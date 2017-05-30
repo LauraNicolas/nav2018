@@ -1,0 +1,314 @@
+OBJECT Codeunit 1800 Assisted Company Setup
+{
+  OBJECT-PROPERTIES
+  {
+    Date=28.05.17;
+    Time=12:00:00;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      EnableWizardErr@1002 : TextConst 'ENU=You cannot enable the assisted company setup for an already active company.';
+      NoConfigPackageFileMsg@1000 : TextConst 'ENU=There are no configuration package files defined in your system. Assisted company setup will not be fully functional. Please contact your system administrator.';
+      CompanyIsBeingSetUpMsg@1001 : TextConst 'ENU=The Company is being set up. Please wait...';
+      StandardTxt@1004 : TextConst '@@@=Must be similar to "Data Type" option in table 101900 Demonstration Data Setup;ENU=Standard';
+      EvaluationTxt@1003 : TextConst '@@@=Must be similar to "Data Type" option in table 101900 Demonstration Data Setup;ENU=Evaluation';
+
+    [External]
+    PROCEDURE EnableAssistedCompanySetup@5(SetupCompanyName@1000 : Text[30];AssistedSetupEnabled@1002 : Boolean);
+    VAR
+      GLEntry@1001 : Record 17;
+      ConfigurationPackageFile@1003 : Record 2000000170;
+    BEGIN
+      IF AssistedSetupEnabled THEN BEGIN
+        GLEntry.CHANGECOMPANY(SetupCompanyName);
+        IF NOT GLEntry.ISEMPTY THEN
+          ERROR(EnableWizardErr);
+        IF ConfigurationPackageFile.ISEMPTY THEN
+          MESSAGE(NoConfigPackageFileMsg);
+      END;
+      SetAssistedCompanySetupVisibility(SetupCompanyName,AssistedSetupEnabled);
+    END;
+
+    LOCAL PROCEDURE RunAssistedCompanySetup@1();
+    VAR
+      AssistedSetup@1001 : Record 1803;
+      IdentityManagement@1000 : Codeunit 9801;
+    BEGIN
+      IF NOT GUIALLOWED THEN
+        EXIT;
+
+      IF IdentityManagement.IsInvAppId THEN
+        EXIT; // Invoicing handles company setup silently
+
+      IF NOT AssistedSetup.READPERMISSION THEN
+        EXIT;
+
+      IF CompanyActive THEN
+        EXIT;
+
+      IF NOT AssistedSetupEnabled THEN
+        EXIT;
+
+      IF NOT AssistedSetup.GET(PAGE::"Assisted Company Setup Wizard") THEN
+        EXIT;
+
+      IF AssistedSetup.Status = AssistedSetup.Status::Completed THEN
+        EXIT;
+
+      COMMIT; // Make sure all data is committed before we run the wizard
+
+      AssistedSetup.Run;
+    END;
+
+    [External]
+    PROCEDURE ApplyUserInput@2(VAR TempConfigSetup@1000 : TEMPORARY Record 8627;VAR BankAccount@1003 : Record 270;AccountingPeriodStartDate@1002 : Date;SkipSetupCompanyInfo@1001 : Boolean);
+    BEGIN
+      IF NOT SkipSetupCompanyInfo THEN
+        TempConfigSetup.CopyCompInfo;
+      CreateAccountingPeriod(AccountingPeriodStartDate);
+      SetupCompanyBankAccount(BankAccount);
+    END;
+
+    [Internal]
+    PROCEDURE GetConfigurationPackageFile@22(ConfigurationPackageFile@1000 : Record 2000000170) ServerTempFileName : Text;
+    VAR
+      FileManagement@1004 : Codeunit 419;
+      TempFile@1003 : File;
+      OutStream@1002 : OutStream;
+      InStream@1001 : InStream;
+    BEGIN
+      ServerTempFileName := FileManagement.ServerTempFileName('rapidstart');
+      TempFile.CREATE(ServerTempFileName);
+      TempFile.CREATEOUTSTREAM(OutStream);
+      ConfigurationPackageFile.CALCFIELDS(Package);
+      ConfigurationPackageFile.Package.CREATEINSTREAM(InStream);
+      COPYSTREAM(OutStream,InStream);
+      TempFile.CLOSE;
+    END;
+
+    PROCEDURE CreateAccountingPeriod@4(StartDate@1002 : Date);
+    VAR
+      AccountingPeriod@1003 : Record 50;
+      CreateFiscalYear@1000 : Report 93;
+      DateFormulaVariable@1001 : DateFormula;
+    BEGIN
+      // The wizard should only setup accounting periods, if non exist.
+      IF NOT AccountingPeriod.ISEMPTY THEN
+        EXIT;
+
+      EVALUATE(DateFormulaVariable,'<1M>');
+      CreateFiscalYear.InitializeRequest(12,DateFormulaVariable,StartDate);
+      CreateFiscalYear.USEREQUESTPAGE(FALSE);
+      CreateFiscalYear.HideConfirmationDialog(TRUE);
+      CreateFiscalYear.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE SetupCompanyBankAccount@9(VAR BankAccount@1002 : Record 270);
+    VAR
+      CompanyInformation@1001 : Record 79;
+      CompanyInformationMgt@1000 : Codeunit 1306;
+    BEGIN
+      CompanyInformation.GET;
+      CompanyInformationMgt.UpdateCompanyBankAccount(CompanyInformation,'',BankAccount);
+    END;
+
+    LOCAL PROCEDURE AssistedSetupEnabled@12() : Boolean;
+    VAR
+      AssistedCompanySetupStatus@1000 : Record 1802;
+    BEGIN
+      EXIT(AssistedCompanySetupStatus.GET(COMPANYNAME) AND AssistedCompanySetupStatus.Enabled);
+    END;
+
+    LOCAL PROCEDURE CompanyActive@3() : Boolean;
+    VAR
+      GLEntry@1000 : Record 17;
+    BEGIN
+      IF NOT GLEntry.READPERMISSION THEN
+        EXIT(TRUE);
+
+      EXIT(NOT GLEntry.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE SetAssistedCompanySetupVisibility@6(SetupCompanyName@1002 : Text[30];IsVisible@1000 : Boolean);
+    VAR
+      AssistedSetup@1001 : Record 1803;
+    BEGIN
+      AssistedSetup.CHANGECOMPANY(SetupCompanyName);
+      IF AssistedSetup.GET(PAGE::"Assisted Company Setup Wizard") THEN BEGIN
+        AssistedSetup.Visible := IsVisible;
+        AssistedSetup.MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE FindJobQueueLogEntries@27(Name@1001 : Text[30];VAR JobQueueLogEntry@1000 : Record 474) : Boolean;
+    VAR
+      AssistedCompanySetupStatus@1002 : Record 1802;
+    BEGIN
+      IF NOT AssistedCompanySetupStatus.GET(Name) THEN
+        EXIT(FALSE);
+      JobQueueLogEntry.CHANGECOMPANY(Name);
+      JobQueueLogEntry.SETRANGE(ID,AssistedCompanySetupStatus."Task ID");
+      EXIT(JobQueueLogEntry.FINDLAST);
+    END;
+
+    LOCAL PROCEDURE GetCompanySetupStatus@25(Name@1000 : Text[30]) : Integer;
+    VAR
+      JobQueueLogEntry@1002 : Record 474;
+      SetupStatus@1001 : ' ,Completed,In Progress,Error';
+    BEGIN
+      IF FindJobQueueLogEntries(Name,JobQueueLogEntry) THEN
+        EXIT(JobQueueLogEntry.Status + 1);
+      IF IsCompanySetupInProgress(Name) THEN
+        EXIT(SetupStatus::"In Progress");
+      EXIT(SetupStatus::" ");
+    END;
+
+    [External]
+    PROCEDURE IsCompanySetupInProgress@16(NewCompanyName@1002 : Text) : Boolean;
+    VAR
+      ActiveSession@1001 : Record 2000000110;
+      AssistedCompanySetupStatus@1000 : Record 1802;
+    BEGIN
+      WITH AssistedCompanySetupStatus DO
+        IF GET(NewCompanyName) THEN
+          IF "Company Setup Session ID" <> 0 THEN
+            EXIT(ActiveSession.GET(SERVICEINSTANCEID,"Company Setup Session ID"));
+    END;
+
+    [External]
+    PROCEDURE WaitForPackageImportToComplete@15();
+    VAR
+      Window@1002 : Dialog;
+    BEGIN
+      IF IsCompanySetupInProgress(COMPANYNAME) THEN BEGIN
+        Window.OPEN(CompanyIsBeingSetUpMsg);
+        WHILE IsCompanySetupInProgress(COMPANYNAME) DO
+          SLEEP(1000);
+        Window.CLOSE;
+      END;
+    END;
+
+    LOCAL PROCEDURE FilterConfigurationPackageFile@24(VAR ConfigurationPackageFile@1000 : Record 2000000170;CompanyData@1001 : 'Evaluation Data,Standard Data,None');
+    BEGIN
+      CASE CompanyData OF
+        CompanyData::"Evaluation Data":
+          ConfigurationPackageFile.SETFILTER(Code,'*' + EvaluationTxt + '*');
+        CompanyData::"Standard Data":
+          ConfigurationPackageFile.SETFILTER(Code,'*' + StandardTxt + '*');
+      END;
+      ConfigurationPackageFile.SETRANGE("Language ID",GLOBALLANGUAGE);
+      ConfigurationPackageFile.SETRANGE("Setup Type",ConfigurationPackageFile."Setup Type"::Company);
+    END;
+
+    [External]
+    PROCEDURE ExistsConfigurationPackageFile@23(CompanyData@1000 : 'Evaluation Data,Standard Data,None') : Boolean;
+    VAR
+      ConfigurationPackageFile@1001 : Record 2000000170;
+    BEGIN
+      FilterConfigurationPackageFile(ConfigurationPackageFile,CompanyData);
+      EXIT(NOT ConfigurationPackageFile.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE FindConfigurationPackageFile@21(VAR ConfigurationPackageFile@1000 : Record 2000000170;CompanyData@1001 : 'Evaluation Data,Standard Data,None') : Boolean;
+    BEGIN
+      FilterConfigurationPackageFile(ConfigurationPackageFile,CompanyData);
+      EXIT(ConfigurationPackageFile.FINDFIRST);
+    END;
+
+    [External]
+    PROCEDURE ScheduleConfigPackageImport@20(ConfigurationPackageFile@1001 : Record 2000000170;Name@1002 : Text);
+    VAR
+      AssistedCompanySetupStatus@1000 : Record 1802;
+    BEGIN
+      WITH AssistedCompanySetupStatus DO BEGIN
+        LOCKTABLE;
+        GET(Name);
+        "Task ID" :=
+          TASKSCHEDULER.CREATETASK(
+            CODEUNIT::"Import Config. Package File",0,TRUE,"Company Name",CURRENTDATETIME,ConfigurationPackageFile.RECORDID);
+        MODIFY;
+        COMMIT;
+      END;
+    END;
+
+    [EventSubscriber(Codeunit,2,OnCompanyInitialize)]
+    LOCAL PROCEDURE OnCompanyInitialize@13();
+    VAR
+      AssistedSetup@1000 : Record 1803;
+    BEGIN
+      AssistedSetup.Initialize;
+    END;
+
+    [EventSubscriber(Table,1802,OnEnabled)]
+    LOCAL PROCEDURE OnEnableAssistedCompanySetup@11(SetupCompanyName@1000 : Text[30];AssistedSetupEnabled@1002 : Boolean);
+    BEGIN
+      EnableAssistedCompanySetup(SetupCompanyName,AssistedSetupEnabled);
+    END;
+
+    [EventSubscriber(Codeunit,1,OnAfterCompanyOpen)]
+    LOCAL PROCEDURE OnAfterCompanyOpenRunAssistedCompanySetup@7();
+    BEGIN
+      RunAssistedCompanySetup;
+    END;
+
+    [EventSubscriber(Page,9177,OnBeforeActionEvent,"Create New Company")]
+    LOCAL PROCEDURE OnBeforeCreateNewCompanyActionOpenCompanyCreationWizard@8(VAR Rec@1000 : Record 2000000006);
+    BEGIN
+      PAGE.RUNMODAL(PAGE::"Company Creation Wizard");
+    END;
+
+    [EventSubscriber(Page,357,OnBeforeActionEvent,"Create New Company")]
+    [Internal]
+    LOCAL PROCEDURE OnBeforeCreateNewCompanyActionOnCompanyPageOpenCompanyCreationWizard@18(VAR Rec@1000 : Record 2000000006);
+    BEGIN
+      PAGE.RUNMODAL(PAGE::"Company Creation Wizard");
+    END;
+
+    [EventSubscriber(Table,1802,OnAfterValidateEvent,"Package Imported")]
+    LOCAL PROCEDURE OnAfterPackageImportedValidate@10(VAR Rec@1000 : Record 1802;VAR xRec@1001 : Record 1802;CurrFieldNo@1002 : Integer);
+    BEGIN
+      // Send global notification that the new company is ready for use
+    END;
+
+    [EventSubscriber(Table,1802,OnAfterValidateEvent,"Import Failed")]
+    LOCAL PROCEDURE OnAfterImportFailedValidate@14(VAR Rec@1000 : Record 1802;VAR xRec@1001 : Record 1802;CurrFieldNo@1002 : Integer);
+    BEGIN
+      // Send global notification that the company set up failed
+    END;
+
+    [EventSubscriber(Page,9176,OnCompanyChange)]
+    LOCAL PROCEDURE OnCompanyChangeCheckForSetupCompletion@17(NewCompanyName@1000 : Text;VAR IsSetupInProgress@1001 : Boolean);
+    BEGIN
+      IsSetupInProgress := IsCompanySetupInProgress(NewCompanyName);
+    END;
+
+    [EventSubscriber(Table,1802,OnGetCompanySetupStatus)]
+    LOCAL PROCEDURE OnGetIsCompanySetupInProgress@19(Name@1000 : Text[30];VAR SetupStatus@1001 : Integer);
+    BEGIN
+      SetupStatus := GetCompanySetupStatus(Name);
+    END;
+
+    [EventSubscriber(Table,1802,OnSetupStatusDrillDown)]
+    LOCAL PROCEDURE OnSetupStatusDrillDown@26(Name@1000 : Text[30]);
+    VAR
+      JobQueueLogEntry@1001 : Record 474;
+    BEGIN
+      IF FindJobQueueLogEntries(Name,JobQueueLogEntry) THEN
+        PAGE.RUNMODAL(PAGE::"Job Queue Log Entries",JobQueueLogEntry);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,267 @@
+OBJECT Codeunit 5450 Graph Subscription Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=28.05.17;
+    Time=12:00:00;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 2000000199=rimd;
+    OnRun=VAR
+            GraphSyncRunner@1000 : Codeunit 5452;
+            SyncMode@1001 : Option;
+          BEGIN
+            SyncMode := SyncModeOption::Delta;
+            CheckGraphSubscriptions(SyncMode);
+
+            CASE SyncMode OF
+              SyncModeOption::Full:
+                GraphSyncRunner.RunFullSync;
+              SyncModeOption::Delta:
+                GraphSyncRunner.RunDeltaSync;
+            END;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SyncModeOption@1004 : 'Full,Delta';
+      ChangeType@1001 : 'Created,Updated,Deleted,Missed';
+
+    [External]
+    PROCEDURE AddOrUpdateGraphSubscription@2(VAR FirstTimeSync@1000 : Boolean;WebhookExists@1001 : Boolean;VAR WebhookSubscription@1002 : Record 2000000199;EntityEndpoint@1004 : Text[250]);
+    VAR
+      GraphSubscription@1003 : Record 5455;
+    BEGIN
+      FirstTimeSync := FirstTimeSync OR NOT WebhookExists;
+      CASE TRUE OF
+        NOT WebhookExists:
+          CreateNewWebhookSubscription(GraphSubscription,WebhookSubscription,EntityEndpoint);
+        NOT GraphSubscription.GET(WebhookSubscription."Subscription ID"):
+          CreateNewGraphSubscription(GraphSubscription,WebhookSubscription,EntityEndpoint);
+        ELSE BEGIN
+          GraphSubscription.ExpirationDateTime := CURRENTDATETIME + GetMaximumExpirationDateTimeOffset;
+          GraphSubscription.Type := GetGraphSubscriptionType;
+          GraphSubscription.MODIFY;
+        END;
+      END;
+    END;
+
+    [External]
+    PROCEDURE GetMaximumExpirationDateTimeOffset@12() : Integer;
+    BEGIN
+      // Maximum expiration datetime is 4230 minutes as documented in https://dev.office.com/blogs/Microsoft-Graph-webhooks-update-March-2016
+      EXIT(4230 * 60 * 1000);
+    END;
+
+    [External]
+    PROCEDURE GetGraphSubscriptionType@8() : Text[250];
+    BEGIN
+      EXIT('#Microsoft.OutlookServices.PushSubscription');
+    END;
+
+    [External]
+    PROCEDURE GetGraphSubscriptionCreatedChangeType@13() : Text[50];
+    BEGIN
+      EXIT(FORMAT(ChangeType::Created,0,0));
+    END;
+
+    [External]
+    PROCEDURE UpdateGraphOnAfterDelete@5(VAR EntityRecordRef@1000 : RecordRef);
+    VAR
+      IntegrationRecordArchive@1001 : Record 5152;
+      GraphSyncRunner@1004 : Codeunit 5452;
+      BackgroundSessionAllowed@1002 : Boolean;
+    BEGIN
+      IF EntityRecordRef.ISTEMPORARY THEN
+        EXIT;
+
+      IF CURRENTCLIENTTYPE = CLIENTTYPE::Background THEN
+        EXIT;
+
+      IF NOT GraphSyncRunner.IsGraphSyncEnabled THEN
+        EXIT;
+
+      IF NOT IntegrationRecordArchive.FindByRecordId(EntityRecordRef.RECORDID) THEN
+        EXIT;
+
+      // run in background session
+      BackgroundSessionAllowed := TRUE;
+      OnBeforeRunGraphSyncBackgroundSession(BackgroundSessionAllowed);
+      IF BackgroundSessionAllowed THEN
+        TASKSCHEDULER.CREATETASK(CODEUNIT::"Graph Sync. Runner - OnDelete",0,TRUE,COMPANYNAME,0DT,IntegrationRecordArchive.RECORDID)
+      ELSE
+        CODEUNIT.RUN(CODEUNIT::"Graph Sync. Runner - OnDelete",IntegrationRecordArchive);
+    END;
+
+    [External]
+    PROCEDURE UpdateGraphOnAfterModify@3(VAR EntityRecordRef@1000 : RecordRef);
+    VAR
+      IntegrationRecord@1003 : Record 5151;
+      GraphSyncRunner@1004 : Codeunit 5452;
+      BackgroundSessionAllowed@1001 : Boolean;
+    BEGIN
+      IF EntityRecordRef.ISTEMPORARY THEN
+        EXIT;
+
+      IF CURRENTCLIENTTYPE = CLIENTTYPE::Background THEN
+        EXIT;
+
+      IF NOT GraphSyncRunner.IsGraphSyncEnabled THEN
+        EXIT;
+
+      IF NOT IntegrationRecord.FindByRecordId(EntityRecordRef.RECORDID) THEN
+        EXIT;
+
+      // run in background session
+      BackgroundSessionAllowed := TRUE;
+      OnBeforeRunGraphSyncBackgroundSession(BackgroundSessionAllowed);
+      IF BackgroundSessionAllowed THEN
+        TASKSCHEDULER.CREATETASK(CODEUNIT::"Graph Sync. Runner - OnModify",0,TRUE,COMPANYNAME,0DT,IntegrationRecord.RECORDID)
+      ELSE
+        CODEUNIT.RUN(CODEUNIT::"Graph Sync. Runner - OnModify",IntegrationRecord);
+    END;
+
+    [External]
+    PROCEDURE CleanExistingWebhookSubscription@29(ResourceUrl@1002 : Text[250];CompName@1003 : Text[30]);
+    VAR
+      WebhookSubscription@1001 : Record 2000000199;
+      WebhookSubscription2@1000 : Record 2000000199;
+    BEGIN
+      IF WebhookSubscription.FINDSET THEN
+        REPEAT
+          IF (WebhookSubscription.Endpoint = ResourceUrl) AND
+             (WebhookSubscription."Company Name" = CompName)
+          THEN BEGIN
+            WebhookSubscription2.GET(WebhookSubscription."Subscription ID",WebhookSubscription.Endpoint);
+            WebhookSubscription2.DELETE;
+          END;
+        UNTIL WebhookSubscription.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateNewGraphSubscription@10(VAR GraphSubscription@1000 : Record 5455;VAR WebhookSubscription@1001 : Record 2000000199;EntityEndpoint@1002 : Text[250]);
+    BEGIN
+      IF GraphSubscription.CreateGraphSubscription(GraphSubscription,EntityEndpoint) THEN
+        IF WebhookSubscription.DELETE THEN
+          IF GraphSubscription.CreateWebhookSubscription(WebhookSubscription) THEN
+            COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateNewWebhookSubscription@6(VAR GraphSubscription@1002 : Record 5455;VAR WebhookSubscription@1001 : Record 2000000199;EntityEndpoint@1003 : Text[250]);
+    BEGIN
+      IF GraphSubscription.CreateGraphSubscription(GraphSubscription,EntityEndpoint) THEN
+        IF GraphSubscription.CreateWebhookSubscription(WebhookSubscription) THEN
+          COMMIT;
+    END;
+
+    [EventSubscriber(Table,2000000194,OnAfterInsertEvent)]
+    LOCAL PROCEDURE SyncToNavOnWebhookNotificationInsert@4(VAR Rec@1000 : Record 2000000194;RunTrigger@1001 : Boolean);
+    VAR
+      GraphSyncRunner@1006 : Codeunit 5452;
+      BackgroundSessionAllowed@1002 : Boolean;
+    BEGIN
+      IF NOT GraphSyncRunner.IsGraphSyncEnabled THEN
+        EXIT;
+
+      BackgroundSessionAllowed := TRUE;
+      OnBeforeRunGraphSyncBackgroundSession(BackgroundSessionAllowed);
+
+      // Temporary fix - +200ms and COMMIT were added because of server bug 215939
+      // We would never start the background session since the record would not be commited
+      IF BackgroundSessionAllowed THEN
+        TASKSCHEDULER.CREATETASK(CODEUNIT::"Graph Webhook Sync To NAV",0,TRUE,COMPANYNAME,CURRENTDATETIME + 200,Rec.RECORDID)
+      ELSE
+        CODEUNIT.RUN(CODEUNIT::"Graph Webhook Sync To NAV",Rec);
+
+      COMMIT;
+    END;
+
+    [EventSubscriber(Codeunit,1,OnAfterCompanyOpen)]
+    LOCAL PROCEDURE AddOrUpdateGraphSubscriptionOnAfterCompanyOpen@7();
+    VAR
+      GraphSyncRunner@1001 : Codeunit 5452;
+      WebhookManagement@1008 : Codeunit 5377;
+      GraphConnectionSetup@1002 : Codeunit 5456;
+    BEGIN
+      IF GETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph) <> '' THEN
+        EXIT;
+
+      IF NOT WebhookManagement.IsCurrentClientTypeAllowed THEN
+        EXIT;
+
+      IF NOT WebhookManagement.IsSyncAllowed THEN
+        EXIT;
+
+      IF NOT GraphSyncRunner.IsGraphSyncEnabled THEN
+        EXIT;
+
+      GraphConnectionSetup.RegisterConnections;
+      IF GUIALLOWED THEN
+        TASKSCHEDULER.CREATETASK(CODEUNIT::"Graph Subscription Management",CODEUNIT::"Graph Delta Sync",
+          TRUE,COMPANYNAME,CURRENTDATETIME + 15000); // Add 15s
+    END;
+
+    LOCAL PROCEDURE CheckGraphSubscriptions@1(VAR SyncMode@1001 : Option);
+    VAR
+      GraphConnectionSetup@1003 : Codeunit 5456;
+      FirstTimeSync@1000 : Boolean;
+    BEGIN
+      GraphConnectionSetup.RegisterConnections;
+      OnBeforeAddOrUpdateGraphSubscriptions(FirstTimeSync);
+      IF FirstTimeSync THEN
+        SyncMode := SyncModeOption::Full
+      ELSE
+        SyncMode := SyncModeOption::Delta;
+    END;
+
+    PROCEDURE IsCreatedInNav@22(IntegrationTableMapping@1001 : Record 5335;WebhookNotification@1000 : Record 2000000194;GraphRecordRef@1003 : RecordRef) : Boolean;
+    VAR
+      TypeHelper@1004 : Codeunit 10;
+      GraphCollectionMgtContact@1005 : Codeunit 5458;
+      IsNavCreatedFieldRef@1002 : FieldRef;
+    BEGIN
+      IF (IntegrationTableMapping."Int. Tbl. State Fld. No." = 0) OR
+         (DELCHR(WebhookNotification."Change Type",'=',' ') <> GetGraphSubscriptionCreatedChangeType)
+      THEN
+        EXIT(FALSE);
+      IsNavCreatedFieldRef := GraphRecordRef.FIELD(IntegrationTableMapping."Int. Tbl. State Fld. No.");
+      EXIT(GraphCollectionMgtContact.GetIsNavCreated(TypeHelper.ReadBlob(IsNavCreatedFieldRef)));
+    END;
+
+    PROCEDURE GetDestinationRecordRef@24(VAR NAVRecordRef@1002 : RecordRef;WebhookNotification@1001 : Record 2000000194;TableID@1000 : Integer) Retrieved : Boolean;
+    VAR
+      GraphIntegrationRecord@1003 : Record 5451;
+      DestinationRecordId@1004 : RecordID;
+    BEGIN
+      IF GraphIntegrationRecord.FindRecordIDFromID(WebhookNotification."Resource ID",TableID,DestinationRecordId) THEN
+        Retrieved := NAVRecordRef.GET(DestinationRecordId);
+    END;
+
+    PROCEDURE GetSourceRecordRef@21(VAR GraphRecordRef@1000 : RecordRef;WebhookNotification@1001 : Record 2000000194;IntegrationTableID@1003 : Integer) Retrieved : Boolean;
+    BEGIN
+      OnGetSourceRecordRef(GraphRecordRef,WebhookNotification,IntegrationTableID,Retrieved);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeAddOrUpdateGraphSubscriptions@17(VAR FirstTimeSync@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeRunGraphSyncBackgroundSession@18(VAR AllowBackgroundSessions@1000 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnGetSourceRecordRef@19(VAR GraphRecordRef@1000 : RecordRef;WebhookNotification@1001 : Record 2000000194;IntegrationTableID@1002 : Integer;VAR Retrieved@1003 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

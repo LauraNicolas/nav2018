@@ -1,0 +1,309 @@
+OBJECT Codeunit 2162 O365 Sales Events
+{
+  OBJECT-PROPERTIES
+  {
+    Date=28.05.17;
+    Time=12:00:00;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    TableNo=2160;
+    Permissions=TableData 2160=rimd;
+    OnRun=BEGIN
+            IF NOT IsInvoicing THEN BEGIN
+              Result := NotInvoicingErr;
+              State := State::Failed;
+              EXIT;
+            END;
+
+            ParseEvent(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      InvoicePostedMsg@1000 : TextConst '@@@="%1=The invoice number";ENU=Invoice %1 was sent.';
+      InvoicePaidMsg@1002 : TextConst '@@@="%1=The invoice number";ENU=Invoice %1 was paid.';
+      InvoiceOverdueMsg@1005 : TextConst '@@@="%1=The invoice number";ENU=Invoice %1 is overdue.';
+      InvoiceDraftMsg@1003 : TextConst 'ENU=There are unsent invoices.';
+      InvoiceInactivityMsg@1004 : TextConst 'ENU=No invoices have been sent recently.';
+      UnsupportedTypeErr@1001 : TextConst 'ENU=This event type is not supported.';
+      NotInvoicingErr@1006 : TextConst 'ENU=This event is only handled for Invoicing.';
+
+    LOCAL PROCEDURE ParseEvent@1(CalendarEvent@1000 : Record 2160);
+    VAR
+      O365SalesEvent@1001 : Record 2163;
+      O365SalesWebService@1002 : Codeunit 2190;
+    BEGIN
+      O365SalesEvent.LOCKTABLE;
+      O365SalesEvent.GET(CalendarEvent."Record ID to Process");
+
+      CASE O365SalesEvent.Type OF
+        O365SalesEvent.Type::"Invoice Sent":
+          BEGIN
+            O365SalesWebService.SendInvoiceCreatedEvent(O365SalesEvent."Document No.");
+            O365SalesWebService.SendKPI;
+          END;
+        O365SalesEvent.Type::"Invoice Paid":
+          BEGIN
+            O365SalesWebService.SendInvoicePaidEvent(O365SalesEvent."Document No.");
+            O365SalesWebService.SendKPI;
+          END;
+        O365SalesEvent.Type::"Draft Reminder":
+          O365SalesWebService.SendInvoiceDraftEvent;
+        O365SalesEvent.Type::"Invoice Overdue":
+          BEGIN
+            O365SalesWebService.SendInvoiceOverdueEvent(O365SalesEvent."Document No.");
+            O365SalesWebService.SendKPI;
+          END;
+        O365SalesEvent.Type::"Invoicing Inactivity":
+          O365SalesWebService.SendInvoiceInactivityEvent;
+        ELSE
+          ERROR(UnsupportedTypeErr);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateDraftEvent@4();
+    VAR
+      O365C2GraphEventSettings@1000 : Record 2162;
+      CalendarEvent@1001 : Record 2160;
+      SalesHeader@1003 : Record 36;
+      O365SalesEvent@1005 : Record 2163;
+      CalendarEventMangement@1004 : Codeunit 2160;
+      NewDate@1002 : Date;
+      EventNo@1006 : Integer;
+    BEGIN
+      IF NOT O365C2GraphEventSettings.GET THEN
+        O365C2GraphEventSettings.INSERT(TRUE);
+
+      NewDate := CALCDATE(STRSUBSTNO('<%1D>',O365C2GraphEventSettings."Inv. Draft Duration (Day)"),TODAY);
+
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Invoice);
+      IF CalendarEvent.GET(O365C2GraphEventSettings."Inv. Draft Event") AND (NOT CalendarEvent.Archived) THEN BEGIN
+        IF SalesHeader.ISEMPTY OR (NOT O365C2GraphEventSettings."Inv. Draft Enabled") THEN
+          CalendarEvent.DELETE(TRUE)
+        ELSE BEGIN
+          CalendarEvent.VALIDATE("Scheduled Date",NewDate);
+          CalendarEvent.MODIFY(TRUE);
+        END;
+
+        EXIT;
+      END;
+
+      IF SalesHeader.ISEMPTY OR (NOT O365C2GraphEventSettings."Inv. Draft Enabled") THEN
+        EXIT;
+
+      CreateEvent(O365SalesEvent,O365SalesEvent.Type::"Draft Reminder",'');
+      EventNo :=
+        CalendarEventMangement.CreateCalendarEvent(NewDate,InvoiceDraftMsg,CODEUNIT::"O365 Sales Events",O365SalesEvent.RECORDID);
+
+      O365C2GraphEventSettings."Inv. Draft Event" := EventNo;
+      O365C2GraphEventSettings.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateInactivityEvent@6();
+    VAR
+      O365C2GraphEventSettings@1006 : Record 2162;
+      CalendarEvent@1005 : Record 2160;
+      O365SalesEvent@1003 : Record 2163;
+      CalendarEventMangement@1002 : Codeunit 2160;
+      NewDate@1001 : Date;
+      EventNo@1000 : Integer;
+    BEGIN
+      IF NOT O365C2GraphEventSettings.GET THEN
+        O365C2GraphEventSettings.INSERT(TRUE);
+
+      NewDate := CALCDATE(STRSUBSTNO('<%1D>',O365C2GraphEventSettings."Inv. Inactivity Duration (Day)"),TODAY);
+
+      IF CalendarEvent.GET(O365C2GraphEventSettings."Inv. Inactivity Event") AND (NOT CalendarEvent.Archived) THEN BEGIN
+        IF NOT O365C2GraphEventSettings."Inv. Inactivity Enabled" THEN
+          CalendarEvent.DELETE(TRUE)
+        ELSE BEGIN
+          CalendarEvent.VALIDATE("Scheduled Date",NewDate);
+          CalendarEvent.MODIFY(TRUE);
+        END;
+
+        EXIT;
+      END;
+
+      IF NOT O365C2GraphEventSettings."Inv. Inactivity Enabled" THEN
+        EXIT;
+
+      CreateEvent(O365SalesEvent,O365SalesEvent.Type::"Invoicing Inactivity",'');
+      EventNo :=
+        CalendarEventMangement.CreateCalendarEvent(NewDate,InvoiceInactivityMsg,CODEUNIT::"O365 Sales Events",O365SalesEvent.RECORDID);
+
+      O365C2GraphEventSettings."Inv. Inactivity Event" := EventNo;
+      O365C2GraphEventSettings.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSendEvent@13(DocNo@1000 : Code[20]);
+    VAR
+      O365SalesEvent@1001 : Record 2163;
+      CalendarEventMangement@1002 : Codeunit 2160;
+    BEGIN
+      IF NOT IsEventTypeEnabled(O365SalesEvent.Type::"Invoice Sent") THEN
+        EXIT;
+
+      CreateEvent(O365SalesEvent,O365SalesEvent.Type::"Invoice Sent",DocNo);
+      CalendarEventMangement.CreateCalendarEvent(
+        TODAY,STRSUBSTNO(InvoicePostedMsg,DocNo),CODEUNIT::"O365 Sales Events",O365SalesEvent.RECORDID);
+    END;
+
+    LOCAL PROCEDURE CreateOverdueEvent@14(DocNo@1000 : Code[20];DueDate@1003 : Date);
+    VAR
+      O365SalesEvent@1002 : Record 2163;
+      CalendarEventMangement@1001 : Codeunit 2160;
+    BEGIN
+      IF NOT IsEventTypeEnabled(O365SalesEvent.Type::"Invoice Overdue") THEN
+        EXIT;
+
+      CreateEvent(O365SalesEvent,O365SalesEvent.Type::"Invoice Overdue",DocNo);
+      CalendarEventMangement.CreateCalendarEvent(
+        DueDate,STRSUBSTNO(InvoiceOverdueMsg,DocNo),CODEUNIT::"O365 Sales Events",O365SalesEvent.RECORDID);
+    END;
+
+    LOCAL PROCEDURE CreatePaidEvent@15(DocNo@1000 : Code[20]);
+    VAR
+      O365SalesEvent@1002 : Record 2163;
+      CalendarEventMangement@1001 : Codeunit 2160;
+    BEGIN
+      IF NOT IsEventTypeEnabled(O365SalesEvent.Type::"Invoice Paid") THEN
+        EXIT;
+
+      CreateEvent(O365SalesEvent,O365SalesEvent.Type::"Invoice Paid",DocNo);
+      CalendarEventMangement.CreateCalendarEvent(
+        TODAY,STRSUBSTNO(InvoicePaidMsg,DocNo),CODEUNIT::"O365 Sales Events",
+        O365SalesEvent.RECORDID);
+    END;
+
+    LOCAL PROCEDURE CreateEvent@5(VAR O365SalesEvent@1002 : Record 2163;Type@1000 : Integer;DocNo@1001 : Code[20]);
+    BEGIN
+      O365SalesEvent.INIT;
+      O365SalesEvent.Type := Type;
+      O365SalesEvent."Document No." := DocNo;
+      O365SalesEvent.INSERT;
+    END;
+
+    LOCAL PROCEDURE IsInvoicing@8() : Boolean;
+    VAR
+      O365SalesInitialSetup@1000 : Record 2110;
+      O365C2GraphEventSettings@1002 : Record 2162;
+      O365SalesEvent@1001 : Record 2163;
+    BEGIN
+      IF NOT O365SalesInitialSetup.READPERMISSION THEN
+        EXIT(FALSE);
+
+      IF NOT O365SalesInitialSetup.GET THEN
+        EXIT(FALSE);
+
+      IF NOT (O365C2GraphEventSettings.READPERMISSION AND O365C2GraphEventSettings.WRITEPERMISSION) THEN
+        EXIT(FALSE);
+
+      IF NOT (O365SalesEvent.READPERMISSION AND O365SalesEvent.WRITEPERMISSION) THEN
+        EXIT(FALSE);
+
+      EXIT(O365SalesInitialSetup."Is initialized");
+    END;
+
+    LOCAL PROCEDURE IsEventTypeEnabled@12(Type@1000 : Integer) : Boolean;
+    VAR
+      O365C2GraphEventSettings@1001 : Record 2162;
+      O365SalesEvent@1002 : Record 2163;
+    BEGIN
+      IF NOT O365C2GraphEventSettings.GET THEN
+        O365C2GraphEventSettings.INSERT;
+
+      CASE Type OF
+        O365SalesEvent.Type::"Draft Reminder":
+          EXIT(O365C2GraphEventSettings."Inv. Draft Enabled");
+        O365SalesEvent.Type::"Invoice Overdue":
+          EXIT(O365C2GraphEventSettings."Inv. Overdue Enabled");
+        O365SalesEvent.Type::"Invoice Paid":
+          EXIT(O365C2GraphEventSettings."Inv. Paid Enabled");
+        O365SalesEvent.Type::"Invoice Sent":
+          EXIT(O365C2GraphEventSettings."Inv. Sent Enabled");
+        O365SalesEvent.Type::"Invoicing Inactivity":
+          EXIT(O365C2GraphEventSettings."Inv. Inactivity Enabled");
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    [EventSubscriber(Codeunit,80,OnAfterPostSalesDoc)]
+    PROCEDURE OnAfterPostSalesDoc@2(VAR SalesHeader@1005 : Record 36;VAR GenJnlPostLine@1004 : Codeunit 12;SalesShptHdrNo@1003 : Code[20];RetRcpHdrNo@1002 : Code[20];SalesInvHdrNo@1001 : Code[20];SalesCrMemoHdrNo@1000 : Code[20]);
+    BEGIN
+      IF NOT IsInvoicing THEN
+        EXIT;
+
+      IF SalesHeader."Document Type" <> SalesHeader."Document Type"::Invoice THEN
+        EXIT;
+
+      // Queue/update Events
+      CreateSendEvent(SalesInvHdrNo);
+      CreateOverdueEvent(SalesInvHdrNo,SalesHeader."Due Date");
+      UpdateDraftEvent;
+      UpdateInactivityEvent;
+    END;
+
+    [EventSubscriber(Codeunit,980,OnAfterPostPaymentRegistration)]
+    PROCEDURE OnAfterPostPaymentRegistrationBuffer@3(VAR TempPaymentRegistrationBuffer@1000 : TEMPORARY Record 981);
+    VAR
+      O365SalesEvent@1002 : Record 2163;
+      SalesInvoiceHeader@1004 : Record 112;
+      CalendarEvent@1003 : Record 2160;
+    BEGIN
+      IF NOT IsInvoicing THEN
+        EXIT;
+
+      IF TempPaymentRegistrationBuffer."Document Type" <> TempPaymentRegistrationBuffer."Document Type"::Invoice THEN
+        EXIT;
+
+      IF NOT SalesInvoiceHeader.GET(TempPaymentRegistrationBuffer."Document No.") THEN
+        EXIT;
+
+      // Verify paid
+      SalesInvoiceHeader.CALCFIELDS("Remaining Amount");
+      IF SalesInvoiceHeader."Remaining Amount" > 0 THEN
+        EXIT;
+
+      CreatePaidEvent(TempPaymentRegistrationBuffer."Document No.");
+
+      // Remove overdue event
+      O365SalesEvent.SETRANGE(Type,O365SalesEvent.Type::"Invoice Overdue");
+      O365SalesEvent.SETRANGE("Document No.",SalesInvoiceHeader."No.");
+      IF NOT O365SalesEvent.FINDFIRST THEN
+        EXIT;
+
+      CalendarEvent.SETRANGE("Record ID to Process",O365SalesEvent.RECORDID);
+      IF CalendarEvent.FINDFIRST THEN
+        IF NOT CalendarEvent.Archived THEN
+          CalendarEvent.DELETE(TRUE);
+    END;
+
+    [EventSubscriber(Table,36,OnAfterInsertEvent)]
+    PROCEDURE OnAfterSalesHeaderInsert@7(VAR Rec@1000 : Record 36;RunTrigger@1001 : Boolean);
+    BEGIN
+      IF NOT IsInvoicing THEN
+        EXIT;
+
+      UpdateDraftEvent;
+      UpdateInactivityEvent;
+    END;
+
+    [EventSubscriber(Table,36,OnAfterDeleteEvent)]
+    PROCEDURE OnAfterSalesHeaderDelete@10(VAR Rec@1000 : Record 36;RunTrigger@1001 : Boolean);
+    BEGIN
+      IF NOT IsInvoicing THEN
+        EXIT;
+
+      UpdateDraftEvent;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

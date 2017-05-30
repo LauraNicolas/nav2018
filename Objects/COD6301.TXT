@@ -1,0 +1,227 @@
+OBJECT Codeunit 6301 Power BI Service Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=28.05.17;
+    Time=12:00:00;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AzureAdMgt@1007 : Codeunit 6300;
+      PowerBiApiResourceUrlTxt@1003 : TextConst '@@@={Locked};ENU=https://analysis.windows.net/powerbi/api';
+      JObject@1005 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      DotNetString@1000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      PowerBiApiResourceUrlPPETxt@1008 : TextConst '@@@={Locked};ENU=https://analysis.windows-int.net/powerbi/api';
+      ReportsUrlTxt@1011 : TextConst '@@@={Locked};ENU=https://api.powerbi.com/beta/myorg/reports';
+      ReportsUrlPPETxt@1010 : TextConst '@@@={Locked};ENU=https://biazure-int-edog-redirect.analysis-df.windows.net/beta/myorg/reports';
+      GenericErr@1002 : TextConst 'ENU=An error occurred while trying to get reports from the Power BI service. Please try again or contact your system administrator if the error persists.';
+      PowerBiResourceNameTxt@1001 : TextConst 'ENU=Power BI Services';
+      ReportPageSizeTxt@1004 : TextConst '@@@={Locked};ENU=16:9';
+      PowerBIurlErr@1009 : TextConst '@@@={Locked};ENU=https://powerbi.microsoft.com';
+      UnauthorizedErr@1012 : TextConst 'ENU=You do not have a Power BI account. You can get a Power BI account at the following location.';
+
+    [Internal]
+    PROCEDURE GetReports@6(VAR TempPowerBIReportBuffer@1000 : TEMPORARY Record 6302;VAR ExceptionMessage@1018 : Text;VAR ExceptionDetails@1014 : Text;Context@1010 : Text[30]);
+    VAR
+      PowerBIReportConfiguration@1008 : Record 6301;
+      DotNetExceptionHandler@1077 : Codeunit 1291;
+      JObj@1017 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      ObjectEnumerator@1016 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.IEnumerator";
+      Current@1015 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.KeyValuePair`2";
+      JArray@1013 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      ArrayEnumerator@1012 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.IEnumerator";
+      JToken@1011 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+      HttpWebResponse@1004 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      WebException@1003 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebException";
+      HttpStatusCode@1002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode";
+      Exception@1005 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Exception";
+      Url@1020 : Text;
+      Key@1009 : Text;
+      ResponseText@1001 : Text;
+    BEGIN
+      // Gets a list of reports from the user's Power BI account and loads them into the given buffer.
+      // Reports are marked as Enabled if they've previously been selected for the given context (page ID).
+      IF NOT TempPowerBIReportBuffer.ISEMPTY THEN
+        EXIT;
+
+      IF IsPPE THEN
+        Url := ReportsUrlPPETxt
+      ELSE
+        Url := ReportsUrlTxt;
+
+      IF NOT GetResponseText(Url,ResponseText) THEN BEGIN
+        Exception := GETLASTERROROBJECT;
+        ExceptionMessage := Exception.Message;
+        ExceptionDetails := Exception.ToString;
+
+        DotNetExceptionHandler.Collect;
+        IF DotNetExceptionHandler.CastToType(WebException,GETDOTNETTYPE(WebException)) THEN BEGIN
+          HttpWebResponse := WebException.Response;
+          HttpStatusCode := HttpWebResponse.StatusCode;
+
+          IF HttpWebResponse.StatusCode = 401 THEN
+            ERROR(UnauthorizedErr);
+        END ELSE
+          ERROR(GenericErr);
+      END;
+
+      JObj := JObject.Parse(ResponseText); // TODO: check versions
+
+      ObjectEnumerator := JObj.GetEnumerator;
+
+      WHILE ObjectEnumerator.MoveNext DO BEGIN
+        Current := ObjectEnumerator.Current;
+        Key := Current.Key;
+
+        IF Key = 'value' THEN BEGIN
+          JArray := Current.Value;
+          ArrayEnumerator := JArray.GetEnumerator;
+
+          WHILE ArrayEnumerator.MoveNext DO BEGIN
+            JObj := ArrayEnumerator.Current;
+            TempPowerBIReportBuffer.INIT;
+
+            // report GUID identifier
+            JToken := JObj.SelectToken('id');
+            EVALUATE(TempPowerBIReportBuffer.ReportID,JToken.ToString);
+
+            // report name
+            JToken := JObj.SelectToken('name');
+            TempPowerBIReportBuffer.ReportName := JToken.ToString;
+
+            // report embedding url
+            JToken := JObj.SelectToken('embedUrl');
+            TempPowerBIReportBuffer.EmbedUrl := JToken.ToString;
+
+            // report enabled
+            TempPowerBIReportBuffer.Enabled := PowerBIReportConfiguration.GET(USERSECURITYID,TempPowerBIReportBuffer.ReportID,Context);
+
+            TempPowerBIReportBuffer.INSERT;
+          END;
+        END
+      END;
+    END;
+
+    [Internal]
+    PROCEDURE IsUserReadyForPowerBI@4() : Boolean;
+    BEGIN
+      IF NOT AzureAdMgt.IsAzureADAppSetupDone THEN
+        EXIT(FALSE);
+
+      EXIT(NOT DotNetString.IsNullOrWhiteSpace(AzureAdMgt.GetAccessToken(GetPowerBiResourceUrl,GetPowerBiResourceName,FALSE)));
+    END;
+
+    [External]
+    PROCEDURE GetPowerBiResourceUrl@3() : Text;
+    BEGIN
+      IF IsPPE THEN
+        EXIT(PowerBiApiResourceUrlPPETxt);
+
+      EXIT(PowerBiApiResourceUrlTxt);
+    END;
+
+    [External]
+    PROCEDURE GetPowerBiResourceName@5() : Text;
+    BEGIN
+      EXIT(PowerBiResourceNameTxt);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE GetResponseText@11(Url@1004 : Text;VAR ResponseText@1010 : Text);
+    VAR
+      TempBlob@1000 : Record 99008535;
+      HttpWebRequest@1002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";
+      HttpWebResponse@1003 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      ResponseInputStream@1005 : InStream;
+      ChunkText@1009 : Text;
+    BEGIN
+      HttpWebRequest := HttpWebRequest.Create(Url);
+      HttpWebRequest.Method := 'GET';
+      HttpWebRequest.ContentLength := 0;
+      // add the access token to the authorization bearer header
+      HttpWebRequest.Headers.Add('Authorization','Bearer ' + AzureAdMgt.GetAccessToken(
+          GetPowerBiResourceUrl,GetPowerBiResourceName,FALSE));
+      HttpWebResponse := HttpWebRequest.GetResponse;
+
+      TempBlob.INIT;
+      TempBlob.Blob.CREATEINSTREAM(ResponseInputStream);
+      HttpWebResponse.GetResponseStream.CopyTo(ResponseInputStream);
+
+      // the READTEXT() function apparently only reads a single line, so we must loop through the stream to get the contents of every line.
+      WHILE NOT ResponseInputStream.EOS DO BEGIN
+        ResponseInputStream.READTEXT(ChunkText);
+        ResponseText += ChunkText;
+      END;
+
+      HttpWebResponse.Close; // close connection
+      HttpWebResponse.Dispose; // cleanup of IDisposable
+    END;
+
+    [External]
+    PROCEDURE GetGenericError@2() : Text;
+    BEGIN
+      EXIT(GenericErr);
+    END;
+
+    LOCAL PROCEDURE IsPPE@1() : Boolean;
+    VAR
+      EnvironmentMgt@1000 : Codeunit 9005;
+    BEGIN
+      EXIT(EnvironmentMgt.IsPPE);
+    END;
+
+    [External]
+    PROCEDURE GetReportPageSize@7() : Text;
+    BEGIN
+      EXIT(ReportPageSizeTxt);
+    END;
+
+    [External]
+    PROCEDURE GetUnauthorizedErrorText@8() : Text;
+    BEGIN
+      EXIT(UnauthorizedErr);
+    END;
+
+    [External]
+    PROCEDURE GetPowerBIUrl@9() : Text;
+    BEGIN
+      EXIT(PowerBIurlErr);
+    END;
+
+    PROCEDURE LogException@10(VAR ExceptionMessage@1000 : Text;VAR ExceptionDetails@1001 : Text);
+    VAR
+      AzureADAppSetup@1004 : Record 6300;
+      ActivityLog@1003 : Record 710;
+      Company@1002 : Record 2000000006;
+    BEGIN
+      IF ExceptionMessage <> '' THEN BEGIN
+        IF NOT AzureADAppSetup.ISEMPTY THEN BEGIN
+          AzureADAppSetup.FINDFIRST;
+          ActivityLog.LogActivityForUser(
+            AzureADAppSetup.RECORDID,ActivityLog.Status::Failed,'Power BI Non-SaaS',ExceptionMessage,ExceptionDetails,USERID);
+        END ELSE BEGIN
+          Company.GET(COMPANYNAME); // Dummy record to attach to activity log
+          ActivityLog.LogActivityForUser(
+            Company.RECORDID,ActivityLog.Status::Failed,'Power BI SaaS',ExceptionMessage,ExceptionDetails,USERID);
+        END;
+        ExceptionMessage := '';
+        ExceptionDetails := '';
+      END;
+    END;
+
+    BEGIN
+    {
+      // Manages access to the Power BI service API's (aka powerbi.com)
+    }
+    END.
+  }
+}
+

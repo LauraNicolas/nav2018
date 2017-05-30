@@ -1,0 +1,139 @@
+OBJECT Codeunit 1805 Import Config. Package Files
+{
+  OBJECT-PROPERTIES
+  {
+    Date=28.05.17;
+    Time=12:00:00;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    TableNo=2000000170;
+    OnRun=VAR
+            AssistedCompanySetupStatus@1001 : Record 1802;
+            LogInManagement@1000 : Codeunit 40;
+          BEGIN
+            AssistedCompanySetupStatus.GET(COMPANYNAME);
+            AssistedCompanySetupStatus."Company Setup Session ID" := SESSIONID;
+            AssistedCompanySetupStatus.MODIFY;
+            COMMIT;
+
+            LogInManagement.InitializeCompany;
+            ImportConfigurationPackageFiles(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      NoPackDefinedMsg@1000 : TextConst '@@@="%1 = Filter String";ENU=Critical Error: No configuration package file is defined within the specified filter %1. Please contact your system administrator.';
+      ImportStartedMsg@1003 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=The import of the %1 configuration package to the %2 company has started.';
+      ImportSuccessfulMsg@1001 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=The configuration package %1 was successfully imported to the %2 company.';
+      ApplicationStartedMsg@1002 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=Application of the %1 configuration package to the %2 company has started.';
+      ApplicationSuccessfulMsg@1005 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=The configuration package %1 was successfully applied to the %2 company.';
+      ApplicationFailedMsg@1004 : TextConst '@@@="%1 = No. of errors, %2 = Package Code, %3 = Company Name";ENU=Critical Error: %1 errors occurred during the application of the %2 package to the %3 company. Please contact your system administrator.';
+
+    LOCAL PROCEDURE ImportConfigurationPackageFiles@1(VAR ConfigurationPackageFile@1000 : Record 2000000170);
+    VAR
+      AssistedCompanySetupStatus@1007 : Record 1802;
+      TempConfigSetupSystemRapidStart@1006 : TEMPORARY Record 8627;
+      ConfigPackage@1008 : Record 8623;
+      JobQueueEntry@1009 : Record 472;
+      JobQueueLogEntry@1011 : Record 474;
+      ConfigPackageImport@1005 : Codeunit 8620;
+      AssistedCompanySetup@1004 : Codeunit 1800;
+      MessageText@1010 : Text;
+      ServerTempFileName@1003 : Text;
+      ErrorCount@1002 : Integer;
+      TotalNoOfErrors@1001 : Integer;
+    BEGIN
+      AssistedCompanySetupStatus.GET(COMPANYNAME);
+      ConfigurationPackageFile.SETCURRENTKEY("Processing Order");
+      IF ConfigurationPackageFile.FINDSET THEN BEGIN
+        REPEAT
+          MessageText := STRSUBSTNO(ImportStartedMsg,ConfigurationPackageFile.Code,COMPANYNAME);
+          InitVirtualJobQueueEntry(JobQueueEntry,AssistedCompanySetupStatus."Task ID");
+          UpdateVirtualJobQueueEntry(JobQueueEntry,MessageText);
+          JobQueueEntry.InsertLogEntry(JobQueueLogEntry);
+          MESSAGE(MessageText);
+
+          ServerTempFileName := AssistedCompanySetup.GetConfigurationPackageFile(ConfigurationPackageFile);
+          ConfigPackageImport.ImportRapidStartPackage(ServerTempFileName,TempConfigSetupSystemRapidStart);
+          MessageText := STRSUBSTNO(ImportSuccessfulMsg,ConfigurationPackageFile.Code,COMPANYNAME);
+          JobQueueLogEntry.Description := COPYSTR(MessageText,1,MAXSTRLEN(JobQueueLogEntry.Description));
+          JobQueueEntry.FinalizeLogEntry(JobQueueLogEntry);
+          MESSAGE(MessageText);
+
+          MessageText := STRSUBSTNO(ApplicationStartedMsg,ConfigurationPackageFile.Code,COMPANYNAME);
+          UpdateVirtualJobQueueEntry(JobQueueEntry,MessageText);
+          JobQueueEntry.InsertLogEntry(JobQueueLogEntry);
+          MESSAGE(MessageText);
+
+          ErrorCount := TempConfigSetupSystemRapidStart.ApplyPackages;
+          TotalNoOfErrors += ErrorCount;
+
+          // Delete everything related to configuration packages after the package has been applied:
+          ConfigPackage.GET(TempConfigSetupSystemRapidStart."Package Code");
+          ConfigPackage.DELETE(TRUE);
+          TempConfigSetupSystemRapidStart.DELETE;
+          ERASE(ServerTempFileName);
+
+          IF ErrorCount > 0 THEN BEGIN
+            MessageText := STRSUBSTNO(ApplicationFailedMsg,ErrorCount,ConfigurationPackageFile.Code,COMPANYNAME);
+            JobQueueEntry.Status := JobQueueEntry.Status::Error;
+            JobQueueEntry.SetErrorMessage(MessageText);
+          END ELSE BEGIN
+            MessageText := STRSUBSTNO(ApplicationSuccessfulMsg,ConfigurationPackageFile.Code,COMPANYNAME);
+            JobQueueLogEntry.Description := COPYSTR(MessageText,1,MAXSTRLEN(JobQueueLogEntry.Description));
+          END;
+          JobQueueEntry.FinalizeLogEntry(JobQueueLogEntry);
+          MESSAGE(MessageText);
+
+        UNTIL ConfigurationPackageFile.NEXT = 0;
+        IF TotalNoOfErrors > 0 THEN
+          AssistedCompanySetupStatus.VALIDATE("Import Failed",TRUE)
+        ELSE
+          AssistedCompanySetupStatus.VALIDATE("Package Imported",TRUE);
+      END ELSE BEGIN
+        AssistedCompanySetupStatus.VALIDATE("Import Failed",TRUE);
+        MessageText := STRSUBSTNO(NoPackDefinedMsg,ConfigurationPackageFile.GETFILTERS);
+        InitVirtualJobQueueEntry(JobQueueEntry,AssistedCompanySetupStatus."Task ID");
+        UpdateVirtualJobQueueEntry(JobQueueEntry,MessageText);
+        JobQueueEntry.InsertLogEntry(JobQueueLogEntry);
+        JobQueueEntry.Status := JobQueueEntry.Status::Error;
+        JobQueueEntry.SetErrorMessage(MessageText);
+        JobQueueEntry.FinalizeLogEntry(JobQueueLogEntry);
+        MESSAGE(MessageText);
+      END;
+      AssistedCompanySetupStatus."Company Setup Session ID" := 0;
+      AssistedCompanySetupStatus.MODIFY;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE InitVirtualJobQueueEntry@2(VAR JobQueueEntry@1000 : Record 472;TaskID@1001 : GUID);
+    BEGIN
+      WITH JobQueueEntry DO BEGIN
+        INIT;
+        ID := TaskID;
+        "User ID" := USERID;
+        "Object Type to Run" := "Object Type to Run"::Codeunit;
+        "Object ID to Run" := CODEUNIT::"Import Config. Package Files";
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateVirtualJobQueueEntry@3(VAR JobQueueEntry@1000 : Record 472;TaskDescription@1002 : Text);
+    BEGIN
+      WITH JobQueueEntry DO BEGIN
+        "User Session Started" := CURRENTDATETIME;
+        Description := COPYSTR(TaskDescription,1,MAXSTRLEN(Description));
+      END;
+    END;
+
+    BEGIN
+    {
+      // This code unit is executed in a separate session. Messages and errors will be output to the event log.
+    }
+    END.
+  }
+}
+

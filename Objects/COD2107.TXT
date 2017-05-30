@@ -1,0 +1,143 @@
+OBJECT Codeunit 2107 O365 Sales Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=28.05.17;
+    Time=12:00:00;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CannotDeleteCustomerWithDraftInvoiceErr@1001 : TextConst 'ENU=One or more ongoing invoices exist for the customer.';
+      CannotDeleteCustomerWithEstimateErr@1000 : TextConst 'ENU=One or more ongoing estimates exist for the customer.';
+      AddCustomerNameNewInvoiceErr@1002 : TextConst 'ENU=Add a customer name first.';
+
+    PROCEDURE BlockCustomerAndDeleteContact@5(VAR Customer@1001 : Record 18);
+    VAR
+      SalesHeader@1000 : Record 36;
+      CustContUpdate@1002 : Codeunit 5056;
+    BEGIN
+      SalesHeader.RESET;
+      SalesHeader.SETRANGE("Sell-to Customer Name",Customer.Name);
+      IF SalesHeader.FINDFIRST THEN BEGIN
+        IF SalesHeader."Document Type" = SalesHeader."Document Type"::Quote THEN
+          ERROR(CannotDeleteCustomerWithEstimateErr);
+
+        ERROR(CannotDeleteCustomerWithDraftInvoiceErr)
+      END;
+      Customer.VALIDATE(Blocked,Customer.Blocked::All);
+      Customer.MODIFY(TRUE);
+      CustContUpdate.DeleteCustomerContacts(Customer);
+    END;
+
+    PROCEDURE OpenNewInvoiceForCustomer@1(Customer@1000 : Record 18);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      IF Customer.Name = '' THEN
+        ERROR(AddCustomerNameNewInvoiceErr);
+
+      SalesHeader.INIT;
+      SalesHeader.VALIDATE("Document Type",SalesHeader."Document Type"::Invoice);
+      SalesHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+      SalesHeader.SetDefaultPaymentServices;
+      SalesHeader.INSERT(TRUE);
+      COMMIT;
+
+      IF CURRENTCLIENTTYPE IN [CLIENTTYPE::Tablet,CLIENTTYPE::Web] THEN
+        PAGE.RUN(PAGE::"BC O365 Sales Invoice",SalesHeader)
+      ELSE
+        PAGE.RUN(PAGE::"O365 Sales Invoice",SalesHeader);
+    END;
+
+    PROCEDURE OpenNewQuoteForCustomer@2(Customer@1000 : Record 18);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      IF Customer.Name = '' THEN
+        ERROR(AddCustomerNameNewInvoiceErr);
+
+      SalesHeader.INIT;
+      SalesHeader.VALIDATE("Document Type",SalesHeader."Document Type"::Quote);
+      SalesHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+      SalesHeader.SetDefaultPaymentServices;
+      SalesHeader.INSERT(TRUE);
+      COMMIT;
+
+      PAGE.RUN(PAGE::"O365 Sales Quote",SalesHeader);
+    END;
+
+    PROCEDURE SetItemDefaultValues@15(VAR Item@1006 : Record 27);
+    VAR
+      GenProductPostingGroup@1005 : Record 251;
+      VATProductPostingGroup@1004 : Record 324;
+      TaxSetup@1001 : Record 326;
+      TaxGroup@1003 : Record 321;
+    BEGIN
+      Item.Type := Item.Type::Service;
+      Item."Costing Method" := Item."Costing Method"::FIFO;
+
+      IF TaxSetup.GET THEN BEGIN
+        IF TaxSetup."Non-Taxable Tax Group Code" <> '' THEN
+          TaxGroup.SETFILTER(Code,'<>%1',TaxSetup."Non-Taxable Tax Group Code");
+        IF TaxGroup.FINDFIRST THEN
+          Item."Tax Group Code" := TaxGroup.Code;
+      END;
+
+      IF GenProductPostingGroup.FINDFIRST THEN
+        Item."Gen. Prod. Posting Group" := GenProductPostingGroup.Code;
+
+      IF VATProductPostingGroup.FINDFIRST THEN
+        Item."VAT Prod. Posting Group" := VATProductPostingGroup.Code;
+
+      IF Item.MODIFY THEN;
+    END;
+
+    PROCEDURE GetO365DocumentBrickStyle@3(O365SalesDocument@1002 : Record 2103;VAR OutStandingStatusStyle@1000 : Text;VAR TotalInvoicedStyle@1001 : Text);
+    BEGIN
+      WITH O365SalesDocument DO BEGIN
+        OutStandingStatusStyle := '';
+        TotalInvoicedStyle := '';
+        CALCFIELDS("Last Email Sent Time","Last Email Sent Status");
+
+        CASE TRUE OF
+          Canceled:
+            OutStandingStatusStyle := '';
+          Posted AND ("Outstanding Amount" <= 0):
+            OutStandingStatusStyle := 'Favorable';
+          "Last Email Sent Status" = "Last Email Sent Status"::Error:
+            OutStandingStatusStyle := '';
+          IsOverduePostedInvoice:
+            OutStandingStatusStyle := 'Unfavorable';
+          ("Document Type" = "Document Type"::Quote) AND "Quote Accepted":
+            OutStandingStatusStyle := 'Favorable';
+        END;
+
+        IF (NOT Canceled) AND
+           ("Last Email Sent Status" = "Last Email Sent Status"::Error) AND
+           (("Outstanding Amount" > 0) OR ("Sales Amount" = 0))
+        THEN
+          TotalInvoicedStyle := 'Unfavorable'
+        ELSE
+          IF ("Document Type" = "Document Type"::Quote) AND ("Last Email Sent Status" = "Last Email Sent Status"::Error) THEN
+            TotalInvoicedStyle := 'Unfavorable'
+          ELSE
+            IF (("Document Type" = "Document Type"::Quote) AND ("Document Status" = "Document Status"::"Draft Invoice")) OR
+               (("Document Type" <> "Document Type"::Quote) AND NOT Posted)
+            THEN
+              TotalInvoicedStyle := 'Ambiguous';
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

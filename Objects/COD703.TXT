@@ -1,0 +1,182 @@
+OBJECT Codeunit 703 Find Record Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=28.05.17;
+    Time=12:00:00;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+
+    [External]
+    PROCEDURE FindRecordByDescription@33(VAR Result@1001 : Text;Type@1004 : ' ,G/L Account,Item,Resource,Fixed Asset,Charge (Item)';SearchText@1000 : Text) : Integer;
+    VAR
+      RecRef@1014 : RecordRef;
+      KeyFieldRef@1009 : FieldRef;
+      DescriptionFieldRef@1010 : FieldRef;
+      AdditionalFieldRef@1012 : FieldRef;
+      KeyNoFieldNo@1011 : Integer;
+      KeyNoMaxStrLen@1005 : Integer;
+      DescriptionFieldNo@1003 : Integer;
+      AdditionalFieldNo@1002 : Integer;
+      RecWithoutQuote@1008 : Text;
+      RecFilterFromStart@1007 : Text;
+      RecFilterContains@1006 : Text;
+    BEGIN
+      // Try to find a record by SearchText looking into "No." OR "Description" fields
+      Result := '';
+      IF (SearchText = '') OR (Type = Type::" ") THEN
+        EXIT(0);
+
+      GetRecRefAndFieldsNoByType(RecRef,Type,KeyNoFieldNo,DescriptionFieldNo,AdditionalFieldNo);
+
+      KeyFieldRef := RecRef.FIELD(KeyNoFieldNo);
+      DescriptionFieldRef := RecRef.FIELD(DescriptionFieldNo);
+      IF AdditionalFieldNo <> 0 THEN
+        AdditionalFieldRef := RecRef.FIELD(AdditionalFieldNo);
+
+      // Try GET(SearchText)
+      KeyNoMaxStrLen := KeyFieldRef.LENGTH;
+      IF STRLEN(SearchText) <= KeyNoMaxStrLen THEN BEGIN
+        KeyFieldRef.SETRANGE(COPYSTR(SearchText,1,KeyNoMaxStrLen));
+        IF RecRef.FINDFIRST THEN BEGIN
+          Result := KeyFieldRef.VALUE;
+          EXIT(1);
+        END;
+      END;
+      KeyFieldRef.SETRANGE;
+
+      // Example of SearchText = "Search string ''";
+      // Try FINDFIRST "Description" by mask "@Search string ?"
+      RecWithoutQuote := CONVERTSTR(SearchText,'''','?');
+      DescriptionFieldRef.SETFILTER('''@' + RecWithoutQuote + '''');
+      IF RecRef.FINDFIRST THEN BEGIN
+        Result := KeyFieldRef.VALUE;
+        EXIT(1);
+      END;
+      DescriptionFieldRef.SETRANGE;
+
+      // Try FINDFIRST "No." OR "Description" by mask "@Search string ?*"
+      RecRef.FILTERGROUP := -1;
+      RecFilterFromStart := '''@' + RecWithoutQuote + '*''';
+      KeyFieldRef.SETFILTER(RecFilterFromStart);
+      DescriptionFieldRef.SETFILTER(RecFilterFromStart);
+      IF RecRef.FINDFIRST THEN BEGIN
+        Result := KeyFieldRef.VALUE;
+        EXIT(1);
+      END;
+
+      // Try FINDFIRST "No." OR "Description" OR additional field by mask "@*Search string ?*"
+      RecFilterContains := '''@*' + RecWithoutQuote + '*''';
+      KeyFieldRef.SETFILTER(RecFilterContains);
+      DescriptionFieldRef.SETFILTER(RecFilterContains);
+      IF AdditionalFieldNo <> 0 THEN
+        AdditionalFieldRef.SETFILTER(RecFilterContains);
+
+      IF RecRef.FINDFIRST THEN BEGIN
+        Result := KeyFieldRef.VALUE;
+        EXIT(RecRef.COUNT);
+      END;
+
+      // Try FINDLAST record with similar "Description"
+      IF FindRecordWithSimilarName(RecRef,SearchText,DescriptionFieldNo) THEN BEGIN
+        Result := KeyFieldRef.VALUE;
+        EXIT(1);
+      END;
+
+      // Not found
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE FindRecordWithSimilarName@34(RecRef@1001 : RecordRef;SearchText@1000 : Text;DescriptionFieldNo@1006 : Integer) : Boolean;
+    VAR
+      TypeHelper@1007 : Codeunit 10;
+      Description@1002 : Text;
+      RecCount@1003 : Integer;
+      TextLength@1004 : Integer;
+      Treshold@1005 : Integer;
+    BEGIN
+      IF SearchText = '' THEN
+        EXIT(FALSE);
+
+      TextLength := STRLEN(SearchText);
+      IF TextLength > RecRef.FIELD(DescriptionFieldNo).LENGTH THEN
+        EXIT(FALSE);
+
+      Treshold := TextLength DIV 5;
+      IF Treshold = 0 THEN
+        EXIT(FALSE);
+
+      RecRef.RESET;
+      RecRef.ASCENDING(FALSE); // most likely to search for newest records
+      IF RecRef.FINDSET THEN
+        REPEAT
+          RecCount += 1;
+          Description := RecRef.FIELD(DescriptionFieldNo).VALUE;
+          IF ABS(TextLength - STRLEN(Description)) <= Treshold THEN
+            IF TypeHelper.TextDistance(UPPERCASE(SearchText),UPPERCASE(Description)) <= Treshold THEN
+              EXIT(TRUE);
+        UNTIL (RecRef.NEXT = 0) OR (RecCount > 1000);
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetRecRefAndFieldsNoByType@1(RecRef@1004 : RecordRef;Type@1002 : ' ,G/L Account,Item,Resource,Fixed Asset,Charge (Item)';VAR KeyNoFieldNo@1003 : Integer;VAR DescriptionFieldNo@1001 : Integer;VAR AdditionalFieldNo@1000 : Integer);
+    VAR
+      GLAccount@1005 : Record 15;
+      Item@1006 : Record 27;
+      FixedAsset@1007 : Record 5600;
+      Resource@1008 : Record 156;
+      ItemCharge@1009 : Record 5800;
+    BEGIN
+      CASE Type OF
+        Type::"G/L Account":
+          BEGIN
+            RecRef.OPEN(DATABASE::"G/L Account");
+            KeyNoFieldNo := GLAccount.FIELDNO("No.");
+            DescriptionFieldNo := GLAccount.FIELDNO(Name);
+            AdditionalFieldNo := 0;
+          END;
+        Type::Item:
+          BEGIN
+            RecRef.OPEN(DATABASE::Item);
+            KeyNoFieldNo := Item.FIELDNO("No.");
+            DescriptionFieldNo := Item.FIELDNO(Description);
+            AdditionalFieldNo := Item.FIELDNO("Base Unit of Measure");
+          END;
+        Type::Resource:
+          BEGIN
+            RecRef.OPEN(DATABASE::Resource);
+            KeyNoFieldNo := Resource.FIELDNO("No.");
+            DescriptionFieldNo := Resource.FIELDNO(Name);
+            AdditionalFieldNo := 0;
+          END;
+        Type::"Fixed Asset":
+          BEGIN
+            RecRef.OPEN(DATABASE::"Fixed Asset");
+            KeyNoFieldNo := FixedAsset.FIELDNO("No.");
+            DescriptionFieldNo := FixedAsset.FIELDNO(Description);
+            AdditionalFieldNo := 0;
+          END;
+        Type::"Charge (Item)":
+          BEGIN
+            RecRef.OPEN(DATABASE::"Item Charge");
+            KeyNoFieldNo := ItemCharge.FIELDNO("No.");
+            DescriptionFieldNo := ItemCharge.FIELDNO(Description);
+            AdditionalFieldNo := 0;
+          END;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

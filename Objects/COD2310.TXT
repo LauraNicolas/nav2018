@@ -1,0 +1,341 @@
+OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=28.05.17;
+    Time=12:00:00;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ProcessDraftInvoiceOptionQst@1001 : TextConst 'ENU=Keep,Discard';
+      ProcessDraftInvoiceInstructionTxt@1000 : TextConst 'ENU=Do you want to keep the new invoice?';
+      AddDiscountTxt@1003 : TextConst 'ENU=Add discount';
+      ChangeDiscountTxt@1002 : TextConst 'ENU=Change discount';
+      AddAttachmentTxt@1005 : TextConst 'ENU=Add attachment';
+      NoOfAttachmentsTxt@1004 : TextConst '@@@="%1=an integer number, starting at 0";ENU=Attachments (%1)';
+      InvoiceDiscountChangedMsg@1007 : TextConst 'ENU=Changing the quantity has cleared the line discount.';
+      AmountOutsideRangeMsg@1008 : TextConst 'ENU=We adjusted the discount to not exceed the line amount.';
+      CouponsHasBeenCheckedForCustomer@1009 : Boolean;
+      HasWarnedAboutExpiredOrClaimedCoupons@1006 : Boolean;
+
+    [External]
+    PROCEDURE GetCustomerEmail@2(CustomerNo@1001 : Code[20]) : Text[80];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      IF CustomerNo <> '' THEN
+        IF Customer.GET(CustomerNo) THEN
+          EXIT(Customer."E-Mail");
+      EXIT('');
+    END;
+
+    [External]
+    PROCEDURE ProcessDraftInvoiceOnCreate@3(VAR SalesHeader@1001 : Record 36) : Boolean;
+    VAR
+      Response@1000 : ',Save,Discard';
+    BEGIN
+      CASE STRMENU(ProcessDraftInvoiceOptionQst,Response::Save,ProcessDraftInvoiceInstructionTxt) OF
+        Response::Save:
+          EXIT(TRUE);
+        Response::Discard:
+          EXIT(SalesHeader.DELETE(TRUE)); // Delete all invoice lines and invoice header
+      END;
+    END;
+
+    [External]
+    PROCEDURE IsCustomerCompanyContact@89(CustomerNo@1001 : Code[20]) : Boolean;
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      IF CustomerNo <> '' THEN
+        IF Customer.GET(CustomerNo) THEN
+          EXIT(Customer."Contact Type" = Customer."Contact Type"::Company);
+      EXIT(FALSE);
+    END;
+
+    [External]
+    PROCEDURE UpdateCouponCodes@6(SalesHeader@1002 : Record 36;VAR CouponCodes@1000 : Text);
+    VAR
+      O365CouponClaim@1001 : Record 2115;
+    BEGIN
+      CouponCodes := O365CouponClaim.GetAppliedClaimsForSalesDocument(SalesHeader);
+    END;
+
+    [External]
+    PROCEDURE UpdateAddress@4(VAR SalesHeader@1001 : Record 36;VAR FullAddress@1002 : Text);
+    VAR
+      TempStandardAddress@1000 : TEMPORARY Record 730;
+    BEGIN
+      TempStandardAddress.CopyFromSalesHeaderSellTo(SalesHeader);
+      FullAddress := TempStandardAddress.ToString;
+      SalesHeader."Bill-to Address" := SalesHeader."Sell-to Address";
+      SalesHeader."Bill-to Address 2" := SalesHeader."Sell-to Address 2";
+      SalesHeader."Bill-to Post Code" := SalesHeader."Sell-to Post Code";
+      SalesHeader."Bill-to City" := SalesHeader."Sell-to City";
+      SalesHeader."Bill-to Country/Region Code" := SalesHeader."Sell-to Country/Region Code";
+      SalesHeader."Bill-to County" := SalesHeader."Sell-to County";
+    END;
+
+    [External]
+    PROCEDURE CalcInvoiceDiscountAmount@8(VAR SalesHeader@1001 : Record 36;VAR SubTotalAmount@1003 : Decimal;VAR DiscountTxt@1002 : Text;VAR InvDiscAmountVisible@1006 : Boolean);
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.CALCSUMS("Inv. Discount Amount","Line Amount");
+      SubTotalAmount := SalesLine."Line Amount";
+      IF SalesHeader."Invoice Discount Value" <> 0 THEN
+        DiscountTxt := ChangeDiscountTxt
+      ELSE
+        DiscountTxt := AddDiscountTxt;
+
+      InvDiscAmountVisible := SalesHeader."Invoice Discount Value" <> 0;
+    END;
+
+    [External]
+    PROCEDURE UpdateNoOfAttachmentsLabel@7(NoOfAttachments@1000 : Integer;VAR NoOfAttachmentsValueTxt@1003 : Text);
+    BEGIN
+      IF NoOfAttachments = 0 THEN
+        NoOfAttachmentsValueTxt := AddAttachmentTxt
+      ELSE
+        NoOfAttachmentsValueTxt := STRSUBSTNO(NoOfAttachmentsTxt,NoOfAttachments);
+    END;
+
+    [External]
+    PROCEDURE OnAfterGetSalesHeaderRecord@1(VAR SalesHeader@1000 : Record 36;VAR CurrencyFormat@1005 : Text;VAR TaxAreaDescription@1007 : Text[50]);
+    VAR
+      Currency@1004 : Record 4;
+      GLSetup@1003 : Record 98;
+      TaxArea@1002 : Record 318;
+      CurrencySymbol@1001 : Text[10];
+    BEGIN
+      SalesHeader.SetDefaultPaymentServices;
+      IF SalesHeader."Currency Code" = '' THEN BEGIN
+        GLSetup.GET;
+        CurrencySymbol := GLSetup.GetCurrencySymbol;
+      END ELSE BEGIN
+        IF Currency.GET(SalesHeader."Currency Code") THEN;
+        CurrencySymbol := Currency.GetCurrencySymbol;
+      END;
+      CurrencyFormat := STRSUBSTNO('%1<precision, 2:2><standard format, 0>',CurrencySymbol);
+
+      IF TaxArea.GET(SalesHeader."Tax Area Code") THEN
+        TaxAreaDescription := TaxArea.Description;
+    END;
+
+    [External]
+    PROCEDURE LookupCustomerName@5(VAR SalesHeader@1003 : Record 36;Text@1000 : Text;VAR CustomerName@1005 : Text[50];VAR CustomerEmail@1004 : Text[80]) : Boolean;
+    VAR
+      Customer@1002 : Record 18;
+      BCO365CustomerList@1001 : Page 2316;
+    BEGIN
+      IF Text <> '' THEN BEGIN
+        Customer.SETRANGE(Name,Text);
+        IF Customer.FINDFIRST THEN;
+        Customer.SETRANGE(Name);
+      END;
+
+      BCO365CustomerList.LOOKUPMODE(TRUE);
+      BCO365CustomerList.SETRECORD(Customer);
+
+      IF BCO365CustomerList.RUNMODAL = ACTION::LookupOK THEN BEGIN
+        BCO365CustomerList.GETRECORD(Customer);
+        SalesHeader.SetHideValidationDialog(TRUE);
+        CustomerName := Customer.Name;
+        SalesHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+        CustomerEmail := GetCustomerEmail(SalesHeader."Sell-to Customer No.");
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    [External]
+    PROCEDURE NotifyOrWarnAboutCoupouns@9(VAR SalesHeader@1003 : Record 36);
+    VAR
+      CouponsManagement@1004 : Codeunit 2116;
+    BEGIN
+      IF NOT HasWarnedAboutExpiredOrClaimedCoupons THEN
+        HasWarnedAboutExpiredOrClaimedCoupons :=
+          CouponsManagement.WarnIfExpiredOrClaimedCoupons(SalesHeader."Document Type",SalesHeader."No.");
+      IF (SalesHeader."Sell-to Customer No." <> '') AND
+         (NOT CouponsHasBeenCheckedForCustomer) AND (NOT HasWarnedAboutExpiredOrClaimedCoupons)
+      THEN BEGIN
+        COMMIT;
+        IF CODEUNIT.RUN(CODEUNIT::"Coupons Sync",SalesHeader) THEN;
+        CouponsHasBeenCheckedForCustomer := TRUE;
+      END;
+    END;
+
+    [External]
+    PROCEDURE GetCouponCodesAndCouponsExists@10(VAR SalesHeader@1001 : Record 36;VAR CouponCodes@1000 : Text;VAR CouponsExistsForCustomer@1002 : Boolean);
+    VAR
+      O365CouponClaim@1003 : Record 2115;
+    BEGIN
+      UpdateCouponCodes(SalesHeader,CouponCodes);
+      CouponsExistsForCustomer := O365CouponClaim.CouponsExistForCustomer(SalesHeader."Sell-to Customer No.");
+    END;
+
+    PROCEDURE CustomerChanged@15();
+    BEGIN
+      HasWarnedAboutExpiredOrClaimedCoupons := FALSE;
+      CouponsHasBeenCheckedForCustomer := FALSE;
+    END;
+
+    [External]
+    PROCEDURE UpdateCustomerFields@11(VAR SalesHeader@1000 : Record 36;VAR CustomerName@1002 : Text[50];VAR CustomerEmail@1001 : Text[80]);
+    BEGIN
+      CustomerName := SalesHeader."Sell-to Customer Name";
+      CustomerEmail := GetCustomerEmail(SalesHeader."Sell-to Customer No.");
+    END;
+
+    [External]
+    PROCEDURE ValidateCustomerName@12(VAR SalesHeader@1001 : Record 36;VAR CustomerName@1003 : Text[50];VAR CustomerEmail@1002 : Text[80]);
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      IF NOT Customer.GET(Customer.GetCustNoOpenCard(SalesHeader."Sell-to Customer Name",FALSE)) THEN BEGIN
+        IF Customer.IsLookupRequested THEN
+          IF LookupCustomerName(SalesHeader,SalesHeader."Sell-to Customer Name",CustomerName,CustomerEmail) THEN
+            EXIT;
+        ERROR('');
+      END;
+      SalesHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+      CustomerName := Customer.Name;
+      CustomerEmail := GetCustomerEmail(SalesHeader."Sell-to Customer No.");
+    END;
+
+    [External]
+    PROCEDURE ValidateCustomerEmail@13(VAR SalesHeader@1002 : Record 36;CustomerEmail@1000 : Text[80]);
+    VAR
+      Customer@1003 : Record 18;
+      MailManagement@1001 : Codeunit 9520;
+    BEGIN
+      IF CustomerEmail <> '' THEN BEGIN
+        MailManagement.CheckValidEmailAddress(CustomerEmail);
+
+        IF (SalesHeader."Sell-to Customer No." <> '') AND Customer.WRITEPERMISSION THEN
+          IF Customer.GET(SalesHeader."Sell-to Customer No.") THEN
+            IF CustomerEmail <> Customer."E-Mail" THEN BEGIN
+              Customer."E-Mail" := CustomerEmail;
+              Customer.MODIFY;
+            END;
+      END;
+    END;
+
+    [External]
+    PROCEDURE OnQueryCloseForSalesHeader@14(VAR SalesHeader@1001 : Record 36;ForceExit@1000 : Boolean;CustomerName@1002 : Text[50]) : Boolean;
+    BEGIN
+      IF ForceExit THEN
+        EXIT;
+
+      IF SalesHeader."No." = '' THEN
+        EXIT;
+
+      IF CustomerName = '' THEN BEGIN
+        SalesHeader.DELETE(TRUE);
+        EXIT;
+      END;
+
+      IF SalesHeader.SalesLinesExist THEN
+        EXIT;
+
+      IF GUIALLOWED THEN
+        EXIT(ProcessDraftInvoiceOnCreate(SalesHeader));
+    END;
+
+    [External]
+    PROCEDURE ShowInvoiceDiscountNotification@18(VAR InvoiceDiscountNotification@1000 : Notification);
+    BEGIN
+      InvoiceDiscountNotification.ID := CREATEGUID;
+      InvoiceDiscountNotification.MESSAGE := InvoiceDiscountChangedMsg;
+      InvoiceDiscountNotification.SCOPE := NOTIFICATIONSCOPE::LocalScope;
+      InvoiceDiscountNotification.SEND;
+    END;
+
+    [External]
+    PROCEDURE LookupDescription@17(VAR SalesLine@1003 : Record 37;Text@1000 : Text;VAR DescriptionSelected@1004 : Boolean) : Boolean;
+    VAR
+      Item@1002 : Record 27;
+      BCO365ItemList@1001 : Page 2314;
+    BEGIN
+      IF Text <> '' THEN BEGIN
+        Item.SETRANGE(Description,Text);
+        IF Item.FINDFIRST THEN;
+        Item.SETRANGE(Description);
+      END;
+
+      BCO365ItemList.LOOKUPMODE(TRUE);
+      BCO365ItemList.SETRECORD(Item);
+
+      IF BCO365ItemList.RUNMODAL = ACTION::LookupOK THEN BEGIN
+        BCO365ItemList.GETRECORD(Item);
+        SalesLine.SetHideValidationDialog(TRUE);
+        SalesLine.VALIDATE("No.",Item."No.");
+        DescriptionSelected := SalesLine.Description <> '';
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    [External]
+    PROCEDURE ConstructCurrencyFormatString@16(VAR SalesLine@1004 : Record 37;VAR CurrencyFormat@1003 : Text);
+    VAR
+      Currency@1002 : Record 4;
+      GLSetup@1001 : Record 98;
+      CurrencySymbol@1000 : Text[10];
+    BEGIN
+      IF SalesLine."Currency Code" = '' THEN BEGIN
+        GLSetup.GET;
+        CurrencySymbol := GLSetup.GetCurrencySymbol;
+      END ELSE BEGIN
+        IF Currency.GET(SalesLine."Currency Code") THEN;
+        CurrencySymbol := Currency.GetCurrencySymbol;
+      END;
+      CurrencyFormat := STRSUBSTNO('%1<precision, 2:2><standard format, 0>',CurrencySymbol);
+    END;
+
+    [External]
+    PROCEDURE GetValueWithinBounds@1027(Value@1000 : Decimal;MinValue@1001 : Decimal;MaxValue@1002 : Decimal;VAR AmountOutsideOfBoundsNotificationSend@1003 : Boolean) : Decimal;
+    BEGIN
+      IF Value < MinValue THEN BEGIN
+        SendOutsideRangeNotification(AmountOutsideOfBoundsNotificationSend);
+        EXIT(MinValue);
+      END;
+      IF Value > MaxValue THEN BEGIN
+        SendOutsideRangeNotification(AmountOutsideOfBoundsNotificationSend);
+        EXIT(MaxValue);
+      END;
+      EXIT(Value);
+    END;
+
+    [External]
+    PROCEDURE SendOutsideRangeNotification@1028(VAR AmountOutsideOfBoundsNotificationSend@1001 : Boolean);
+    VAR
+      AmountOutOfBoundsNotification@1000 : Notification;
+    BEGIN
+      IF AmountOutsideOfBoundsNotificationSend THEN
+        EXIT;
+
+      AmountOutOfBoundsNotification.ID := CREATEGUID;
+      AmountOutOfBoundsNotification.MESSAGE := AmountOutsideRangeMsg;
+      AmountOutOfBoundsNotification.SCOPE := NOTIFICATIONSCOPE::LocalScope;
+      AmountOutOfBoundsNotification.SEND;
+      AmountOutsideOfBoundsNotificationSend := TRUE;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+
