@@ -1,0 +1,191 @@
+OBJECT Codeunit 1805 Import Config. Package Files
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Configuration Package File";
+    OnRun=VAR
+            AssistedCompanySetupStatus@1001 : Record "Assisted Company Setup Status";
+            LogInManagement@1000 : Codeunit LogInManagement;
+          BEGIN
+            AssistedCompanySetupStatus.GET(COMPANYNAME);
+            AssistedCompanySetupStatus."Company Setup Session ID" := SESSIONID;
+            AssistedCompanySetupStatus.MODIFY;
+            COMMIT;
+
+            LogInManagement.InitializeCompany;
+            ImportConfigurationPackageFiles(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      NoPackDefinedMsg@1000 : TextConst '@@@="%1 = Filter String";ENU=Critical Error: No configuration package file is defined within the specified filter %1. Please contact your system administrator.';
+      ImportStartedMsg@1003 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=The import of the %1 configuration package to the %2 company has started.';
+      ImportSuccessfulMsg@1001 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=The configuration package %1 was successfully imported to the %2 company.';
+      ApplicationStartedMsg@1002 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=Application of the %1 configuration package to the %2 company has started.';
+      ApplicationSuccessfulMsg@1005 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=The configuration package %1 was successfully applied to the %2 company.';
+      ApplicationFailedMsg@1004 : TextConst '@@@="%1 = No. of errors, %2 = Package Code, %3 = Company Name";ENU=Critical Error: %1 errors occurred during the package application. Please contact your system administrator.';
+      PackageLbl@1006 : TextConst 'ENU=Package';
+      CompanyLbl@1007 : TextConst 'ENU=Company';
+
+    LOCAL PROCEDURE ImportConfigurationPackageFiles@1(VAR ConfigurationPackageFile@1000 : Record "Configuration Package File");
+    VAR
+      AssistedCompanySetupStatus@1007 : Record "Assisted Company Setup Status";
+      TempConfigSetupSystemRapidStart@1006 : TEMPORARY Record "Config. Setup";
+      ConfigPackage@1008 : Record "Config. Package";
+      JobQueueEntry@1009 : Record "Job Queue Entry";
+      JobQueueLogEntry@1011 : Record "Job Queue Log Entry";
+      ConfigPackageImport@1005 : Codeunit "Config. Package - Import";
+      AssistedCompanySetup@1004 : Codeunit "Assisted Company Setup";
+      MessageText@1010 : Text;
+      ServerTempFileName@1003 : Text;
+      ErrorCount@1002 : Integer;
+      TotalNoOfErrors@1001 : Integer;
+    BEGIN
+      AssistedCompanySetupStatus.GET(COMPANYNAME);
+      ConfigurationPackageFile.SETCURRENTKEY("Processing Order");
+      if ConfigurationPackageFile.FINDSET then begin
+        repeat
+          MessageText := STRSUBSTNO(ImportStartedMsg,ConfigurationPackageFile.Code,COMPANYNAME);
+          InitVirtualJobQueueEntry(JobQueueEntry,AssistedCompanySetupStatus."Task ID");
+          UpdateVirtualJobQueueEntry(JobQueueEntry,MessageText);
+          JobQueueEntry.InsertLogEntry(JobQueueLogEntry);
+          MESSAGE(MessageText);
+
+          ServerTempFileName := AssistedCompanySetup.GetConfigurationPackageFile(ConfigurationPackageFile);
+          ConfigPackageImport.ImportRapidStartPackage(ServerTempFileName,TempConfigSetupSystemRapidStart);
+          MessageText := STRSUBSTNO(ImportSuccessfulMsg,ConfigurationPackageFile.Code,COMPANYNAME);
+          JobQueueLogEntry.Description := COPYSTR(MessageText,1,MAXSTRLEN(JobQueueLogEntry.Description));
+          JobQueueEntry.FinalizeLogEntry(JobQueueLogEntry);
+          MESSAGE(MessageText);
+
+          MessageText := STRSUBSTNO(ApplicationStartedMsg,ConfigurationPackageFile.Code,COMPANYNAME);
+          UpdateVirtualJobQueueEntry(JobQueueEntry,MessageText);
+          JobQueueEntry.InsertLogEntry(JobQueueLogEntry);
+          MESSAGE(MessageText);
+
+          ErrorCount := TempConfigSetupSystemRapidStart.ApplyPackages;
+          TotalNoOfErrors += ErrorCount;
+
+          ERASE(ServerTempFileName);
+
+          if ErrorCount > 0 then begin
+            MessageText :=
+              GetApplicationErrorSourceText(
+                COMPANYNAME,TempConfigSetupSystemRapidStart."Package Code") + ' ' +
+              STRSUBSTNO(ApplicationFailedMsg,ErrorCount);
+            JobQueueEntry.Status := JobQueueEntry.Status::Error;
+            JobQueueEntry.SetErrorMessage(MessageText);
+            ConfigPackage.GET(TempConfigSetupSystemRapidStart."Package Code");
+          end else begin
+            MessageText := STRSUBSTNO(ApplicationSuccessfulMsg,ConfigurationPackageFile.Code,COMPANYNAME);
+            JobQueueLogEntry.Description := COPYSTR(MessageText,1,MAXSTRLEN(JobQueueLogEntry.Description));
+            // Delete everything related to configuration packages after the package has been applied:
+            ConfigPackage.GET(TempConfigSetupSystemRapidStart."Package Code");
+            ConfigPackage.DELETE(true);
+            TempConfigSetupSystemRapidStart.DELETE;
+          end;
+          JobQueueEntry.FinalizeLogEntry(JobQueueLogEntry);
+          MESSAGE(MessageText);
+
+        until ConfigurationPackageFile.NEXT = 0;
+        if TotalNoOfErrors > 0 then
+          AssistedCompanySetupStatus.VALIDATE("Import Failed",true)
+        else
+          AssistedCompanySetupStatus.VALIDATE("Package Imported",true);
+      end else begin
+        AssistedCompanySetupStatus.VALIDATE("Import Failed",true);
+        MessageText := STRSUBSTNO(NoPackDefinedMsg,ConfigurationPackageFile.GETFILTERS);
+        InitVirtualJobQueueEntry(JobQueueEntry,AssistedCompanySetupStatus."Task ID");
+        UpdateVirtualJobQueueEntry(JobQueueEntry,MessageText);
+        JobQueueEntry.InsertLogEntry(JobQueueLogEntry);
+        JobQueueEntry.Status := JobQueueEntry.Status::Error;
+        JobQueueEntry.SetErrorMessage(MessageText);
+        JobQueueEntry.FinalizeLogEntry(JobQueueLogEntry);
+        MESSAGE(MessageText);
+      end;
+      AssistedCompanySetupStatus."Company Setup Session ID" := 0;
+      AssistedCompanySetupStatus.MODIFY;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE InitVirtualJobQueueEntry@2(VAR JobQueueEntry@1000 : Record "Job Queue Entry";TaskID@1001 : GUID);
+    BEGIN
+      with JobQueueEntry do begin
+        INIT;
+        ID := TaskID;
+        "User ID" := USERID;
+        "Object Type to Run" := "Object Type to Run"::Codeunit;
+        "Object ID to Run" := CODEUNIT::"Import Config. Package Files";
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateVirtualJobQueueEntry@3(VAR JobQueueEntry@1000 : Record "Job Queue Entry";TaskDescription@1002 : Text);
+    BEGIN
+      with JobQueueEntry do begin
+        "User Session Started" := CURRENTDATETIME;
+        Description := COPYSTR(TaskDescription,1,MAXSTRLEN(Description));
+      end;
+    END;
+
+    [EventSubscriber(Page,674,OnShowDetails)]
+    LOCAL PROCEDURE OnShowDetailedLog@4(JobQueueLogEntry@1000 : Record "Job Queue Log Entry");
+    VAR
+      ConfigPackageError@1002 : Record "Config. Package Error";
+      ApplCompanyName@1001 : Text;
+      PackageCode@1003 : Text;
+    BEGIN
+      if (JobQueueLogEntry."Object ID to Run" = CODEUNIT::"Import Config. Package Files") and
+         (JobQueueLogEntry.Status = JobQueueLogEntry.Status::Error) and
+         ParseApplicationErrorText(ApplCompanyName,PackageCode,JobQueueLogEntry."Error Message")
+      then begin
+        ConfigPackageError.CHANGECOMPANY(ApplCompanyName);
+        ConfigPackageError.SETRANGE("Package Code",PackageCode);
+        PAGE.RUNMODAL(0,ConfigPackageError);
+      end;
+    END;
+
+    LOCAL PROCEDURE ParseApplicationErrorText@8(VAR ApplCompanyName@1004 : Text;VAR PackageCode@1000 : Text;ErrorText@1001 : Text) : Boolean;
+    BEGIN
+      ApplCompanyName := ExtractSubstring(ErrorText,CompanyLbl);
+      PackageCode := ExtractSubstring(ErrorText,PackageLbl);
+      exit((ApplCompanyName <> '') and (PackageCode <> ''));
+    END;
+
+    PROCEDURE GetApplicationErrorSourceText@5(ApplCompanyName@1000 : Text;PackageCode@1001 : Text) : Text;
+    BEGIN
+      exit(
+        STRSUBSTNO(
+          '%1 <%2>, %3 <%4>.',CompanyLbl,ApplCompanyName,PackageLbl,PackageCode));
+    END;
+
+    LOCAL PROCEDURE ExtractSubstring@17(VAR ErrorText@1000 : Text;Lable@1003 : Text) Substring : Text;
+    VAR
+      StartPos@1002 : Integer;
+      EndPos@1001 : Integer;
+      StartMarker@1004 : Text;
+    BEGIN
+      StartMarker := STRSUBSTNO('%1 <',Lable);
+      StartPos := STRPOS(ErrorText,StartMarker);
+      EndPos := STRPOS(ErrorText,'>');
+      if (StartPos <> 0) and (EndPos <> 0) then begin
+        Substring := COPYSTR(ErrorText,StartPos + STRLEN(StartMarker),EndPos - STRLEN(StartMarker) - StartPos);
+        ErrorText := COPYSTR(ErrorText,EndPos + 1);
+      end;
+    END;
+
+    BEGIN
+    {
+      // This code unit is executed in a separate session. Messages and errors will be output to the event log.
+    }
+    END.
+  }
+}
+

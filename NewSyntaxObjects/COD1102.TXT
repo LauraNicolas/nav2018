@@ -1,0 +1,289 @@
+OBJECT Codeunit 1102 CA Jnl.-Post Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Cost Journal Line";
+    Permissions=TableData "Cost Entry"=imd,
+                TableData "Cost Register"=imd;
+    OnRun=BEGIN
+            CostAccSetup.GET;
+            RunWithCheck(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CostAccSetup@1017 : Record "Cost Accounting Setup";
+      CostEntry@1018 : Record "Cost Entry";
+      GlEntry@1019 : Record "G/L Entry";
+      CostJnlLine@1021 : Record "Cost Journal Line";
+      CostRegister@1022 : Record "Cost Register";
+      CostBudgetRegister@1023 : Record "Cost Budget Register";
+      CostAllocationSource@1024 : Record "Cost Allocation Source";
+      CostBudgetEntry@1025 : Record "Cost Budget Entry";
+      GLSetup@1000 : Record "General Ledger Setup";
+      CAJnlCheckLine@1026 : Codeunit "CA Jnl.-Check Line";
+      PostBudget@1036 : Boolean;
+      TotalDebit@1037 : Decimal;
+      TotalCredit@1038 : Decimal;
+      TotalBudgetAmount@1039 : Decimal;
+      NextCostEntryNo@1027 : Integer;
+      NextCostBudgetEntryNo@1028 : Integer;
+
+    [Internal]
+    PROCEDURE RunWithCheck@7(VAR CostJnlLine2@1000 : Record "Cost Journal Line");
+    BEGIN
+      CostJnlLine.COPY(CostJnlLine2);
+      Code;
+      CostJnlLine2 := CostJnlLine;
+    END;
+
+    LOCAL PROCEDURE Code@8();
+    BEGIN
+      with CostJnlLine do begin
+        if EmptyLine then
+          exit;
+
+        CAJnlCheckLine.RunCheck(CostJnlLine);
+        if "Budget Name" <> '' then
+          PostBudget := true;
+
+        if PostBudget then begin
+          if NextCostBudgetEntryNo = 0 then begin
+            CostBudgetEntry.LOCKTABLE;
+            if CostBudgetEntry.FINDLAST then
+              NextCostBudgetEntryNo := CostBudgetEntry."Entry No.";
+            NextCostBudgetEntryNo := NextCostBudgetEntryNo + 1;
+          end;
+        end else
+          if NextCostEntryNo = 0 then begin
+            CostEntry.LOCKTABLE;
+            if CostEntry.FINDLAST then
+              NextCostEntryNo := CostEntry."Entry No.";
+            NextCostEntryNo := NextCostEntryNo + 1;
+          end;
+      end;
+      PostLine;
+    END;
+
+    LOCAL PROCEDURE PostLine@4();
+    BEGIN
+      with CostJnlLine do
+        if PostBudget then begin
+          if "Cost Type No." <> '' then
+            InsertBudgetEntries("Cost Type No.","Cost Center Code","Cost Object Code",Amount);
+
+          if "Bal. Cost Type No." <> '' then
+            InsertBudgetEntries("Bal. Cost Type No.","Bal. Cost Center Code","Bal. Cost Object Code",-Amount);
+        end else begin
+          if "Cost Type No." <> '' then
+            InsertCostEntries("Cost Type No.","Cost Center Code","Cost Object Code",Amount);
+
+          if "Bal. Cost Type No." <> '' then
+            InsertCostEntries("Bal. Cost Type No.","Bal. Cost Center Code","Bal. Cost Object Code",-Amount);
+        end;
+    END;
+
+    LOCAL PROCEDURE CreateCostRegister@1();
+    VAR
+      SourceCodeSetup@1000 : Record "Source Code Setup";
+    BEGIN
+      SourceCodeSetup.GET;
+      if CostRegister."No." = 0 then begin
+        CostRegister.LOCKTABLE;
+        if (not CostRegister.FINDLAST) or (CostRegister."To Cost Entry No." <> 0) then
+          with CostJnlLine do begin
+            CostRegister.INIT;
+            CostRegister."Journal Batch Name" := "Journal Batch Name";
+            CostRegister."No." := CostRegister."No." + 1;
+            CostRegister."From Cost Entry No." := NextCostEntryNo;
+            CostRegister."To Cost Entry No." := NextCostEntryNo;
+            CostRegister."No. of Entries" := 1;
+            CostRegister."Debit Amount" := TotalDebit;
+            CostRegister."Credit Amount" := TotalCredit;
+            CostRegister."Posting Date" := "Posting Date";  // from last journal line
+            CostRegister."User ID" := USERID;
+            CostRegister."Processed Date" := TODAY;
+
+            case "Source Code" of
+              SourceCodeSetup."Cost Allocation":
+                begin
+                  CostRegister.Source := CostRegister.Source::Allocation;
+                  CostAllocationSource.GET("Allocation ID");
+                  CostRegister.Level := CostAllocationSource.Level;
+                end;
+              SourceCodeSetup."G/L Entry to CA":
+                begin
+                  CostRegister.Source := CostRegister.Source::"Transfer from G/L";
+                  CostRegister."From G/L Entry No." := "G/L Entry No.";
+                  CostRegister."To G/L Entry No." := "G/L Entry No.";
+                end;
+              SourceCodeSetup."Transfer Budget to Actual":
+                CostRegister.Source := CostRegister.Source::"Transfer from Budget";
+              else
+                CostRegister.Source := CostRegister.Source::"Cost Journal";
+            end;
+            CostRegister.INSERT;
+          end;
+      end else begin
+        CostRegister."Debit Amount" := TotalDebit;
+        CostRegister."Credit Amount" := TotalCredit;
+        CostRegister."To G/L Entry No." := CostJnlLine."G/L Entry No.";
+        CostRegister."To Cost Entry No." := NextCostEntryNo;
+        CostRegister."No. of Entries" := CostRegister."To Cost Entry No." - CostRegister."From Cost Entry No." + 1;
+        CostRegister.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateCostBudgetRegister@2();
+    BEGIN
+      if CostBudgetRegister."No." = 0 then begin
+        CostBudgetRegister.LOCKTABLE;
+        if (not CostBudgetRegister.FINDLAST) or (CostBudgetRegister."To Cost Budget Entry No." <> 0) then
+          with CostJnlLine do begin
+            CostBudgetRegister.INIT;
+            CostBudgetRegister."Journal Batch Name" := "Journal Batch Name";
+            CostBudgetRegister."Cost Budget Name" := "Budget Name";
+            CostBudgetRegister."No." := CostBudgetRegister."No." + 1;
+            CostBudgetRegister."From Cost Budget Entry No." := NextCostBudgetEntryNo;
+            CostBudgetRegister."To Cost Budget Entry No." := NextCostBudgetEntryNo;
+            CostBudgetRegister."No. of Entries" := 1;
+            CostBudgetRegister.Amount := TotalBudgetAmount;
+            CostBudgetRegister."Posting Date" := "Posting Date";  // from last journal line
+            CostBudgetRegister."User ID" := USERID;
+            CostBudgetRegister."Processed Date" := TODAY;
+            CostAccSetup.GET;
+            if "Allocation ID" <> '' then
+              CostBudgetRegister.Source := CostBudgetRegister.Source::Allocation
+            else
+              CostBudgetRegister.Source := CostBudgetRegister.Source::"Cost Journal";
+
+            if "Allocation ID" <> '' then begin
+              CostAllocationSource.GET("Allocation ID");
+              CostBudgetRegister.Level := CostAllocationSource.Level;
+            end;
+            CostBudgetRegister.INSERT;
+          end;
+      end;
+      CostBudgetRegister."To Cost Budget Entry No." := NextCostBudgetEntryNo;
+      CostBudgetRegister."No. of Entries" := CostBudgetRegister."To Cost Budget Entry No." -
+        CostBudgetRegister."From Cost Budget Entry No." + 1;
+      CostBudgetRegister.MODIFY;
+    END;
+
+    LOCAL PROCEDURE InsertCostEntries@5(CT@1001 : Code[20];CC@1002 : Code[20];CO@1003 : Code[20];Amt@1004 : Decimal);
+    BEGIN
+      GLSetup.GET;
+      with CostJnlLine do begin
+        CostEntry.INIT;
+        CostEntry."Entry No." := NextCostEntryNo;
+        CostEntry."Cost Type No." := CT;
+        CostEntry."Posting Date" := "Posting Date";
+        CostEntry."Document No." := "Document No.";
+        CostEntry.Description := Description;
+        CostEntry."Cost Center Code" := CC;
+        CostEntry."Cost Object Code" := CO;
+
+        if "System-Created Entry" then begin
+          CostEntry."Additional-Currency Amount" := "Additional-Currency Amount";
+          CostEntry."Add.-Currency Debit Amount" := "Add.-Currency Debit Amount";
+          CostEntry."Add.-Currency Credit Amount" := "Add.-Currency Credit Amount";
+        end;
+
+        CostEntry.Amount := Amt;
+        if Amt > 0 then begin
+          CostEntry."Debit Amount" := Amt;
+          if GLSetup."Additional Reporting Currency" <> '' then begin
+            CostEntry."Additional-Currency Amount" := CalcAddCurrAmount(Amt);
+            CostEntry."Add.-Currency Debit Amount" := CostEntry."Additional-Currency Amount";
+          end;
+        end else begin
+          CostEntry."Credit Amount" := -Amt;
+          if GLSetup."Additional Reporting Currency" <> '' then begin
+            CostEntry."Additional-Currency Amount" := CalcAddCurrAmount(Amt);
+            CostEntry."Add.-Currency Credit Amount" := -CostEntry."Additional-Currency Amount";
+          end;
+        end;
+
+        CostEntry."Reason Code" := "Reason Code";
+        if GlEntry.GET("G/L Entry No.") then
+          CostEntry."G/L Account" := GlEntry."G/L Account No.";
+        CostEntry."G/L Entry No." := "G/L Entry No.";
+        CostEntry."Source Code" := "Source Code";
+        CostEntry."System-Created Entry" := "System-Created Entry";
+        CostEntry.Allocated := Allocated;
+        CostEntry."User ID" := USERID;
+        CostEntry."Batch Name" := "Journal Batch Name";
+        CostEntry."Allocation Description" := "Allocation Description";
+        CostEntry."Allocation ID" := "Allocation ID";
+        CostEntry.INSERT;
+      end;
+      TotalCredit := TotalCredit + CostEntry."Credit Amount";
+      TotalDebit := TotalDebit + CostEntry."Debit Amount";
+      CreateCostRegister;
+      NextCostEntryNo := NextCostEntryNo + 1;
+    END;
+
+    LOCAL PROCEDURE InsertBudgetEntries@6(CT@1001 : Code[20];CC@1002 : Code[20];CO@1003 : Code[20];Amt@1004 : Decimal);
+    BEGIN
+      with CostJnlLine do begin
+        CostBudgetEntry.INIT;
+        CostBudgetEntry."Entry No." := NextCostBudgetEntryNo;
+        CostBudgetEntry."Budget Name" := "Budget Name";
+        CostBudgetEntry."Cost Type No." := CT;
+        CostBudgetEntry.Date := "Posting Date";
+        CostBudgetEntry."Document No." := "Document No.";
+        CostBudgetEntry.Description := Description;
+        CostBudgetEntry."Cost Center Code" := CC;
+        CostBudgetEntry."Cost Object Code" := CO;
+        CostBudgetEntry.Amount := Amt;
+        CostBudgetEntry."Source Code" := "Source Code";
+        CostBudgetEntry."System-Created Entry" := "System-Created Entry";
+        CostBudgetEntry.Allocated := Allocated;
+        CostBudgetEntry."Last Modified By User" := USERID;
+        CostBudgetEntry."Allocation Description" := "Allocation Description";
+        CostBudgetEntry."Allocation ID" := "Allocation ID";
+        CostBudgetEntry.INSERT;
+      end;
+      CreateCostBudgetRegister;
+      NextCostBudgetEntryNo := NextCostBudgetEntryNo + 1;
+
+      TotalBudgetAmount := TotalBudgetAmount + Amt
+    END;
+
+    LOCAL PROCEDURE CalcAddCurrAmount@3(Amount@1000 : Decimal) : Decimal;
+    VAR
+      AddCurrency@1001 : Record Currency;
+      CurrExchRate@1002 : Record "Currency Exchange Rate";
+    BEGIN
+      GetAddCurrency(AddCurrency);
+      exit(
+        ROUND(
+          CurrExchRate.ExchangeAmtLCYToFCY(CostJnlLine."Posting Date",GLSetup."Additional Reporting Currency",Amount,
+            CurrExchRate.ExchangeRate(CostJnlLine."Posting Date",GLSetup."Additional Reporting Currency")),
+          AddCurrency."Amount Rounding Precision"));
+    END;
+
+    LOCAL PROCEDURE GetAddCurrency@9(VAR AddCurrency@1000 : Record Currency);
+    BEGIN
+      if GLSetup."Additional Reporting Currency" <> '' then
+        if GLSetup."Additional Reporting Currency" <> AddCurrency.Code then begin
+          AddCurrency.GET(GLSetup."Additional Reporting Currency");
+          AddCurrency.TESTFIELD("Amount Rounding Precision");
+          AddCurrency.TESTFIELD("Residual Gains Account");
+          AddCurrency.TESTFIELD("Residual Losses Account");
+        end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

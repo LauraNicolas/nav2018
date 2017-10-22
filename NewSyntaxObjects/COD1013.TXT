@@ -1,0 +1,301 @@
+OBJECT Codeunit 1013 Job Jnl.-Post Batch
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20161025D;
+    Time=120000T;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Job Journal Line";
+    Permissions=TableData "Job Journal Batch"=imd;
+    OnRun=BEGIN
+            JobJnlLine.COPY(Rec);
+            Code;
+            Rec := JobJnlLine;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=cannot exceed %1 characters.';
+      Text001@1001 : TextConst 'ENU=Journal Batch Name    #1##########\\';
+      Text002@1002 : TextConst 'ENU=Checking lines        #2######\';
+      Text003@1003 : TextConst 'ENU=Posting lines         #3###### @4@@@@@@@@@@@@@\';
+      Text004@1004 : TextConst 'ENU=Updating lines        #5###### @6@@@@@@@@@@@@@';
+      Text005@1005 : TextConst 'ENU=Posting lines         #3###### @4@@@@@@@@@@@@@';
+      Text006@1006 : TextConst 'ENU=A maximum of %1 posting number series can be used in each journal.';
+      Text007@1007 : TextConst 'ENU=<Month Text>';
+      AccountingPeriod@1008 : Record "Accounting Period";
+      JobJnlTemplate@1009 : Record "Job Journal Template";
+      JobJnlBatch@1010 : Record "Job Journal Batch";
+      JobJnlLine@1011 : Record "Job Journal Line";
+      JobJnlLine2@1012 : Record "Job Journal Line";
+      JobJnlLine3@1013 : Record "Job Journal Line";
+      JobLedgEntry@1015 : Record "Job Ledger Entry";
+      JobReg@1016 : Record "Job Register";
+      NoSeries@1017 : TEMPORARY Record "No. Series";
+      JobJnlCheckLine@1018 : Codeunit "Job Jnl.-Check Line";
+      JobJnlPostLine@1019 : Codeunit "Job Jnl.-Post Line";
+      NoSeriesMgt@1020 : Codeunit NoSeriesManagement;
+      NoSeriesMgt2@1021 : ARRAY [10] OF Codeunit NoSeriesManagement;
+      Window@1023 : Dialog;
+      JobRegNo@1024 : Integer;
+      StartLineNo@1025 : Integer;
+      Day@1026 : Integer;
+      Week@1027 : Integer;
+      Month@1028 : Integer;
+      MonthText@1029 : Text[30];
+      LineCount@1030 : Integer;
+      NoOfRecords@1031 : Integer;
+      LastDocNo@1032 : Code[20];
+      LastDocNo2@1033 : Code[20];
+      LastPostedDocNo@1034 : Code[20];
+      NoOfPostingNoSeries@1035 : Integer;
+      PostingNoSeriesNo@1036 : Integer;
+
+    LOCAL PROCEDURE Code@1();
+    VAR
+      InvtSetup@1004 : Record "Inventory Setup";
+      InvtAdjmt@1005 : Codeunit "Inventory Adjustment";
+      UpdateAnalysisView@1002 : Codeunit "Update Analysis View";
+      UpdateItemAnalysisView@1003 : Codeunit "Update Item Analysis View";
+    BEGIN
+      with JobJnlLine do begin
+        SETRANGE("Journal Template Name","Journal Template Name");
+        SETRANGE("Journal Batch Name","Journal Batch Name");
+        LOCKTABLE;
+
+        JobJnlTemplate.GET("Journal Template Name");
+        JobJnlBatch.GET("Journal Template Name","Journal Batch Name");
+        if STRLEN(INCSTR(JobJnlBatch.Name)) > MAXSTRLEN(JobJnlBatch.Name) then
+          JobJnlBatch.FIELDERROR(
+            Name,
+            STRSUBSTNO(
+              Text000,
+              MAXSTRLEN(JobJnlBatch.Name)));
+
+        if JobJnlTemplate.Recurring then begin
+          SETRANGE("Posting Date",0D,WORKDATE);
+          SETFILTER("Expiration Date",'%1 | %2..',0D,WORKDATE);
+        end;
+
+        if not FIND('=><') then begin
+          "Line No." := 0;
+          COMMIT;
+          exit;
+        end;
+
+        if JobJnlTemplate.Recurring then
+          Window.OPEN(
+            Text001 +
+            Text002 +
+            Text003 +
+            Text004)
+        else
+          Window.OPEN(
+            Text001 +
+            Text002 +
+            Text005);
+        Window.UPDATE(1,"Journal Batch Name");
+
+        // Check lines
+        LineCount := 0;
+        StartLineNo := "Line No.";
+        repeat
+          LineCount := LineCount + 1;
+          Window.UPDATE(2,LineCount);
+          CheckRecurringLine(JobJnlLine);
+          JobJnlCheckLine.RunCheck(JobJnlLine);
+          if NEXT = 0 then
+            FIND('-');
+        until "Line No." = StartLineNo;
+        NoOfRecords := LineCount;
+
+        // Find next register no.
+        JobLedgEntry.LOCKTABLE;
+        if JobLedgEntry.FINDLAST then;
+        JobReg.LOCKTABLE;
+        if JobReg.FINDLAST and (JobReg."To Entry No." = 0) then
+          JobRegNo := JobReg."No."
+        else
+          JobRegNo := JobReg."No." + 1;
+
+        // Post lines
+        LineCount := 0;
+        LastDocNo := '';
+        LastDocNo2 := '';
+        LastPostedDocNo := '';
+        FIND('-');
+        repeat
+          LineCount := LineCount + 1;
+          Window.UPDATE(3,LineCount);
+          Window.UPDATE(4,ROUND(LineCount / NoOfRecords * 10000,1));
+          if not EmptyLine and
+             (JobJnlBatch."No. Series" <> '') and
+             ("Document No." <> LastDocNo2)
+          then
+            TESTFIELD("Document No.",NoSeriesMgt.GetNextNo(JobJnlBatch."No. Series","Posting Date",false));
+          if not EmptyLine then
+            LastDocNo2 := "Document No.";
+          MakeRecurringTexts(JobJnlLine);
+          if "Posting No. Series" = '' then begin
+            "Posting No. Series" := JobJnlBatch."No. Series";
+            TESTFIELD("Document No.");
+          end else
+            if not EmptyLine then
+              if ("Document No." = LastDocNo) and ("Document No." <> '') then
+                "Document No." := LastPostedDocNo
+              else begin
+                if not NoSeries.GET("Posting No. Series") then begin
+                  NoOfPostingNoSeries := NoOfPostingNoSeries + 1;
+                  if NoOfPostingNoSeries > ARRAYLEN(NoSeriesMgt2) then
+                    ERROR(
+                      Text006,
+                      ARRAYLEN(NoSeriesMgt2));
+                  NoSeries.Code := "Posting No. Series";
+                  NoSeries.Description := FORMAT(NoOfPostingNoSeries);
+                  NoSeries.INSERT;
+                end;
+                LastDocNo := "Document No.";
+                EVALUATE(PostingNoSeriesNo,NoSeries.Description);
+                "Document No." := NoSeriesMgt2[PostingNoSeriesNo].GetNextNo("Posting No. Series","Posting Date",false);
+                LastPostedDocNo := "Document No.";
+              end;
+          JobJnlPostLine.RunWithCheck(JobJnlLine);
+        until NEXT = 0;
+
+        InvtSetup.GET;
+        if InvtSetup."Automatic Cost Adjustment" <>
+           InvtSetup."Automatic Cost Adjustment"::Never
+        then begin
+          InvtAdjmt.SetProperties(true,InvtSetup."Automatic Cost Posting");
+          InvtAdjmt.MakeMultiLevelAdjmt;
+        end;
+
+        // Copy register no. and current journal batch name to the job journal
+        if not JobReg.FINDLAST or (JobReg."No." <> JobRegNo) then
+          JobRegNo := 0;
+
+        INIT;
+        "Line No." := JobRegNo;
+
+        // Update/delete lines
+        if JobRegNo <> 0 then begin
+          if JobJnlTemplate.Recurring then begin
+            // Recurring journal
+            LineCount := 0;
+            JobJnlLine2.COPYFILTERS(JobJnlLine);
+            JobJnlLine2.FIND('-');
+            repeat
+              LineCount := LineCount + 1;
+              Window.UPDATE(5,LineCount);
+              Window.UPDATE(6,ROUND(LineCount / NoOfRecords * 10000,1));
+              if JobJnlLine2."Posting Date" <> 0D then
+                JobJnlLine2.VALIDATE("Posting Date",CALCDATE(JobJnlLine2."Recurring Frequency",JobJnlLine2."Posting Date"));
+              if (JobJnlLine2."Recurring Method" = JobJnlLine2."Recurring Method"::Variable) and
+                 (JobJnlLine2."No." <> '')
+              then
+                JobJnlLine2.DeleteAmounts;
+              JobJnlLine2.MODIFY;
+            until JobJnlLine2.NEXT = 0;
+          end else begin
+            // Not a recurring journal
+            JobJnlLine2.COPYFILTERS(JobJnlLine);
+            JobJnlLine2.SETFILTER("No.",'<>%1','');
+            if JobJnlLine2.FIND then; // Remember the last line
+            JobJnlLine3.COPY(JobJnlLine);
+            if JobJnlLine3.FIND('-') then
+              repeat
+                JobJnlLine3.DELETE;
+              until JobJnlLine3.NEXT = 0;
+            JobJnlLine3.RESET;
+            JobJnlLine3.SETRANGE("Journal Template Name","Journal Template Name");
+            JobJnlLine3.SETRANGE("Journal Batch Name","Journal Batch Name");
+            if not JobJnlLine3.FIND('+') then
+              if INCSTR("Journal Batch Name") <> '' then begin
+                JobJnlBatch.DELETE;
+                JobJnlBatch.Name := INCSTR("Journal Batch Name");
+                if JobJnlBatch.INSERT then;
+                "Journal Batch Name" := JobJnlBatch.Name;
+              end;
+
+            JobJnlLine3.SETRANGE("Journal Batch Name","Journal Batch Name");
+            if (JobJnlBatch."No. Series" = '') and not JobJnlLine3.FIND('+') then begin
+              JobJnlLine3.INIT;
+              JobJnlLine3."Journal Template Name" := "Journal Template Name";
+              JobJnlLine3."Journal Batch Name" := "Journal Batch Name";
+              JobJnlLine3."Line No." := 10000;
+              JobJnlLine3.INSERT;
+              JobJnlLine3.SetUpNewLine(JobJnlLine2);
+              JobJnlLine3.MODIFY;
+            end;
+          end;
+        end;
+        if JobJnlBatch."No. Series" <> '' then
+          NoSeriesMgt.SaveNoSeries;
+        if NoSeries.FIND('-') then
+          repeat
+            EVALUATE(PostingNoSeriesNo,NoSeries.Description);
+            NoSeriesMgt2[PostingNoSeriesNo].SaveNoSeries;
+          until NoSeries.NEXT = 0;
+
+        COMMIT;
+      end;
+      UpdateAnalysisView.UpdateAll(0,true);
+      UpdateItemAnalysisView.UpdateAll(0,true);
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CheckRecurringLine@2(VAR JobJnlLine2@1000 : Record "Job Journal Line");
+    VAR
+      TempDateFormula@1001 : DateFormula;
+    BEGIN
+      with JobJnlLine2 do begin
+        if "No." <> '' then
+          if JobJnlTemplate.Recurring then begin
+            TESTFIELD("Recurring Method");
+            TESTFIELD("Recurring Frequency");
+            if "Recurring Method" = "Recurring Method"::Variable then
+              TESTFIELD(Quantity);
+          end else begin
+            TESTFIELD("Recurring Method",0);
+            TESTFIELD("Recurring Frequency",TempDateFormula);
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE MakeRecurringTexts@3(VAR JobJnlLine2@1000 : Record "Job Journal Line");
+    BEGIN
+      with JobJnlLine2 do begin
+        if ("No." <> '') and ("Recurring Method" <> 0) then begin // Not recurring
+          Day := DATE2DMY("Posting Date",1);
+          Week := DATE2DWY("Posting Date",2);
+          Month := DATE2DMY("Posting Date",2);
+          MonthText := FORMAT("Posting Date",0,Text007);
+          AccountingPeriod.SETRANGE("Starting Date",0D,"Posting Date");
+          if not AccountingPeriod.FINDLAST then
+            AccountingPeriod.Name := '';
+          "Document No." :=
+            DELCHR(
+              PADSTR(
+                STRSUBSTNO("Document No.",Day,Week,Month,MonthText,AccountingPeriod.Name),
+                MAXSTRLEN("Document No.")),
+              '>');
+          Description :=
+            DELCHR(
+              PADSTR(
+                STRSUBSTNO(Description,Day,Week,Month,MonthText,AccountingPeriod.Name),
+                MAXSTRLEN(Description)),
+              '>');
+        end;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

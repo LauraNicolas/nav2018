@@ -1,0 +1,528 @@
+OBJECT Codeunit 5980 Service-Post
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Service Header";
+    Permissions=TableData "Service Header"=imd,
+                TableData "Service Item Line"=imd,
+                TableData "Service Line"=imd,
+                TableData "Service Shipment Item Line"=imd,
+                TableData "Service Shipment Header"=imd,
+                TableData "Service Shipment Line"=imd,
+                TableData "Service Invoice Header"=imd,
+                TableData "Service Invoice Line"=imd,
+                TableData "Service Cr.Memo Header"=imd,
+                TableData "Service Cr.Memo Line"=imd;
+    OnRun=VAR
+            DummyServLine@1000 : TEMPORARY Record "Service Line";
+          BEGIN
+            PostWithLines(Rec,DummyServLine,Ship,Consume,Invoice);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ServiceShptLine@1011 : Record "Service Shipment Line";
+      SourceCodeSetup@1006 : Record "Source Code Setup";
+      SourceCode@1005 : Record "Source Code";
+      ServiceSetup@1004 : Record "Service Mgt. Setup";
+      ServiceInvLine@1002 : Record "Service Invoice Line";
+      ServiceCrMemoLine@1001 : Record "Service Cr.Memo Line";
+      TempWarehouseShipmentHeader@1007 : TEMPORARY Record "Warehouse Shipment Header";
+      WarehouseShipmentHeader@1014 : Record "Warehouse Shipment Header";
+      TempWarehouseShipmentLine@1015 : TEMPORARY Record "Warehouse Shipment Line";
+      ServDocumentsMgt@1000 : Codeunit "Serv-Documents Mgt.";
+      WhsePostShpt@1016 : Codeunit "Whse.-Post Shipment";
+      Window@1012 : Dialog;
+      PostingDate@1029 : Date;
+      ReplaceDocumentDate@1030 : Boolean;
+      ReplacePostingDate@1028 : Boolean;
+      PostingDateExists@1027 : Boolean;
+      HideValidationDialog@1013 : Boolean;
+      Ship@1008 : Boolean;
+      Consume@1009 : Boolean;
+      Invoice@1010 : Boolean;
+      Text001@1025 : TextConst 'ENU=There is nothing to post.';
+      Text002@1024 : TextConst 'ENU=Posting lines              #2######\';
+      Text003@1023 : TextConst 'ENU=Posting serv. and VAT      #3######\';
+      Text004@1022 : TextConst 'ENU=Posting to customers       #4######\';
+      Text005@1021 : TextConst 'ENU=Posting to bal. account    #5######';
+      Text006@1020 : TextConst 'ENU=Posting lines              #2######';
+      Text007@1003 : TextConst 'ENU=is not within your range of allowed posting dates';
+      WhseShip@1017 : Boolean;
+      PreviewMode@1019 : Boolean;
+      NotSupportedDocumentTypeErr@1026 : TextConst '@@@="%1=Document Type e.g. Invoice";ENU=Document type %1 is not supported.';
+
+    [Internal]
+    PROCEDURE PostWithLines@9(VAR PassedServHeader@1003 : Record "Service Header";VAR PassedServLine@1011 : Record "Service Line";VAR PassedShip@1002 : Boolean;VAR PassedConsume@1001 : Boolean;VAR PassedInvoice@1000 : Boolean);
+    VAR
+      ServiceHeader@1012 : Record "Service Header";
+      ServiceLine@1005 : Record "Service Line";
+      GLEntry@1006 : Record "G/L Entry";
+      ServDocReg@1013 : Record "Service Document Register";
+      WarehouseShipmentLine@1004 : Record "Warehouse Shipment Line";
+      PostedWhseShipmentHeader@1007 : Record "Posted Whse. Shipment Header";
+      PostedWhseShipmentLine@1008 : Record "Posted Whse. Shipment Line";
+      WarehouseShipmentHeaderLocal@1016 : Record "Warehouse Shipment Header";
+      TempTrackingSpecification@1018 : TEMPORARY Record "Tracking Specification";
+      UpdateAnalysisView@1009 : Codeunit "Update Analysis View";
+      UpdateItemAnalysisView@1010 : Codeunit "Update Item Analysis View";
+      WhseServiceRelease@1017 : Codeunit "Whse.-Service Release";
+      GenJnlPostPreview@1019 : Codeunit "Gen. Jnl.-Post Preview";
+      ServDocNo@1015 : Code[20];
+      ServDocType@1014 : Integer;
+    BEGIN
+      OnBeforePostWithLines(PassedServHeader,PassedServLine,PassedShip,PassedConsume,PassedInvoice);
+
+      ServiceHeader := PassedServHeader;
+
+      CLEAR(ServDocumentsMgt);
+      if PostingDateExists and (ReplacePostingDate or (ServiceHeader."Posting Date" = 0D)) then begin
+        ServiceHeader."Posting Date" := PostingDate;
+        ServiceHeader.VALIDATE("Currency Code");
+      end;
+      if PostingDateExists and (ReplaceDocumentDate or (ServiceHeader."Document Date" = 0D)) then
+        ServiceHeader.VALIDATE("Document Date",PostingDate);
+      Initialize(ServiceHeader,PassedServLine,PassedShip,PassedConsume,PassedInvoice);
+
+      with ServiceHeader do begin
+        if Invoice then
+          Window.OPEN('#1#################################\\' + Text002 + Text003 + Text004 + Text005)
+        else
+          Window.OPEN('#1#################################\\' + Text006);
+        Window.UPDATE(1,STRSUBSTNO('%1 %2',"Document Type","No."));
+
+        if ServDocumentsMgt.SetNoSeries(ServiceHeader) then
+          MODIFY;
+
+        ServDocumentsMgt.CalcInvDiscount;
+        FIND;
+
+        CollectWhseShipmentInformation(PassedServHeader);
+
+        LockTables(ServiceLine,GLEntry);
+
+        // fetch related document (if any), for testing invoices and credit memos fields.
+        CLEAR(ServDocReg);
+        ServDocReg.ServiceDocument("Document Type","No.",ServDocType,ServDocNo);
+
+        // update quantites upon posting options and test related fields.
+        ServDocumentsMgt.CheckAndBlankQtys(ServDocType);
+
+        // create posted documents (both header and lines).
+        WhseShip := false;
+        if Ship then begin
+          ServDocumentsMgt.PrepareShipmentHeader;
+          WhseShip := not TempWarehouseShipmentHeader.ISEMPTY;
+        end;
+        if Invoice then
+          if "Document Type" in ["Document Type"::Order,"Document Type"::Invoice] then
+            ServDocumentsMgt.PrepareInvoiceHeader(Window)
+          else
+            ServDocumentsMgt.PrepareCrMemoHeader(Window);
+
+        if WhseShip then begin
+          WarehouseShipmentHeader.GET(TempWarehouseShipmentHeader."No.");
+          WhsePostShpt.CreatePostedShptHeader(
+            PostedWhseShipmentHeader,WarehouseShipmentHeader,"Shipping No.","Posting Date");
+        end;
+
+        // main lines posting routine via Journals
+        ServDocumentsMgt.PostDocumentLines(Window);
+        ServDocumentsMgt.CollectTrackingSpecification(TempTrackingSpecification);
+
+        ServDocumentsMgt.SetLastNos(ServiceHeader);
+        MODIFY;
+
+        // handling afterposting modification/deletion of documents
+        ServDocumentsMgt.UpdateDocumentLines;
+
+        ServDocumentsMgt.InsertValueEntryRelation;
+
+        if WhseShip then begin
+          if TempWarehouseShipmentLine.FINDSET then
+            repeat
+              WarehouseShipmentLine.GET(TempWarehouseShipmentLine."No.",TempWarehouseShipmentLine."Line No.");
+              WhsePostShpt.CreatePostedShptLine(WarehouseShipmentLine,PostedWhseShipmentHeader,
+                PostedWhseShipmentLine,TempTrackingSpecification);
+            until TempWarehouseShipmentLine.NEXT = 0;
+          if WarehouseShipmentHeaderLocal.GET(WarehouseShipmentHeader."No.") then
+            WhsePostShpt.PostUpdateWhseDocuments(WarehouseShipmentHeader);
+        end;
+
+        if PreviewMode then begin
+          Window.CLOSE;
+          GenJnlPostPreview.ThrowError;
+        end;
+
+        Finalize(ServiceHeader);
+      end;
+
+      if WhseShip then
+        WhseServiceRelease.Release(ServiceHeader);
+      COMMIT;
+      Window.CLOSE;
+      UpdateAnalysisView.UpdateAll(0,true);
+      UpdateItemAnalysisView.UpdateAll(0,true);
+
+      PassedServHeader := ServiceHeader;
+    END;
+
+    LOCAL PROCEDURE Initialize@7(VAR PassedServiceHeader@1000 : Record "Service Header";VAR PassedServiceLine@1004 : Record "Service Line";VAR PassedShip@1001 : Boolean;VAR PassedConsume@1002 : Boolean;VAR PassedInvoice@1003 : Boolean);
+    BEGIN
+      SetPostingOptions(PassedShip,PassedConsume,PassedInvoice);
+      TestMandatoryFields(PassedServiceHeader,PassedServiceLine);
+      ServDocumentsMgt.Initialize(PassedServiceHeader,PassedServiceLine);
+
+      // Also calls procedure of the same name from ServDocMgt.
+      // Might change the value of global Ship,Consume,Invoice vars.
+      CheckAndSetPostingConstants(PassedServiceHeader,PassedShip,PassedConsume,PassedInvoice);
+
+      // check for service lines with adjusted price
+      if (not HideValidationDialog or not GUIALLOWED) and
+         Invoice and (PassedServiceHeader."Document Type" = PassedServiceHeader."Document Type"::Order)
+      then
+        ServDocumentsMgt.CheckAdjustedLines;
+    END;
+
+    LOCAL PROCEDURE Finalize@8(VAR PassedServiceHeader@1000 : Record "Service Header");
+    BEGIN
+      ServDocumentsMgt.Finalize(PassedServiceHeader);
+    END;
+
+    LOCAL PROCEDURE CheckAndSetPostingConstants@5(VAR ServiceHeader@1000 : Record "Service Header";VAR PassedShip@1003 : Boolean;VAR PassedConsume@1002 : Boolean;VAR PassedInvoice@1001 : Boolean);
+    BEGIN
+      with ServiceHeader do begin
+        case "Document Type" of
+          "Document Type"::Invoice:
+            begin
+              PassedShip := true;
+              PassedInvoice := true;
+            end;
+          "Document Type"::"Credit Memo":
+            begin
+              PassedShip := false;
+              PassedInvoice := true;
+            end;
+        end;
+
+        ServDocumentsMgt.CheckAndSetPostingConstants(PassedShip,PassedConsume,PassedInvoice);
+
+        if not (PassedShip or PassedInvoice or PassedConsume) then
+          ERROR(Text001);
+
+        if Invoice and ("Document Type" <> "Document Type"::"Credit Memo") then
+          TESTFIELD("Due Date");
+      end;
+      SetPostingOptions(PassedShip,PassedConsume,PassedInvoice);
+    END;
+
+    LOCAL PROCEDURE TestMandatoryFields@12(VAR PassedServiceHeader@1000 : Record "Service Header";VAR PassedServiceLine@1002 : Record "Service Line");
+    VAR
+      GenJnlCheckLine@1001 : Codeunit "Gen. Jnl.-Check Line";
+    BEGIN
+      with PassedServiceHeader do begin
+        TESTFIELD("Document Type");
+        TESTFIELD("Customer No.");
+        TESTFIELD("Bill-to Customer No.");
+        TESTFIELD("Posting Date");
+        TESTFIELD("Document Date");
+        if PassedServiceLine.ISEMPTY then
+          TestServLinePostingDate("Document Type","No.")
+        else begin
+          if "Posting Date" <> PassedServiceLine."Posting Date" then begin
+            if PassedServiceLine.Type <> PassedServiceLine.Type::" " then
+              if GenJnlCheckLine.DateNotAllowed(PassedServiceLine."Posting Date") then
+                PassedServiceLine.FIELDERROR("Posting Date",Text007);
+
+            if GenJnlCheckLine.DateNotAllowed("Posting Date") then
+              FIELDERROR("Posting Date",Text007);
+          end;
+        end;
+        TestMandatoryFields(PassedServiceLine);
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetPostingDate@2(NewReplacePostingDate@1000 : Boolean;NewReplaceDocumentDate@1001 : Boolean;NewPostingDate@1002 : Date);
+    BEGIN
+      CLEARALL;
+      PostingDateExists := true;
+      ReplacePostingDate := NewReplacePostingDate;
+      ReplaceDocumentDate := NewReplaceDocumentDate;
+      PostingDate := NewPostingDate;
+    END;
+
+    [External]
+    PROCEDURE SetPostingOptions@4(PassedShip@1000 : Boolean;PassedConsume@1001 : Boolean;PassedInvoice@1002 : Boolean);
+    BEGIN
+      Ship := PassedShip;
+      Consume := PassedConsume;
+      Invoice := PassedInvoice;
+      ServDocumentsMgt.SetPostingOptions(Ship,Consume,Invoice);
+    END;
+
+    [External]
+    PROCEDURE SetHideValidationDialog@14(NewHideValidationDialog@1000 : Boolean);
+    BEGIN
+      HideValidationDialog := NewHideValidationDialog;
+    END;
+
+    [External]
+    PROCEDURE TestDeleteHeader@19(ServiceHeader@1000 : Record "Service Header";VAR ServiceShptHeader@1001 : Record "Service Shipment Header";VAR ServiceInvHeader@1002 : Record "Service Invoice Header";VAR ServiceCrMemoHeader@1003 : Record "Service Cr.Memo Header");
+    BEGIN
+      with ServiceHeader do begin
+        CLEAR(ServiceShptHeader);
+        CLEAR(ServiceInvHeader);
+        CLEAR(ServiceCrMemoHeader);
+        ServiceSetup.GET;
+
+        SourceCodeSetup.GET;
+        SourceCodeSetup.TESTFIELD("Deleted Document");
+        SourceCode.GET(SourceCodeSetup."Deleted Document");
+
+        if ("Shipping No. Series" <> '') and ("Shipping No." <> '') then begin
+          ServiceShptHeader.TRANSFERFIELDS(ServiceHeader);
+          ServiceShptHeader."No." := "Shipping No.";
+          ServiceShptHeader."Posting Date" := TODAY;
+          ServiceShptHeader."User ID" := USERID;
+          ServiceShptHeader."Source Code" := SourceCode.Code;
+        end;
+
+        if ("Posting No. Series" <> '') and
+           (("Document Type" in ["Document Type"::Order,"Document Type"::Invoice]) and
+            ("Posting No." <> '') or
+            ("Document Type" = "Document Type"::Invoice) and
+            ("No. Series" = "Posting No. Series"))
+        then begin
+          ServiceInvHeader.TRANSFERFIELDS(ServiceHeader);
+          if "Posting No." <> '' then
+            ServiceInvHeader."No." := "Posting No.";
+          if "Document Type" = "Document Type"::Invoice then begin
+            ServiceInvHeader."Pre-Assigned No. Series" := "No. Series";
+            ServiceInvHeader."Pre-Assigned No." := "No.";
+          end else begin
+            ServiceInvHeader."Pre-Assigned No. Series" := '';
+            ServiceInvHeader."Pre-Assigned No." := '';
+            ServiceInvHeader."Order No. Series" := "No. Series";
+            ServiceInvHeader."Order No." := "No.";
+          end;
+          ServiceInvHeader."Posting Date" := TODAY;
+          ServiceInvHeader."User ID" := USERID;
+          ServiceInvHeader."Source Code" := SourceCode.Code;
+        end;
+
+        if ("Posting No. Series" <> '') and
+           (("Document Type" in ["Document Type"::"Credit Memo"]) and
+            ("Posting No." <> '') or
+            ("Document Type" = "Document Type"::"Credit Memo") and
+            ("No. Series" = "Posting No. Series"))
+        then begin
+          ServiceCrMemoHeader.TRANSFERFIELDS(ServiceHeader);
+          if "Posting No." <> '' then
+            ServiceCrMemoHeader."No." := "Posting No.";
+          ServiceCrMemoHeader."Pre-Assigned No. Series" := "No. Series";
+          ServiceCrMemoHeader."Pre-Assigned No." := "No.";
+          ServiceCrMemoHeader."Posting Date" := TODAY;
+          ServiceCrMemoHeader."User ID" := USERID;
+          ServiceCrMemoHeader."Source Code" := SourceCode.Code;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE LockTables@58(VAR ServiceLine@1003 : Record "Service Line";VAR GLEntry@1005 : Record "G/L Entry");
+    VAR
+      GLSetup@1004 : Record "General Ledger Setup";
+    BEGIN
+      ServiceLine.LOCKTABLE;
+
+      GLSetup.GET;
+      if not GLSetup.OptimGLEntLockForMultiuserEnv then begin
+        GLEntry.LOCKTABLE;
+        if GLEntry.FIND('+') then;
+      end;
+    END;
+
+    [External]
+    PROCEDURE DeleteHeader@10(ServiceHeader@1000 : Record "Service Header";VAR ServiceShptHeader@1001 : Record "Service Shipment Header";VAR ServiceInvHeader@1002 : Record "Service Invoice Header";VAR ServiceCrMemoHeader@1003 : Record "Service Cr.Memo Header");
+    BEGIN
+      with ServiceHeader do begin
+        TestDeleteHeader(ServiceHeader,ServiceShptHeader,ServiceInvHeader,ServiceCrMemoHeader);
+        if ServiceShptHeader."No." <> '' then begin
+          ServiceShptHeader.INSERT;
+          ServiceShptLine.INIT;
+          ServiceShptLine."Document No." := ServiceShptHeader."No.";
+          ServiceShptLine."Line No." := 10000;
+          ServiceShptLine.Description := SourceCode.Description;
+          ServiceShptLine.INSERT;
+        end;
+
+        if ServiceInvHeader."No." <> '' then begin
+          ServiceInvHeader.INSERT;
+          ServiceInvLine.INIT;
+          ServiceInvLine."Document No." := ServiceInvHeader."No.";
+          ServiceInvLine."Line No." := 10000;
+          ServiceInvLine.Description := SourceCode.Description;
+          ServiceInvLine.INSERT;
+        end;
+
+        if ServiceCrMemoHeader."No." <> '' then begin
+          ServiceCrMemoHeader.INSERT;
+          ServiceCrMemoLine.INIT;
+          ServiceCrMemoLine."Document No." := ServiceCrMemoHeader."No.";
+          ServiceCrMemoLine."Line No." := 10000;
+          ServiceCrMemoLine.Description := SourceCode.Description;
+          ServiceCrMemoLine.INSERT;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CollectWhseShipmentInformation@3(ServiceHeader@1000 : Record "Service Header");
+    VAR
+      WarehouseShipmentHeaderLocal@1002 : Record "Warehouse Shipment Header";
+      WarehouseShipmentLineLocal@1001 : Record "Warehouse Shipment Line";
+      ServiceLine@1003 : Record "Service Line";
+    BEGIN
+      TempWarehouseShipmentHeader.DELETEALL;
+      TempWarehouseShipmentLine.DELETEALL;
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.SETRANGE(Type,ServiceLine.Type::Item);
+      ServiceLine.SETFILTER("Qty. to Ship",'<>%1',0);
+      if not ServiceLine.FINDSET then
+        exit;
+      WarehouseShipmentLineLocal.SETCURRENTKEY("Source Type","Source Subtype","Source No.","Source Line No.");
+      WarehouseShipmentLineLocal.SETRANGE("Source Type",DATABASE::"Service Line");
+      WarehouseShipmentLineLocal.SETRANGE("Source Subtype",ServiceHeader."Document Type");
+      WarehouseShipmentLineLocal.SETRANGE("Source No.",ServiceHeader."No.");
+      repeat
+        WarehouseShipmentLineLocal.SETRANGE("Source Line No.",ServiceLine."Line No.");
+        if WarehouseShipmentLineLocal.FINDSET then
+          repeat
+            if WarehouseShipmentLineLocal."Qty. to Ship" <> 0 then begin
+              TempWarehouseShipmentLine := WarehouseShipmentLineLocal;
+              TempWarehouseShipmentLine.INSERT;
+              WarehouseShipmentHeaderLocal.GET(WarehouseShipmentLineLocal."No.");
+              TempWarehouseShipmentHeader := WarehouseShipmentHeaderLocal;
+              if TempWarehouseShipmentHeader.INSERT then;
+            end;
+          until WarehouseShipmentLineLocal.NEXT = 0;
+      until ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE TestServLinePostingDate@11(ServHeaderDocType@1000 : Integer;ServHeaderNo@1001 : Code[20]);
+    VAR
+      ServLine@1002 : Record "Service Line";
+      GenJnlCheckLine@1003 : Codeunit "Gen. Jnl.-Check Line";
+    BEGIN
+      with ServLine do begin
+        SETRANGE("Document Type",ServHeaderDocType);
+        SETRANGE("Document No.",ServHeaderNo);
+        SETFILTER(Type,'<>%1',Type::" ");
+        if FINDSET then
+          repeat
+            if GenJnlCheckLine.DateNotAllowed("Posting Date") then
+              FIELDERROR("Posting Date",Text007)
+          until NEXT = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetPreviewMode@6(NewPreviewMode@1000 : Boolean);
+    BEGIN
+      PreviewMode := NewPreviewMode;
+    END;
+
+    [External]
+    PROCEDURE GetPostedDocumentRecord@222(ServiceHeader@1000 : Record "Service Header";VAR PostedServiceDocumentVariant@1001 : Variant);
+    VAR
+      ServiceInvHeader@1007 : Record "Service Invoice Header";
+      ServiceCrMemoHeader@1006 : Record "Service Cr.Memo Header";
+    BEGIN
+      with ServiceHeader do
+        case "Document Type" of
+          "Document Type"::Order:
+            if Invoice then begin
+              ServiceInvHeader.GET("Last Posting No.");
+              ServiceInvHeader.SETRECFILTER;
+              PostedServiceDocumentVariant := ServiceInvHeader;
+            end;
+          "Document Type"::Invoice:
+            begin
+              if "Last Posting No." = '' then
+                ServiceInvHeader.GET("No.")
+              else
+                ServiceInvHeader.GET("Last Posting No.");
+
+              ServiceInvHeader.SETRECFILTER;
+              PostedServiceDocumentVariant := ServiceInvHeader;
+            end;
+          "Document Type"::"Credit Memo":
+            begin
+              if "Last Posting No." = '' then
+                ServiceCrMemoHeader.GET("No.")
+              else
+                ServiceCrMemoHeader.GET("Last Posting No.");
+              ServiceCrMemoHeader.SETRECFILTER;
+              PostedServiceDocumentVariant := ServiceCrMemoHeader;
+            end;
+          else
+            ERROR(STRSUBSTNO(NotSupportedDocumentTypeErr,"Document Type"));
+        end;
+    END;
+
+    [Internal]
+    PROCEDURE SendPostedDocumentRecord@223(ServiceHeader@1000 : Record "Service Header";VAR DocumentSendingProfile@1001 : Record "Document Sending Profile");
+    VAR
+      ServiceInvHeader@1007 : Record "Service Invoice Header";
+      ServiceCrMemoHeader@1006 : Record "Service Cr.Memo Header";
+    BEGIN
+      with ServiceHeader do
+        case "Document Type" of
+          "Document Type"::Order:
+            if Invoice then begin
+              ServiceInvHeader.GET("Last Posting No.");
+              ServiceInvHeader.SETRECFILTER;
+              ServiceInvHeader.SendProfile(DocumentSendingProfile);
+            end;
+          "Document Type"::Invoice:
+            begin
+              if "Last Posting No." = '' then
+                ServiceInvHeader.GET("No.")
+              else
+                ServiceInvHeader.GET("Last Posting No.");
+
+              ServiceInvHeader.SETRECFILTER;
+              ServiceInvHeader.SendProfile(DocumentSendingProfile);
+            end;
+          "Document Type"::"Credit Memo":
+            begin
+              if "Last Posting No." = '' then
+                ServiceCrMemoHeader.GET("No.")
+              else
+                ServiceCrMemoHeader.GET("Last Posting No.");
+              ServiceCrMemoHeader.SETRECFILTER;
+              ServiceCrMemoHeader.SendProfile(DocumentSendingProfile);
+            end;
+          else
+            ERROR(STRSUBSTNO(NotSupportedDocumentTypeErr,"Document Type"));
+        end;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforePostWithLines@1(VAR PassedServHeader@1004 : Record "Service Header";VAR PassedServLine@1003 : Record "Service Line";VAR PassedShip@1002 : Boolean;VAR PassedConsume@1001 : Boolean;VAR PassedInvoice@1000 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,849 @@
+OBJECT Codeunit 7324 Whse.-Activity-Post
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Warehouse Activity Line";
+    Permissions=TableData "Warehouse Setup"=m,
+                TableData "Warehouse Journal Batch"=imd,
+                TableData "Posted Invt. Put-away Header"=i,
+                TableData "Posted Invt. Put-away Line"=i,
+                TableData "Posted Invt. Pick Header"=i,
+                TableData "Posted Invt. Pick Line"=i;
+    OnRun=BEGIN
+            WhseActivLine.COPY(Rec);
+            Code;
+            Rec := WhseActivLine;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1001 : TextConst 'ENU=Warehouse Activity    #1##########\\';
+      Text001@1002 : TextConst 'ENU=Checking lines        #2######\';
+      Text002@1005 : TextConst 'ENU=Posting lines         #3###### @4@@@@@@@@@@@@@';
+      Location@1006 : Record Location;
+      Item@1014 : Record Item;
+      WhseActivHeader@1000 : Record "Warehouse Activity Header";
+      WhseActivLine@1010 : Record "Warehouse Activity Line";
+      TempWhseActivLine@1016 : TEMPORARY Record "Warehouse Activity Line";
+      PostedInvtPutAwayHdr@1008 : Record "Posted Invt. Put-away Header";
+      PostedInvtPutAwayLine@1009 : Record "Posted Invt. Put-away Line";
+      PostedInvtPickHdr@1013 : Record "Posted Invt. Pick Header";
+      PostedInvtPickLine@1011 : Record "Posted Invt. Pick Line";
+      WhseSetup@1028 : Record "Warehouse Setup";
+      WhseRequest@1029 : Record "Warehouse Request";
+      PurchHeader@1030 : Record "Purchase Header";
+      PurchLine@1033 : Record "Purchase Line";
+      SalesHeader@1031 : Record "Sales Header";
+      TransHeader@1032 : Record "Transfer Header";
+      TransLine@1038 : Record "Transfer Line";
+      ProdOrder@1020 : Record "Production Order";
+      ProdOrderLine@1019 : Record "Prod. Order Line";
+      ProdOrderComp@1021 : Record "Prod. Order Component";
+      SourceCodeSetup@1007 : Record "Source Code Setup";
+      ItemTrackingMgt@1023 : Codeunit "Item Tracking Management";
+      WhseJnlRegisterLine@1012 : Codeunit "Whse. Jnl.-Register Line";
+      PurchPostPrint@1039 : Codeunit "Purch.-Post + Print";
+      SalesPostPrint@1040 : Codeunit "Sales-Post + Print";
+      Window@1027 : Dialog;
+      PostedSourceNo@1017 : Code[20];
+      PostedSourceType@1015 : Integer;
+      PostedSourceSubType@1018 : Integer;
+      NoOfRecords@1034 : Integer;
+      LineCount@1035 : Integer;
+      PostingReference@1026 : Integer;
+      HideDialog@1036 : Boolean;
+      Text003@1003 : TextConst 'ENU=There is nothing to post.';
+      Text005@1025 : TextConst 'ENU=The source document %1 %2 is not released.';
+      InvoiceSourceDoc@1004 : Boolean;
+      PrintDoc@1022 : Boolean;
+
+    LOCAL PROCEDURE Code@3();
+    VAR
+      WhseProdRelease@1000 : Codeunit "Whse.-Production Release";
+      WhseOutputRelease@1001 : Codeunit "Whse.-Output Prod. Release";
+      TransferOrderPostPrint@1003 : Codeunit "TransferOrder-Post + Print";
+      ItemTrackingRequired@1002 : Boolean;
+      Selection@1004 : '" ",Shipment,Receipt';
+    BEGIN
+      PostingReference := WhseSetup.GetNextReference;
+
+      with WhseActivHeader do begin
+        WhseActivLine.SETRANGE("Activity Type",WhseActivLine."Activity Type");
+        WhseActivLine.SETRANGE("No.",WhseActivLine."No.");
+        WhseActivLine.SETFILTER("Qty. to Handle",'<>0');
+        if not WhseActivLine.FIND('-') then
+          ERROR(Text003);
+
+        GET(WhseActivLine."Activity Type",WhseActivLine."No.");
+        GetLocation("Location Code");
+
+        if Type = Type::"Invt. Put-away" then
+          WhseRequest.GET(
+            WhseRequest.Type::Inbound,"Location Code",
+            "Source Type","Source Subtype","Source No.")
+        else
+          WhseRequest.GET(
+            WhseRequest.Type::Outbound,"Location Code",
+            "Source Type","Source Subtype","Source No.");
+        if WhseRequest."Document Status" <> WhseRequest."Document Status"::Released then
+          ERROR(Text005,"Source Document","Source No.");
+
+        if not HideDialog then begin
+          Window.OPEN(
+            Text000 +
+            Text001 +
+            Text002);
+          Window.UPDATE(1,"No.");
+        end;
+
+        // Check Lines
+        LineCount := 0;
+        if WhseActivLine.FIND('-') then begin
+          TempWhseActivLine.SETCURRENTKEY(
+            "Source Type","Source Subtype","Source No.","Source Line No.","Source Subline No.");
+          repeat
+            LineCount := LineCount + 1;
+            if not HideDialog then
+              Window.UPDATE(2,LineCount);
+            WhseActivLine.TESTFIELD("Item No.");
+            if Location."Bin Mandatory" then begin
+              WhseActivLine.TESTFIELD("Unit of Measure Code");
+              WhseActivLine.TESTFIELD("Bin Code");
+            end;
+            ItemTrackingRequired := CheckItemTracking(WhseActivLine);
+            InsertTempWhseActivLine(WhseActivLine,ItemTrackingRequired);
+          until WhseActivLine.NEXT = 0;
+        end;
+        NoOfRecords := LineCount;
+
+        // Posting lines
+        SourceCodeSetup.GET;
+        LineCount := 0;
+        WhseActivLine.LOCKTABLE;
+        if WhseActivLine.FIND('-') then begin
+          if Type = Type::"Invt. Put-away" then begin
+            PostedInvtPutAwayHdr.LOCKTABLE;
+            PostedInvtPutAwayLine.LOCKTABLE;
+          end else begin
+            PostedInvtPickHdr.LOCKTABLE;
+            PostedInvtPickLine.LOCKTABLE;
+          end;
+
+          if "Source Document" = "Source Document"::"Prod. Consumption" then begin
+            PostConsumption;
+            WhseProdRelease.Release(ProdOrder);
+          end else
+            if (Type = Type::"Invt. Put-away") and
+               ("Source Document" = "Source Document"::"Prod. Output")
+            then begin
+              PostOutput;
+              WhseOutputRelease.Release(ProdOrder);
+            end else
+              PostSourceDoc;
+
+          CreatePostedActivHeader(WhseActivHeader);
+          repeat
+            LineCount := LineCount + 1;
+            if not HideDialog then begin
+              Window.UPDATE(3,LineCount);
+              Window.UPDATE(4,ROUND(LineCount / NoOfRecords * 10000,1));
+            end;
+
+            if Location."Bin Mandatory" then
+              PostWhseJnlLine(WhseActivLine);
+            CreatePostedActivLine(WhseActivLine);
+          until WhseActivLine.NEXT = 0;
+        end;
+
+        // Modify/delete activity header and activity lines
+        TempWhseActivLine.DELETEALL;
+
+        WhseActivLine.SETCURRENTKEY(
+          "Activity Type","No.","Whse. Document Type","Whse. Document No.");
+        if WhseActivLine.FIND('-') then
+          repeat
+            if WhseActivLine."Qty. Outstanding" = WhseActivLine."Qty. to Handle" then
+              WhseActivLine.DELETE
+            else begin
+              WhseActivLine.VALIDATE(
+                "Qty. Outstanding",WhseActivLine."Qty. Outstanding" - WhseActivLine."Qty. to Handle");
+              if HideDialog then
+                WhseActivLine.VALIDATE("Qty. to Handle",0);
+              WhseActivLine.VALIDATE(
+                "Qty. Handled",WhseActivLine.Quantity - WhseActivLine."Qty. Outstanding");
+              WhseActivLine.MODIFY;
+            end;
+          until WhseActivLine.NEXT = 0;
+
+        WhseActivLine.RESET;
+        WhseActivLine.SETRANGE("Activity Type",Type);
+        WhseActivLine.SETRANGE("No.","No.");
+        WhseActivLine.SETFILTER("Qty. Outstanding",'<>%1',0);
+        if not WhseActivLine.FIND('-') then
+          DELETE(true);
+
+        if not HideDialog then
+          Window.CLOSE;
+
+        if PrintDoc then
+          case "Source Document" of
+            "Source Document"::"Purchase Order",
+            "Source Document"::"Purchase Return Order":
+              PurchPostPrint.GetReport(PurchHeader);
+            "Source Document"::"Sales Order",
+            "Source Document"::"Sales Return Order":
+              SalesPostPrint.GetReport(SalesHeader);
+            "Source Document"::"Inbound Transfer":
+              TransferOrderPostPrint.PrintReport(TransHeader,Selection::Receipt);
+            "Source Document"::"Outbound Transfer":
+              TransferOrderPostPrint.PrintReport(TransHeader,Selection::Shipment);
+          end;
+
+        COMMIT;
+        CLEAR(WhseJnlRegisterLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertTempWhseActivLine@10(WhseActivLine@1000 : Record "Warehouse Activity Line";ItemTrackingRequired@1001 : Boolean);
+    BEGIN
+      with WhseActivLine do begin
+        TempWhseActivLine.SetSourceFilter(
+          "Source Type","Source Subtype","Source No.","Source Line No.","Source Subline No.",false);
+        if TempWhseActivLine.FIND('-') then begin
+          TempWhseActivLine."Qty. to Handle" := TempWhseActivLine."Qty. to Handle" + "Qty. to Handle";
+          TempWhseActivLine.MODIFY;
+        end else begin
+          TempWhseActivLine.INIT;
+          TempWhseActivLine := WhseActivLine;
+          TempWhseActivLine.INSERT;
+          if ItemTrackingRequired and
+             ("Activity Type" in ["Activity Type"::"Invt. Pick","Activity Type"::"Invt. Put-away"])
+          then
+            ItemTrackingMgt.SynchronizeWhseActivItemTrkg(WhseActivLine);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE InitSourceDocument@11();
+    VAR
+      SalesLine@1003 : Record "Sales Line";
+      SalesRelease@1002 : Codeunit "Release Sales Document";
+      PurchRelease@1001 : Codeunit "Release Purchase Document";
+      ModifyHeader@1000 : Boolean;
+    BEGIN
+      with WhseActivHeader do
+        case "Source Type" of
+          DATABASE::"Purchase Line":
+            begin
+              PurchHeader.GET("Source Subtype","Source No.");
+              PurchLine.SETRANGE("Document Type","Source Subtype");
+              PurchLine.SETRANGE("Document No.","Source No.");
+              if PurchLine.FIND('-') then
+                repeat
+                  if "Source Document" = "Source Document"::"Purchase Order" then
+                    PurchLine.VALIDATE("Qty. to Receive",0)
+                  else
+                    PurchLine.VALIDATE("Return Qty. to Ship",0);
+                  PurchLine.VALIDATE("Qty. to Invoice",0);
+                  PurchLine.MODIFY;
+                until PurchLine.NEXT = 0;
+
+              if (PurchHeader."Posting Date" <> "Posting Date") and ("Posting Date" <> 0D) then begin
+                PurchRelease.Reopen(PurchHeader);
+                PurchHeader.SetHideValidationDialog(true);
+                PurchHeader.VALIDATE("Posting Date","Posting Date");
+                PurchRelease.RUN(PurchHeader);
+                ModifyHeader := true;
+              end;
+              if "External Document No." <> '' then begin
+                PurchHeader."Vendor Shipment No." := "External Document No.";
+                ModifyHeader := true;
+              end;
+              if "External Document No.2" <> '' then begin
+                if "Source Document" = "Source Document"::"Purchase Order" then
+                  PurchHeader."Vendor Invoice No." := "External Document No.2"
+                else
+                  PurchHeader."Vendor Cr. Memo No." := "External Document No.2";
+                ModifyHeader := true;
+              end;
+              if ModifyHeader then
+                PurchHeader.MODIFY;
+            end;
+          DATABASE::"Sales Line":
+            begin
+              SalesHeader.GET("Source Subtype","Source No.");
+              SalesLine.SETRANGE("Document Type","Source Subtype");
+              SalesLine.SETRANGE("Document No.","Source No.");
+              if SalesHeader."Shipping Advice" = SalesHeader."Shipping Advice"::Complete then
+                SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+              if SalesLine.FIND('-') then
+                repeat
+                  if "Source Document" = "Source Document"::"Sales Order" then
+                    SalesLine.VALIDATE("Qty. to Ship",0)
+                  else
+                    SalesLine.VALIDATE("Return Qty. to Receive",0);
+                  SalesLine.VALIDATE("Qty. to Invoice",0);
+                  SalesLine.MODIFY;
+                until SalesLine.NEXT = 0;
+
+              if (SalesHeader."Posting Date" <> "Posting Date") and ("Posting Date" <> 0D) then begin
+                SalesRelease.Reopen(SalesHeader);
+                SalesHeader.SetHideValidationDialog(true);
+                SalesHeader.VALIDATE("Posting Date","Posting Date");
+                SalesRelease.RUN(SalesHeader);
+                ModifyHeader := true;
+              end;
+              if "External Document No." <> '' then begin
+                SalesHeader."External Document No." := "External Document No.";
+                ModifyHeader := true;
+              end;
+              if ModifyHeader then
+                SalesHeader.MODIFY;
+            end;
+          DATABASE::"Transfer Line":
+            begin
+              TransHeader.GET("Source No.");
+              TransLine.SETRANGE("Document No.",TransHeader."No.");
+              TransLine.SETRANGE("Derived From Line No.",0);
+              TransLine.SETFILTER("Item No.",'<>%1','');
+              if TransLine.FIND('-') then
+                repeat
+                  TransLine.VALIDATE("Qty. to Ship",0);
+                  TransLine.VALIDATE("Qty. to Receive",0);
+                  TransLine.MODIFY;
+                until TransLine.NEXT = 0;
+
+              if (TransHeader."Posting Date" <> "Posting Date") and ("Posting Date" <> 0D) then begin
+                TransHeader.CalledFromWarehouse(true);
+                TransHeader.VALIDATE("Posting Date","Posting Date");
+                ModifyHeader := true;
+              end;
+              if "External Document No." <> '' then begin
+                TransHeader."External Document No." := "External Document No.";
+                ModifyHeader := true;
+              end;
+              if ModifyHeader then
+                TransHeader.MODIFY;
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE UpdateSourceDocument@8();
+    VAR
+      SalesLine@1000 : Record "Sales Line";
+      ATOLink@1001 : Record "Assemble-to-Order Link";
+    BEGIN
+      with TempWhseActivLine do
+        case "Source Type" of
+          DATABASE::"Purchase Line":
+            begin
+              if "Activity Type" = "Activity Type"::"Invt. Pick" then
+                "Qty. to Handle" := -"Qty. to Handle";
+              PurchLine.GET("Source Subtype","Source No.","Source Line No.");
+              if "Source Document" = "Source Document"::"Purchase Order" then begin
+                PurchLine.VALIDATE("Qty. to Receive","Qty. to Handle");
+                if InvoiceSourceDoc then
+                  PurchLine.VALIDATE("Qty. to Invoice","Qty. to Handle");
+              end else begin
+                PurchLine.VALIDATE(
+                  "Return Qty. to Ship",-"Qty. to Handle");
+                if InvoiceSourceDoc then
+                  PurchLine.VALIDATE("Qty. to Invoice",-"Qty. to Handle");
+              end;
+              PurchLine."Bin Code" := "Bin Code";
+              PurchLine.MODIFY;
+            end;
+          DATABASE::"Sales Line":
+            begin
+              if "Activity Type" = "Activity Type"::"Invt. Pick" then
+                "Qty. to Handle" := -"Qty. to Handle";
+              SalesLine.GET("Source Subtype","Source No.","Source Line No.");
+              if "Source Document" = "Source Document"::"Sales Order" then begin
+                SalesLine.VALIDATE("Qty. to Ship",-"Qty. to Handle");
+                if InvoiceSourceDoc then
+                  SalesLine.VALIDATE("Qty. to Invoice",-"Qty. to Handle");
+              end else begin
+                SalesLine.VALIDATE("Return Qty. to Receive","Qty. to Handle");
+                if InvoiceSourceDoc then
+                  SalesLine.VALIDATE("Qty. to Invoice","Qty. to Handle");
+              end;
+              SalesLine."Bin Code" := "Bin Code";
+              SalesLine.MODIFY;
+              if "Assemble to Order" then begin
+                ATOLink.UpdateQtyToAsmFromInvtPickLine(TempWhseActivLine);
+                ATOLink.UpdateAsmBinCodeFromInvtPickLine(TempWhseActivLine);
+              end;
+            end;
+          DATABASE::"Transfer Line":
+            begin
+              TransLine.GET("Source No.","Source Line No.");
+              if "Activity Type" = "Activity Type"::"Invt. Put-away" then begin
+                TransLine."Transfer-To Bin Code" := "Bin Code";
+                TransLine.VALIDATE("Qty. to Receive","Qty. to Handle");
+              end else begin
+                TransLine."Transfer-from Bin Code" := "Bin Code";
+                TransLine.VALIDATE("Qty. to Ship","Qty. to Handle");
+              end;
+              TransLine.MODIFY;
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE UpdateUnhandledTransLine@12(TransHeaderNo@1000 : Code[20]);
+    VAR
+      TransLine@1001 : Record "Transfer Line";
+    BEGIN
+      with TransLine do begin
+        SETRANGE("Document No.",TransHeaderNo);
+        SETRANGE("Derived From Line No.",0);
+        SETRANGE("Qty. to Ship",0);
+        SETRANGE("Qty. to Receive",0);
+        if FINDSET then
+          repeat
+            if "Qty. in Transit" <> 0 then
+              VALIDATE("Qty. to Receive","Qty. in Transit");
+            if "Outstanding Quantity" <> 0 then
+              VALIDATE("Qty. to Ship","Outstanding Quantity");
+            MODIFY;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE PostSourceDocument@7(WhseActivHeader@1000 : Record "Warehouse Activity Header");
+    VAR
+      PurchPost@1003 : Codeunit "Purch.-Post";
+      SalesPost@1004 : Codeunit "Sales-Post";
+      TransferPostReceipt@1005 : Codeunit "TransferOrder-Post Receipt";
+      TransferPostShip@1001 : Codeunit "TransferOrder-Post Shipment";
+    BEGIN
+      with WhseActivHeader do
+        case "Source Type" of
+          DATABASE::"Purchase Line":
+            begin
+              CLEAR(PurchPost);
+              COMMIT;
+              if "Source Document" = "Source Document"::"Purchase Order" then
+                PurchHeader.Receive := true
+              else
+                PurchHeader.Ship := true;
+              PurchHeader.Invoice := InvoiceSourceDoc;
+              PurchHeader."Posting from Whse. Ref." := PostingReference;
+              PurchPost.RUN(PurchHeader);
+              if "Source Document" = "Source Document"::"Purchase Order" then begin
+                PostedSourceType := DATABASE::"Purch. Rcpt. Header";
+                PostedSourceNo := PurchHeader."Last Receiving No.";
+              end else begin
+                PostedSourceType := DATABASE::"Return Shipment Header";
+                PostedSourceNo := PurchHeader."Last Return Shipment No.";
+              end;
+              PostedSourceSubType := 0;
+            end;
+          DATABASE::"Sales Line":
+            begin
+              CLEAR(SalesPost);
+              COMMIT;
+              if "Source Document" = "Source Document"::"Sales Order" then
+                SalesHeader.Ship := true
+              else
+                SalesHeader.Receive := true;
+              SalesHeader.Invoice := InvoiceSourceDoc;
+              SalesHeader."Posting from Whse. Ref." := PostingReference;
+              SalesPost.SetWhseJnlRegisterCU(WhseJnlRegisterLine);
+              SalesPost.RUN(SalesHeader);
+              if "Source Document" = "Source Document"::"Sales Order" then begin
+                PostedSourceType := DATABASE::"Sales Shipment Header";
+                PostedSourceNo := SalesHeader."Last Shipping No.";
+              end else begin
+                PostedSourceType := DATABASE::"Return Receipt Header";
+                PostedSourceNo := SalesHeader."Last Return Receipt No.";
+              end;
+              PostedSourceSubType := 0;
+            end;
+          DATABASE::"Transfer Line":
+            begin
+              CLEAR(TransferPostReceipt);
+              COMMIT;
+              if Type = Type::"Invt. Put-away" then begin
+                if HideDialog then
+                  TransferPostReceipt.SetHideValidationDialog(HideDialog);
+                TransHeader."Posting from Whse. Ref." := PostingReference;
+                TransferPostReceipt.RUN(TransHeader);
+                PostedSourceType := DATABASE::"Transfer Receipt Header";
+                PostedSourceNo := TransHeader."Last Receipt No.";
+              end else begin
+                if HideDialog then
+                  TransferPostShip.SetHideValidationDialog(HideDialog);
+                TransHeader."Posting from Whse. Ref." := PostingReference;
+                TransferPostShip.RUN(TransHeader);
+                PostedSourceType := DATABASE::"Transfer Shipment Header";
+                PostedSourceNo := TransHeader."Last Shipment No.";
+              end;
+              UpdateUnhandledTransLine(TransHeader."No.");
+              PostedSourceSubType := 0;
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE PostWhseJnlLine@5(WhseActivLine@1000 : Record "Warehouse Activity Line");
+    VAR
+      TempWhseJnlLine@1001 : TEMPORARY Record "Warehouse Journal Line";
+      WMSMgt@1002 : Codeunit "WMS Management";
+    BEGIN
+      CreateWhseJnlLine(TempWhseJnlLine,WhseActivLine);
+      if TempWhseJnlLine."Entry Type" = TempWhseJnlLine."Entry Type"::"Negative Adjmt." then
+        WMSMgt.CheckWhseJnlLine(TempWhseJnlLine,4,TempWhseJnlLine."Qty. (Base)",false); // 4 = Whse. Journal
+      WhseJnlRegisterLine.RUN(TempWhseJnlLine);
+    END;
+
+    LOCAL PROCEDURE CreateWhseJnlLine@22(VAR WhseJnlLine@1001 : Record "Warehouse Journal Line";WhseActivLine@1000 : Record "Warehouse Activity Line");
+    VAR
+      WMSMgt@1003 : Codeunit "WMS Management";
+    BEGIN
+      with WhseActivLine do begin
+        WhseJnlLine.INIT;
+        WhseJnlLine."Location Code" := "Location Code";
+        WhseJnlLine."Item No." := "Item No.";
+        WhseJnlLine."Registering Date" := WhseActivHeader."Posting Date";
+        WhseJnlLine."User ID" := USERID;
+        WhseJnlLine."Variant Code" := "Variant Code";
+        if "Action Type" = "Action Type"::Take then begin
+          WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Negative Adjmt.";
+          WhseJnlLine."From Bin Code" := "Bin Code";
+          WhseJnlLine.Quantity := "Qty. to Handle (Base)";
+          WhseJnlLine."Qty. (Base)" := "Qty. to Handle (Base)";
+        end else begin
+          WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Positive Adjmt.";
+          WhseJnlLine."To Bin Code" := "Bin Code";
+          WhseJnlLine.Quantity := -"Qty. to Handle (Base)";
+          WhseJnlLine."Qty. (Base)" := -"Qty. to Handle (Base)";
+        end;
+        WhseJnlLine."Qty. (Absolute)" := "Qty. to Handle (Base)";
+        WhseJnlLine."Qty. (Absolute, Base)" := "Qty. to Handle (Base)";
+        WhseJnlLine."Unit of Measure Code" := WMSMgt.GetBaseUOM("Item No.");
+        WhseJnlLine."Qty. per Unit of Measure" := 1;
+        WhseJnlLine."Source Type" := PostedSourceType;
+        WhseJnlLine."Source Subtype" := PostedSourceSubType;
+        WhseJnlLine."Source No." := PostedSourceNo;
+        WhseJnlLine."Reference No." := PostedSourceNo;
+        case "Source Document" of
+          "Source Document"::"Purchase Order":
+            begin
+              WhseJnlLine."Source Code" := SourceCodeSetup.Purchases;
+              WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Posted Rcpt.";
+            end;
+          "Source Document"::"Sales Order":
+            begin
+              WhseJnlLine."Source Code" := SourceCodeSetup.Sales;
+              WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Posted Shipment";
+            end;
+          "Source Document"::"Purchase Return Order":
+            begin
+              WhseJnlLine."Source Code" := SourceCodeSetup.Purchases;
+              WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Posted Rtrn. Shipment";
+            end;
+          "Source Document"::"Sales Return Order":
+            begin
+              WhseJnlLine."Source Code" := SourceCodeSetup.Sales;
+              WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Posted Rtrn. Rcpt.";
+            end;
+          "Source Document"::"Outbound Transfer":
+            begin
+              WhseJnlLine."Source Code" := SourceCodeSetup.Transfer;
+              WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Posted T. Shipment";
+            end;
+          "Source Document"::"Inbound Transfer":
+            begin
+              WhseJnlLine."Source Code" := SourceCodeSetup.Transfer;
+              WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Posted T. Receipt";
+            end;
+          "Source Document"::"Prod. Consumption":
+            begin
+              WhseJnlLine."Source Code" := SourceCodeSetup."Consumption Journal";
+              WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Prod.";
+            end;
+          "Source Document"::"Prod. Output":
+            begin
+              WhseJnlLine."Source Code" := SourceCodeSetup."Output Journal";
+              WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Prod.";
+            end;
+        end;
+
+        if "Activity Type" in ["Activity Type"::"Invt. Put-away","Activity Type"::"Invt. Pick",
+                               "Activity Type"::"Invt. Movement"]
+        then
+          WhseJnlLine."Whse. Document Type" := WhseJnlLine."Whse. Document Type"::" ";
+
+        WhseJnlLine."Serial No." := "Serial No.";
+        WhseJnlLine."Lot No." := "Lot No.";
+        WhseJnlLine."Warranty Date" := "Warranty Date";
+        WhseJnlLine."Expiration Date" := "Expiration Date";
+      end;
+    END;
+
+    LOCAL PROCEDURE CreatePostedActivHeader@2(WhseActivHeader@1000 : Record "Warehouse Activity Header");
+    VAR
+      WhseComment@1002 : Record "Warehouse Comment Line";
+      WhseComment2@1001 : Record "Warehouse Comment Line";
+    BEGIN
+      if WhseActivHeader.Type = WhseActivHeader.Type::"Invt. Put-away" then begin
+        PostedInvtPutAwayHdr.INIT;
+        PostedInvtPutAwayHdr.TRANSFERFIELDS(WhseActivHeader);
+        PostedInvtPutAwayHdr."No." := '';
+        PostedInvtPutAwayHdr."Invt. Put-away No." := WhseActivHeader."No.";
+        PostedInvtPutAwayHdr."Source No." := PostedSourceNo;
+        PostedInvtPutAwayHdr."Source Type" := PostedSourceType;
+        PostedInvtPutAwayHdr.INSERT(true);
+      end else begin
+        PostedInvtPickHdr.INIT;
+        PostedInvtPickHdr.TRANSFERFIELDS(WhseActivHeader);
+        PostedInvtPickHdr."No." := '';
+        PostedInvtPickHdr."Invt Pick No." := WhseActivHeader."No.";
+        PostedInvtPickHdr."Source No." := PostedSourceNo;
+        PostedInvtPickHdr."Source Type" := PostedSourceType;
+        PostedInvtPickHdr.INSERT(true);
+      end;
+
+      WhseComment.SETRANGE("Table Name",WhseComment."Table Name"::"Whse. Activity Header");
+      WhseComment.SETRANGE(Type,WhseActivHeader.Type);
+      WhseComment.SETRANGE("No.",WhseActivHeader."No.");
+      WhseComment.LOCKTABLE;
+      if WhseComment.FIND('-') then
+        repeat
+          WhseComment2.INIT;
+          WhseComment2 := WhseComment;
+          if WhseActivHeader.Type = WhseActivHeader.Type::"Invt. Put-away" then begin
+            WhseComment2."Table Name" := WhseComment2."Table Name"::"Posted Invt. Put-Away";
+            WhseComment2."No." := PostedInvtPutAwayHdr."No.";
+          end else begin
+            WhseComment2."Table Name" := WhseComment2."Table Name"::"Posted Invt. Pick";
+            WhseComment2."No." := PostedInvtPickHdr."No.";
+          end;
+          WhseComment2.Type := WhseComment2.Type::" ";
+          WhseComment2.INSERT;
+        until WhseComment.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreatePostedActivLine@6(WhseActivLine@1000 : Record "Warehouse Activity Line");
+    BEGIN
+      if WhseActivHeader.Type = WhseActivHeader.Type::"Invt. Put-away" then begin
+        PostedInvtPutAwayLine.INIT;
+        PostedInvtPutAwayLine.TRANSFERFIELDS(WhseActivLine);
+        PostedInvtPutAwayLine."No." := PostedInvtPutAwayHdr."No.";
+        PostedInvtPutAwayLine.VALIDATE(Quantity,WhseActivLine."Qty. to Handle");
+        PostedInvtPutAwayLine.INSERT;
+      end else begin
+        PostedInvtPickLine.INIT;
+        PostedInvtPickLine.TRANSFERFIELDS(WhseActivLine);
+        PostedInvtPickLine."No." := PostedInvtPickHdr."No.";
+        PostedInvtPickLine.VALIDATE(Quantity,WhseActivLine."Qty. to Handle");
+        PostedInvtPickLine.INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE PostSourceDoc@14();
+    BEGIN
+      TempWhseActivLine.RESET;
+      TempWhseActivLine.FIND('-');
+      InitSourceDocument;
+      repeat
+        UpdateSourceDocument;
+      until TempWhseActivLine.NEXT = 0;
+
+      PostSourceDocument(WhseActivHeader);
+    END;
+
+    LOCAL PROCEDURE PostConsumption@15();
+    BEGIN
+      with TempWhseActivLine do begin
+        RESET;
+        FIND('-');
+        ProdOrder.GET("Source Subtype","Source No.");
+        repeat
+          ProdOrderComp.GET("Source Subtype","Source No.","Source Line No.","Source Subline No.");
+          PostConsumptionLine;
+        until NEXT = 0;
+
+        PostedSourceType := "Source Type";
+        PostedSourceSubType := "Source Subtype";
+        PostedSourceNo := "Source No.";
+      end;
+    END;
+
+    LOCAL PROCEDURE PostConsumptionLine@9();
+    VAR
+      ItemJnlLine@1000 : Record "Item Journal Line";
+      ItemJnlPostLine@1003 : Codeunit "Item Jnl.-Post Line";
+      ReserveProdOrderComp@1006 : Codeunit "Prod. Order Comp.-Reserve";
+    BEGIN
+      with TempWhseActivLine do begin
+        ProdOrderLine.GET("Source Subtype","Source No.","Source Line No.");
+        ItemJnlLine.INIT;
+        ItemJnlLine.VALIDATE("Entry Type",ItemJnlLine."Entry Type"::Consumption);
+        ItemJnlLine.VALIDATE("Posting Date",WhseActivHeader."Posting Date");
+        ItemJnlLine."Source No." := ProdOrderLine."Item No.";
+        ItemJnlLine."Source Type" := ItemJnlLine."Source Type"::Item;
+        ItemJnlLine."Document No." := ProdOrder."No.";
+        ItemJnlLine.VALIDATE("Order Type",ItemJnlLine."Order Type"::Production);
+        ItemJnlLine.VALIDATE("Order No.",ProdOrder."No.");
+        ItemJnlLine.VALIDATE("Order Line No.",ProdOrderLine."Line No.");
+        ItemJnlLine.VALIDATE("Item No.","Item No.");
+        if ItemJnlLine."Unit of Measure Code" <> "Unit of Measure Code" then
+          ItemJnlLine.VALIDATE("Unit of Measure Code","Unit of Measure Code");
+        ItemJnlLine.VALIDATE("Prod. Order Comp. Line No.",ProdOrderComp."Line No.");
+        ItemJnlLine."Qty. per Unit of Measure" := "Qty. per Unit of Measure";
+        ItemJnlLine.Description := Description;
+        if "Activity Type" = "Activity Type"::"Invt. Pick" then
+          ItemJnlLine.VALIDATE(Quantity,"Qty. to Handle")
+        else
+          ItemJnlLine.VALIDATE(Quantity,-"Qty. to Handle");
+        ItemJnlLine.VALIDATE("Unit Cost",ProdOrderComp."Unit Cost");
+        ItemJnlLine."Location Code" := "Location Code";
+        ItemJnlLine."Bin Code" := "Bin Code";
+        ItemJnlLine."Variant Code" := "Variant Code";
+        ItemJnlLine."Source Code" := SourceCodeSetup."Consumption Journal";
+        ItemJnlLine."Gen. Bus. Posting Group" := ProdOrder."Gen. Bus. Posting Group";
+        GetItem("Item No.");
+        ItemJnlLine."Gen. Prod. Posting Group" := Item."Gen. Prod. Posting Group";
+        ReserveProdOrderComp.TransferPOCompToItemJnlLine(
+          ProdOrderComp,ItemJnlLine,ItemJnlLine."Quantity (Base)");
+        ItemJnlPostLine.SetCalledFromInvtPutawayPick(true);
+        ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+        ReserveProdOrderComp.UpdateItemTrackingAfterPosting(ProdOrderComp);
+      end;
+    END;
+
+    LOCAL PROCEDURE PostOutput@16();
+    BEGIN
+      with TempWhseActivLine do begin
+        RESET;
+        FIND('-');
+        ProdOrder.GET("Source Subtype","Source No.");
+        repeat
+          ProdOrderLine.GET("Source Subtype","Source No.","Source Line No.");
+          PostOutputLine;
+        until NEXT = 0;
+        PostedSourceType := "Source Type";
+        PostedSourceSubType := "Source Subtype";
+        PostedSourceNo := "Source No.";
+      end;
+    END;
+
+    LOCAL PROCEDURE PostOutputLine@13();
+    VAR
+      ItemJnlLine@1001 : Record "Item Journal Line";
+      ItemJnlPostLine@1004 : Codeunit "Item Jnl.-Post Line";
+      ReservProdOrderLine@1000 : Codeunit "Prod. Order Line-Reserve";
+    BEGIN
+      with TempWhseActivLine do begin
+        ItemJnlLine.INIT;
+        ItemJnlLine.VALIDATE("Entry Type",ItemJnlLine."Entry Type"::Output);
+        ItemJnlLine.VALIDATE("Posting Date",WhseActivHeader."Posting Date");
+        ItemJnlLine."Document No." := ProdOrder."No.";
+        ItemJnlLine.VALIDATE("Order Type",ItemJnlLine."Order Type"::Production);
+        ItemJnlLine.VALIDATE("Order No.",ProdOrder."No.");
+        ItemJnlLine.VALIDATE("Order Line No.",ProdOrderLine."Line No.");
+        ItemJnlLine.VALIDATE("Routing Reference No.",ProdOrderLine."Routing Reference No.");
+        ItemJnlLine.VALIDATE("Routing No.",ProdOrderLine."Routing No.");
+        ItemJnlLine.VALIDATE("Item No.",ProdOrderLine."Item No.");
+        if ItemJnlLine."Unit of Measure Code" <> "Unit of Measure Code" then
+          ItemJnlLine.VALIDATE("Unit of Measure Code","Unit of Measure Code");
+        ItemJnlLine."Qty. per Unit of Measure" := "Qty. per Unit of Measure";
+        ItemJnlLine."Location Code" := "Location Code";
+        ItemJnlLine."Bin Code" := "Bin Code";
+        ItemJnlLine.Description := Description;
+        if ProdOrderLine."Routing No." <> '' then
+          ItemJnlLine.VALIDATE("Operation No.",CalcLastOperationNo);
+        ItemJnlLine.VALIDATE("Output Quantity","Qty. to Handle");
+        ItemJnlLine."Source Code" := SourceCodeSetup."Output Journal";
+        ItemJnlLine."Dimension Set ID" := ProdOrderLine."Dimension Set ID";
+        ReservProdOrderLine.TransferPOLineToItemJnlLine(
+          ProdOrderLine,ItemJnlLine,ItemJnlLine."Quantity (Base)");
+        ItemJnlPostLine.SetCalledFromInvtPutawayPick(true);
+        ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+        ReservProdOrderLine.UpdateItemTrackingAfterPosting(ProdOrderLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcLastOperationNo@18() : Code[10];
+    VAR
+      ProdOrderRtngLine@1000 : Record "Prod. Order Routing Line";
+      ProdOrderRouteManagement@1001 : Codeunit "Prod. Order Route Management";
+    BEGIN
+      with ProdOrderLine do begin
+        ProdOrderRtngLine.SETRANGE(Status,Status);
+        ProdOrderRtngLine.SETRANGE("Prod. Order No.","Prod. Order No.");
+        ProdOrderRtngLine.SETRANGE("Routing Reference No.","Routing Reference No.");
+        ProdOrderRtngLine.SETRANGE("Routing No.","Routing No.");
+        if not ProdOrderRtngLine.ISEMPTY then begin
+          ProdOrderRouteManagement.Check(ProdOrderLine,false);
+          ProdOrderRtngLine.SETRANGE("Next Operation No.",'');
+          ProdOrderRtngLine.FINDLAST;
+          exit(ProdOrderRtngLine."Operation No.");
+        end;
+
+        exit('');
+      end;
+    END;
+
+    LOCAL PROCEDURE GetLocation@4(LocationCode@1000 : Code[10]);
+    BEGIN
+      if LocationCode = '' then
+        CLEAR(Location)
+      else
+        if Location.Code <> LocationCode then
+          Location.GET(LocationCode);
+    END;
+
+    LOCAL PROCEDURE GetItem@17(ItemNo@1000 : Code[20]);
+    BEGIN
+      if Item."No." <> ItemNo then
+        Item.GET(ItemNo);
+    END;
+
+    [External]
+    PROCEDURE ShowHideDialog@36(HideDialog2@1000 : Boolean);
+    BEGIN
+      HideDialog := HideDialog2;
+    END;
+
+    [External]
+    PROCEDURE SetInvoiceSourceDoc@1(Invoice@1000 : Boolean);
+    BEGIN
+      InvoiceSourceDoc := Invoice;
+    END;
+
+    [External]
+    PROCEDURE PrintDocument@19(SetPrint@1000 : Boolean);
+    BEGIN
+      PrintDoc := SetPrint;
+    END;
+
+    LOCAL PROCEDURE CheckItemTracking@20(WhseActivLine2@1002 : Record "Warehouse Activity Line") : Boolean;
+    VAR
+      SNRequired@1001 : Boolean;
+      LNRequired@1000 : Boolean;
+    BEGIN
+      with WhseActivLine2 do begin
+        ItemTrackingMgt.CheckWhseItemTrkgSetup("Item No.",SNRequired,LNRequired,false);
+        if SNRequired then
+          TESTFIELD("Serial No.");
+        if LNRequired then
+          TESTFIELD("Lot No.");
+      end;
+
+      exit(SNRequired or LNRequired);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

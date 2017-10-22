@@ -1,0 +1,597 @@
+OBJECT Codeunit 99000836 Transfer Line-Reserve
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Reservation Entry"=rimd,
+                TableData "Planning Assignment"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Codeunit is not initialized correctly.';
+      Text001@1001 : TextConst 'ENU=Reserved quantity cannot be greater than %1';
+      Text002@1002 : TextConst 'ENU=must be filled in when a quantity is reserved';
+      Text003@1003 : TextConst 'ENU=must not be changed when a quantity is reserved';
+      ReservMgt@1005 : Codeunit "Reservation Management";
+      CreateReservEntry@1006 : Codeunit "Create Reserv. Entry";
+      ReservEngineMgt@1007 : Codeunit "Reservation Engine Mgt.";
+      Blocked@1008 : Boolean;
+      SetFromType@1009 : '" ",Sales,"Requisition Line",Purchase,"Item Journal","BOM Journal","Item Ledger Entry",Service,Job';
+      SetFromSubtype@1010 : Integer;
+      SetFromID@1011 : Code[20];
+      SetFromBatchName@1012 : Code[10];
+      SetFromProdOrderLine@1013 : Integer;
+      SetFromRefNo@1014 : Integer;
+      SetFromVariantCode@1015 : Code[10];
+      SetFromLocationCode@1016 : Code[10];
+      SetFromSerialNo@1018 : Code[20];
+      SetFromLotNo@1019 : Code[20];
+      SetFromQtyPerUOM@1020 : Decimal;
+      DeleteItemTracking@1004 : Boolean;
+
+    [External]
+    PROCEDURE CreateReservation@4(VAR TransLine@1000 : Record "Transfer Line";Description@1001 : Text[50];ExpectedReceiptDate@1002 : Date;Quantity@1006 : Decimal;QuantityBase@1003 : Decimal;ForSerialNo@1005 : Code[20];ForLotNo@1004 : Code[20];Direction@1007 : 'Outbound,Inbound');
+    VAR
+      ShipmentDate@1008 : Date;
+    BEGIN
+      if SetFromType = 0 then
+        ERROR(Text000);
+
+      TransLine.TESTFIELD("Item No.");
+      TransLine.TESTFIELD("Variant Code",SetFromVariantCode);
+
+      case Direction of
+        Direction::Outbound:
+          begin
+            TransLine.TESTFIELD("Shipment Date");
+            TransLine.TESTFIELD("Transfer-from Code",SetFromLocationCode);
+            TransLine.CALCFIELDS("Reserved Qty. Outbnd. (Base)");
+            if ABS(TransLine."Outstanding Qty. (Base)") <
+               ABS(TransLine."Reserved Qty. Outbnd. (Base)") + QuantityBase
+            then
+              ERROR(
+                Text001,
+                ABS(TransLine."Outstanding Qty. (Base)") - ABS(TransLine."Reserved Qty. Outbnd. (Base)"));
+            ShipmentDate := TransLine."Shipment Date";
+          end;
+        Direction::Inbound:
+          begin
+            TransLine.TESTFIELD("Receipt Date");
+            TransLine.TESTFIELD("Transfer-to Code",SetFromLocationCode);
+            TransLine.CALCFIELDS("Reserved Qty. Inbnd. (Base)");
+            if ABS(TransLine."Outstanding Qty. (Base)") <
+               ABS(TransLine."Reserved Qty. Inbnd. (Base)") + QuantityBase
+            then
+              ERROR(
+                Text001,
+                ABS(TransLine."Outstanding Qty. (Base)") - ABS(TransLine."Reserved Qty. Inbnd. (Base)"));
+            ExpectedReceiptDate := TransLine."Receipt Date";
+            ShipmentDate := GetInboundReservEntryShipmentDate;
+          end;
+      end;
+      CreateReservEntry.CreateReservEntryFor(
+        DATABASE::"Transfer Line",
+        Direction,TransLine."Document No.",'',
+        TransLine."Derived From Line No.",TransLine."Line No.",TransLine."Qty. per Unit of Measure",
+        Quantity,QuantityBase,ForSerialNo,ForLotNo);
+      CreateReservEntry.CreateReservEntryFrom(
+        SetFromType,SetFromSubtype,SetFromID,SetFromBatchName,SetFromProdOrderLine,SetFromRefNo,
+        SetFromQtyPerUOM,SetFromSerialNo,SetFromLotNo);
+      CreateReservEntry.CreateReservEntry(
+        TransLine."Item No.",TransLine."Variant Code",SetFromLocationCode,
+        Description,ExpectedReceiptDate,ShipmentDate);
+
+      SetFromType := 0;
+    END;
+
+    [External]
+    PROCEDURE CreateReservationSetFrom@7(TrackingSpecificationFrom@1000 : Record "Tracking Specification");
+    BEGIN
+      with TrackingSpecificationFrom do begin
+        SetFromType := "Source Type";
+        SetFromSubtype := "Source Subtype";
+        SetFromID := "Source ID";
+        SetFromBatchName := "Source Batch Name";
+        SetFromProdOrderLine := "Source Prod. Order Line";
+        SetFromRefNo := "Source Ref. No.";
+        SetFromVariantCode := "Variant Code";
+        SetFromLocationCode := "Location Code";
+        SetFromSerialNo := "Serial No.";
+        SetFromLotNo := "Lot No.";
+        SetFromQtyPerUOM := "Qty. per Unit of Measure";
+      end;
+    END;
+
+    [External]
+    PROCEDURE FilterReservFor@9(VAR FilterReservEntry@1000 : Record "Reservation Entry";TransLine@1001 : Record "Transfer Line";Direction@1002 : 'Outbound,Inbound');
+    BEGIN
+      FilterReservEntry.SetSourceFilter(DATABASE::"Transfer Line",Direction,TransLine."Document No.",TransLine."Line No.",false);
+      FilterReservEntry.SetSourceFilter2('',TransLine."Derived From Line No.");
+    END;
+
+    [External]
+    PROCEDURE Caption@27(TransLine@1001 : Record "Transfer Line") CaptionText@1000 : Text[80];
+    BEGIN
+      CaptionText :=
+        STRSUBSTNO(
+          '%1 %2 %3',TransLine."Document No.",TransLine."Line No.",
+          TransLine."Item No.");
+    END;
+
+    [External]
+    PROCEDURE FindReservEntry@1(TransLine@1000 : Record "Transfer Line";VAR ReservEntry@1001 : Record "Reservation Entry";Direction@1002 : 'Outbound,Inbound') : Boolean;
+    BEGIN
+      ReservEngineMgt.InitFilterAndSortingLookupFor(ReservEntry,false);
+      FilterReservFor(ReservEntry,TransLine,Direction);
+      exit(ReservEntry.FINDLAST);
+    END;
+
+    LOCAL PROCEDURE ReservEntryExist@13(TransLine@1000 : Record "Transfer Line") : Boolean;
+    VAR
+      ReservEntry@1001 : Record "Reservation Entry";
+    BEGIN
+      ReservEngineMgt.InitFilterAndSortingLookupFor(ReservEntry,false);
+      FilterReservFor(ReservEntry,TransLine,0);
+      ReservEntry.SETRANGE("Source Subtype"); // Ignore direction
+      exit(not ReservEntry.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE VerifyChange@62(VAR NewTransLine@1000 : Record "Transfer Line";VAR OldTransLine@1001 : Record "Transfer Line");
+    VAR
+      TransLine@1007 : Record "Transfer Line";
+      TempReservEntry@1002 : Record "Reservation Entry";
+      ShowErrorInbnd@1003 : Boolean;
+      ShowErrorOutbnd@1004 : Boolean;
+      HasErrorInbnd@1005 : Boolean;
+      HasErrorOutbnd@1006 : Boolean;
+    BEGIN
+      if Blocked then
+        exit;
+      if NewTransLine."Line No." = 0 then
+        if not TransLine.GET(NewTransLine."Document No.",NewTransLine."Line No.") then
+          exit;
+
+      NewTransLine.CALCFIELDS("Reserved Qty. Inbnd. (Base)");
+      NewTransLine.CALCFIELDS("Reserved Qty. Outbnd. (Base)");
+
+      ShowErrorInbnd := (NewTransLine."Reserved Qty. Inbnd. (Base)" <> 0);
+      ShowErrorOutbnd := (NewTransLine."Reserved Qty. Outbnd. (Base)" <> 0);
+
+      if NewTransLine."Shipment Date" = 0D then
+        if ShowErrorOutbnd then
+          NewTransLine.FIELDERROR("Shipment Date",Text002)
+        else
+          HasErrorOutbnd := true;
+
+      if NewTransLine."Receipt Date" = 0D then
+        if ShowErrorInbnd then
+          NewTransLine.FIELDERROR("Receipt Date",Text002)
+        else
+          HasErrorInbnd := true;
+
+      if NewTransLine."Item No." <> OldTransLine."Item No." then
+        if ShowErrorInbnd or ShowErrorOutbnd then
+          NewTransLine.FIELDERROR("Item No.",Text003)
+        else begin
+          HasErrorInbnd := true;
+          HasErrorOutbnd := true;
+        end;
+
+      if NewTransLine."Transfer-from Code" <> OldTransLine."Transfer-from Code" then
+        if ShowErrorOutbnd then
+          NewTransLine.FIELDERROR("Transfer-from Code",Text003)
+        else
+          HasErrorOutbnd := true;
+
+      if NewTransLine."Transfer-to Code" <> OldTransLine."Transfer-to Code" then
+        if ShowErrorInbnd then
+          NewTransLine.FIELDERROR("Transfer-to Code",Text003)
+        else
+          HasErrorInbnd := true;
+
+      if (NewTransLine."Transfer-from Bin Code" <> OldTransLine."Transfer-from Bin Code") and
+         (not ReservMgt.CalcIsAvailTrackedQtyInBin(
+            NewTransLine."Item No.",NewTransLine."Transfer-from Bin Code",
+            NewTransLine."Transfer-from Code",NewTransLine."Variant Code",
+            DATABASE::"Transfer Line",0,
+            NewTransLine."Document No.",'',NewTransLine."Derived From Line No.",
+            NewTransLine."Line No."))
+      then begin
+        if ShowErrorOutbnd then
+          NewTransLine.FIELDERROR("Transfer-from Bin Code",Text003);
+        HasErrorOutbnd := true;
+      end;
+
+      if (NewTransLine."Transfer-To Bin Code" <> OldTransLine."Transfer-To Bin Code") and
+         (not ReservMgt.CalcIsAvailTrackedQtyInBin(
+            NewTransLine."Item No.",NewTransLine."Transfer-To Bin Code",
+            NewTransLine."Transfer-to Code",NewTransLine."Variant Code",
+            DATABASE::"Transfer Line",1,
+            NewTransLine."Document No.",'',NewTransLine."Derived From Line No.",
+            NewTransLine."Line No."))
+      then begin
+        if ShowErrorInbnd then
+          NewTransLine.FIELDERROR("Transfer-To Bin Code",Text003);
+        HasErrorInbnd := true;
+      end;
+
+      if NewTransLine."Variant Code" <> OldTransLine."Variant Code" then
+        if ShowErrorInbnd or ShowErrorOutbnd then
+          NewTransLine.FIELDERROR("Variant Code",Text003)
+        else begin
+          HasErrorInbnd := true;
+          HasErrorOutbnd := true;
+        end;
+
+      if NewTransLine."Line No." <> OldTransLine."Line No." then begin
+        HasErrorInbnd := true;
+        HasErrorOutbnd := true;
+      end;
+
+      if HasErrorOutbnd then begin
+        AutoTracking(OldTransLine,NewTransLine,TempReservEntry,0);
+        AssignForPlanning(NewTransLine,0);
+        if (NewTransLine."Item No." <> OldTransLine."Item No.") or
+           (NewTransLine."Variant Code" <> OldTransLine."Variant Code") or
+           (NewTransLine."Transfer-to Code" <> OldTransLine."Transfer-to Code")
+        then
+          AssignForPlanning(OldTransLine,0);
+      end;
+
+      if HasErrorInbnd then begin
+        AutoTracking(OldTransLine,NewTransLine,TempReservEntry,1);
+        AssignForPlanning(NewTransLine,1);
+        if (NewTransLine."Item No." <> OldTransLine."Item No.") or
+           (NewTransLine."Variant Code" <> OldTransLine."Variant Code") or
+           (NewTransLine."Transfer-from Code" <> OldTransLine."Transfer-from Code")
+        then
+          AssignForPlanning(OldTransLine,1);
+      end;
+    END;
+
+    [External]
+    PROCEDURE VerifyQuantity@3(VAR NewTransLine@1000 : Record "Transfer Line";VAR OldTransLine@1001 : Record "Transfer Line");
+    VAR
+      TransLine@1003 : Record "Transfer Line";
+      Direction@1002 : 'Outbound,Inbound';
+    BEGIN
+      if Blocked then
+        exit;
+
+      with NewTransLine do begin
+        if "Line No." = OldTransLine."Line No." then
+          if "Quantity (Base)" = OldTransLine."Quantity (Base)" then
+            exit;
+        if "Line No." = 0 then
+          if not TransLine.GET("Document No.","Line No.") then
+            exit;
+        for Direction := Direction::Outbound to Direction::Inbound do begin
+          ReservMgt.SetTransferLine(NewTransLine,Direction);
+          if "Qty. per Unit of Measure" <> OldTransLine."Qty. per Unit of Measure" then
+            ReservMgt.ModifyUnitOfMeasure;
+          ReservMgt.DeleteReservEntries(false,"Outstanding Qty. (Base)");
+          ReservMgt.ClearSurplus;
+          ReservMgt.AutoTrack("Outstanding Qty. (Base)");
+          AssignForPlanning(NewTransLine,Direction);
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdatePlanningFlexibility@23(VAR TransLine@1000 : Record "Transfer Line");
+    VAR
+      ReservEntry@1001 : Record "Reservation Entry";
+    BEGIN
+      if FindReservEntry(TransLine,ReservEntry,0) then
+        ReservEntry.MODIFYALL("Planning Flexibility",TransLine."Planning Flexibility");
+      if FindReservEntry(TransLine,ReservEntry,1) then
+        ReservEntry.MODIFYALL("Planning Flexibility",TransLine."Planning Flexibility");
+    END;
+
+    [External]
+    PROCEDURE TransferTransferToItemJnlLine@35(VAR TransLine@1000 : Record "Transfer Line";VAR ItemJnlLine@1001 : Record "Item Journal Line";TransferQty@1002 : Decimal;Direction@1003 : 'Outbound,Inbound');
+    VAR
+      OldReservEntry@1004 : Record "Reservation Entry";
+      TransferLocation@1006 : Code[10];
+    BEGIN
+      if not FindReservEntry(TransLine,OldReservEntry,Direction) then
+        exit;
+
+      OldReservEntry.Lock;
+
+      case Direction of
+        Direction::Outbound:
+          begin
+            TransferLocation := TransLine."Transfer-from Code";
+            ItemJnlLine.TESTFIELD("Location Code",TransferLocation);
+          end;
+        Direction::Inbound:
+          begin
+            TransferLocation := TransLine."Transfer-to Code";
+            ItemJnlLine.TESTFIELD("New Location Code",TransferLocation);
+          end;
+      end;
+
+      ItemJnlLine.TESTFIELD("Item No.",TransLine."Item No.");
+      ItemJnlLine.TESTFIELD("Variant Code",TransLine."Variant Code");
+
+      if TransferQty = 0 then
+        exit;
+      if ReservEngineMgt.InitRecordSet(OldReservEntry) then
+        repeat
+          OldReservEntry.TestItemFields(TransLine."Item No.",TransLine."Variant Code",TransferLocation);
+          OldReservEntry."New Serial No." := OldReservEntry."Serial No.";
+          OldReservEntry."New Lot No." := OldReservEntry."Lot No.";
+
+          TransferQty :=
+            CreateReservEntry.TransferReservEntry(DATABASE::"Item Journal Line",
+              ItemJnlLine."Entry Type",ItemJnlLine."Journal Template Name",
+              ItemJnlLine."Journal Batch Name",0,ItemJnlLine."Line No.",
+              ItemJnlLine."Qty. per Unit of Measure",OldReservEntry,TransferQty);
+
+        until (ReservEngineMgt.NEXTRecord(OldReservEntry) = 0) or (TransferQty = 0);
+    END;
+
+    [External]
+    PROCEDURE TransferTransferToTransfer@31(VAR OldTransLine@1000 : Record "Transfer Line";VAR NewTransLine@1001 : Record "Transfer Line";TransferQty@1002 : Decimal;Direction@1003 : 'Outbound,Inbound';VAR TrackingSpecification@1007 : Record "Tracking Specification");
+    VAR
+      OldReservEntry@1004 : Record "Reservation Entry";
+      Status@1005 : 'Reservation,Tracking,Surplus,Prospect';
+      TransferLocation@1006 : Code[10];
+    BEGIN
+      // Used when derived Transfer Lines are created during posting of shipment.
+      if not FindReservEntry(OldTransLine,OldReservEntry,Direction) then
+        exit;
+
+      OldReservEntry.SetTrackingFilterFromSpec(TrackingSpecification);
+      if OldReservEntry.ISEMPTY then
+        exit;
+
+      OldReservEntry.Lock;
+
+      case Direction of
+        Direction::Outbound:
+          begin
+            TransferLocation := OldTransLine."Transfer-from Code";
+            NewTransLine.TESTFIELD("Transfer-from Code",TransferLocation);
+          end;
+        Direction::Inbound:
+          begin
+            TransferLocation := OldTransLine."Transfer-to Code";
+            NewTransLine.TESTFIELD("Transfer-to Code",TransferLocation);
+          end;
+      end;
+
+      NewTransLine.TESTFIELD("Item No.",OldTransLine."Item No.");
+      NewTransLine.TESTFIELD("Variant Code",OldTransLine."Variant Code");
+
+      for Status := Status::Reservation to Status::Prospect do begin
+        if TransferQty = 0 then
+          exit;
+        OldReservEntry.SETRANGE("Reservation Status",Status);
+        if OldReservEntry.FINDSET then
+          repeat
+            OldReservEntry.TestItemFields(OldTransLine."Item No.",OldTransLine."Variant Code",TransferLocation);
+
+            TransferQty :=
+              CreateReservEntry.TransferReservEntry(DATABASE::"Transfer Line",
+                Direction,NewTransLine."Document No.",'',NewTransLine."Derived From Line No.",
+                NewTransLine."Line No.",NewTransLine."Qty. per Unit of Measure",OldReservEntry,TransferQty);
+
+          until (OldReservEntry.NEXT = 0) or (TransferQty = 0);
+      end;
+    END;
+
+    [External]
+    PROCEDURE DeleteLineConfirm@20(VAR TransLine@1000 : Record "Transfer Line") : Boolean;
+    BEGIN
+      with TransLine do begin
+        if not ReservEntryExist(TransLine) then
+          exit(true);
+
+        ReservMgt.SetTransferLine(TransLine,0);
+        if ReservMgt.DeleteItemTrackingConfirm then
+          DeleteItemTracking := true;
+      end;
+
+      exit(DeleteItemTracking);
+    END;
+
+    [External]
+    PROCEDURE DeleteLine@2(VAR TransLine@1000 : Record "Transfer Line");
+    BEGIN
+      if Blocked then
+        exit;
+
+      with TransLine do begin
+        ReservMgt.SetTransferLine(TransLine,0);
+        if DeleteItemTracking then
+          ReservMgt.SetItemTrackingHandling(1); // Allow Deletion
+        ReservMgt.DeleteReservEntries(true,0);
+        CALCFIELDS("Reserved Qty. Outbnd. (Base)");
+
+        ReservMgt.SetTransferLine(TransLine,1);
+        if DeleteItemTracking then
+          ReservMgt.SetItemTrackingHandling(1); // Allow Deletion
+        ReservMgt.DeleteReservEntries(true,0);
+        CALCFIELDS("Reserved Qty. Inbnd. (Base)");
+      end;
+    END;
+
+    LOCAL PROCEDURE AssignForPlanning@5(VAR TransLine@1000 : Record "Transfer Line";Direction@1001 : 'Outbound,Inbound');
+    VAR
+      PlanningAssignment@1002 : Record "Planning Assignment";
+    BEGIN
+      if TransLine."Item No." <> '' then
+        with TransLine do
+          case Direction of
+            Direction::Outbound:
+              PlanningAssignment.ChkAssignOne("Item No.","Variant Code","Transfer-to Code","Shipment Date");
+            Direction::Inbound:
+              PlanningAssignment.ChkAssignOne("Item No.","Variant Code","Transfer-from Code","Receipt Date");
+          end;
+    END;
+
+    [External]
+    PROCEDURE Block@14(SetBlocked@1000 : Boolean);
+    BEGIN
+      Blocked := SetBlocked;
+    END;
+
+    [External]
+    PROCEDURE CallItemTracking@6(VAR TransLine@1000 : Record "Transfer Line";Direction@1003 : 'Outbound,Inbound');
+    VAR
+      TrackingSpecification@1001 : Record "Tracking Specification";
+      ItemTrackingLines@1002 : Page "Item Tracking Lines";
+      AvalabilityDate@1005 : Date;
+    BEGIN
+      TrackingSpecification.InitFromTransLine(TransLine,AvalabilityDate,Direction);
+      ItemTrackingLines.SetSourceSpec(TrackingSpecification,AvalabilityDate);
+      ItemTrackingLines.SetInbound(TransLine.IsInbound);
+      ItemTrackingLines.RUNMODAL;
+    END;
+
+    [External]
+    PROCEDURE CallItemTracking2@15(VAR TransLine@1000 : Record "Transfer Line";Direction@1004 : 'Outbound,Inbound';SecondSourceQuantityArray@1001 : ARRAY [3] OF Decimal);
+    VAR
+      TrackingSpecification@1002 : Record "Tracking Specification";
+      ItemTrackingLines@1003 : Page "Item Tracking Lines";
+      AvailabilityDate@1005 : Date;
+    BEGIN
+      TrackingSpecification.InitFromTransLine(TransLine,AvailabilityDate,Direction);
+      ItemTrackingLines.SetSourceSpec(TrackingSpecification,AvailabilityDate);
+      ItemTrackingLines.SetSecondSourceQuantity(SecondSourceQuantityArray);
+      ItemTrackingLines.RUNMODAL;
+    END;
+
+    [External]
+    PROCEDURE UpdateItemTrackingAfterPosting@11(TransHeader@1001 : Record "Transfer Header";Direction@1000 : 'Outbound,Inbound');
+    VAR
+      ReservEntry@1003 : Record "Reservation Entry";
+      ReservEntry2@1002 : Record "Reservation Entry";
+      CreateReservEntry@1004 : Codeunit "Create Reserv. Entry";
+    BEGIN
+      // Used for updating Quantity to Handle after posting;
+      ReservEntry.SetSourceFilter(DATABASE::"Transfer Line",Direction,TransHeader."No.",-1,true);
+      ReservEntry.SETRANGE("Source Batch Name",'');
+      if Direction = Direction::Outbound then
+        ReservEntry.SETRANGE("Source Prod. Order Line",0)
+      else
+        ReservEntry.SETFILTER("Source Prod. Order Line",'<>%1',0);
+      CreateReservEntry.UpdateItemTrackingAfterPosting(ReservEntry);
+      if Direction = Direction::Outbound then begin
+        ReservEntry2.COPY(ReservEntry);
+        ReservEntry2.SETRANGE("Source Subtype",Direction::Inbound);
+        ReservEntry2.SetTrackingFilterFromReservEntry(ReservEntry);
+        CreateReservEntry.UpdateItemTrackingAfterPosting(ReservEntry2);
+      end;
+    END;
+
+    [External]
+    PROCEDURE RegisterBinContentItemTracking@1203(VAR TransferLine@1003 : Record "Transfer Line";VAR TempTrackingSpecification@1200 : TEMPORARY Record "Tracking Specification");
+    VAR
+      SourceTrackingSpecification@1202 : Record "Tracking Specification";
+      ItemTrackingLines@1004 : Page "Item Tracking Lines";
+      FormRunMode@1201 : ',Reclass,"Combined Ship/Rcpt","Drop Shipment",Transfer';
+      Direction@1203 : 'Outbound,Inbound';
+    BEGIN
+      if not TempTrackingSpecification.FINDSET then
+        exit;
+      SourceTrackingSpecification.InitFromTransLine(TransferLine,TransferLine."Shipment Date",Direction::Outbound);
+
+      CLEAR(ItemTrackingLines);
+      ItemTrackingLines.SetFormRunMode(FormRunMode::Transfer);
+      ItemTrackingLines.SetSourceSpec(SourceTrackingSpecification,TransferLine."Shipment Date");
+      ItemTrackingLines.RegisterItemTrackingLines(
+        SourceTrackingSpecification,TransferLine."Shipment Date",TempTrackingSpecification);
+    END;
+
+    LOCAL PROCEDURE GetInboundReservEntryShipmentDate@123() InboundReservEntryShipmentDate : Date;
+    BEGIN
+      case SetFromType of
+        DATABASE::"Sales Line":
+          InboundReservEntryShipmentDate := GetInboundReservEntryShipmentDateBySalesLine;
+        DATABASE::"Purchase Line":
+          InboundReservEntryShipmentDate := GetInboundReservEntryShipmentDateByPurchaseLine;
+        DATABASE::"Transfer Line":
+          InboundReservEntryShipmentDate := GetInboundReservEntryShipmentDateByTransferLine;
+        DATABASE::"Service Line":
+          InboundReservEntryShipmentDate := GetInboundReservEntryShipmentDateByServiceLine;
+        DATABASE::"Job Planning Line":
+          InboundReservEntryShipmentDate := GetInboundReservEntryShipmentDateByJobPlanningLine;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetInboundReservEntryShipmentDateBySalesLine@130() : Date;
+    VAR
+      SalesLine@1000 : Record "Sales Line";
+    BEGIN
+      SalesLine.GET(SetFromSubtype,SetFromID,SetFromRefNo);
+      exit(SalesLine."Shipment Date");
+    END;
+
+    LOCAL PROCEDURE GetInboundReservEntryShipmentDateByPurchaseLine@134() : Date;
+    VAR
+      PurchaseLine@1000 : Record "Purchase Line";
+    BEGIN
+      PurchaseLine.GET(SetFromSubtype,SetFromID,SetFromRefNo);
+      exit(PurchaseLine."Expected Receipt Date");
+    END;
+
+    LOCAL PROCEDURE GetInboundReservEntryShipmentDateByTransferLine@141() : Date;
+    VAR
+      TransferLine@1000 : Record "Transfer Line";
+    BEGIN
+      TransferLine.GET(SetFromID,SetFromRefNo);
+      exit(TransferLine."Shipment Date");
+    END;
+
+    LOCAL PROCEDURE GetInboundReservEntryShipmentDateByServiceLine@140() : Date;
+    VAR
+      ServiceLine@1000 : Record "Service Line";
+    BEGIN
+      ServiceLine.GET(SetFromSubtype,SetFromID,SetFromRefNo);
+      exit(ServiceLine."Needed by Date");
+    END;
+
+    LOCAL PROCEDURE GetInboundReservEntryShipmentDateByJobPlanningLine@171() : Date;
+    VAR
+      JobPlanningLine@1000 : Record "Job Planning Line";
+    BEGIN
+      JobPlanningLine.SETRANGE(Status,SetFromSubtype);
+      JobPlanningLine.SETRANGE("Job No.",SetFromID);
+      JobPlanningLine.SETRANGE("Job Contract Entry No.",SetFromRefNo);
+      JobPlanningLine.FINDFIRST;
+      exit(JobPlanningLine."Planning Date");
+    END;
+
+    LOCAL PROCEDURE AutoTracking@10(OldTransLine@1000 : Record "Transfer Line";NewTransLine@1001 : Record "Transfer Line";VAR TempReservEntry@1003 : TEMPORARY Record "Reservation Entry";Direction@1002 : Option);
+    BEGIN
+      if (NewTransLine."Item No." <> OldTransLine."Item No.") or FindReservEntry(NewTransLine,TempReservEntry,0) then begin
+        if NewTransLine."Item No." <> OldTransLine."Item No." then begin
+          ReservMgt.SetTransferLine(OldTransLine,Direction);
+          ReservMgt.DeleteReservEntries(true,0);
+          ReservMgt.SetTransferLine(NewTransLine,Direction);
+        end else begin
+          ReservMgt.SetTransferLine(NewTransLine,Direction);
+          ReservMgt.DeleteReservEntries(true,0);
+        end;
+        ReservMgt.AutoTrack(NewTransLine."Outstanding Qty. (Base)");
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

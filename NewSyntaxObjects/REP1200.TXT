@@ -1,0 +1,191 @@
+OBJECT Report 1200 Create Direct Debit Collection
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TransactionType=Update;
+    CaptionML=ENU=Create Direct Debit Collection;
+    ProcessingOnly=true;
+    OnPreReport=BEGIN
+                  BankAccount.GET(BankAccount."No.");
+                  GLSetup.GET;
+                END;
+
+    OnPostReport=BEGIN
+                   if NoOfEntries = 0 then
+                     ERROR(NoEntriesCreatedErr);
+                   MESSAGE(EntriesCreatedMsg,NoOfEntries);
+                 END;
+
+  }
+  DATASET
+  {
+    { 2   ;    ;DataItem;Customer            ;
+               DataItemTable=Customer;
+               OnPreDataItem=BEGIN
+                               DirectDebitCollection.CreateNew(BankAccount.GetDirectDebitMessageNo,BankAccount."No.",PartnerType);
+                               SETRANGE("Partner Type",PartnerType);
+                             END;
+
+               ReqFilterFields="Currency Code","Country/Region Code" }
+
+    { 1   ;1   ;DataItem;Cust. Ledger Entry  ;
+               DataItemTable="Cust. Ledger Entry";
+               DataItemTableView=SORTING(Open,"Due Date") WHERE(Open=CONST(true),"Document Type"=CONST(Invoice));
+               OnPreDataItem=BEGIN
+                               SETAUTOCALCFIELDS("Remaining Amount");
+                               SETRANGE("Due Date",FromDate,ToDate);
+                               if OnlyInvoicesWithMandate then
+                                 SETFILTER("Direct Debit Mandate ID",'<>%1','');
+                               SETRANGE("Currency Code",GLSetup.GetCurrencyCode('EUR'))
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  if OnlyCustomersWithMandate then
+                                    if not Customer.HasValidDDMandate("Due Date") then
+                                      CurrReport.SKIP;
+                                  if OnlyInvoicesWithMandate then begin
+                                    SEPADirectDebitMandate.GET("Direct Debit Mandate ID");
+                                    if not SEPADirectDebitMandate.IsMandateActive("Due Date") then
+                                      CurrReport.SKIP;
+                                  end;
+
+                                  if not EntryFullyCollected("Entry No.") then begin
+                                    DirectDebitCollectionEntry.CreateNew(DirectDebitCollection."No.","Cust. Ledger Entry");
+                                    NoOfEntries += 1;
+                                  end;
+                                END;
+
+               DataItemLink="Customer No."=FIELD("No.") }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=true;
+    }
+    CONTROLS
+    {
+      { 1   ;    ;Container ;
+                  Name=Options;
+                  CaptionML=ENU=Options;
+                  ContainerType=ContentArea }
+
+      { 2   ;1   ;Field     ;
+                  Name=FromDueDate;
+                  CaptionML=ENU=From Due Date;
+                  ToolTipML=ENU=Specifies the earliest payment due date on sales invoices that you want to create a direct-debit collection for.;
+                  ApplicationArea=#Suite;
+                  SourceExpr=FromDate }
+
+      { 3   ;1   ;Field     ;
+                  Name=ToDueDate;
+                  CaptionML=ENU=To Due Date;
+                  ToolTipML=ENU=Specifies the latest payment due date on sales invoices that you want to create a direct-debit collection for.;
+                  ApplicationArea=#Suite;
+                  SourceExpr=ToDate;
+                  OnValidate=BEGIN
+                               if (ToDate <> 0D) and (FromDate > ToDate) then
+                                 ERROR(WrongDateErr);
+                             END;
+                              }
+
+      { 8   ;1   ;Field     ;
+                  Name=PartnerType;
+                  CaptionML=ENU=Partner Type;
+                  ToolTipML=ENU=Specifies if the direct-debit collection is made for customers of type Company or Person.;
+                  OptionCaptionML=ENU=,Company,Person;
+                  ApplicationArea=#Suite;
+                  NotBlank=true;
+                  BlankZero=true;
+                  SourceExpr=PartnerType }
+
+      { 4   ;1   ;Field     ;
+                  Name=OnlyCustomerValidMandate;
+                  CaptionML=ENU=Only Customers With Valid Mandate;
+                  ToolTipML=ENU=Specifies if a direct-debit collection is created for customers who have a valid direct-debit mandate. A direct-debit collection is created even if the Direct Debit Mandate ID field is not filled on the sales invoice.;
+                  ApplicationArea=#Suite;
+                  SourceExpr=OnlyCustomersWithMandate }
+
+      { 7   ;1   ;Field     ;
+                  Name=OnlyInvoiceValidMandate;
+                  CaptionML=ENU=Only Invoices With Valid Mandate;
+                  ToolTipML=ENU=Specifies if a direct-debit collection is only created for sales invoices if a valid direct-debit mandate is selected in the Direct Debit Mandate ID field on the sales invoice.;
+                  ApplicationArea=#Suite;
+                  SourceExpr=OnlyInvoicesWithMandate }
+
+      { 5   ;1   ;Field     ;
+                  Name=BankAccNo;
+                  CaptionML=ENU=Bank Account No.;
+                  ToolTipML=ENU=Specifies which of your company's bank accounts the collected payment will be transferred to from the customer's bank account.;
+                  ApplicationArea=#Suite;
+                  SourceExpr=BankAccount."No.";
+                  TableRelation="Bank Account";
+                  OnValidate=BEGIN
+                               if BankAccount."No." = '' then
+                                 exit;
+                               BankAccount.GET(BankAccount."No.");
+                               BankAccount.TESTFIELD("Direct Debit Msg. Nos.");
+                             END;
+                              }
+
+      { 6   ;1   ;Field     ;
+                  Name=BankAccName;
+                  CaptionML=ENU=Bank Account Name;
+                  ToolTipML=ENU=Specifies the name of the bank account that you select in the Bank Account No. field. This field is filled automatically.;
+                  ApplicationArea=#Suite;
+                  SourceExpr=BankAccount.Name;
+                  Enabled=FALSE;
+                  Editable=FALSE }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      BankAccount@1004 : Record "Bank Account";
+      DirectDebitCollection@1005 : Record "Direct Debit Collection";
+      DirectDebitCollectionEntry@1006 : Record "Direct Debit Collection Entry";
+      SEPADirectDebitMandate@1008 : Record "SEPA Direct Debit Mandate";
+      GLSetup@1013 : Record "General Ledger Setup";
+      FromDate@1000 : Date;
+      ToDate@1001 : Date;
+      OnlyCustomersWithMandate@1002 : Boolean;
+      WrongDateErr@1003 : TextConst 'ENU=To Date must be equal to or greater than From Date.';
+      OnlyInvoicesWithMandate@1007 : Boolean;
+      NoOfEntries@1009 : Integer;
+      NoEntriesCreatedErr@1010 : TextConst '@@@="%1=Field;%2=Table;%3=Field;Table";ENU=No entries have been created.';
+      EntriesCreatedMsg@1011 : TextConst '@@@="%1 = an integer number, e.g. 7.";ENU=%1 entries have been created.';
+      PartnerType@1012 : ',Company,Person';
+
+    LOCAL PROCEDURE EntryFullyCollected@1(EntryNo@1000 : Integer) : Boolean;
+    VAR
+      DirectDebitCollectionEntry@1001 : Record "Direct Debit Collection Entry";
+    BEGIN
+      DirectDebitCollectionEntry.SETRANGE("Applies-to Entry No.",EntryNo);
+      if DirectDebitCollectionEntry.ISEMPTY then
+        exit(false);
+
+      DirectDebitCollectionEntry.SETFILTER(
+        Status,'%1|%2',DirectDebitCollectionEntry.Status::New,DirectDebitCollectionEntry.Status::"File Created");
+      DirectDebitCollectionEntry.CALCSUMS("Transfer Amount");
+      exit(DirectDebitCollectionEntry."Transfer Amount" >= "Cust. Ledger Entry"."Remaining Amount");
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

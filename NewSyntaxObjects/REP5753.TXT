@@ -1,0 +1,538 @@
+OBJECT Report 5753 Get Source Documents
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Get Source Documents;
+    ProcessingOnly=true;
+    OnPreReport=BEGIN
+                  ActivitiesCreated := 0;
+                  LineCreated := false;
+                END;
+
+    OnPostReport=BEGIN
+                   if not HideDialog then
+                     case RequestType of
+                       RequestType::Receive:
+                         ShowReceiptDialog;
+                       RequestType::Ship:
+                         ShowShipmentDialog;
+                     end;
+                   if SkippedSourceDoc > 0 then
+                     MESSAGE(CustomerIsBlockedMsg,SkippedSourceDoc);
+                   Completed := true;
+                 END;
+
+  }
+  DATASET
+  {
+    { 9356;    ;DataItem;Warehouse Request   ;
+               DataItemTable="Warehouse Request";
+               DataItemTableView=WHERE("Document Status"=CONST(Released),"Completely Handled"=FILTER(false));
+               OnPreDataItem=BEGIN
+                               if OneHeaderCreated then begin
+                                 case RequestType of
+                                   RequestType::Receive:
+                                     Type := Type::Inbound;
+                                   RequestType::Ship:
+                                     Type := Type::Outbound;
+                                 end;
+                                 SETRANGE(Type,Type);
+                               end;
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  WhseSetup@1000 : Record "Warehouse Setup";
+                                BEGIN
+                                  WhseHeaderCreated := false;
+                                  case Type of
+                                    Type::Inbound:
+                                      begin
+                                        if not Location.RequireReceive("Location Code") then begin
+                                          if "Location Code" = '' then
+                                            WhseSetup.TESTFIELD("Require Receive");
+                                          Location.GET("Location Code");
+                                          Location.TESTFIELD("Require Receive");
+                                        end;
+                                        if not OneHeaderCreated then
+                                          RequestType := RequestType::Receive;
+                                      end;
+                                    Type::Outbound:
+                                      begin
+                                        if not Location.RequireShipment("Location Code") then begin
+                                          if "Location Code" = '' then
+                                            WhseSetup.TESTFIELD("Require Shipment");
+                                          Location.GET("Location Code");
+                                          Location.TESTFIELD("Require Shipment");
+                                        end;
+                                        if not OneHeaderCreated then
+                                          RequestType := RequestType::Ship;
+                                      end;
+                                  end;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                if WhseHeaderCreated or OneHeaderCreated then begin
+                                  WhseShptHeader.SortWhseDoc;
+                                  WhseReceiptHeader.SortWhseDoc;
+                                end;
+                              END;
+
+               ReqFilterFields="Source Document","Source No." }
+
+    { 6640;1   ;DataItem;Sales Header        ;
+               DataItemTable="Sales Header";
+               DataItemTableView=SORTING("Document Type","No.");
+               OnPreDataItem=BEGIN
+                               if "Warehouse Request"."Source Type" <> DATABASE::"Sales Line" then
+                                 CurrReport.BREAK;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  TESTFIELD("Sell-to Customer No.");
+                                  Cust.GET("Sell-to Customer No.");
+                                  if not SkipBlockedCustomer then
+                                    Cust.CheckBlockedCustOnDocs(Cust,"Document Type",false,false);
+                                  SalesHeaderCounted := false;
+                                END;
+
+               DataItemLink="Document Type"=FIELD("Source Subtype"),"No."=FIELD("Source No.") }
+
+    { 2844;2   ;DataItem;Sales Line          ;
+               DataItemTable="Sales Line";
+               DataItemTableView=SORTING("Document Type","Document No.","Line No.");
+               OnPreDataItem=BEGIN
+                               SETRANGE(Type,Type::Item);
+                               if (("Warehouse Request".Type = "Warehouse Request".Type::Outbound) and
+                                   ("Warehouse Request"."Source Document" = "Warehouse Request"."Source Document"::"Sales Order")) or
+                                  (("Warehouse Request".Type = "Warehouse Request".Type::Inbound) and
+                                   ("Warehouse Request"."Source Document" = "Warehouse Request"."Source Document"::"Sales Return Order"))
+                               then
+                                 SETFILTER("Outstanding Quantity",'>0')
+                               else
+                                 SETFILTER("Outstanding Quantity",'<0');
+                               SETRANGE("Drop Shipment",false);
+                               SETRANGE("Job No.",'');
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  VerifyItemNotBlocked("No.");
+                                  if "Location Code" = "Warehouse Request"."Location Code" then
+                                    case RequestType of
+                                      RequestType::Receive:
+                                        if WhseActivityCreate.CheckIfSalesLine2ReceiptLine("Sales Line") then begin
+                                          if not OneHeaderCreated and not WhseHeaderCreated then
+                                            CreateReceiptHeader;
+                                          if not WhseActivityCreate.SalesLine2ReceiptLine(WhseReceiptHeader,"Sales Line") then
+                                            ErrorOccured := true;
+                                          LineCreated := true;
+                                        end;
+                                      RequestType::Ship:
+                                        if WhseActivityCreate.CheckIfFromSalesLine2ShptLine("Sales Line") then begin
+                                          if Cust.Blocked <> Cust.Blocked::" " then begin
+                                            if not SalesHeaderCounted then begin
+                                              SkippedSourceDoc += 1;
+                                              SalesHeaderCounted := true;
+                                            end;
+                                            CurrReport.SKIP;
+                                          end;
+
+                                          if not OneHeaderCreated and not WhseHeaderCreated then
+                                            CreateShptHeader;
+                                          if not WhseActivityCreate.FromSalesLine2ShptLine(WhseShptHeader,"Sales Line") then
+                                            ErrorOccured := true;
+                                          LineCreated := true;
+                                        end;
+                                    end;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                if WhseHeaderCreated then begin
+                                  UpdateReceiptHeaderStatus;
+                                  CheckFillQtyToHandle;
+                                end;
+                              END;
+
+               DataItemLink="Document Type"=FIELD("Document Type"),"Document No."=FIELD("No.") }
+
+    { 4458;1   ;DataItem;Purchase Header     ;
+               DataItemTable="Purchase Header";
+               DataItemTableView=SORTING("Document Type","No.");
+               OnPreDataItem=BEGIN
+                               if "Warehouse Request"."Source Type" <> DATABASE::"Purchase Line" then
+                                 CurrReport.BREAK;
+                             END;
+
+               DataItemLink="Document Type"=FIELD("Source Subtype"),"No."=FIELD("Source No.") }
+
+    { 6547;2   ;DataItem;Purchase Line       ;
+               DataItemTable="Purchase Line";
+               DataItemTableView=SORTING("Document Type","Document No.","Line No.");
+               OnPreDataItem=BEGIN
+                               SETRANGE(Type,Type::Item);
+                               if (("Warehouse Request".Type = "Warehouse Request".Type::Inbound) and
+                                   ("Warehouse Request"."Source Document" = "Warehouse Request"."Source Document"::"Purchase Order")) or
+                                  (("Warehouse Request".Type = "Warehouse Request".Type::Outbound) and
+                                   ("Warehouse Request"."Source Document" = "Warehouse Request"."Source Document"::"Purchase Return Order"))
+                               then
+                                 SETFILTER("Outstanding Quantity",'>0')
+                               else
+                                 SETFILTER("Outstanding Quantity",'<0');
+                               SETRANGE("Drop Shipment",false);
+                               SETRANGE("Job No.",'');
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  VerifyItemNotBlocked("No.");
+                                  if "Location Code" = "Warehouse Request"."Location Code" then
+                                    case RequestType of
+                                      RequestType::Receive:
+                                        if WhseActivityCreate.CheckIfPurchLine2ReceiptLine("Purchase Line") then begin
+                                          if not OneHeaderCreated and not WhseHeaderCreated then
+                                            CreateReceiptHeader;
+                                          if not WhseActivityCreate.PurchLine2ReceiptLine(WhseReceiptHeader,"Purchase Line") then
+                                            ErrorOccured := true;
+                                          LineCreated := true;
+                                        end;
+                                      RequestType::Ship:
+                                        if WhseActivityCreate.CheckIfFromPurchLine2ShptLine("Purchase Line") then begin
+                                          if not OneHeaderCreated and not WhseHeaderCreated then
+                                            CreateShptHeader;
+                                          if not WhseActivityCreate.FromPurchLine2ShptLine(WhseShptHeader,"Purchase Line") then
+                                            ErrorOccured := true;
+                                          LineCreated := true;
+                                        end;
+                                    end;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                if WhseHeaderCreated then begin
+                                  UpdateReceiptHeaderStatus;
+                                  CheckFillQtyToHandle;
+                                end;
+                              END;
+
+               DataItemLink="Document Type"=FIELD("Document Type"),"Document No."=FIELD("No.") }
+
+    { 2957;1   ;DataItem;Transfer Header     ;
+               DataItemTable="Transfer Header";
+               DataItemTableView=SORTING("No.");
+               OnPreDataItem=BEGIN
+                               if "Warehouse Request"."Source Type" <> DATABASE::"Transfer Line" then
+                                 CurrReport.BREAK;
+                             END;
+
+               DataItemLink="No."=FIELD("Source No.") }
+
+    { 9370;2   ;DataItem;Transfer Line       ;
+               DataItemTable="Transfer Line";
+               DataItemTableView=SORTING("Document No.","Line No.");
+               OnPreDataItem=BEGIN
+                               case "Warehouse Request"."Source Subtype" of
+                                 0:
+                                   SETFILTER("Outstanding Quantity",'>0');
+                                 1:
+                                   SETFILTER("Qty. in Transit",'>0');
+                               end;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  case RequestType of
+                                    RequestType::Receive:
+                                      if WhseActivityCreate.CheckIfTransLine2ReceiptLine("Transfer Line") then begin
+                                        if not OneHeaderCreated and not WhseHeaderCreated then
+                                          CreateReceiptHeader;
+                                        if not WhseActivityCreate.TransLine2ReceiptLine(WhseReceiptHeader,"Transfer Line") then
+                                          ErrorOccured := true;
+                                        LineCreated := true;
+                                      end;
+                                    RequestType::Ship:
+                                      if WhseActivityCreate.CheckIfFromTransLine2ShptLine("Transfer Line") then begin
+                                        if not OneHeaderCreated and not WhseHeaderCreated then
+                                          CreateShptHeader;
+                                        if not WhseActivityCreate.FromTransLine2ShptLine(WhseShptHeader,"Transfer Line") then
+                                          ErrorOccured := true;
+                                        LineCreated := true;
+                                      end;
+                                  end;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                if WhseHeaderCreated then begin
+                                  UpdateReceiptHeaderStatus;
+                                  CheckFillQtyToHandle;
+                                end;
+                              END;
+
+               DataItemLink="Document No."=FIELD("No.") }
+
+    { 1634;1   ;DataItem;Service Header      ;
+               DataItemTable="Service Header";
+               DataItemTableView=SORTING("Document Type","No.");
+               OnPreDataItem=BEGIN
+                               if "Warehouse Request"."Source Type" <> DATABASE::"Service Line" then
+                                 CurrReport.BREAK;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  TESTFIELD("Bill-to Customer No.");
+                                  Cust.GET("Bill-to Customer No.");
+                                  if not SkipBlockedCustomer then
+                                    Cust.CheckBlockedCustOnDocs(Cust,"Document Type",false,false)
+                                  else
+                                    if Cust.Blocked <> Cust.Blocked::" " then
+                                      CurrReport.SKIP;
+                                END;
+
+               DataItemLink="Document Type"=FIELD("Source Subtype"),"No."=FIELD("Source No.") }
+
+    { 6560;2   ;DataItem;Service Line        ;
+               DataItemTable="Service Line";
+               DataItemTableView=SORTING("Document Type","Document No.","Line No.");
+               OnPreDataItem=BEGIN
+                               SETRANGE(Type,Type::Item);
+                               if (("Warehouse Request".Type = "Warehouse Request".Type::Outbound) and
+                                   ("Warehouse Request"."Source Document" = "Warehouse Request"."Source Document"::"Service Order"))
+                               then
+                                 SETFILTER("Outstanding Quantity",'>0')
+                               else
+                                 SETFILTER("Outstanding Quantity",'<0');
+                               SETRANGE("Job No.",'');
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  if "Location Code" = "Warehouse Request"."Location Code" then
+                                    case RequestType of
+                                      RequestType::Ship:
+                                        if WhseActivityCreate.CheckIfFromServiceLine2ShptLin("Service Line") then begin
+                                          if not OneHeaderCreated and not WhseHeaderCreated then
+                                            CreateShptHeader;
+                                          if not WhseActivityCreate.FromServiceLine2ShptLine(WhseShptHeader,"Service Line") then
+                                            ErrorOccured := true;
+                                          LineCreated := true;
+                                        end;
+                                    end;
+                                END;
+
+               DataItemLink="Document Type"=FIELD("Document Type"),"Document No."=FIELD("No.") }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  Name=Container1900000001;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  Name=Options;
+                  CaptionML=ENU=Options }
+
+      { 1   ;2   ;Field     ;
+                  Name=Do Not Fill Qty. to Handle;
+                  CaptionML=ENU=Do Not Fill Qty. to Handle;
+                  ToolTipML=ENU=Specifies if the Quantity to Handle field in the warehouse document is prefilled according to the source document quantities.;
+                  ApplicationArea=#Warehouse;
+                  SourceExpr=DoNotFillQtytoHandle }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=There are no Warehouse Receipt Lines created.';
+      Text001@1001 : TextConst 'ENU=%1 %2 has been created.';
+      WhseReceiptHeader@1015 : Record "Warehouse Receipt Header";
+      WhseReceiptLine@1014 : Record "Warehouse Receipt Line";
+      WhseShptHeader@1018 : Record "Warehouse Shipment Header";
+      WhseShptLine@1017 : Record "Warehouse Shipment Line";
+      Location@1002 : Record Location;
+      Cust@1005 : Record Customer;
+      WhseActivityCreate@1006 : Codeunit "Whse.-Create Source Document";
+      ActivitiesCreated@1007 : Integer;
+      OneHeaderCreated@1008 : Boolean;
+      Completed@1010 : Boolean;
+      LineCreated@1012 : Boolean;
+      WhseHeaderCreated@1009 : Boolean;
+      DoNotFillQtytoHandle@1004 : Boolean;
+      HideDialog@1013 : Boolean;
+      SkipBlockedCustomer@1020 : Boolean;
+      SkipBlockedItem@1026 : Boolean;
+      RequestType@1016 : 'Receive,Ship';
+      SalesHeaderCounted@1023 : Boolean;
+      SkippedSourceDoc@1024 : Integer;
+      Text002@1019 : TextConst 'ENU=%1 Warehouse Receipts have been created.';
+      Text003@1003 : TextConst 'ENU=There are no Warehouse Shipment Lines created.';
+      Text004@1011 : TextConst 'ENU=%1 Warehouse Shipments have been created.';
+      ErrorOccured@1021 : Boolean;
+      Text005@1022 : TextConst 'ENU=One or more of the lines on this %1 require special warehouse handling. The %2 for such lines has been set to blank.';
+      CustomerIsBlockedMsg@1025 : TextConst 'ENU=%1 source documents were not included because the customer is blocked.';
+
+    PROCEDURE SetHideDialog@6(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    PROCEDURE SetOneCreatedShptHeader@1(WhseShptHeader2@1000 : Record "Warehouse Shipment Header");
+    BEGIN
+      RequestType := RequestType::Ship;
+      WhseShptHeader := WhseShptHeader2;
+      if WhseShptHeader.FIND then
+        OneHeaderCreated := true;
+    END;
+
+    PROCEDURE SetOneCreatedReceiptHeader@7(WhseReceiptHeader2@1000 : Record "Warehouse Receipt Header");
+    BEGIN
+      RequestType := RequestType::Receive;
+      WhseReceiptHeader := WhseReceiptHeader2;
+      if WhseReceiptHeader.FIND then
+        OneHeaderCreated := true;
+    END;
+
+    PROCEDURE SetDoNotFillQtytoHandle@3(DoNotFillQtytoHandle2@1000 : Boolean);
+    BEGIN
+      DoNotFillQtytoHandle := DoNotFillQtytoHandle2;
+    END;
+
+    PROCEDURE GetLastShptHeader@5(VAR WhseShptHeader2@1000 : Record "Warehouse Shipment Header");
+    BEGIN
+      RequestType := RequestType::Ship;
+      WhseShptHeader2 := WhseShptHeader;
+    END;
+
+    PROCEDURE GetLastReceiptHeader@8(VAR WhseReceiptHeader2@1000 : Record "Warehouse Receipt Header");
+    BEGIN
+      RequestType := RequestType::Receive;
+      WhseReceiptHeader2 := WhseReceiptHeader;
+    END;
+
+    PROCEDURE NotCancelled@4() : Boolean;
+    BEGIN
+      exit(Completed);
+    END;
+
+    LOCAL PROCEDURE CreateShptHeader@10();
+    BEGIN
+      WhseShptHeader.INIT;
+      WhseShptHeader."No." := '';
+      WhseShptHeader."Location Code" := "Warehouse Request"."Location Code";
+      if Location.Code = WhseShptHeader."Location Code" then
+        WhseShptHeader."Bin Code" := Location."Shipment Bin Code";
+      WhseShptHeader."External Document No." := "Warehouse Request"."External Document No.";
+      WhseShptLine.LOCKTABLE;
+      WhseShptHeader.INSERT(true);
+      ActivitiesCreated := ActivitiesCreated + 1;
+      WhseHeaderCreated := true;
+    END;
+
+    LOCAL PROCEDURE CreateReceiptHeader@9();
+    BEGIN
+      WhseReceiptHeader.INIT;
+      WhseReceiptHeader."No." := '';
+      WhseReceiptHeader."Location Code" := "Warehouse Request"."Location Code";
+      if Location.Code = WhseReceiptHeader."Location Code" then
+        WhseReceiptHeader."Bin Code" := Location."Receipt Bin Code";
+      WhseReceiptHeader."Vendor Shipment No." := "Warehouse Request"."External Document No.";
+      WhseReceiptLine.LOCKTABLE;
+      WhseReceiptHeader.INSERT(true);
+      ActivitiesCreated := ActivitiesCreated + 1;
+      WhseHeaderCreated := true;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE UpdateReceiptHeaderStatus@19();
+    BEGIN
+      with WhseReceiptHeader do begin
+        if "No." = '' then
+          exit;
+        VALIDATE("Document Status",GetHeaderStatus(0));
+        MODIFY(true);
+      end;
+    END;
+
+    PROCEDURE SetSkipBlocked@2(Skip@1000 : Boolean);
+    BEGIN
+      SkipBlockedCustomer := Skip;
+    END;
+
+    PROCEDURE SetSkipBlockedItem@11(Skip@1000 : Boolean);
+    BEGIN
+      SkipBlockedItem := Skip;
+    END;
+
+    LOCAL PROCEDURE VerifyItemNotBlocked@12(ItemNo@1000 : Code[20]);
+    VAR
+      Item@1001 : Record Item;
+    BEGIN
+      Item.GET(ItemNo);
+      if SkipBlockedItem and Item.Blocked then
+        CurrReport.SKIP;
+
+      Item.TESTFIELD(Blocked,false);
+    END;
+
+    PROCEDURE ShowReceiptDialog@13();
+    VAR
+      SpecialHandlingMessage@1000 : Text[1024];
+    BEGIN
+      if not LineCreated then
+        ERROR(Text000);
+
+      if ErrorOccured then
+        SpecialHandlingMessage :=
+          ' ' + STRSUBSTNO(Text005,WhseReceiptHeader.TABLECAPTION,WhseReceiptLine.FIELDCAPTION("Bin Code"));
+      if (ActivitiesCreated = 0) and LineCreated and ErrorOccured then
+        MESSAGE(SpecialHandlingMessage);
+      if ActivitiesCreated = 1 then
+        MESSAGE(STRSUBSTNO(Text001,ActivitiesCreated,WhseReceiptHeader.TABLECAPTION) + SpecialHandlingMessage);
+      if ActivitiesCreated > 1 then
+        MESSAGE(STRSUBSTNO(Text002,ActivitiesCreated) + SpecialHandlingMessage);
+    END;
+
+    PROCEDURE ShowShipmentDialog@14();
+    VAR
+      SpecialHandlingMessage@1000 : Text[1024];
+    BEGIN
+      if not LineCreated then
+        ERROR(Text003);
+
+      if ErrorOccured then
+        SpecialHandlingMessage :=
+          ' ' + STRSUBSTNO(Text005,WhseShptHeader.TABLECAPTION,WhseShptLine.FIELDCAPTION("Bin Code"));
+      if (ActivitiesCreated = 0) and LineCreated and ErrorOccured then
+        MESSAGE(SpecialHandlingMessage);
+      if ActivitiesCreated = 1 then
+        MESSAGE(STRSUBSTNO(Text001,ActivitiesCreated,WhseShptHeader.TABLECAPTION) + SpecialHandlingMessage);
+      if ActivitiesCreated > 1 then
+        MESSAGE(STRSUBSTNO(Text004,ActivitiesCreated) + SpecialHandlingMessage);
+    END;
+
+    LOCAL PROCEDURE CheckFillQtyToHandle@15();
+    BEGIN
+      if DoNotFillQtytoHandle and (RequestType = RequestType::Receive) then begin
+        WhseReceiptLine.RESET;
+        WhseReceiptLine.SETRANGE("No.",WhseReceiptHeader."No.");
+        WhseReceiptLine.DeleteQtyToReceive(WhseReceiptLine);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

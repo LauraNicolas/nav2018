@@ -1,0 +1,206 @@
+OBJECT Table 172 Standard Customer Sales Code
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Standard Customer Sales Code;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Customer No.        ;Code20        ;TableRelation=Customer;
+                                                   CaptionML=ENU=Customer No.;
+                                                   NotBlank=true }
+    { 2   ;   ;Code                ;Code10        ;TableRelation="Standard Sales Code";
+                                                   OnValidate=VAR
+                                                                StdSalesCode@1000 : Record "Standard Sales Code";
+                                                              BEGIN
+                                                                if Code = '' then
+                                                                  exit;
+                                                                StdSalesCode.GET(Code);
+                                                                Description := StdSalesCode.Description;
+                                                              END;
+
+                                                   CaptionML=ENU=Code;
+                                                   NotBlank=true }
+    { 3   ;   ;Description         ;Text50        ;CaptionML=ENU=Description }
+    { 4   ;   ;Valid From Date     ;Date          ;CaptionML=ENU=Valid From Date }
+    { 5   ;   ;Valid To date       ;Date          ;CaptionML=ENU=Valid To date }
+    { 6   ;   ;Payment Method Code ;Code10        ;TableRelation="Payment Method";
+                                                   CaptionML=ENU=Payment Method Code }
+    { 7   ;   ;Payment Terms Code  ;Code10        ;TableRelation="Payment Terms";
+                                                   CaptionML=ENU=Payment Terms Code }
+    { 8   ;   ;Direct Debit Mandate ID;Code35     ;TableRelation="SEPA Direct Debit Mandate" WHERE ("Customer No."=FIELD("Customer No."),
+                                                                                                    Blocked=CONST(false),
+                                                                                                    Closed=CONST(false));
+                                                   CaptionML=ENU=Direct Debit Mandate ID }
+    { 9   ;   ;Blocked             ;Boolean       ;CaptionML=ENU=Blocked }
+  }
+  KEYS
+  {
+    {    ;"Customer No.",Code                     ;Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+
+    [External]
+    PROCEDURE CreateSalesInvoice@6(OrderDate@1000 : Date;PostingDate@1002 : Date);
+    VAR
+      SalesHeader@1001 : Record "Sales Header";
+    BEGIN
+      TESTFIELD(Blocked,false);
+      SalesHeader.INIT;
+      SalesHeader."No." := '';
+      SalesHeader."Document Type" := SalesHeader."Document Type"::Invoice;
+      SalesHeader.INSERT(true);
+      SalesHeader.VALIDATE("Sell-to Customer No.","Customer No.");
+      SalesHeader.VALIDATE("Order Date",OrderDate);
+      SalesHeader.VALIDATE("Posting Date",PostingDate);
+      SalesHeader.VALIDATE("Document Date",OrderDate);
+      if "Payment Method Code" <> '' then
+        SalesHeader.VALIDATE("Payment Method Code","Payment Method Code");
+      if "Payment Terms Code" <> '' then
+        SalesHeader.VALIDATE("Payment Terms Code","Payment Terms Code");
+      if "Direct Debit Mandate ID" <> '' then
+        SalesHeader.VALIDATE("Direct Debit Mandate ID","Direct Debit Mandate ID");
+      SalesHeader.MODIFY;
+      ApplyStdCodesToSalesLines(SalesHeader,Rec);
+    END;
+
+    [External]
+    PROCEDURE InsertSalesLines@1(VAR SalesHeader@1000 : Record "Sales Header");
+    VAR
+      StdCustSalesCode@1001 : Record "Standard Customer Sales Code";
+      StdCustSalesCodes@1002 : Page "Standard Customer Sales Codes";
+    BEGIN
+      SalesHeader.TESTFIELD("No.");
+      SalesHeader.TESTFIELD("Sell-to Customer No.");
+
+      StdCustSalesCode.FILTERGROUP := 2;
+      StdCustSalesCode.SETRANGE("Customer No.",SalesHeader."Sell-to Customer No.");
+      StdCustSalesCode.FILTERGROUP := 0;
+
+      StdCustSalesCodes.SETTABLEVIEW(StdCustSalesCode);
+      StdCustSalesCodes.LOOKUPMODE(true);
+      if StdCustSalesCodes.RUNMODAL = ACTION::LookupOK then begin
+        StdCustSalesCodes.GetSelected(StdCustSalesCode);
+        if StdCustSalesCode.FINDSET then
+          repeat
+            ApplyStdCodesToSalesLines(SalesHeader,StdCustSalesCode);
+          until StdCustSalesCode.NEXT = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ApplyStdCodesToSalesLines@2(VAR SalesHeader@1000 : Record "Sales Header";StdCustSalesCode@1004 : Record "Standard Customer Sales Code");
+    VAR
+      Currency@1006 : Record Currency;
+      StdSalesLine@1003 : Record "Standard Sales Line";
+      StdSalesCode@1002 : Record "Standard Sales Code";
+      SalesLine@1005 : Record "Sales Line";
+      Factor@1001 : Integer;
+    BEGIN
+      if SalesHeader."Currency Code" = '' then
+        Currency.InitRoundingPrecision
+      else
+        Currency.GET(SalesHeader."Currency Code");
+
+      StdCustSalesCode.TESTFIELD(Code);
+      StdCustSalesCode.TESTFIELD("Customer No.",SalesHeader."Sell-to Customer No.");
+      StdSalesCode.GET(StdCustSalesCode.Code);
+      StdSalesCode.TESTFIELD("Currency Code",SalesHeader."Currency Code");
+      StdSalesLine.SETRANGE("Standard Sales Code",StdCustSalesCode.Code);
+      SalesLine."Document Type" := SalesHeader."Document Type";
+      SalesLine."Document No." := SalesHeader."No.";
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      if SalesHeader."Prices Including VAT" then
+        Factor := 1
+      else
+        Factor := 0;
+      SalesLine.LOCKTABLE;
+      StdSalesLine.LOCKTABLE;
+      if StdSalesLine.FIND('-') then
+        repeat
+          SalesLine.INIT;
+          SalesLine."Line No." := 0;
+          SalesLine.VALIDATE(Type,StdSalesLine.Type);
+          if StdSalesLine.Type = StdSalesLine.Type::" " then begin
+            SalesLine.VALIDATE("No.",StdSalesLine."No.");
+            SalesLine.Description := StdSalesLine.Description
+          end else
+            if not StdSalesLine.EmptyLine then begin
+              StdSalesLine.TESTFIELD("No.");
+              SalesLine.VALIDATE("No.",StdSalesLine."No.");
+              if StdSalesLine."Variant Code" <> '' then
+                SalesLine.VALIDATE("Variant Code",StdSalesLine."Variant Code");
+              SalesLine.VALIDATE(Quantity,StdSalesLine.Quantity);
+              if StdSalesLine."Unit of Measure Code" <> '' then
+                SalesLine.VALIDATE("Unit of Measure Code",StdSalesLine."Unit of Measure Code");
+              SalesLine.Description := StdSalesLine.Description;
+              if (StdSalesLine.Type = StdSalesLine.Type::"G/L Account") or
+                 (StdSalesLine.Type = StdSalesLine.Type::"Charge (Item)")
+              then
+                SalesLine.VALIDATE(
+                  "Unit Price",
+                  ROUND(StdSalesLine."Amount Excl. VAT" *
+                    (SalesLine."VAT %" / 100 * Factor + 1),Currency."Unit-Amount Rounding Precision"));
+            end;
+
+          SalesLine."Shortcut Dimension 1 Code" := StdSalesLine."Shortcut Dimension 1 Code";
+          SalesLine."Shortcut Dimension 2 Code" := StdSalesLine."Shortcut Dimension 2 Code";
+
+          CombineDimensions(SalesLine,StdSalesLine);
+
+          if StdSalesLine.InsertLine then begin
+            SalesLine."Line No." := GetNextLineNo(SalesLine);
+            SalesLine.INSERT(true);
+            SalesLine.AutoAsmToOrder;
+            InsertExtendedText(SalesLine);
+          end;
+        until StdSalesLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CombineDimensions@5(VAR SalesLine@1001 : Record "Sales Line";StdSalesLine@1002 : Record "Standard Sales Line");
+    VAR
+      DimensionManagement@1000 : Codeunit DimensionManagement;
+      DimensionSetIDArr@1005 : ARRAY [10] OF Integer;
+    BEGIN
+      DimensionSetIDArr[1] := SalesLine."Dimension Set ID";
+      DimensionSetIDArr[2] := StdSalesLine."Dimension Set ID";
+
+      SalesLine."Dimension Set ID" :=
+        DimensionManagement.GetCombinedDimensionSetID(
+          DimensionSetIDArr,SalesLine."Shortcut Dimension 1 Code",SalesLine."Shortcut Dimension 2 Code");
+    END;
+
+    LOCAL PROCEDURE InsertExtendedText@3(SalesLine@1000 : Record "Sales Line");
+    VAR
+      TransferExtendedText@1001 : Codeunit "Transfer Extended Text";
+    BEGIN
+      if TransferExtendedText.SalesCheckIfAnyExtText(SalesLine,false) then
+        TransferExtendedText.InsertSalesExtText(SalesLine);
+    END;
+
+    LOCAL PROCEDURE GetNextLineNo@4(SalesLine@1001 : Record "Sales Line") : Integer;
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesLine."Document No.");
+      if SalesLine.FINDLAST then
+        exit(SalesLine."Line No." + 10000);
+
+      exit(10000);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

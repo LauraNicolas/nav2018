@@ -1,0 +1,919 @@
+OBJECT Codeunit 6520 Item Tracing Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      FirstLevelEntries@1027 : TEMPORARY Record "Item Tracing Buffer";
+      TempTraceHistory@1000 : TEMPORARY Record "Item Tracing History Buffer";
+      SearchCriteria@1013 : 'None,Lot,Serial,Both,Item';
+      TempLineNo@1007 : Integer;
+      CurrentLevel@1006 : Integer;
+      NextLineNo@1001 : Integer;
+      CurrentHistoryEntryNo@1002 : Integer;
+
+    [External]
+    PROCEDURE FindRecords@1000000001(VAR TempTrackEntry@1005 : Record "Item Tracing Buffer";VAR TempTrackEntry2@1004 : Record "Item Tracing Buffer";SerialNoFilter@1003 : Text;LotNoFilter@1002 : Text;ItemNoFilter@1001 : Text;VariantFilter@1000 : Text;Direction@1006 : 'Forward,Backward';ShowComponents@1007 : 'No,"Item-tracked only",All');
+    BEGIN
+      DeleteTempTables(TempTrackEntry,TempTrackEntry2);
+      InitSearchCriteria(SerialNoFilter,LotNoFilter,ItemNoFilter);
+      FirstLevel(TempTrackEntry,SerialNoFilter,LotNoFilter,ItemNoFilter,VariantFilter,Direction,ShowComponents);
+      if TempLineNo > 0 then
+        InitTempTable(TempTrackEntry,TempTrackEntry2);
+      TempTrackEntry.RESET;
+      UpdateHistory(SerialNoFilter,LotNoFilter,ItemNoFilter,VariantFilter,Direction,ShowComponents);
+    END;
+
+    LOCAL PROCEDURE FirstLevel@1(VAR TempTrackEntry@1007 : Record "Item Tracing Buffer";SerialNoFilter@1006 : Text;LotNoFilter@1005 : Text;ItemNoFilter@1004 : Text;VariantFilter@1003 : Text;Direction@1008 : 'Forward,Backward';ShowComponents@1009 : 'No,"Item-tracked only",All');
+    VAR
+      ItemLedgEntry@1001 : Record "Item Ledger Entry";
+      ItemLedgEntry2@1000 : Record "Item Ledger Entry";
+      ItemApplnEntry@1002 : Record "Item Application Entry";
+    BEGIN
+      TempLineNo := 0;
+      CurrentLevel := 0;
+
+      ItemLedgEntry.RESET;
+      case SearchCriteria of
+        SearchCriteria::None:
+          exit;
+        SearchCriteria::Serial:
+          if not ItemLedgEntry.SETCURRENTKEY("Serial No.") then
+            if ItemNoFilter <> '' then
+              ItemLedgEntry.SETCURRENTKEY("Item No.")
+            else
+              ItemLedgEntry.SETCURRENTKEY("Item No.",Open,"Variant Code",Positive,
+                "Location Code","Posting Date","Expiration Date","Lot No.","Serial No.");
+        SearchCriteria::Lot,
+        SearchCriteria::Both:
+          if not ItemLedgEntry.SETCURRENTKEY("Lot No.") then
+            if ItemNoFilter <> '' then
+              ItemLedgEntry.SETCURRENTKEY("Item No.")
+            else
+              ItemLedgEntry.SETCURRENTKEY("Item No.",Open,"Variant Code",Positive,
+                "Location Code","Posting Date","Expiration Date","Lot No.","Serial No.");
+        SearchCriteria::Item:
+          ItemLedgEntry.SETCURRENTKEY("Item No.");
+      end;
+
+      ItemLedgEntry.SETFILTER("Lot No.",LotNoFilter);
+      ItemLedgEntry.SETFILTER("Serial No.",SerialNoFilter);
+      ItemLedgEntry.SETFILTER("Item No.",ItemNoFilter);
+      ItemLedgEntry.SETFILTER("Variant Code",VariantFilter);
+      if Direction = Direction::Forward then
+        ItemLedgEntry.SETRANGE(Positive,true);
+
+      CLEAR(FirstLevelEntries);
+      FirstLevelEntries.DELETEALL;
+      NextLineNo := 0;
+      if ItemLedgEntry.FINDSET then
+        repeat
+          NextLineNo += 1;
+          FirstLevelEntries."Line No." := NextLineNo;
+          FirstLevelEntries."Item No." := ItemLedgEntry."Item No.";
+          FirstLevelEntries."Serial No." := ItemLedgEntry."Serial No.";
+          FirstLevelEntries."Lot No." := ItemLedgEntry."Lot No.";
+          FirstLevelEntries."Item Ledger Entry No." := ItemLedgEntry."Entry No.";
+          FirstLevelEntries.INSERT;
+        until ItemLedgEntry.NEXT = 0;
+
+      case SearchCriteria of
+        SearchCriteria::None:
+          exit;
+        SearchCriteria::Serial:
+          FirstLevelEntries.SETCURRENTKEY("Serial No.","Item Ledger Entry No.");
+        SearchCriteria::Lot,
+        SearchCriteria::Both:
+          FirstLevelEntries.SETCURRENTKEY("Lot No.","Item Ledger Entry No.");
+        SearchCriteria::Item:
+          FirstLevelEntries.SETCURRENTKEY("Item No.","Item Ledger Entry No.");
+      end;
+
+      FirstLevelEntries.ASCENDING(Direction = Direction::Forward);
+      if FirstLevelEntries.FIND('-') then
+        repeat
+          ItemLedgEntry.GET(FirstLevelEntries."Item Ledger Entry No.");
+          if ItemLedgEntry.TrackingExists then begin
+            ItemLedgEntry2 := ItemLedgEntry;
+
+            // Test for Reclass
+            if (Direction = Direction::Backward) and
+               (ItemLedgEntry."Entry Type" = ItemLedgEntry."Entry Type"::Transfer) and
+               not ItemLedgEntry.Positive
+            then begin
+              ItemApplnEntry.RESET;
+              ItemApplnEntry.SETCURRENTKEY("Outbound Item Entry No.");
+              ItemApplnEntry.SETRANGE("Outbound Item Entry No.",ItemLedgEntry2."Entry No.");
+              ItemApplnEntry.SETRANGE("Item Ledger Entry No.",ItemLedgEntry2."Entry No.");
+              ItemApplnEntry.SETRANGE("Transferred-from Entry No.",0);
+              if ItemApplnEntry.FINDFIRST then begin
+                ItemApplnEntry.SETFILTER("Item Ledger Entry No.",'<>%1',ItemLedgEntry2."Entry No.");
+                ItemApplnEntry.SETRANGE("Transferred-from Entry No.",ItemApplnEntry."Inbound Item Entry No.");
+                if ItemApplnEntry.FINDFIRST then begin
+                  ItemLedgEntry2.RESET;
+                  if not ItemLedgEntry2.GET(ItemApplnEntry."Item Ledger Entry No.") then
+                    ItemLedgEntry2 := ItemLedgEntry;
+                end;
+              end;
+            end;
+
+            if SearchCriteria = SearchCriteria::Item then
+              ItemLedgEntry2.SETRANGE("Item No.",ItemLedgEntry."Item No.");
+            TransferData(ItemLedgEntry2,TempTrackEntry);
+            if InsertRecord(TempTrackEntry,0) then begin
+              FindComponents(ItemLedgEntry2,TempTrackEntry,Direction,ShowComponents,ItemLedgEntry2."Entry No.");
+              NextLevel(TempTrackEntry,TempTrackEntry,Direction,ShowComponents,ItemLedgEntry2."Entry No.");
+            end;
+          end;
+        until (FirstLevelEntries.NEXT = 0) or (CurrentLevel > 50);
+    END;
+
+    LOCAL PROCEDURE NextLevel@1000000000(VAR TempTrackEntry@1000 : Record "Item Tracing Buffer";TempTrackEntry2@1004 : Record "Item Tracing Buffer";Direction@1002 : 'Forward,Backward';ShowComponents@1003 : 'No,"Item-tracked only",All';ParentID@1005 : Integer);
+    VAR
+      ItemLedgEntry@1000000004 : Record "Item Ledger Entry";
+      ItemApplnEntry@1000000005 : Record "Item Application Entry";
+      TrackNo@1001 : Integer;
+    BEGIN
+      with TempTrackEntry2 do begin
+        if ExitLevel(TempTrackEntry) then
+          exit;
+        CurrentLevel += 1;
+
+        ItemApplnEntry.RESET;
+        // Test for if we have reached lowest level possible - if so exit
+        if (Direction = Direction::Backward) and Positive then begin
+          ItemApplnEntry.SETCURRENTKEY("Inbound Item Entry No.","Item Ledger Entry No.","Outbound Item Entry No.");
+          ItemApplnEntry.SETRANGE("Inbound Item Entry No.","Item Ledger Entry No.");
+          ItemApplnEntry.SETRANGE("Item Ledger Entry No.","Item Ledger Entry No.");
+          ItemApplnEntry.SETRANGE("Outbound Item Entry No.",0);
+          if ItemApplnEntry.FIND('-') then begin
+            CurrentLevel -= 1;
+            exit;
+          end;
+          ItemApplnEntry.RESET;
+        end;
+
+        if Positive then begin
+          ItemApplnEntry.SETCURRENTKEY("Inbound Item Entry No.","Item Ledger Entry No.","Outbound Item Entry No.");
+          ItemApplnEntry.SETRANGE("Inbound Item Entry No.","Item Ledger Entry No.");
+        end else begin
+          ItemApplnEntry.SETCURRENTKEY("Outbound Item Entry No.");
+          ItemApplnEntry.SETRANGE("Outbound Item Entry No.","Item Ledger Entry No.");
+        end;
+
+        if Direction = Direction::Forward then
+          ItemApplnEntry.SETFILTER("Item Ledger Entry No.",'<>%1',"Item Ledger Entry No.")
+        else
+          ItemApplnEntry.SETRANGE("Item Ledger Entry No.","Item Ledger Entry No.");
+
+        ItemApplnEntry.ASCENDING(Direction = Direction::Forward);
+        if ItemApplnEntry.FIND('-') then
+          repeat
+            if Positive then
+              TrackNo := ItemApplnEntry."Outbound Item Entry No."
+            else
+              TrackNo := ItemApplnEntry."Inbound Item Entry No.";
+
+            if TrackNo <> 0 then
+              if ItemLedgEntry.GET(TrackNo) then begin
+                TransferData(ItemLedgEntry,TempTrackEntry);
+                if InsertRecord(TempTrackEntry,ParentID) then begin
+                  FindComponents(ItemLedgEntry,TempTrackEntry,Direction,ShowComponents,ItemLedgEntry."Entry No.");
+                  NextLevel(TempTrackEntry,TempTrackEntry,Direction,ShowComponents,ItemLedgEntry."Entry No.");
+                end;
+              end;
+          until (TrackNo = 0) or (ItemApplnEntry.NEXT = 0);
+      end;
+      CurrentLevel -= 1;
+    END;
+
+    LOCAL PROCEDURE FindComponents@2(VAR ItemLedgEntry2@1000 : Record "Item Ledger Entry";VAR TempTrackEntry@1002 : Record "Item Tracing Buffer";Direction@1003 : 'Forward,Backward';ShowComponents@1004 : 'No,"Item-tracked only",All';ParentID@1005 : Integer);
+    VAR
+      ItemLedgEntry@1001 : Record "Item Ledger Entry";
+    BEGIN
+      with ItemLedgEntry2 do begin
+        if (("Order Type" <> "Order Type"::Production) and ("Order Type" <> "Order Type"::Assembly)) or ("Order No." = '') then
+          exit;
+
+        if ((("Entry Type" = "Entry Type"::Consumption) or ("Entry Type" = "Entry Type"::"Assembly Consumption")) and
+            (Direction = Direction::Forward) ) or
+           ((("Entry Type" = "Entry Type"::Output) or ("Entry Type" = "Entry Type"::"Assembly Output")) and
+            (Direction = Direction::Backward))
+        then begin
+          ItemLedgEntry.RESET;
+          ItemLedgEntry.SETCURRENTKEY("Order Type","Order No.");
+          ItemLedgEntry.SETRANGE("Order Type","Order Type");
+          ItemLedgEntry.SETRANGE("Order No.","Order No.");
+          if "Order Type" = "Order Type"::Production then
+            ItemLedgEntry.SETRANGE("Order Line No.","Order Line No.");
+          ItemLedgEntry.SETFILTER("Entry No.",'<>%1',ParentID);
+          if ("Entry Type" = "Entry Type"::Consumption) or ("Entry Type" = "Entry Type"::"Assembly Consumption") then begin
+            if ShowComponents <> ShowComponents::No then begin
+              ItemLedgEntry.SETFILTER("Entry Type",'%1|%2',ItemLedgEntry."Entry Type"::Consumption,
+                ItemLedgEntry."Entry Type"::"Assembly Consumption");
+              ItemLedgEntry.SETRANGE(Positive,false);
+              if ItemLedgEntry.FIND('-') then
+                repeat
+                  if (ShowComponents = ShowComponents::All) or ItemLedgEntry.TrackingExists then begin
+                    CurrentLevel += 1;
+                    TransferData(ItemLedgEntry,TempTrackEntry);
+                    if InsertRecord(TempTrackEntry,ParentID) then
+                      NextLevel(TempTrackEntry,TempTrackEntry,Direction,ShowComponents,ItemLedgEntry."Entry No.");
+                    CurrentLevel -= 1;
+                  end;
+                until ItemLedgEntry.NEXT = 0;
+            end;
+            ItemLedgEntry.SETFILTER("Entry Type",'%1|%2',ItemLedgEntry."Entry Type"::Output,
+              ItemLedgEntry."Entry Type"::"Assembly Output");
+            ItemLedgEntry.SETRANGE(Positive,true);
+          end else begin
+            if ShowComponents = ShowComponents::No then
+              exit;
+            ItemLedgEntry.SETFILTER("Entry Type",'%1|%2',ItemLedgEntry."Entry Type"::Consumption,
+              ItemLedgEntry."Entry Type"::"Assembly Consumption");
+            ItemLedgEntry.SETRANGE(Positive,false);
+          end;
+          CurrentLevel += 1;
+          if ItemLedgEntry.FIND('-') then
+            repeat
+              if (ShowComponents = ShowComponents::All) or ItemLedgEntry.TrackingExists then begin
+                TransferData(ItemLedgEntry,TempTrackEntry);
+                if InsertRecord(TempTrackEntry,ParentID) then
+                  NextLevel(TempTrackEntry,TempTrackEntry,Direction,ShowComponents,ItemLedgEntry."Entry No.");
+              end;
+            until ItemLedgEntry.NEXT = 0;
+          CurrentLevel -= 1;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertRecord@1000000004(VAR TempTrackEntry@1002 : Record "Item Tracing Buffer";ParentID@1003 : Integer) : Boolean;
+    VAR
+      TempTrackEntry2@1004 : Record "Item Tracing Buffer";
+      ProductionOrder@1000 : Record "Production Order";
+      ItemLedgerEntry@1005 : Record "Item Ledger Entry";
+      Job@1006 : Record Job;
+      RecRef@1001 : RecordRef;
+      InsertEntry@1007 : Boolean;
+      Description2@1008 : Text[100];
+    BEGIN
+      with TempTrackEntry do begin
+        TempTrackEntry2 := TempTrackEntry;
+        RESET;
+        SETCURRENTKEY("Item Ledger Entry No.");
+        SETRANGE("Item Ledger Entry No.","Item Ledger Entry No.");
+
+        // Mark entry if already in search result
+        TempTrackEntry2."Already Traced" := FINDFIRST;
+
+        if CurrentLevel = 1 then begin
+          SETRANGE("Parent Item Ledger Entry No.",ParentID);
+          SETFILTER(Level,'<>%1',CurrentLevel);
+        end;
+
+        InsertEntry := true;
+        if CurrentLevel <= 1 then
+          InsertEntry := not FINDFIRST;
+
+        if InsertEntry then begin
+          TempTrackEntry2.RESET;
+          TempTrackEntry := TempTrackEntry2;
+          TempLineNo += 1;
+          "Line No." := TempLineNo;
+          SetRecordID(TempTrackEntry);
+          "Parent Item Ledger Entry No." := ParentID;
+          if FORMAT("Record Identifier") = '' then
+            Description2 := STRSUBSTNO('%1 %2',"Entry Type","Document No.")
+          else begin
+            if RecRef.GET("Record Identifier") then
+              case RecRef.NUMBER of
+                DATABASE::"Production Order":
+                  begin
+                    RecRef.SETTABLE(ProductionOrder);
+                    Description2 :=
+                      STRSUBSTNO('%1 %2 %3 %4',ProductionOrder.Status,RecRef.CAPTION,"Entry Type","Document No.");
+                  end;
+                DATABASE::"Posted Assembly Header":
+                  Description2 := STRSUBSTNO('%1 %2',"Entry Type","Document No.");
+                DATABASE::"Item Ledger Entry":
+                  begin
+                    RecRef.SETTABLE(ItemLedgerEntry);
+                    if ItemLedgerEntry."Job No." <> '' then begin
+                      Job.GET(ItemLedgerEntry."Job No.");
+                      Description2 := FORMAT(STRSUBSTNO('%1 %2',Job.TABLECAPTION,ItemLedgerEntry."Job No."),-50);
+                    end;
+                  end;
+              end;
+            if Description2 = '' then
+              Description2 := STRSUBSTNO('%1 %2',RecRef.CAPTION,"Document No.");
+          end;
+          SetDescription(Description2);
+          INSERT;
+          exit(true);
+        end;
+        exit(false);
+      end;
+    END;
+
+    [External]
+    PROCEDURE InitTempTable@3(VAR TempTrackEntry@1000 : Record "Item Tracing Buffer";VAR TempTrackEntry2@1001 : Record "Item Tracing Buffer");
+    BEGIN
+      TempTrackEntry2.RESET;
+      TempTrackEntry2.DELETEALL;
+      TempTrackEntry.RESET;
+      TempTrackEntry.SETRANGE(Level,0);
+      if TempTrackEntry.FIND('-') then
+        repeat
+          TempTrackEntry2 := TempTrackEntry;
+          TempTrackEntry2.INSERT;
+        until TempTrackEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DeleteTempTables@1000000002(VAR TempTrackEntry@1002 : Record "Item Tracing Buffer";VAR TempTrackEntry2@1001 : Record "Item Tracing Buffer");
+    BEGIN
+      CLEAR(TempTrackEntry);
+      if not TempTrackEntry.ISEMPTY then
+        TempTrackEntry.DELETEALL;
+
+      CLEAR(TempTrackEntry2);
+      if not TempTrackEntry2.ISEMPTY then
+        TempTrackEntry2.DELETEALL;
+    END;
+
+    [External]
+    PROCEDURE ExpandAll@1000000009(VAR TempTrackEntry@1001 : Record "Item Tracing Buffer";VAR TempTrackEntry2@1000 : Record "Item Tracing Buffer");
+    BEGIN
+      TempTrackEntry2.RESET;
+      TempTrackEntry2.DELETEALL;
+      TempTrackEntry.RESET;
+      if TempTrackEntry.FINDSET then
+        repeat
+          TempTrackEntry2 := TempTrackEntry;
+          TempTrackEntry2.INSERT;
+        until TempTrackEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE IsExpanded@5(ActualTrackingLine@1000 : Record "Item Tracing Buffer";VAR TempTrackEntry2@1001 : Record "Item Tracing Buffer") : Boolean;
+    VAR
+      xTrackEntry@1002 : Record "Item Tracing Buffer";
+      Found@1003 : Boolean;
+    BEGIN
+      xTrackEntry.COPY(TempTrackEntry2);
+      TempTrackEntry2.RESET;
+      TempTrackEntry2 := ActualTrackingLine;
+      Found := (TempTrackEntry2.NEXT <> 0);
+      if Found then
+        Found := (TempTrackEntry2.Level > ActualTrackingLine.Level);
+      TempTrackEntry2.COPY(xTrackEntry);
+      exit(Found);
+    END;
+
+    LOCAL PROCEDURE HasChildren@6(ActualTrackingLine@1000 : Record "Item Tracing Buffer";VAR TempTrackEntry@1001 : Record "Item Tracing Buffer") : Boolean;
+    BEGIN
+      TempTrackEntry.RESET;
+      TempTrackEntry := ActualTrackingLine;
+      if TempTrackEntry.NEXT = 0 then
+        exit(false);
+
+      exit(TempTrackEntry.Level > ActualTrackingLine.Level);
+    END;
+
+    LOCAL PROCEDURE TransferData@1000000003(VAR ItemLedgEntry@1000000000 : Record "Item Ledger Entry";VAR TempTrackEntry@1000 : Record "Item Tracing Buffer");
+    VAR
+      Customer@1000000002 : Record Customer;
+      Vendor@1000000003 : Record Vendor;
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      TempTrackEntry.INIT;
+      TempTrackEntry."Line No." := 9999999;
+      TempTrackEntry.Level := CurrentLevel;
+      TempTrackEntry."Item No." := ItemLedgEntry."Item No.";
+      TempTrackEntry."Item Description" := GetItemDescription(ItemLedgEntry."Item No.");
+      TempTrackEntry."Posting Date" := ItemLedgEntry."Posting Date";
+      TempTrackEntry."Entry Type" := ItemLedgEntry."Entry Type";
+      TempTrackEntry."Source Type" := ItemLedgEntry."Source Type";
+      TempTrackEntry."Source No." := ItemLedgEntry."Source No.";
+      TempTrackEntry."Source Name" := '';
+      case TempTrackEntry."Source Type" of
+        TempTrackEntry."Source Type"::Customer:
+          if Customer.GET(TempTrackEntry."Source No.") then
+            TempTrackEntry."Source Name" := Customer.Name;
+        TempTrackEntry."Source Type"::Vendor:
+          if Vendor.GET(TempTrackEntry."Source No.") then
+            TempTrackEntry."Source Name" := Vendor.Name;
+      end;
+      TempTrackEntry."Document No." := ItemLedgEntry."Document No.";
+      TempTrackEntry.Description := ItemLedgEntry.Description;
+      TempTrackEntry."Location Code" := ItemLedgEntry."Location Code";
+      TempTrackEntry.Quantity := ItemLedgEntry.Quantity;
+      TempTrackEntry."Remaining Quantity" := ItemLedgEntry."Remaining Quantity";
+      TempTrackEntry.Open := ItemLedgEntry.Open;
+      TempTrackEntry.Positive := ItemLedgEntry.Positive;
+      TempTrackEntry."Variant Code" := ItemLedgEntry."Variant Code";
+      TempTrackEntry."Serial No." := ItemLedgEntry."Serial No.";
+      TempTrackEntry."Lot No." := ItemLedgEntry."Lot No.";
+      TempTrackEntry."Item Ledger Entry No." := ItemLedgEntry."Entry No.";
+
+      ValueEntry.RESET;
+      ValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Document No.");
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgEntry."Entry No.");
+      if not ValueEntry.FINDFIRST then
+        CLEAR(ValueEntry);
+      TempTrackEntry."Created by" := ValueEntry."User ID";
+      TempTrackEntry."Created on" := ValueEntry."Posting Date";
+    END;
+
+    [External]
+    PROCEDURE InitSearchCriteria@1000000006(SerialNoFilter@1003 : Text;LotNoFilter@1002 : Text;ItemNoFilter@1001 : Text);
+    BEGIN
+      if (SerialNoFilter = '') and (LotNoFilter = '') and (ItemNoFilter = '') then
+        SearchCriteria := SearchCriteria::None
+      else
+        if LotNoFilter <> '' then begin
+          if SerialNoFilter = '' then
+            SearchCriteria := SearchCriteria::Lot
+          else
+            SearchCriteria := SearchCriteria::Both;
+        end else
+          if SerialNoFilter <> '' then
+            SearchCriteria := SearchCriteria::Serial
+          else
+            if ItemNoFilter <> '' then
+              SearchCriteria := SearchCriteria::Item;
+    END;
+
+    [External]
+    PROCEDURE InitSearchParm@1000000007(VAR Rec@1001 : Record "Item Tracing Buffer";VAR SerialNoFilter@1003 : Text;VAR LotNoFilter@1002 : Text;VAR ItemNoFilter@1004 : Text;VAR VariantFilter@1000 : Text);
+    VAR
+      ItemTrackingEntry@1005 : Record "Item Tracing Buffer";
+    BEGIN
+      with Rec do begin
+        ItemTrackingEntry.SETRANGE("Serial No.","Serial No.");
+        ItemTrackingEntry.SETRANGE("Lot No.","Lot No.");
+        ItemTrackingEntry.SETRANGE("Item No.","Item No.");
+        ItemTrackingEntry.SETRANGE("Variant Code","Variant Code");
+        SerialNoFilter := ItemTrackingEntry.GETFILTER("Serial No.");
+        LotNoFilter := ItemTrackingEntry.GETFILTER("Lot No.");
+        ItemNoFilter := ItemTrackingEntry.GETFILTER("Item No.");
+        VariantFilter := ItemTrackingEntry.GETFILTER("Variant Code");
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetRecordID@1000000010(VAR TrackingEntry@1000000010 : Record "Item Tracing Buffer");
+    VAR
+      ItemLedgEntry@1000 : Record "Item Ledger Entry";
+      PurchRcptHeader@1000000006 : Record "Purch. Rcpt. Header";
+      PurchInvHeader@1000000005 : Record "Purch. Inv. Header";
+      PurchCrMemoHeader@1000000004 : Record "Purch. Cr. Memo Hdr.";
+      SalesShptHeader@1000000003 : Record "Sales Shipment Header";
+      SalesInvHeader@1000000002 : Record "Sales Invoice Header";
+      SalesCrMemoHeader@1000000001 : Record "Sales Cr.Memo Header";
+      ReturnShipHeader@1001 : Record "Return Shipment Header";
+      ReturnRcptHeader@1002 : Record "Return Receipt Header";
+      TransShipHeader@1000000007 : Record "Transfer Shipment Header";
+      TransRcptHeader@1000000008 : Record "Transfer Receipt Header";
+      ProductionOrder@1000000000 : Record "Production Order";
+      ServShptHeader@1005 : Record "Service Shipment Header";
+      ServInvHeader@1004 : Record "Service Invoice Header";
+      ServCrMemoHeader@1003 : Record "Service Cr.Memo Header";
+      RecRef@1000000011 : RecordRef;
+    BEGIN
+      with TrackingEntry do begin
+        CLEAR(RecRef);
+
+        case "Entry Type" of
+          "Entry Type"::Purchase:
+            if not Positive then begin
+              if PurchCrMemoHeader.GET("Document No.") then begin
+                RecRef.GETTABLE(PurchCrMemoHeader);
+                "Record Identifier" := RecRef.RECORDID;
+              end else
+                if ReturnShipHeader.GET("Document No.") then begin
+                  RecRef.GETTABLE(ReturnShipHeader);
+                  "Record Identifier" := RecRef.RECORDID;
+                end else
+                  if ItemLedgEntry.GET("Item Ledger Entry No.") then begin
+                    RecRef.GETTABLE(ItemLedgEntry);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end;
+            end else
+              if PurchRcptHeader.GET("Document No.") then begin
+                RecRef.GETTABLE(PurchRcptHeader);
+                "Record Identifier" := RecRef.RECORDID;
+              end else
+                if PurchInvHeader.GET("Document No.") then begin
+                  RecRef.GETTABLE(PurchInvHeader);
+                  "Record Identifier" := RecRef.RECORDID;
+                end else
+                  if ItemLedgEntry.GET("Item Ledger Entry No.") then begin
+                    RecRef.GETTABLE(ItemLedgEntry);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end;
+          "Entry Type"::Sale:
+            if IsServiceDocument("Item Ledger Entry No.",ItemLedgEntry) then
+              case ItemLedgEntry."Document Type" of
+                ItemLedgEntry."Document Type"::"Service Shipment":
+                  if ServShptHeader.GET("Document No.") then begin
+                    RecRef.GETTABLE(ServShptHeader);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end else
+                    begin
+                    RecRef.GETTABLE(ItemLedgEntry);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end;
+                ItemLedgEntry."Document Type"::"Service Invoice":
+                  if ServInvHeader.GET("Document No.") then begin
+                    RecRef.GETTABLE(ServInvHeader);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end else begin
+                    RecRef.GETTABLE(ItemLedgEntry);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end;
+                ItemLedgEntry."Document Type"::"Service Credit Memo":
+                  if ServCrMemoHeader.GET("Document No.") then begin
+                    RecRef.GETTABLE(ServCrMemoHeader);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end else begin
+                    RecRef.GETTABLE(ItemLedgEntry);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end;
+              end
+            else
+              if Positive then begin
+                if SalesCrMemoHeader.GET("Document No.") then begin
+                  RecRef.GETTABLE(SalesCrMemoHeader);
+                  "Record Identifier" := RecRef.RECORDID;
+                end else
+                  if ReturnRcptHeader.GET("Document No.") then begin
+                    RecRef.GETTABLE(ReturnRcptHeader);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end else
+                    if ItemLedgEntry.GET("Item Ledger Entry No.") then begin
+                      RecRef.GETTABLE(ItemLedgEntry);
+                      "Record Identifier" := RecRef.RECORDID;
+                    end;
+              end else
+                if SalesShptHeader.GET("Document No.") then begin
+                  RecRef.GETTABLE(SalesShptHeader);
+                  "Record Identifier" := RecRef.RECORDID;
+                end else
+                  if SalesInvHeader.GET("Document No.") then begin
+                    RecRef.GETTABLE(SalesInvHeader);
+                    "Record Identifier" := RecRef.RECORDID;
+                  end else
+                    if ItemLedgEntry.GET("Item Ledger Entry No.") then begin
+                      RecRef.GETTABLE(ItemLedgEntry);
+                      "Record Identifier" := RecRef.RECORDID;
+                    end;
+          "Entry Type"::"Positive Adjmt.",
+          "Entry Type"::"Negative Adjmt.":
+            if ItemLedgEntry.GET("Item Ledger Entry No.") then begin
+              RecRef.GETTABLE(ItemLedgEntry);
+              "Record Identifier" := RecRef.RECORDID;
+            end;
+          "Entry Type"::Transfer:
+            if TransShipHeader.GET("Document No.") then begin
+              RecRef.GETTABLE(TransShipHeader);
+              "Record Identifier" := RecRef.RECORDID;
+            end else
+              if TransRcptHeader.GET("Document No.") then begin
+                RecRef.GETTABLE(TransRcptHeader);
+                "Record Identifier" := RecRef.RECORDID;
+              end else
+                if ItemLedgEntry.GET("Item Ledger Entry No.") then begin
+                  RecRef.GETTABLE(ItemLedgEntry);
+                  "Record Identifier" := RecRef.RECORDID;
+                end;
+          "Entry Type"::"Assembly Consumption",
+          "Entry Type"::"Assembly Output":
+            SetRecordIDAssembly(TrackingEntry);
+          "Entry Type"::Consumption,
+          "Entry Type"::Output:
+            begin
+              ProductionOrder.SETFILTER(Status,'>=%1',ProductionOrder.Status::Released);
+              ProductionOrder.SETRANGE("No.","Document No.");
+              if ProductionOrder.FINDFIRST then begin
+                RecRef.GETTABLE(ProductionOrder);
+                "Record Identifier" := RecRef.RECORDID;
+              end;
+            end;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetRecordIDAssembly@17(VAR ItemTracingBuffer@1000 : Record "Item Tracing Buffer");
+    VAR
+      PostedAssemblyHeader@1001 : Record "Posted Assembly Header";
+      RecRef@1002 : RecordRef;
+    BEGIN
+      with ItemTracingBuffer do
+        if PostedAssemblyHeader.GET("Document No.") then begin
+          RecRef.GETTABLE(PostedAssemblyHeader);
+          "Record Identifier" := RecRef.RECORDID;
+        end;
+    END;
+
+    [External]
+    PROCEDURE ShowDocument@1000000008(RecID@1000000010 : RecordID);
+    VAR
+      ItemLedgEntry@1000 : Record "Item Ledger Entry";
+      SalesShptHeader@1000000003 : Record "Sales Shipment Header";
+      SalesInvHeader@1000000000 : Record "Sales Invoice Header";
+      SalesCrMemoHeader@1000000002 : Record "Sales Cr.Memo Header";
+      ServShptHeader@1005 : Record "Service Shipment Header";
+      ServInvHeader@1004 : Record "Service Invoice Header";
+      ServCrMemoHeader@1003 : Record "Service Cr.Memo Header";
+      PurchRcptHeader@1000000006 : Record "Purch. Rcpt. Header";
+      PurchInvHeader@1000000005 : Record "Purch. Inv. Header";
+      PurchCrMemoHeader@1000000004 : Record "Purch. Cr. Memo Hdr.";
+      ReturnShipHeader@1002 : Record "Return Shipment Header";
+      ReturnRcptHeader@1001 : Record "Return Receipt Header";
+      TransShipHeader@1000000009 : Record "Transfer Shipment Header";
+      TransRcptHeader@1000000008 : Record "Transfer Receipt Header";
+      ProductionOrder@1000000001 : Record "Production Order";
+      PostedAssemblyHeader@1006 : Record "Posted Assembly Header";
+      RecRef@1000000007 : RecordRef;
+    BEGIN
+      if FORMAT(RecID) = '' then
+        exit;
+
+      RecRef := RecID.GETRECORD;
+
+      case RecID.TABLENO of
+        DATABASE::"Item Ledger Entry":
+          begin
+            RecRef.SETTABLE(ItemLedgEntry);
+            PAGE.RUNMODAL(PAGE::"Item Ledger Entries",ItemLedgEntry);
+          end;
+        DATABASE::"Sales Shipment Header":
+          begin
+            RecRef.SETTABLE(SalesShptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Sales Shipment",SalesShptHeader);
+          end;
+        DATABASE::"Sales Invoice Header":
+          begin
+            RecRef.SETTABLE(SalesInvHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Sales Invoice",SalesInvHeader);
+          end;
+        DATABASE::"Sales Cr.Memo Header":
+          begin
+            RecRef.SETTABLE(SalesCrMemoHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Sales Credit Memo",SalesCrMemoHeader);
+          end;
+        DATABASE::"Service Shipment Header":
+          begin
+            RecRef.SETTABLE(ServShptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Service Shipment",ServShptHeader);
+          end;
+        DATABASE::"Service Invoice Header":
+          begin
+            RecRef.SETTABLE(ServInvHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Service Invoice",ServInvHeader);
+          end;
+        DATABASE::"Service Cr.Memo Header":
+          begin
+            RecRef.SETTABLE(ServCrMemoHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Service Credit Memo",ServCrMemoHeader);
+          end;
+        DATABASE::"Purch. Rcpt. Header":
+          begin
+            RecRef.SETTABLE(PurchRcptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Purchase Receipt",PurchRcptHeader);
+          end;
+        DATABASE::"Purch. Inv. Header":
+          begin
+            RecRef.SETTABLE(PurchInvHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Purchase Invoice",PurchInvHeader);
+          end;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          begin
+            RecRef.SETTABLE(PurchCrMemoHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Purchase Credit Memo",PurchCrMemoHeader);
+          end;
+        DATABASE::"Return Shipment Header":
+          begin
+            RecRef.SETTABLE(ReturnShipHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Return Shipment",ReturnShipHeader);
+          end;
+        DATABASE::"Return Receipt Header":
+          begin
+            RecRef.SETTABLE(ReturnRcptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Return Receipt",ReturnRcptHeader);
+          end;
+        DATABASE::"Transfer Shipment Header":
+          begin
+            RecRef.SETTABLE(TransShipHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Transfer Shipment",TransShipHeader);
+          end;
+        DATABASE::"Transfer Receipt Header":
+          begin
+            RecRef.SETTABLE(TransRcptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Transfer Receipt",TransRcptHeader);
+          end;
+        DATABASE::"Posted Assembly Line",
+        DATABASE::"Posted Assembly Header":
+          begin
+            RecRef.SETTABLE(PostedAssemblyHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Assembly Order",PostedAssemblyHeader);
+          end;
+        DATABASE::"Production Order":
+          begin
+            RecRef.SETTABLE(ProductionOrder);
+            if ProductionOrder.Status = ProductionOrder.Status::Released then
+              PAGE.RUNMODAL(PAGE::"Released Production Order",ProductionOrder)
+            else
+              if ProductionOrder.Status = ProductionOrder.Status::Finished then
+                PAGE.RUNMODAL(PAGE::"Finished Production Order",ProductionOrder);
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetExpansionStatus@16(Rec@1001 : Record "Item Tracing Buffer";VAR TempTrackEntry@1002 : Record "Item Tracing Buffer";VAR TempTrackEntry2@1004 : Record "Item Tracing Buffer";VAR ActualExpansionStatus@1000 : '"Has Children",Expanded,"No Children"');
+    BEGIN
+      if IsExpanded(Rec,TempTrackEntry2) then
+        ActualExpansionStatus := ActualExpansionStatus::Expanded
+      else
+        if HasChildren(Rec,TempTrackEntry) then
+          ActualExpansionStatus := ActualExpansionStatus::"Has Children"
+        else
+          ActualExpansionStatus := ActualExpansionStatus::"No Children";
+    END;
+
+    LOCAL PROCEDURE GetItem@8(VAR Item@1000 : Record Item;ItemNo@1001 : Code[20]);
+    BEGIN
+      if ItemNo <> Item."No." then
+        if not Item.GET(ItemNo) then
+          CLEAR(Item);
+    END;
+
+    LOCAL PROCEDURE GetItemDescription@4(ItemNo@1000 : Code[20]) : Text[50];
+    VAR
+      Item@1001 : Record Item;
+    BEGIN
+      GetItem(Item,ItemNo);
+      exit(Item.Description);
+    END;
+
+    LOCAL PROCEDURE GetItemTrackingCode@9(VAR ItemTrackingCode@1000 : Record "Item Tracking Code";ItemNo@1002 : Code[20]);
+    VAR
+      Item@1001 : Record Item;
+    BEGIN
+      GetItem(Item,ItemNo);
+      if Item."Item Tracking Code" <> '' then begin
+        if not ItemTrackingCode.GET(Item."Item Tracking Code") then
+          CLEAR(ItemTrackingCode);
+      end else
+        CLEAR(ItemTrackingCode);
+    END;
+
+    [External]
+    PROCEDURE SpecificTracking@10(ItemNo@1003 : Code[20];SerialNo@1001 : Code[20];LotNo@1002 : Code[20]) : Boolean;
+    VAR
+      ItemTrackingCode@1000 : Record "Item Tracking Code";
+    BEGIN
+      GetItemTrackingCode(ItemTrackingCode,ItemNo);
+      if ((SerialNo <> '') and ItemTrackingCode."SN Specific Tracking") or
+         ((LotNo <> '') and ItemTrackingCode."Lot Specific Tracking")
+      then
+        exit(true);
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE ExitLevel@7(TempTrackEntry@1000 : Record "Item Tracing Buffer") : Boolean;
+    BEGIN
+      with TempTrackEntry do begin
+        if ("Serial No." = '') and ("Lot No." = '') then
+          exit(true);
+        if CurrentLevel > 50 then
+          exit(true);
+        if not SpecificTracking("Item No.","Serial No.","Lot No.") then
+          exit(true);
+        if "Already Traced" then
+          exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE UpdateHistory@11(SerialNoFilter@1005 : Text;LotNoFilter@1004 : Text;ItemNoFilter@1003 : Text;VariantFilter@1002 : Text;TraceMethod@1001 : '"Origin->Usage","Usage->Origin"';ShowComponents@1000 : 'No,"Item-tracked only",All') OK : Boolean;
+    VAR
+      LevelCount@1006 : Integer;
+    BEGIN
+      with TempTraceHistory do begin
+        RESET;
+        SETFILTER("Entry No.",'>%1',CurrentHistoryEntryNo);
+        DELETEALL;
+
+        repeat
+          INIT;
+          "Entry No." := CurrentHistoryEntryNo + 1;
+          Level := LevelCount;
+
+          "Serial No. Filter" := COPYSTR(SerialNoFilter,1,MAXSTRLEN("Serial No. Filter"));
+          "Lot No. Filter" := COPYSTR(LotNoFilter,1,MAXSTRLEN("Lot No. Filter"));
+          "Item No. Filter" := COPYSTR(ItemNoFilter,1,MAXSTRLEN("Item No. Filter"));
+          "Variant Filter" := COPYSTR(VariantFilter,1,MAXSTRLEN("Variant Filter"));
+
+          if Level = 0 then begin
+            "Trace Method" := TraceMethod;
+            "Show Components" := ShowComponents;
+          end;
+          INSERT;
+
+          LevelCount += 1;
+          SerialNoFilter := DELSTR(SerialNoFilter,1,MAXSTRLEN("Serial No. Filter"));
+          LotNoFilter := DELSTR(LotNoFilter,1,MAXSTRLEN("Lot No. Filter"));
+          ItemNoFilter := DELSTR(ItemNoFilter,1,MAXSTRLEN("Item No. Filter"));
+          VariantFilter := DELSTR(VariantFilter,1,MAXSTRLEN("Variant Filter"));
+        until (SerialNoFilter = '') and (LotNoFilter = '') and (ItemNoFilter = '') and (VariantFilter = '');
+        CurrentHistoryEntryNo := "Entry No.";
+      end;
+      OK := true;
+    END;
+
+    [External]
+    PROCEDURE RecallHistory@14(Steps@1000 : Integer;VAR TempTrackEntry@1002 : Record "Item Tracing Buffer";VAR TempTrackEntry2@1001 : Record "Item Tracing Buffer";VAR SerialNoFilter@1008 : Text;VAR LotNoFilter@1007 : Text;VAR ItemNoFilter@1006 : Text;VAR VariantFilter@1005 : Text;VAR TraceMethod@1004 : '"Origin->Usage","Usage->Origin"';VAR ShowComponents@1003 : 'No,"Item-tracked only",All') : Boolean;
+    BEGIN
+      if not RetrieveHistoryData(CurrentHistoryEntryNo + Steps,
+           SerialNoFilter,LotNoFilter,ItemNoFilter,VariantFilter,TraceMethod,ShowComponents)
+      then
+        exit(false);
+      DeleteTempTables(TempTrackEntry,TempTrackEntry2);
+      InitSearchCriteria(SerialNoFilter,LotNoFilter,ItemNoFilter);
+      FirstLevel(TempTrackEntry,SerialNoFilter,LotNoFilter,ItemNoFilter,
+        VariantFilter,TraceMethod,ShowComponents);
+      if TempLineNo > 0 then
+        InitTempTable(TempTrackEntry,TempTrackEntry2);
+      TempTrackEntry.RESET;
+      CurrentHistoryEntryNo := CurrentHistoryEntryNo + Steps;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE RetrieveHistoryData@15(EntryNo@1006 : Integer;VAR SerialNoFilter@1005 : Text;VAR LotNoFilter@1004 : Text;VAR ItemNoFilter@1003 : Text;VAR VariantFilter@1002 : Text;VAR TraceMethod@1001 : '"Origin->Usage","Usage->Origin"';VAR ShowComponents@1000 : 'No,"Item-tracked only",All') : Boolean;
+    BEGIN
+      with TempTraceHistory do begin
+        RESET;
+        SETCURRENTKEY("Entry No.",Level);
+        SETRANGE("Entry No.",EntryNo);
+        if not FINDSET then
+          exit(false);
+        repeat
+          if Level = 0 then begin
+            SerialNoFilter := "Serial No. Filter";
+            LotNoFilter := "Lot No. Filter";
+            ItemNoFilter := "Item No. Filter";
+            VariantFilter := "Variant Filter";
+            TraceMethod := "Trace Method";
+            ShowComponents := "Show Components";
+          end else begin
+            SerialNoFilter := SerialNoFilter + "Serial No. Filter";
+            LotNoFilter := LotNoFilter + "Lot No. Filter";
+            ItemNoFilter := ItemNoFilter + "Item No. Filter";
+            VariantFilter := VariantFilter + "Variant Filter";
+          end;
+        until NEXT = 0;
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetHistoryStatus@12(VAR PreviousExists@1001 : Boolean;VAR NextExists@1000 : Boolean);
+    BEGIN
+      TempTraceHistory.RESET;
+      TempTraceHistory.SETFILTER("Entry No.",'>%1',CurrentHistoryEntryNo);
+      NextExists := not TempTraceHistory.ISEMPTY;
+      TempTraceHistory.SETFILTER("Entry No.",'<%1',CurrentHistoryEntryNo);
+      PreviousExists := not TempTraceHistory.ISEMPTY;
+    END;
+
+    LOCAL PROCEDURE IsServiceDocument@13(ItemLedgEntryNo@1000 : Integer;VAR ItemLedgEntry@1002 : Record "Item Ledger Entry") : Boolean;
+    BEGIN
+      with ItemLedgEntry do
+        if GET(ItemLedgEntryNo) then
+          if "Document Type" in [
+                                 "Document Type"::"Service Shipment","Document Type"::"Service Invoice",
+                                 "Document Type"::"Service Credit Memo"]
+          then
+            exit(true);
+      exit(false);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

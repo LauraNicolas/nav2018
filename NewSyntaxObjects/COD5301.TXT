@@ -1,0 +1,1478 @@
+OBJECT Codeunit 5301 Outlook Synch. NAV Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OSynchEntity@1002 : Record "Outlook Synch. Entity";
+      OSynchEntityElement@1007 : Record "Outlook Synch. Entity Element";
+      OSynchLink@1005 : Record "Outlook Synch. Link";
+      OSynchFilter@1008 : Record "Outlook Synch. Filter";
+      OSynchField@1004 : Record "Outlook Synch. Field";
+      OSynchUserSetup@1006 : Record "Outlook Synch. User Setup";
+      OSynchSetupDetail@1009 : Record "Outlook Synch. Setup Detail";
+      GlobalRecordIDBuffer@1014 : TEMPORARY Record "Outlook Synch. Link";
+      SortedEntitiesBuffer@1020 : TEMPORARY Record "Outlook Synch. Lookup Name";
+      Field@1012 : Record Field;
+      OSynchSetupMgt@1001 : Codeunit "Outlook Synch. Setup Mgt.";
+      OSynchTypeConversion@1013 : Codeunit "Outlook Synch. Type Conv";
+      OSynchOutlookMgt@1018 : Codeunit "Outlook Synch. Outlook Mgt.";
+      OSynchProcessLine@1023 : Codeunit "Outlook Synch. Process Line";
+      XMLWriter@1000 : DotNet "'Microsoft.Dynamics.Nav.OLSync.Common, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.NAV.OLSync.Common.XmlTextWriter";
+      Text001@1010 : TextConst '@@@=%1 - product name;ENU=The synchronization failed because the synchronization data could not be obtained from %1. Try again later and if the problem persists contact your system administrator.';
+      Text002@1011 : TextConst 'ENU=The synchronization failed because the synchronization data from Microsoft Outlook cannot be processed. Try again later and if the problem persists contact your system administrator.';
+      Text003@1016 : TextConst 'ENU=The synchronization failed because the correlation for the %1 field of the %2 entity cannot be found. Try again later and if the problem persists contact your system administrator.';
+      Text004@1017 : TextConst 'ENU=The synchronization failed because an Outlook item of %1 entity could not be found in the synchronization folders.';
+      Text005@1022 : TextConst 'ENU=The synchronization failed because the %1 and %2 entities contain the same entries. Try again later and if the problem persists contact your system administrator.';
+      Text008@1019 : TextConst '@@@=%1 - product name;ENU=The synchronization cannot be performed because the tracking of data changes in %1 has not been activated. Try again later and if the problem persists contact your system administrator.';
+      Text009@1015 : TextConst 'ENU=The synchronization failed because the correlation for the %1 field of the %2 collection in the %3 entity cannot be found. Try again later and if the problem persists contact your system administrator.';
+      Text010@1003 : TextConst '@@@=%2 - product name;ENU=The synchronization failed because the synchronization data could not be obtained from %2 for the %1 entity. Try again later and if the problem persists contact your system administrator.';
+
+    [Internal]
+    PROCEDURE StartSynchronization@25(UserID@1000 : Code[50];VAR XMLMessage@1002 : Text;SynchronizeAll@1004 : Boolean);
+    VAR
+      SynchStartTime@1003 : DateTime;
+    BEGIN
+      if not (STRLEN(XMLMessage) > 0) then
+        ERROR(Text001);
+
+      SortedEntitiesBuffer.RESET;
+      SortedEntitiesBuffer.DELETEALL;
+
+      GetSortedEntities(UserID,SortedEntitiesBuffer,false);
+
+      CLEAR(XMLWriter);
+      XMLWriter := XMLWriter.XmlTextWriter;
+      XMLWriter.WriteStartDocument;
+      XMLWriter.WriteStartElement('SynchronizationMessage');
+
+      if (not CheckChangeLogAvailability) and (not SynchronizeAll) then
+        ERROR(Text008,PRODUCTNAME.FULL);
+
+      ProcessRenamedRecords(UserID);
+      SynchStartTime := OSynchOutlookMgt.ProcessOutlookChanges(UserID,XMLMessage,XMLWriter,false);
+      if SynchronizeAll then begin
+        ProcessDeletedRecords(UserID);
+        CollectNavisionChanges(UserID,SynchronizeAll,SynchStartTime);
+      end else begin
+        CollectNavisionChanges(UserID,SynchronizeAll,SynchStartTime);
+        ProcessDeletedRecords(UserID);
+      end;
+
+      if not ISNULL(XMLWriter) then begin
+        XMLWriter.WriteEndElement;
+        XMLWriter.WriteEndDocument;
+
+        XMLMessage := XMLWriter.ToString;
+        CLEAR(XMLWriter);
+
+        if STRLEN(XMLMessage) = 0 then
+          ERROR(Text001,PRODUCTNAME.FULL);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE CollectConflictedEntities@11(UserID@1002 : Code[50];VAR XMLMessage@1006 : Text);
+    VAR
+      EntityRecRef@1010 : RecordRef;
+      TempEntityRecRef@1011 : RecordRef;
+      EntityRecID@1007 : RecordID;
+      XmlTextReader@1000 : DotNet "'Microsoft.Dynamics.Nav.OLSync.Common, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.NAV.OLSync.Common.XmlTextReader";
+      SynchEntityCode@1009 : Code[10];
+      Container@1005 : Text;
+      TagName@1003 : Text[80];
+      RootIterator@1004 : Text[38];
+      EntryIDHash@1008 : Text[32];
+    BEGIN
+      XmlTextReader := XmlTextReader.XmlTextReader;
+
+      if not XmlTextReader.LoadXml(XMLMessage) then
+        ERROR(Text002);
+
+      TagName := XmlTextReader.RootLocalName;
+      if TagName <> 'RefreshTroubleshootingInfo' then
+        ERROR(Text002);
+
+      if XmlTextReader.SelectElements(RootIterator,'*') < 1 then
+        exit;
+
+      TagName := XmlTextReader.GetName(RootIterator);
+      if TagName <> 'OutlookItem' then
+        ERROR(Text002);
+
+      if ISNULL(XMLWriter) then
+        XMLWriter := XMLWriter.XmlTextWriter;
+      XMLWriter.WriteStartDocument;
+      XMLWriter.WriteStartElement('SynchronizationMessage');
+
+      if XmlTextReader.SelectElements(RootIterator,'child::OutlookItem') > 0 then begin
+        CLEAR(Container);
+        GlobalRecordIDBuffer.RESET;
+        GlobalRecordIDBuffer.DELETEALL;
+
+        repeat
+          CLEAR(EntityRecID);
+          EntryIDHash := '';
+
+          TagName := XmlTextReader.GetName(RootIterator);
+          SynchEntityCode :=
+            COPYSTR(XmlTextReader.GetCurrentNodeAttribute(RootIterator,'SynchEntityCode'),1,MAXSTRLEN(SynchEntityCode));
+
+          OSynchUserSetup.GET(UserID,SynchEntityCode);
+          OSynchEntity.GET(SynchEntityCode);
+          EntryIDHash := OSynchOutlookMgt.GetEntryIDHash(Container,XmlTextReader,RootIterator);
+          if EntryIDHash <> '' then begin
+            OSynchLink.RESET;
+            OSynchLink.SETRANGE("User ID",UserID);
+            OSynchLink.SETRANGE("Outlook Entry ID Hash",EntryIDHash);
+            if OSynchLink.FINDFIRST then begin
+              EVALUATE(EntityRecID,FORMAT(OSynchLink."Record ID"));
+              GlobalRecordIDBuffer.SETRANGE("Search Record ID",UPPERCASE(FORMAT(EntityRecID)));
+              if not GlobalRecordIDBuffer.FINDFIRST then
+                if EntityRecRef.GET(EntityRecID) then begin
+                  TempEntityRecRef.OPEN(EntityRecID.TABLENO,true);
+                  CopyRecordReference(EntityRecRef,TempEntityRecRef,false);
+                  ProcessEntityRecords(TempEntityRecRef,SynchEntityCode);
+                  TempEntityRecRef.CLOSE;
+                end else begin
+                  XMLWriter.WriteStartElement('DeletedOutlookItem');
+                  XMLWriter.WriteAttribute('SynchEntityCode',SynchEntityCode);
+                  XMLWriter.WriteAttribute('RecordID',FORMAT(EntityRecID));
+                  XMLWriter.WriteAttribute(
+                    'LastModificationTime',
+                    OSynchTypeConversion.SetDateTimeFormat(
+                      OSynchTypeConversion.LocalDT2UTC(OSynchOutlookMgt.GetLastModificationTime(EntityRecID))));
+                  WriteLinkedOutlookEntryID(UserID,EntityRecID,XMLWriter);
+                  XMLWriter.WriteEndElement;
+
+                  UpdateGlobalRecordIDBuffer(EntityRecID,SynchEntityCode);
+                end;
+            end else begin
+              XMLWriter.WriteStartElement('DeletedOutlookItem');
+              XMLWriter.WriteAttribute('SynchEntityCode',SynchEntityCode);
+              XMLWriter.WriteAttribute('RecordID','');
+              XMLWriter.WriteAttribute(
+                'LastModificationTime',
+                OSynchTypeConversion.SetDateTimeFormat(OSynchTypeConversion.LocalDT2UTC(0DT)));
+
+              XMLWriter.WriteStartElement('EntryID');
+              XMLWriter.WriteElementTextContent(OSynchOutlookMgt.ConvertValueToBase64(Container));
+              XMLWriter.WriteEndElement;
+
+              XMLWriter.WriteEndElement;
+            end;
+          end else
+            OSynchOutlookMgt.WriteErrorLog(
+              UserID,
+              EntityRecID,
+              'Error',
+              SynchEntityCode,
+              STRSUBSTNO(Text004,SynchEntityCode),
+              XMLWriter,
+              Container);
+        until not XmlTextReader.MoveNext(RootIterator);
+      end;
+
+      if not ISNULL(XMLWriter) then begin
+        XMLWriter.WriteEndElement;
+        XMLWriter.WriteEndDocument;
+
+        XMLMessage := XMLWriter.ToString;
+        CLEAR(XMLWriter);
+
+        if STRLEN(XMLMessage) = 0 then
+          ERROR(Text001);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE CollectNavisionChanges@4(UserID@1000 : Code[50];SynchronizeAll@1001 : Boolean;SynchStartTime@1002 : DateTime);
+    BEGIN
+      if not SortedEntitiesBuffer.FINDSET then
+        exit;
+
+      GlobalRecordIDBuffer.RESET;
+      GlobalRecordIDBuffer.DELETEALL;
+
+      repeat
+        OSynchUserSetup.GET(UserID,SortedEntitiesBuffer.Name);
+        OSynchEntity.GET(SortedEntitiesBuffer.Name);
+
+        CollectEntityChanges(SynchronizeAll,SynchStartTime);
+        CollectEntityElementChanges(SynchronizeAll,SynchStartTime);
+      until SortedEntitiesBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CollectEntityChanges@22(SynchronizeAll@1001 : Boolean;SynchStartTime@1006 : DateTime);
+    VAR
+      TempDeletedChangeLogEntry@1000 : TEMPORARY Record "Change Log Entry";
+      TempRecRef@1003 : RecordRef;
+      TempRecRef1@1005 : RecordRef;
+      NullRecRef@1002 : RecordRef;
+      RecID@1004 : RecordID;
+    BEGIN
+      TempDeletedChangeLogEntry.RESET;
+      TempDeletedChangeLogEntry.DELETEALL;
+
+      if not SynchronizeAll then begin
+        TempRecRef.OPEN(OSynchEntity."Table No.",true);
+        ProcessChangeLog(
+          OSynchEntity."Table No.",
+          OSynchUserSetup."Last Synch. Time",
+          TempRecRef,
+          TempDeletedChangeLogEntry);
+      end else
+        TempRecRef.OPEN(OSynchEntity."Table No.");
+
+      OSynchFilter.RESET;
+      OSynchFilter.SETFILTER(
+        "Record GUID",
+        '%1|%2',
+        OSynchEntity."Record GUID",
+        OSynchUserSetup."Record GUID");
+
+      TempRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter,NullRecRef));
+      if TempRecRef.FIND('-') then
+        repeat
+          if SynchronizeAll then
+            ProcessEntityRecords(TempRecRef,OSynchUserSetup."Synch. Entity Code")
+          else begin
+            EVALUATE(RecID,FORMAT(TempRecRef.RECORDID));
+            if CheckTimeCondition(RecID,SynchStartTime) then begin
+              TempRecRef1.OPEN(OSynchEntity."Table No.",true);
+              CopyRecordReference(TempRecRef,TempRecRef1,false);
+              ProcessEntityRecords(TempRecRef1,OSynchUserSetup."Synch. Entity Code");
+              TempRecRef1.CLOSE;
+            end;
+          end;
+        until TempRecRef.NEXT = 0;
+
+      if not SynchronizeAll then
+        if TempDeletedChangeLogEntry.FIND('-') then
+          ProcessDeletedEntityRecords(TempDeletedChangeLogEntry);
+
+      TempDeletedChangeLogEntry.RESET;
+      TempDeletedChangeLogEntry.DELETEALL;
+      TempRecRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE CollectEntityElementChanges@23(SynchronizeAll@1000 : Boolean;SynchStartTime@1001 : DateTime);
+    VAR
+      TempDeletedChangeLogEntry@1004 : TEMPORARY Record "Change Log Entry";
+      TempRecRef@1003 : RecordRef;
+    BEGIN
+      if SynchronizeAll then
+        exit;
+
+      OSynchSetupDetail.RESET;
+      OSynchSetupDetail.SETRANGE("User ID",OSynchUserSetup."User ID");
+      OSynchSetupDetail.SETRANGE("Synch. Entity Code",OSynchUserSetup."Synch. Entity Code");
+      if OSynchSetupDetail.FIND('-') then
+        repeat
+          OSynchEntityElement.GET(OSynchSetupDetail."Synch. Entity Code",OSynchSetupDetail."Element No.");
+          TempRecRef.OPEN(OSynchEntityElement."Table No.",true);
+          ProcessChangeLog(
+            OSynchEntityElement."Table No.",
+            OSynchUserSetup."Last Synch. Time",
+            TempRecRef,
+            TempDeletedChangeLogEntry);
+
+          if TempRecRef.FIND('-') then
+            ProcessEntityElements(TempRecRef,SynchStartTime);
+          if TempDeletedChangeLogEntry.FIND('-') then
+            ProcessDeletedEntityElements(TempDeletedChangeLogEntry,SynchStartTime);
+
+          TempRecRef.CLOSE;
+          TempDeletedChangeLogEntry.DELETEALL;
+        until OSynchSetupDetail.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ProcessEntityRecords@5(VAR EntityRecRefIn@1000 : RecordRef;SynchEntityCode@1002 : Code[10]);
+    VAR
+      OSynchEntity1@1003 : Record "Outlook Synch. Entity";
+      OSynchEntityElement1@1007 : Record "Outlook Synch. Entity Element";
+      OSynchField1@1001 : Record "Outlook Synch. Field";
+      OSynchFilter1@1011 : Record "Outlook Synch. Filter";
+      OSynchUserSetup1@1006 : Record "Outlook Synch. User Setup";
+      OSynchSetupDetail1@1004 : Record "Outlook Synch. Setup Detail";
+      OSynchDependency1@1005 : Record "Outlook Synch. Dependency";
+      EntityRecRef@1009 : RecordRef;
+      EntityRecRefDependent@1014 : RecordRef;
+      CollectionRecRef@1008 : RecordRef;
+      CollectionRecRef1@1015 : RecordRef;
+      NullRecRef@1010 : RecordRef;
+      RecID@1012 : RecordID;
+    BEGIN
+      if not EntityRecRefIn.FIND('-') then
+        exit;
+
+      EVALUATE(RecID,FORMAT(EntityRecRefIn.RECORDID));
+      EntityRecRef.OPEN(RecID.TABLENO,true);
+      repeat
+        CopyRecordReference(EntityRecRefIn,EntityRecRef,false);
+      until EntityRecRefIn.NEXT = 0;
+
+      OSynchEntity1.GET(SynchEntityCode);
+      OSynchFilter1.RESET;
+      OSynchFilter1.SETRANGE("Record GUID",OSynchEntity1."Record GUID");
+      EntityRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter1,NullRecRef));
+      if not EntityRecRef.FIND('-') then
+        exit;
+
+      OSynchField1.RESET;
+      OSynchField1.SETRANGE("Synch. Entity Code",SynchEntityCode);
+      OSynchField1.SETFILTER("Read-Only Status",'<>%1',OSynchField1."Read-Only Status"::"Read-Only in Outlook");
+      OSynchField1.SETFILTER("Outlook Property",'<>%1','');
+      if OSynchField1.ISEMPTY then
+        exit;
+
+      OSynchUserSetup1.GET(OSynchUserSetup."User ID",SynchEntityCode);
+      OSynchUserSetup1.CALCFIELDS("No. of Elements");
+
+      repeat
+        GlobalRecordIDBuffer.SETRANGE("Search Record ID",UPPERCASE(FORMAT(EntityRecRef.RECORDID)));
+        if not GlobalRecordIDBuffer.FINDFIRST then begin
+          if OSynchUserSetup1."No. of Elements" > 0 then begin
+            OSynchSetupDetail1.RESET;
+            OSynchSetupDetail1.SETRANGE("User ID",OSynchUserSetup."User ID");
+            OSynchSetupDetail1.SETRANGE("Synch. Entity Code",SynchEntityCode);
+            if OSynchSetupDetail1.FIND('-') then
+              repeat
+                OSynchEntityElement1.GET(OSynchSetupDetail1."Synch. Entity Code",OSynchSetupDetail1."Element No.");
+                OSynchEntityElement1.CALCFIELDS("No. of Dependencies");
+                if OSynchEntityElement1."No. of Dependencies" > 0 then begin
+                  OSynchDependency1.RESET;
+                  OSynchDependency1.SETRANGE("Synch. Entity Code",OSynchEntityElement1."Synch. Entity Code");
+                  OSynchDependency1.SETRANGE("Element No.",OSynchEntityElement1."Element No.");
+
+                  OSynchFilter1.RESET;
+                  OSynchFilter1.SETRANGE("Record GUID",OSynchEntityElement1."Record GUID");
+
+                  CollectionRecRef.OPEN(OSynchEntityElement1."Table No.");
+                  CollectionRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter1,EntityRecRef));
+                  if CollectionRecRef.FIND('-') then
+                    repeat
+                      GlobalRecordIDBuffer.SETRANGE("Search Record ID",UPPERCASE(FORMAT(CollectionRecRef.RECORDID)));
+                      if not GlobalRecordIDBuffer.FINDFIRST then begin
+                        if OSynchDependency1.FIND('-') then
+                          repeat
+                            CollectionRecRef1.OPEN(OSynchEntityElement1."Table No.",true);
+                            CopyRecordReference(CollectionRecRef,CollectionRecRef1,false);
+
+                            OSynchFilter1.RESET;
+                            OSynchFilter1.SETRANGE("Record GUID",OSynchDependency1."Record GUID");
+
+                            if OSynchDependency1.Condition <> '' then begin
+                              OSynchFilter1.SETRANGE("Filter Type",OSynchFilter1."Filter Type"::Condition);
+                              CollectionRecRef1.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter1,NullRecRef));
+                            end;
+
+                            if CollectionRecRef1.FIND('-') then begin
+                              OSynchFilter1.SETRANGE("Filter Type",OSynchFilter1."Filter Type"::"Table Relation");
+                              OSynchDependency1.CALCFIELDS("Depend. Synch. Entity Tab. No.");
+
+                              EntityRecRefDependent.OPEN(OSynchDependency1."Depend. Synch. Entity Tab. No.");
+                              EntityRecRefDependent.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter1,CollectionRecRef1));
+                              if EntityRecRefDependent.FIND('-') then
+                                ProcessEntityRecords(EntityRecRefDependent,OSynchDependency1."Depend. Synch. Entity Code");
+                              EntityRecRefDependent.CLOSE;
+                            end;
+                            CollectionRecRef1.CLOSE;
+                          until OSynchDependency1.NEXT = 0;
+                      end;
+                    until CollectionRecRef.NEXT = 0;
+                  CollectionRecRef.CLOSE;
+                end;
+              until OSynchSetupDetail1.NEXT = 0;
+          end;
+
+          InsertEntity(EntityRecRef,SynchEntityCode);
+          EVALUATE(RecID,FORMAT(EntityRecRef.RECORDID));
+          UpdateGlobalRecordIDBuffer(RecID,SynchEntityCode);
+        end else
+          if GlobalRecordIDBuffer."User ID" <> SynchEntityCode then
+            ERROR(Text005,GlobalRecordIDBuffer."User ID",SynchEntityCode);
+      until EntityRecRef.NEXT = 0;
+      EntityRecRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessDeletedEntityRecords@6(VAR TempDeletedChangeLogEntry@1000 : Record "Change Log Entry");
+    VAR
+      RecID@1001 : RecordID;
+    BEGIN
+      if not TempDeletedChangeLogEntry.FIND('-') then
+        exit;
+
+      OSynchField.RESET;
+      OSynchField.SETRANGE("Synch. Entity Code",OSynchEntity.Code);
+      OSynchField.SETFILTER("Read-Only Status",'<>%1',OSynchField."Read-Only Status"::"Read-Only in Outlook");
+      OSynchField.SETFILTER("Outlook Property",'<>%1','');
+      if not OSynchField.FIND('-') then
+        exit;
+
+      OSynchFilter.RESET;
+      OSynchFilter.SETFILTER("Record GUID",'%1|%2',OSynchEntity."Record GUID",OSynchUserSetup."Record GUID");
+
+      repeat
+        if CheckDeletedRecFilterCondition(TempDeletedChangeLogEntry,OSynchFilter) then begin
+          ObtainRecordID(TempDeletedChangeLogEntry,RecID);
+          GlobalRecordIDBuffer.SETRANGE("Search Record ID",UPPERCASE(FORMAT(RecID)));
+          if not GlobalRecordIDBuffer.FINDFIRST then begin
+            if OSynchLink.GET(OSynchUserSetup."User ID",RecID) then begin
+              XMLWriter.WriteStartElement('DeletedOutlookItem');
+              XMLWriter.WriteAttribute('SynchEntityCode',OSynchEntity.Code);
+              XMLWriter.WriteAttribute('RecordID',FORMAT(RecID));
+              XMLWriter.WriteAttribute(
+                'LastModificationTime',
+                OSynchTypeConversion.SetDateTimeFormat(
+                  OSynchTypeConversion.LocalDT2UTC(TempDeletedChangeLogEntry."Date and Time")));
+              WriteLinkedOutlookEntryID(OSynchUserSetup."User ID",RecID,XMLWriter);
+              XMLWriter.WriteEndElement;
+
+              UpdateGlobalRecordIDBuffer(RecID,OSynchEntity.Code);
+            end;
+          end else
+            if GlobalRecordIDBuffer."User ID" <> OSynchEntity.Code then
+              ERROR(Text005,GlobalRecordIDBuffer."User ID",OSynchEntity.Code);
+        end;
+      until TempDeletedChangeLogEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ProcessEntityElements@17(VAR ChangedCollectionRecRef@1000 : RecordRef;SynchStartTime@1010 : DateTime);
+    VAR
+      OSynchFilter1@1011 : Record "Outlook Synch. Filter";
+      TempOSynchFilter@1005 : TEMPORARY Record "Outlook Synch. Filter";
+      OSynchUserSetup1@1004 : Record "Outlook Synch. User Setup";
+      ChangedCollectionRecRef1@1003 : RecordRef;
+      EntityRecRef@1001 : RecordRef;
+      TempEntityRecRef@1007 : RecordRef;
+      TempEntityRecRef1@1009 : RecordRef;
+      NullRecRef@1002 : RecordRef;
+      EntityRecID@1008 : RecordID;
+      CollectionElementRecID@1006 : RecordID;
+    BEGIN
+      if not ChangedCollectionRecRef.FIND('-') then
+        exit;
+
+      EntityRecRef.OPEN(OSynchEntity."Table No.");
+      repeat
+        OSynchFilter.RESET;
+        OSynchFilter.SETRANGE("Record GUID",OSynchEntityElement."Record GUID");
+
+        TempOSynchFilter.RESET;
+        TempOSynchFilter.DELETEALL;
+
+        ChangedCollectionRecRef1.OPEN(OSynchEntityElement."Table No.",true);
+        CopyRecordReference(ChangedCollectionRecRef,ChangedCollectionRecRef1,false);
+
+        OSynchFilter.SETFILTER(Type,'<>%1',OSynchFilter.Type::FIELD);
+        if OSynchFilter.FINDFIRST then
+          ChangedCollectionRecRef1.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter,NullRecRef));
+
+        if ChangedCollectionRecRef1.FIND('-') then begin
+          OSynchFilter.SETRANGE(Type,OSynchFilter.Type::FIELD);
+          if OSynchFilter.FINDFIRST then begin
+            OSynchSetupMgt.ComposeFilterRecords(OSynchFilter,TempOSynchFilter,ChangedCollectionRecRef1,TempOSynchFilter.Type::CONST);
+
+            EntityRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(TempOSynchFilter,NullRecRef));
+            if EntityRecRef.FIND('-') then begin
+              TempEntityRecRef.OPEN(OSynchEntity."Table No.",true);
+              repeat
+                CopyRecordReference(EntityRecRef,TempEntityRecRef,false);
+              until EntityRecRef.NEXT = 0;
+
+              OSynchUserSetup1.GET(OSynchUserSetup."User ID",OSynchEntityElement."Synch. Entity Code");
+              OSynchFilter1.RESET;
+              OSynchFilter1.SETRANGE("Record GUID",OSynchUserSetup1."Record GUID");
+              if OSynchFilter1.FINDFIRST then
+                TempEntityRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter1,NullRecRef));
+
+              if TempEntityRecRef.FIND('-') then
+                repeat
+                  EVALUATE(EntityRecID,FORMAT(TempEntityRecRef.RECORDID));
+                  EVALUATE(CollectionElementRecID,FORMAT(ChangedCollectionRecRef1.RECORDID));
+                  if CheckCollectionTimeCondition(EntityRecID,CollectionElementRecID,SynchStartTime) then begin
+                    TempEntityRecRef1.OPEN(OSynchEntity."Table No.",true);
+                    CopyRecordReference(TempEntityRecRef,TempEntityRecRef1,false);
+                    ProcessEntityRecords(TempEntityRecRef1,OSynchEntityElement."Synch. Entity Code");
+                    TempEntityRecRef1.CLOSE;
+                  end;
+                until TempEntityRecRef.NEXT = 0;
+
+              TempEntityRecRef.CLOSE;
+            end;
+          end;
+        end;
+        ChangedCollectionRecRef1.CLOSE;
+      until ChangedCollectionRecRef.NEXT = 0;
+      EntityRecRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessDeletedEntityElements@84(VAR TempDeletedChangeLogEntry@1000 : Record "Change Log Entry";SynchStartTime@1008 : DateTime);
+    VAR
+      ChangeLogEntry@1002 : Record "Change Log Entry";
+      OSynchFilter1@1006 : Record "Outlook Synch. Filter";
+      TempOSynchFilter@1005 : TEMPORARY Record "Outlook Synch. Filter";
+      EntityRecRef@1001 : RecordRef;
+      TempEntityRecRef@1003 : RecordRef;
+      NullRecRef@1007 : RecordRef;
+      RecID@1004 : RecordID;
+    BEGIN
+      if not TempDeletedChangeLogEntry.FIND('-') then
+        exit;
+
+      EntityRecRef.OPEN(OSynchEntity."Table No.");
+
+      OSynchFilter1.RESET;
+      OSynchFilter1.SETRANGE("Record GUID",OSynchEntityElement."Record GUID");
+      if not OSynchFilter1.FINDFIRST then
+        exit;
+
+      ChangeLogEntry.SETCURRENTKEY("Table No.","Primary Key Field 1 Value");
+      ChangeLogEntry.SETRANGE("Table No.",TempDeletedChangeLogEntry."Table No.");
+      ChangeLogEntry.SETFILTER("Date and Time",'>=%1',OSynchUserSetup."Last Synch. Time");
+      ChangeLogEntry.SETRANGE("Type of Change",ChangeLogEntry."Type of Change"::Deletion);
+
+      repeat
+        OSynchFilter1.SETFILTER(Type,'<>%1',OSynchFilter1.Type::FIELD);
+
+        if CheckDeletedRecFilterCondition(TempDeletedChangeLogEntry,OSynchFilter1) then begin
+          TempOSynchFilter.RESET;
+          TempOSynchFilter.DELETEALL;
+          OSynchFilter1.SETRANGE(Type,OSynchFilter1.Type::FIELD);
+
+          if OSynchFilter1.FIND('-') then
+            repeat
+              ChangeLogEntry.SETRANGE("Primary Key",TempDeletedChangeLogEntry."Primary Key");
+              ChangeLogEntry.SETRANGE("Primary Key Field 1 Value",TempDeletedChangeLogEntry."Primary Key Field 1 Value");
+              ChangeLogEntry.SETRANGE("Field No.",OSynchFilter1."Field No.");
+
+              if ChangeLogEntry.FINDLAST then
+                OSynchSetupMgt.CreateFilterCondition(
+                  TempOSynchFilter,
+                  OSynchFilter1."Master Table No.",
+                  OSynchFilter1."Master Table Field No.",
+                  TempOSynchFilter.Type::CONST,
+                  ChangeLogEntry."Old Value");
+            until OSynchFilter1.NEXT = 0;
+
+          EntityRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(TempOSynchFilter,NullRecRef));
+          if EntityRecRef.FIND('-') then
+            repeat
+              EVALUATE(RecID,FORMAT(EntityRecRef.RECORDID));
+              if OSynchLink.GET(OSynchUserSetup."User ID",RecID) then begin
+                TempEntityRecRef.OPEN(OSynchEntity."Table No.",true);
+                CopyRecordReference(EntityRecRef,TempEntityRecRef,false);
+                if OSynchLink."Synchronization Date" < TempDeletedChangeLogEntry."Date and Time" then
+                  ProcessEntityRecords(TempEntityRecRef,OSynchEntityElement."Synch. Entity Code")
+                else
+                  if SynchStartTime < TempDeletedChangeLogEntry."Date and Time" then
+                    ProcessEntityRecords(TempEntityRecRef,OSynchEntityElement."Synch. Entity Code");
+                TempEntityRecRef.CLOSE;
+              end;
+            until EntityRecRef.NEXT = 0;
+        end;
+      until TempDeletedChangeLogEntry.NEXT = 0;
+      EntityRecRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessChangeLog@10(TableID@1000 : Integer;LastSynchTime@1001 : DateTime;VAR TempRecRef@1006 : RecordRef;VAR DeletedChangeLogEntry@1004 : Record "Change Log Entry");
+    VAR
+      ChangeLogEntry@1002 : Record "Change Log Entry";
+      InsModChangeLogEntry@1005 : TEMPORARY Record "Change Log Entry";
+    BEGIN
+      ChangeLogEntry.SETCURRENTKEY("Table No.","Date and Time");
+      ChangeLogEntry.SETRANGE("Table No.",TableID);
+      ChangeLogEntry.SETFILTER("Date and Time",'>=%1',LastSynchTime);
+
+      RemoveChangeLogDuplicates(ChangeLogEntry,InsModChangeLogEntry);
+
+      InsModChangeLogEntry.SETRANGE("Type of Change",InsModChangeLogEntry."Type of Change"::Deletion);
+      if InsModChangeLogEntry.FIND('-') then
+        repeat
+          DeletedChangeLogEntry.INIT;
+          DeletedChangeLogEntry := InsModChangeLogEntry;
+          DeletedChangeLogEntry.INSERT;
+        until InsModChangeLogEntry.NEXT = 0;
+
+      InsModChangeLogEntry.DELETEALL;
+      InsModChangeLogEntry.RESET;
+
+      FindMasterRecByChangeLogEntry(InsModChangeLogEntry,TempRecRef);
+    END;
+
+    LOCAL PROCEDURE ProcessDependentEntity@3(OSynchEntityCode@1000 : Code[10];VAR I@1004 : Integer;VAR TempOSynchEntityUnsorted@1002 : Record "Outlook Synch. Entity";VAR TempOSynchLookupName@1003 : Record "Outlook Synch. Lookup Name");
+    VAR
+      OSynchDependency@1001 : Record "Outlook Synch. Dependency";
+    BEGIN
+      OSynchDependency.SETRANGE("Synch. Entity Code",OSynchEntityCode);
+
+      if OSynchDependency.FIND('-') then
+        repeat
+          if not (TempOSynchEntityUnsorted.GET(OSynchDependency."Depend. Synch. Entity Code") and
+                  TempOSynchEntityUnsorted.MARK)
+          then
+            ProcessDependentEntity(
+              OSynchDependency."Depend. Synch. Entity Code",
+              I,
+              TempOSynchEntityUnsorted,
+              TempOSynchLookupName);
+        until OSynchDependency.NEXT = 0;
+
+      if TempOSynchEntityUnsorted.GET(OSynchEntityCode) then
+        if not TempOSynchEntityUnsorted.MARK then begin
+          TempOSynchLookupName.INIT;
+          TempOSynchLookupName."Entry No." := I;
+          TempOSynchLookupName.Name := TempOSynchEntityUnsorted.Code;
+          TempOSynchLookupName.INSERT;
+          TempOSynchEntityUnsorted.MARK(true);
+          I := I + 1;
+        end;
+    END;
+
+    [Internal]
+    PROCEDURE ProcessRenamedRecords@16(UserID@1010 : Code[50]);
+    VAR
+      ChangeLogEntry@1001 : Record "Change Log Entry";
+      TempChangeLogEntry@1002 : TEMPORARY Record "Change Log Entry";
+      TempChangeLogEntry1@1004 : TEMPORARY Record "Change Log Entry";
+      OSynchLink@1000 : Record "Outlook Synch. Link";
+      TempRecRef@1003 : RecordRef;
+      TempMasterRecRef@1006 : RecordRef;
+      EntityKeyRef@1005 : KeyRef;
+      EntityFieldRef@1012 : FieldRef;
+      RecID@1007 : RecordID;
+      Counter@1008 : Integer;
+      KeyString@1011 : Text[250];
+      IsRenamed@1009 : Boolean;
+    BEGIN
+      if not SortedEntitiesBuffer.FIND('-') then
+        exit;
+
+      repeat
+        OSynchEntity.GET(SortedEntitiesBuffer.Name);
+        OSynchUserSetup.GET(UserID,SortedEntitiesBuffer.Name);
+
+        TempRecRef.OPEN(OSynchEntity."Table No.",true);
+        EntityKeyRef := TempRecRef.KEYINDEX(1);
+        for Counter := 1 to EntityKeyRef.FIELDCOUNT do begin
+          if KeyString <> '' then
+            KeyString := KeyString + '|';
+          EntityFieldRef := EntityKeyRef.FIELDINDEX(Counter);
+          KeyString := KeyString + FORMAT(EntityFieldRef.NUMBER);
+        end;
+        TempRecRef.CLOSE;
+
+        ChangeLogEntry.SETCURRENTKEY("Table No.","Date and Time");
+        ChangeLogEntry.SETRANGE("Table No.",OSynchEntity."Table No.");
+        ChangeLogEntry.SETFILTER("Date and Time",'>=%1',OSynchUserSetup."Last Synch. Time");
+        ChangeLogEntry.SETRANGE("Type of Change",ChangeLogEntry."Type of Change"::Modification);
+        ChangeLogEntry.SETFILTER("Field No.",KeyString);
+        if ChangeLogEntry.FIND('-') then begin
+          TempChangeLogEntry.RESET;
+          TempChangeLogEntry.DELETEALL;
+          TempChangeLogEntry1.RESET;
+          TempChangeLogEntry1.DELETEALL;
+
+          repeat
+            TempChangeLogEntry.INIT;
+            TempChangeLogEntry := ChangeLogEntry;
+            TempChangeLogEntry.INSERT;
+          until ChangeLogEntry.NEXT = 0;
+
+          RemoveChangeLogDuplicates(TempChangeLogEntry,TempChangeLogEntry1);
+
+          if TempChangeLogEntry1.FIND('-') then
+            repeat
+              TempChangeLogEntry.RESET;
+              TempChangeLogEntry.SETRANGE("Primary Key Field 1 Value",TempChangeLogEntry1."Primary Key Field 1 Value");
+              if TempChangeLogEntry1."Primary Key Field 2 No." <> 0 then
+                TempChangeLogEntry.SETRANGE("Primary Key Field 2 Value",TempChangeLogEntry1."Primary Key Field 2 Value");
+              if TempChangeLogEntry1."Primary Key Field 3 No." <> 0 then
+                TempChangeLogEntry.SETRANGE("Primary Key Field 3 Value",TempChangeLogEntry1."Primary Key Field 3 Value");
+
+              ObtainRenamedRecordID(
+                TempChangeLogEntry,
+                TempChangeLogEntry1."Primary Key Field 1 No.",
+                TempChangeLogEntry1."Primary Key Field 2 No.",
+                TempChangeLogEntry1."Primary Key Field 3 No.",
+                RecID);
+
+              if RecID.TABLENO <> 0 then
+                if OSynchLink.GET(OSynchUserSetup."User ID",RecID) then begin
+                  TempMasterRecRef.OPEN(TempChangeLogEntry1."Table No.",true);
+                  FindMasterRecByChangeLogEntry(TempChangeLogEntry1,TempMasterRecRef);
+
+                  if FORMAT(RecID) <> FORMAT(TempMasterRecRef.RECORDID) then begin
+                    EVALUATE(RecID,FORMAT(TempMasterRecRef.RECORDID));
+                    OSynchLink.RENAME(OSynchUserSetup."User ID",RecID);
+                    IsRenamed := true;
+                  end;
+
+                  TempMasterRecRef.CLOSE;
+                end;
+            until TempChangeLogEntry1.NEXT = 0;
+        end;
+      until SortedEntitiesBuffer.NEXT = 0;
+
+      if IsRenamed then
+        COMMIT;
+    END;
+
+    [Internal]
+    PROCEDURE ProcessDeletedRecords@21(UserID@1003 : Code[50]);
+    VAR
+      ChangeLogEntry@1001 : Record "Change Log Entry";
+      TempChangeLogEntry@1002 : TEMPORARY Record "Change Log Entry";
+      OSynchLink@1000 : Record "Outlook Synch. Link";
+      RecID@1007 : RecordID;
+    BEGIN
+      if not SortedEntitiesBuffer.FIND('-') then
+        exit;
+
+      repeat
+        OSynchEntity.GET(SortedEntitiesBuffer.Name);
+        OSynchUserSetup.GET(UserID,SortedEntitiesBuffer.Name);
+
+        ChangeLogEntry.SETCURRENTKEY("Table No.","Date and Time");
+        ChangeLogEntry.SETRANGE("Table No.",OSynchEntity."Table No.");
+        ChangeLogEntry.SETFILTER("Date and Time",'>=%1',OSynchUserSetup."Last Synch. Time");
+        ChangeLogEntry.SETRANGE("Type of Change",ChangeLogEntry."Type of Change"::Deletion);
+        if not ChangeLogEntry.ISEMPTY then begin
+          TempChangeLogEntry.RESET;
+          TempChangeLogEntry.DELETEALL;
+
+          RemoveChangeLogDuplicates(ChangeLogEntry,TempChangeLogEntry);
+
+          if TempChangeLogEntry.FIND('-') then
+            repeat
+              ObtainRecordID(TempChangeLogEntry,RecID);
+              if OSynchLink.GET(OSynchUserSetup."User ID",RecID) then
+                OSynchLink.DELETE;
+            until TempChangeLogEntry.NEXT = 0;
+        end;
+      until SortedEntitiesBuffer.NEXT = 0;
+
+      OSynchLink.RESET;
+      OSynchLink.SETRANGE("User ID",OSynchUserSetup."User ID");
+      OSynchLink.SETRANGE("Outlook Entry ID Hash",'');
+      OSynchLink.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE InsertEntity@50(EntityRecRef@1000 : RecordRef;SynchEntityCode@1001 : Code[10]);
+    VAR
+      RecID@1002 : RecordID;
+      LastModificationTime@1003 : DateTime;
+    BEGIN
+      EVALUATE(RecID,FORMAT(EntityRecRef.RECORDID));
+      LastModificationTime := OSynchOutlookMgt.GetLastModificationTime(RecID);
+
+      XMLWriter.WriteStartElement('OutlookItem');
+      XMLWriter.WriteAttribute('SynchEntityCode',SynchEntityCode);
+      XMLWriter.WriteAttribute('RecordID',FORMAT(RecID));
+      XMLWriter.WriteAttribute(
+        'LastModificationTime',
+        OSynchTypeConversion.SetDateTimeFormat(OSynchTypeConversion.LocalDT2UTC(LastModificationTime)));
+      WriteLinkedOutlookEntryID(OSynchUserSetup."User ID",RecID,XMLWriter);
+
+      OSynchField.RESET;
+      OSynchField.SETRANGE("Synch. Entity Code",SynchEntityCode);
+      OSynchField.SETFILTER("Read-Only Status",'<>%1',OSynchField."Read-Only Status"::"Read-Only in Outlook");
+      OSynchField.SETFILTER("Outlook Property",'<>%1','');
+      OSynchField.SETRANGE("Element No.",0);
+
+      if OSynchField.FIND('-') then
+        InsertFields(EntityRecRef,false);
+
+      OSynchUserSetup.CALCFIELDS("No. of Elements");
+      if OSynchUserSetup."No. of Elements" > 0 then
+        InsertCollections(EntityRecRef,SynchEntityCode);
+
+      XMLWriter.WriteEndElement;
+    END;
+
+    LOCAL PROCEDURE InsertCollections@51(EntityRecRef@1001 : RecordRef;SynchEntityCode@1002 : Code[10]);
+    VAR
+      OSynchEntityElement1@1003 : Record "Outlook Synch. Entity Element";
+      MasterRecRef@1000 : RecordRef;
+      EntityRecID@1004 : RecordID;
+      DependencyFound@1005 : Boolean;
+    BEGIN
+      OSynchSetupDetail.RESET;
+      OSynchSetupDetail.SETRANGE("User ID",OSynchUserSetup."User ID");
+      OSynchSetupDetail.SETRANGE("Synch. Entity Code",SynchEntityCode);
+
+      if OSynchSetupDetail.FIND('-') then
+        repeat
+          OSynchEntityElement1.GET(OSynchSetupDetail."Synch. Entity Code",OSynchSetupDetail."Element No.");
+          XMLWriter.WriteStartElement('Collection');
+          XMLWriter.WriteAttribute('Name',OSynchEntityElement1."Outlook Collection");
+
+          OSynchFilter.RESET;
+          OSynchFilter.SETRANGE("Record GUID",OSynchEntityElement1."Record GUID");
+          MasterRecRef.OPEN(OSynchEntityElement1."Table No.");
+          MasterRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter,EntityRecRef));
+          if MasterRecRef.FIND('-') then
+            repeat
+              CLEAR(EntityRecID);
+              DependencyFound := false;
+
+              OSynchEntityElement1.CALCFIELDS("No. of Dependencies");
+              if OSynchEntityElement1."No. of Dependencies" = 0 then begin
+                XMLWriter.WriteStartElement('Element');
+                XMLWriter.WriteAttribute('RecordID',FORMAT(MasterRecRef.RECORDID));
+                DependencyFound := true;
+              end else begin
+                DependencyFound := FindDependentRecord(OSynchEntityElement1,MasterRecRef,EntityRecID);
+                if DependencyFound then begin
+                  XMLWriter.WriteStartElement('Element');
+                  XMLWriter.WriteAttribute('RecordID',FORMAT(EntityRecID));
+                  WriteLinkedOutlookEntryID(OSynchUserSetup."User ID",EntityRecID,XMLWriter);
+                end;
+              end;
+
+              if DependencyFound then begin
+                OSynchField.RESET;
+                OSynchField.SETRANGE("Synch. Entity Code",SynchEntityCode);
+                OSynchField.SETFILTER("Read-Only Status",'<>%1',OSynchField."Read-Only Status"::"Read-Only in Outlook");
+                OSynchField.SETFILTER("Outlook Property",'<>%1','');
+                OSynchField.SETRANGE("Element No.",OSynchEntityElement1."Element No.");
+                OSynchField.SETRANGE("Search Field",false);
+                if OSynchField.FIND('-') then
+                  InsertFields(MasterRecRef,false);
+
+                OSynchField.SETRANGE("Read-Only Status");
+                OSynchField.SETRANGE("Search Field",true);
+                if OSynchField.FIND('-') then
+                  InsertFields(MasterRecRef,true);
+
+                XMLWriter.WriteEndElement;
+              end;
+            until MasterRecRef.NEXT = 0;
+          XMLWriter.WriteEndElement;
+          MasterRecRef.CLOSE;
+        until OSynchSetupDetail.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertFields@9(SynchRecRef@1000 : RecordRef;SearchFields@1016 : Boolean);
+    VAR
+      OSynchField1@1015 : Record "Outlook Synch. Field";
+      TempOSynchField@1009 : TEMPORARY Record "Outlook Synch. Field";
+      OSynchOptionCorrel@1007 : Record "Outlook Synch. Option Correl.";
+      TempBLOBStore@1004 : TEMPORARY Record Object;
+      RelatedRecRef@1002 : RecordRef;
+      DateTimeRecRef@1014 : RecordRef;
+      FieldRef@1001 : FieldRef;
+      DateTimeFieldRef@1013 : FieldRef;
+      InStrm@1005 : InStream;
+      TempDateTime@1010 : DateTime;
+      TempDate@1011 : Date;
+      TempTime@1012 : Time;
+      OptionId@1006 : Integer;
+      FieldValueDefined@1008 : Boolean;
+    BEGIN
+      repeat
+        if not SearchFields then begin
+          TempOSynchField.RESET;
+          TempOSynchField.SETRANGE("Synch. Entity Code",OSynchField."Synch. Entity Code");
+          TempOSynchField.SETRANGE("Element No.",OSynchField."Element No.");
+          TempOSynchField.SETRANGE("Outlook Property",OSynchField."Outlook Property");
+          if not TempOSynchField.FIND('-') then begin
+            TempOSynchField.INIT;
+            TempOSynchField := OSynchField;
+            TempOSynchField.INSERT;
+          end;
+        end else begin
+          TempOSynchField.INIT;
+          TempOSynchField := OSynchField;
+          TempOSynchField.INSERT;
+        end;
+      until OSynchField.NEXT = 0;
+
+      TempOSynchField.RESET;
+      if TempOSynchField.FIND('-') then
+        repeat
+          if CheckSynchFieldCondition(SynchRecRef,TempOSynchField) then begin
+            FieldValueDefined := true;
+            if TempOSynchField."Table No." <> 0 then begin
+              OSynchFilter.RESET;
+              OSynchFilter.SETRANGE("Record GUID",TempOSynchField."Record GUID");
+              OSynchFilter.SETRANGE("Filter Type",OSynchFilter."Filter Type"::"Table Relation");
+
+              RelatedRecRef.OPEN(TempOSynchField."Table No.");
+              RelatedRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter,SynchRecRef));
+              FieldValueDefined := RelatedRecRef.FINDFIRST;
+              if FieldValueDefined then
+                FieldRef := RelatedRecRef.FIELD(TempOSynchField."Field No.");
+            end else
+              FieldRef := SynchRecRef.FIELD(TempOSynchField."Field No.");
+
+            XMLWriter.WriteStartElement('Field');
+            XMLWriter.WriteAttribute('Name',TempOSynchField."Outlook Property");
+
+            if FieldValueDefined then
+              // EVALUATE(Field.Type,FORMAT(FieldRef.TYPE));
+
+              case FORMAT(FieldRef.TYPE) of
+                // Field.Type::Time:
+                'Time':
+                  begin
+                    TempDate := 45010101D;
+                    if not EVALUATE(TempTime,FORMAT(FieldRef.VALUE)) then
+                      TempTime := 000000T;
+                    OSynchField1.RESET;
+                    OSynchField1.SETRANGE("Synch. Entity Code",TempOSynchField."Synch. Entity Code");
+                    OSynchField1.SETRANGE("Element No.",TempOSynchField."Element No.");
+                    OSynchField1.SETFILTER("Line No.",'<>%1',TempOSynchField."Line No.");
+                    OSynchField1.SETRANGE("Outlook Property",TempOSynchField."Outlook Property");
+                    if OSynchField1.FIND('-') then
+                      repeat
+                        GetDateTimeFieldRef(OSynchField1,TempOSynchField,SynchRecRef,RelatedRecRef,DateTimeFieldRef);
+                        if (FORMAT(DateTimeFieldRef.TYPE) = 'Date') and (FORMAT(DateTimeFieldRef.VALUE) <> '') then
+                          if EVALUATE(TempDate,FORMAT(DateTimeFieldRef.VALUE)) then;
+                        DateTimeRecRef.CLOSE;
+                      until OSynchField1.NEXT = 0;
+
+                    if OSynchTypeConversion.RunningUTC then
+                      TempDateTime := OSynchTypeConversion.LocalDT2UTC(CREATEDATETIME(TempDate,TempTime))
+                    else
+                      TempDateTime := CREATEDATETIME(TempDate,TempTime);
+                    if TempDate = 45010101D then
+                      TempDateTime := CREATEDATETIME(TempDate,DT2TIME(TempDateTime));
+                    XMLWriter.WriteElementTextContent(OSynchTypeConversion.SetDateTimeFormat(TempDateTime));
+                  end;
+                // Field.Type::Date:
+                'Date':
+                  begin
+                    TempTime := 000000T;
+                    if not EVALUATE(TempDate,FORMAT(FieldRef.VALUE)) or (TempDate = 0D) then
+                      TempDate := 45010101D;
+                    OSynchField1.RESET;
+                    OSynchField1.SETRANGE("Synch. Entity Code",TempOSynchField."Synch. Entity Code");
+                    OSynchField1.SETRANGE("Element No.",TempOSynchField."Element No.");
+                    OSynchField1.SETFILTER("Line No.",'<>%1',TempOSynchField."Line No.");
+                    OSynchField1.SETRANGE("Outlook Property",TempOSynchField."Outlook Property");
+                    if OSynchField1.FIND('-') then
+                      repeat
+                        GetDateTimeFieldRef(OSynchField1,TempOSynchField,SynchRecRef,RelatedRecRef,DateTimeFieldRef);
+                        if (FORMAT(DateTimeFieldRef.TYPE) = 'Time') and (FORMAT(DateTimeFieldRef.VALUE) <> '') then
+                          if EVALUATE(TempTime,FORMAT(DateTimeFieldRef.VALUE)) then;
+                        DateTimeRecRef.CLOSE;
+                      until OSynchField1.NEXT = 0;
+
+                    if OSynchTypeConversion.RunningUTC then
+                      TempDateTime := OSynchTypeConversion.LocalDT2UTC(CREATEDATETIME(TempDate,TempTime))
+                    else
+                      TempDateTime := CREATEDATETIME(TempDate,TempTime);
+                    if TempDate = 45010101D then
+                      TempDateTime := CREATEDATETIME(TempDate,DT2TIME(TempDateTime));
+                    XMLWriter.WriteElementTextContent(OSynchTypeConversion.SetDateTimeFormat(TempDateTime));
+                  end;
+                // Field.Type::BLOB:
+                'BLOB':
+                  begin
+                    CLEAR(InStrm);
+                    FieldRef.CALCFIELD;
+                    TempBLOBStore."BLOB Reference" := FieldRef.VALUE;
+                    TempBLOBStore.CALCFIELDS("BLOB Reference");
+                    if TempBLOBStore."BLOB Reference".HASVALUE then begin
+                      TempBLOBStore."BLOB Reference".CREATEINSTREAM(InStrm);
+                      XMLWriter.WriteStreamData(InStrm);
+                    end;
+                  end;
+                // Field.Type::Option:
+                'Option':
+                  begin
+                    OSynchOptionCorrel.RESET;
+                    OSynchOptionCorrel.SETRANGE("Synch. Entity Code",TempOSynchField."Synch. Entity Code");
+                    OSynchOptionCorrel.SETRANGE("Element No.",TempOSynchField."Element No.");
+                    OSynchOptionCorrel.SETRANGE("Field Line No.",TempOSynchField."Line No.");
+                    OptionId := OSynchTypeConversion.TextToOptionValue(FORMAT(FieldRef.VALUE),FieldRef.OPTIONCAPTION);
+                    OSynchOptionCorrel.SETRANGE("Option No.",OptionId);
+                    if OSynchOptionCorrel.FINDFIRST then
+                      XMLWriter.WriteElementTextContent(FORMAT(OSynchOptionCorrel."Enumeration No."))
+                    else
+                      if not OSynchSetupMgt.CheckOEnumeration(TempOSynchField) then
+                        XMLWriter.WriteElementTextContent(OSynchTypeConversion.PrepareFieldValueForXML(FieldRef))
+                      else begin
+                        if TempOSynchField."Element No." = 0 then
+                          ERROR(Text003,FieldRef.CAPTION,TempOSynchField."Synch. Entity Code");
+
+                        ERROR(Text009,FieldRef.CAPTION,TempOSynchField."Outlook Object",TempOSynchField."Synch. Entity Code");
+                      end;
+                  end;
+                else
+                  XMLWriter.WriteElementTextContent(OSynchTypeConversion.PrepareFieldValueForXML(FieldRef));
+              end;
+
+            XMLWriter.WriteEndElement;
+            RelatedRecRef.CLOSE;
+          end;
+        until TempOSynchField.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindDependentRecord@31(OSynchEntityElement1@1002 : Record "Outlook Synch. Entity Element";CollectionElementRecRef@1000 : RecordRef;VAR MasterRecID@1001 : RecordID) : Boolean;
+    VAR
+      OSynchEntity1@1010 : Record "Outlook Synch. Entity";
+      OSynchFilter1@1006 : Record "Outlook Synch. Filter";
+      OSynchDependency@1003 : Record "Outlook Synch. Dependency";
+      EntityRecRef@1004 : RecordRef;
+      TempEntityRecRef@1009 : RecordRef;
+      TempCollectionElementRecRef@1005 : RecordRef;
+      NullRecRef@1007 : RecordRef;
+    BEGIN
+      TempCollectionElementRecRef.OPEN(OSynchEntityElement1."Table No.",true);
+      CopyRecordReference(CollectionElementRecRef,TempCollectionElementRecRef,false);
+
+      OSynchDependency.RESET;
+      OSynchDependency.SETRANGE("Synch. Entity Code",OSynchEntityElement1."Synch. Entity Code");
+      OSynchDependency.SETRANGE("Element No.",OSynchEntityElement1."Element No.");
+      if OSynchDependency.FIND('-') then
+        repeat
+          TempCollectionElementRecRef.RESET;
+          OSynchFilter1.RESET;
+          OSynchFilter1.SETRANGE("Record GUID",OSynchDependency."Record GUID");
+          OSynchFilter1.SETRANGE("Filter Type",OSynchFilter1."Filter Type"::Condition);
+          if OSynchFilter1.FINDFIRST then
+            TempCollectionElementRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter1,NullRecRef));
+
+          if TempCollectionElementRecRef.FIND('-') then begin
+            OSynchDependency.CALCFIELDS("Depend. Synch. Entity Tab. No.");
+            OSynchFilter1.SETRANGE("Filter Type",OSynchFilter1."Filter Type"::"Table Relation");
+            if OSynchFilter1.FINDFIRST then begin
+              EntityRecRef.OPEN(OSynchDependency."Depend. Synch. Entity Tab. No.");
+              EntityRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter1,TempCollectionElementRecRef));
+              if EntityRecRef.FIND('-') then begin
+                TempEntityRecRef.OPEN(OSynchDependency."Depend. Synch. Entity Tab. No.",true);
+                CopyRecordReference(EntityRecRef,TempEntityRecRef,false);
+                OSynchEntity1.GET(OSynchDependency."Depend. Synch. Entity Code");
+
+                OSynchFilter1.RESET;
+                OSynchFilter1.SETRANGE("Record GUID",OSynchEntity1."Record GUID");
+                TempEntityRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter1,NullRecRef));
+                if TempEntityRecRef.FIND('-') then begin
+                  EVALUATE(MasterRecID,FORMAT(TempEntityRecRef.RECORDID));
+                  exit(true);
+                end;
+                TempEntityRecRef.CLOSE;
+              end;
+              EntityRecRef.CLOSE;
+            end;
+          end;
+        until OSynchDependency.NEXT = 0;
+      TempCollectionElementRecRef.CLOSE;
+    END;
+
+    [Internal]
+    PROCEDURE CheckSynchFieldCondition@12(SynchRecRef@1000 : RecordRef;VAR OSynchField1@1005 : Record "Outlook Synch. Field") : Boolean;
+    VAR
+      OSynchFilter1@1006 : Record "Outlook Synch. Filter";
+      SynchRecRef1@1002 : RecordRef;
+      NullRecRef@1001 : RecordRef;
+      RecID@1003 : RecordID;
+    BEGIN
+      if OSynchField1.Condition = '' then
+        exit(true);
+
+      EVALUATE(RecID,FORMAT(SynchRecRef.RECORDID));
+      SynchRecRef1.OPEN(RecID.TABLENO,true);
+      CopyRecordReference(SynchRecRef,SynchRecRef1,false);
+
+      OSynchFilter1.RESET;
+      OSynchFilter1.SETRANGE("Record GUID",OSynchField1."Record GUID");
+      OSynchFilter1.SETRANGE("Filter Type",OSynchFilter1."Filter Type"::Condition);
+      SynchRecRef1.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter1,NullRecRef));
+
+      exit(not SynchRecRef1.ISEMPTY);
+    END;
+
+    [Internal]
+    PROCEDURE CheckDeletedRecFilterCondition@20(VAR TempDeletedChangeLogEntry@1000 : Record "Change Log Entry";VAR OSynchFilterIn@1003 : Record "Outlook Synch. Filter") IsMatched : Boolean;
+    VAR
+      ChangeLogEntry@1002 : Record "Change Log Entry";
+      TempRecRef@1004 : RecordRef;
+      NullRecRef@1006 : RecordRef;
+      FieldRef@1005 : FieldRef;
+    BEGIN
+      IsMatched := true;
+      if not OSynchFilterIn.FINDFIRST then
+        exit;
+
+      ChangeLogEntry.SETCURRENTKEY("Table No.","Primary Key Field 1 Value");
+      ChangeLogEntry.SETRANGE("Table No.",TempDeletedChangeLogEntry."Table No.");
+      ChangeLogEntry.SETRANGE("Primary Key Field 1 Value",TempDeletedChangeLogEntry."Primary Key Field 1 Value");
+      ChangeLogEntry.SETFILTER("Date and Time",'>=%1',OSynchUserSetup."Last Synch. Time");
+      ChangeLogEntry.SETRANGE("Type of Change",ChangeLogEntry."Type of Change"::Deletion);
+      ChangeLogEntry.SETRANGE("Primary Key",TempDeletedChangeLogEntry."Primary Key");
+
+      TempRecRef.OPEN(TempDeletedChangeLogEntry."Table No.",true);
+      TempRecRef.INIT;
+
+      if ChangeLogEntry.FINDSET then
+        repeat
+          FieldRef := TempRecRef.FIELD(ChangeLogEntry."Field No.");
+          if not
+             OSynchTypeConversion.EvaluateTextToFieldRef(
+               OSynchTypeConversion.SetValueFormat(ChangeLogEntry."Old Value",FieldRef),
+               FieldRef,
+               false)
+          then
+            ERROR(Text010,OSynchEntity.Code,PRODUCTNAME.FULL);
+        until ChangeLogEntry.NEXT = 0;
+
+      TempRecRef.INSERT;
+
+      TempRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilterIn,NullRecRef));
+      IsMatched := TempRecRef.FIND('-');
+      TempRecRef.CLOSE;
+    END;
+
+    [External]
+    PROCEDURE CheckTimeCondition@13(RecID@1000 : RecordID;SynchStartTime@1001 : DateTime) : Boolean;
+    VAR
+      ChangeLogEntry@1002 : Record "Change Log Entry";
+    BEGIN
+      ChangeLogEntry.SETCURRENTKEY("Table No.","Primary Key Field 1 Value");
+      OSynchProcessLine.FilterChangeLog(RecID,ChangeLogEntry);
+      if ChangeLogEntry.FINDLAST then;
+
+      OSynchLink.RESET;
+      if OSynchLink.GET(OSynchUserSetup."User ID",RecID) then begin
+        if (OSynchLink."Synchronization Date" >= ChangeLogEntry."Date and Time") and
+           (OSynchLink."Synchronization Date" <= SynchStartTime)
+        then
+          exit(false);
+        // Item was deleted during this synchronization so we should not return it.
+        if (OSynchLink."Synchronization Date" >= SynchStartTime) and (OSynchLink."Outlook Entry ID Hash" = '') then
+          exit(false);
+      end;
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE CheckCollectionTimeCondition@14(EntityRecID@1000 : RecordID;CollectionElementRecID@1001 : RecordID;SynchStartTime@1003 : DateTime) : Boolean;
+    VAR
+      ChangeLogEntry@1002 : Record "Change Log Entry";
+      CollectionElementLMDT@1006 : DateTime;
+    BEGIN
+      if CheckTimeCondition(EntityRecID,SynchStartTime) then
+        exit(true);
+
+      ChangeLogEntry.RESET;
+      ChangeLogEntry.SETCURRENTKEY("Table No.","Primary Key Field 1 Value");
+      OSynchProcessLine.FilterChangeLog(CollectionElementRecID,ChangeLogEntry);
+      if ChangeLogEntry.FINDLAST then
+        CollectionElementLMDT := ChangeLogEntry."Date and Time";
+
+      if OSynchLink.GET(OSynchUserSetup."User ID",EntityRecID) then
+        if OSynchLink."Synchronization Date" < CollectionElementLMDT then
+          exit(true)
+        else
+          if SynchStartTime < CollectionElementLMDT then
+            exit(true);
+    END;
+
+    LOCAL PROCEDURE SortEntitiesForXMLOutput@1(VAR TempOSynchEntityUnsorted@1000 : Record "Outlook Synch. Entity";VAR TempOSynchLookupName@1001 : Record "Outlook Synch. Lookup Name");
+    VAR
+      OSynchDependency@1004 : Record "Outlook Synch. Dependency";
+      LastIndex@1005 : Integer;
+    BEGIN
+      TempOSynchLookupName.DELETEALL;
+
+      if TempOSynchEntityUnsorted.FIND('-') then begin
+        OSynchDependency.RESET;
+        if not OSynchDependency.ISEMPTY then
+          repeat
+            ProcessDependentEntity(
+              TempOSynchEntityUnsorted.Code,
+              LastIndex,
+              TempOSynchEntityUnsorted,
+              TempOSynchLookupName);
+          until TempOSynchEntityUnsorted.NEXT = 0;
+
+        if TempOSynchEntityUnsorted.FIND('-') then
+          repeat
+            if not TempOSynchEntityUnsorted.MARK then begin
+              TempOSynchLookupName.INIT;
+              TempOSynchLookupName."Entry No." := LastIndex;
+              TempOSynchLookupName.Name := TempOSynchEntityUnsorted.Code;
+              TempOSynchLookupName.INSERT;
+              LastIndex := LastIndex + 1;
+            end;
+          until TempOSynchEntityUnsorted.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE ObtainRenamedRecordID@2(VAR ChangeLogEntry@1000 : Record "Change Log Entry";PKField1No@1004 : Integer;PKField2No@1005 : Integer;PKField3No@1006 : Integer;VAR RecID@1001 : RecordID);
+    VAR
+      TempRecRef@1002 : RecordRef;
+      ArrayFieldRef@1003 : ARRAY [3] OF FieldRef;
+    BEGIN
+      if not ChangeLogEntry.FIND('-') then
+        exit;
+
+      TempRecRef.OPEN(ChangeLogEntry."Table No.",true);
+      TempRecRef.INIT;
+      repeat
+        case ChangeLogEntry."Field No." of
+          ChangeLogEntry."Primary Key Field 1 No.":
+            begin
+              ArrayFieldRef[1] := TempRecRef.FIELD(PKField1No);
+              if not OSynchTypeConversion.EvaluateTextToFieldRef(ChangeLogEntry."Old Value",ArrayFieldRef[1],false) then
+                ERROR(Text001);
+            end;
+          ChangeLogEntry."Primary Key Field 2 No.":
+            begin
+              ArrayFieldRef[2] := TempRecRef.FIELD(PKField2No);
+              if not OSynchTypeConversion.EvaluateTextToFieldRef(ChangeLogEntry."Old Value",ArrayFieldRef[2],false) then
+                ERROR(Text001);
+            end;
+          ChangeLogEntry."Primary Key Field 3 No.":
+            begin
+              ArrayFieldRef[3] := TempRecRef.FIELD(PKField3No);
+              if not OSynchTypeConversion.EvaluateTextToFieldRef(ChangeLogEntry."Old Value",ArrayFieldRef[3],false) then
+                ERROR(Text001);
+            end;
+        end;
+      until ChangeLogEntry.NEXT = 0;
+      TempRecRef.INSERT;
+      EVALUATE(RecID,FORMAT(TempRecRef.RECORDID));
+      TempRecRef.CLOSE;
+    END;
+
+    [Internal]
+    PROCEDURE WriteLinkedOutlookEntryID@35(UserID@1003 : Code[50];RecID@1000 : RecordID;VAR XMLTextWriter@1002 : DotNet "'Microsoft.Dynamics.Nav.OLSync.Common, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.NAV.OLSync.Common.XmlTextWriter");
+    VAR
+      EntryIDContainer@1004 : Text;
+    BEGIN
+      if not OSynchLink.GET(UserID,RecID) then
+        exit;
+
+      CLEAR(EntryIDContainer);
+      if not OSynchLink.GetEntryID(EntryIDContainer) then
+        exit;
+
+      XMLTextWriter.WriteStartElement('EntryID');
+      XMLTextWriter.WriteElementTextContent(OSynchOutlookMgt.ConvertValueToBase64(EntryIDContainer));
+      XMLTextWriter.WriteEndElement;
+    END;
+
+    [External]
+    PROCEDURE RemoveChangeLogDuplicates@19(VAR ChangeLogEntry@1001 : Record "Change Log Entry";VAR TempChangeLogEntry@1000 : Record "Change Log Entry");
+    BEGIN
+      ChangeLogEntry.SETCURRENTKEY("Table No.","Date and Time");
+      ChangeLogEntry.SETFILTER("Date and Time",'>=%1',OSynchUserSetup."Last Synch. Time");
+      TempChangeLogEntry.RESET;
+      TempChangeLogEntry.DELETEALL;
+
+      if ChangeLogEntry.FIND('+') then
+        repeat
+          if ChangeLogEntry."Primary Key" <> TempChangeLogEntry."Primary Key" then begin
+            TempChangeLogEntry.SETRANGE("Primary Key",ChangeLogEntry."Primary Key");
+            if not TempChangeLogEntry.FIND('-') then begin
+              TempChangeLogEntry.INIT;
+              TempChangeLogEntry := ChangeLogEntry;
+              TempChangeLogEntry.INSERT;
+            end;
+          end;
+        until ChangeLogEntry.NEXT(-1) = 0;
+
+      TempChangeLogEntry.RESET;
+    END;
+
+    [Internal]
+    PROCEDURE ObtainRecordID@18(TempChangeLogEntry@1000 : Record "Change Log Entry";VAR RecID@1001 : RecordID);
+    VAR
+      TempDeletedRecordRef@1004 : RecordRef;
+      ArrayFieldRef@1003 : ARRAY [3] OF FieldRef;
+      KeyRef@1002 : KeyRef;
+      I@1006 : Integer;
+    BEGIN
+      TempDeletedRecordRef.OPEN(TempChangeLogEntry."Table No.",true);
+
+      KeyRef := TempDeletedRecordRef.KEYINDEX(1);
+      for I := 1 to KeyRef.FIELDCOUNT do
+        ArrayFieldRef[I] := KeyRef.FIELDINDEX(I);
+
+      TempDeletedRecordRef.INIT;
+
+      if TempChangeLogEntry."Primary Key Field 1 No." > 0 then
+        if TempChangeLogEntry."Primary Key Field 1 No." = ArrayFieldRef[1].NUMBER then
+          if not
+             OSynchTypeConversion.EvaluateTextToFieldRef(TempChangeLogEntry."Primary Key Field 1 Value",ArrayFieldRef[1],false)
+          then
+            ERROR(Text001);
+
+      if TempChangeLogEntry."Primary Key Field 2 No." > 0 then
+        if TempChangeLogEntry."Primary Key Field 2 No." = ArrayFieldRef[2].NUMBER then
+          if not
+             OSynchTypeConversion.EvaluateTextToFieldRef(TempChangeLogEntry."Primary Key Field 2 Value",ArrayFieldRef[2],false)
+          then
+            ERROR(Text001);
+
+      if TempChangeLogEntry."Primary Key Field 3 No." > 0 then
+        if TempChangeLogEntry."Primary Key Field 3 No." = ArrayFieldRef[3].NUMBER then
+          if not
+             OSynchTypeConversion.EvaluateTextToFieldRef(TempChangeLogEntry."Primary Key Field 3 Value",ArrayFieldRef[3],false)
+          then
+            ERROR(Text001);
+
+      TempDeletedRecordRef.INSERT;
+
+      EVALUATE(RecID,FORMAT(TempDeletedRecordRef.RECORDID));
+      TempDeletedRecordRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE FindMasterRecByChangeLogEntry@39(VAR InsModChangeLogEntry@1000 : Record "Change Log Entry";VAR TempRecRef@1001 : RecordRef);
+    VAR
+      MasterTableRef@1002 : RecordRef;
+      RecID@1005 : RecordID;
+    BEGIN
+      if not InsModChangeLogEntry.FIND('-') then
+        exit;
+
+      MasterTableRef.OPEN(InsModChangeLogEntry."Table No.");
+
+      repeat
+        ObtainRecordID(InsModChangeLogEntry,RecID);
+        if MasterTableRef.GET(RecID) then
+          CopyRecordReference(MasterTableRef,TempRecRef,false);
+      until InsModChangeLogEntry.NEXT = 0;
+
+      MasterTableRef.CLOSE;
+    END;
+
+    [External]
+    PROCEDURE CopyRecordReference@15(FromRec@1000 : RecordRef;VAR ToRec@1001 : RecordRef;ValidateOnInsert@1007 : Boolean);
+    VAR
+      FromField@1004 : FieldRef;
+      ToField@1003 : FieldRef;
+      RecIDFrom@1005 : RecordID;
+      RecIDTo@1006 : RecordID;
+      Counter@1002 : Integer;
+    BEGIN
+      EVALUATE(RecIDFrom,FORMAT(FromRec.RECORDID));
+      EVALUATE(RecIDTo,FORMAT(ToRec.RECORDID));
+      if RecIDFrom.TABLENO <> RecIDTo.TABLENO then
+        exit;
+
+      ToRec.INIT;
+
+      for Counter := 1 to FromRec.FIELDCOUNT do begin
+        FromField := FromRec.FIELDINDEX(Counter);
+        ToField := ToRec.FIELD(FromField.NUMBER);
+
+        if (FORMAT(FromField.TYPE) <> 'BLOB') and
+           (FORMAT(FromField.TYPE) <> 'Binary') and
+           (FORMAT(FromField.TYPE) <> 'TableFilter')
+        then
+          ToField.VALUE := FromField.VALUE
+        else
+          if Field.Type = Field.Type::BLOB then;
+      end;
+
+      ToRec.INSERT(ValidateOnInsert);
+    END;
+
+    [External]
+    PROCEDURE GetSortedEntities@30(UserID@1000 : Code[50];VAR EntitiesBuffer@1001 : Record "Outlook Synch. Lookup Name";IsSchema@1003 : Boolean);
+    VAR
+      TempOSynchEntityUnsorted@1002 : TEMPORARY Record "Outlook Synch. Entity";
+    BEGIN
+      EntitiesBuffer.RESET;
+      EntitiesBuffer.DELETEALL;
+
+      OSynchUserSetup.RESET;
+      OSynchUserSetup.SETRANGE("User ID",UserID);
+      if not IsSchema then
+        OSynchUserSetup.SETFILTER("Synch. Direction",'<>%1',OSynchUserSetup."Synch. Direction"::"Outlook to Microsoft Dynamics NAV");
+
+      if not OSynchUserSetup.FIND('-') then
+        exit;
+
+      TempOSynchEntityUnsorted.RESET;
+      TempOSynchEntityUnsorted.DELETEALL;
+
+      repeat
+        OSynchEntity.GET(OSynchUserSetup."Synch. Entity Code");
+        TempOSynchEntityUnsorted.INIT;
+        TempOSynchEntityUnsorted := OSynchEntity;
+        TempOSynchEntityUnsorted.INSERT;
+      until OSynchUserSetup.NEXT = 0;
+
+      SortEntitiesForXMLOutput(TempOSynchEntityUnsorted,EntitiesBuffer);
+    END;
+
+    LOCAL PROCEDURE UpdateGlobalRecordIDBuffer@29(RecID@1000 : RecordID;SynchEntityCode@1001 : Code[10]);
+    BEGIN
+      GlobalRecordIDBuffer.SETRANGE("Search Record ID",UPPERCASE(FORMAT(RecID)));
+      if GlobalRecordIDBuffer.FINDFIRST then
+        exit;
+
+      GlobalRecordIDBuffer.INIT;
+      GlobalRecordIDBuffer."User ID" := SynchEntityCode;
+      GlobalRecordIDBuffer."Record ID" := RecID;
+      GlobalRecordIDBuffer."Search Record ID" := FORMAT(RecID);
+      GlobalRecordIDBuffer.INSERT;
+    END;
+
+    LOCAL PROCEDURE CheckChangeLogAvailability@24() : Boolean;
+    VAR
+      ChangeLogSetup@1000 : Record "Change Log Setup";
+    BEGIN
+      if ChangeLogSetup.GET then
+        exit(ChangeLogSetup."Change Log Activated");
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE IsOSyncUser@7(UserID@1000 : Code[50]) : Boolean;
+    VAR
+      OutlookSynchUserSetup@1001 : Record "Outlook Synch. User Setup";
+    BEGIN
+      if UserID = '' then
+        exit(false);
+
+      OutlookSynchUserSetup.SETRANGE("User ID",UserID);
+      exit(not OutlookSynchUserSetup.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE GetDateTimeFieldRef@8(OutlookSynchField@1001 : Record "Outlook Synch. Field";TempOutlookSynchField@1000 : TEMPORARY Record "Outlook Synch. Field";VAR SynchRecRef@1003 : RecordRef;VAR RelatedRecRef@1004 : RecordRef;VAR DateTimeFieldRef@1002 : FieldRef);
+    VAR
+      DateTimeRecRef@1005 : RecordRef;
+    BEGIN
+      if OutlookSynchField."Table No." = TempOutlookSynchField."Table No." then begin
+        if TempOutlookSynchField."Table No." = 0 then
+          DateTimeFieldRef := SynchRecRef.FIELD(OutlookSynchField."Field No.")
+        else
+          DateTimeFieldRef := RelatedRecRef.FIELD(OutlookSynchField."Field No.");
+      end else begin
+        OSynchFilter.RESET;
+        OSynchFilter.SETRANGE("Record GUID",OutlookSynchField."Record GUID");
+        OSynchFilter.SETRANGE("Filter Type",OSynchFilter."Filter Type"::"Table Relation");
+
+        DateTimeRecRef.OPEN(OutlookSynchField."Table No.");
+        DateTimeRecRef.SETVIEW(OSynchSetupMgt.ComposeTableFilter(OSynchFilter,SynchRecRef));
+        if DateTimeRecRef.FIND('-') then
+          DateTimeFieldRef := DateTimeRecRef.FIELD(OutlookSynchField."Field No.");
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

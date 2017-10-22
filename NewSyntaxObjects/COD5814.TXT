@@ -1,0 +1,286 @@
+OBJECT Codeunit 5814 Undo Return Shipment Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Return Shipment Line";
+    Permissions=TableData "Purchase Line"=imd,
+                TableData "Item Entry Relation"=ri,
+                TableData "Return Shipment Line"=imd;
+    OnRun=BEGIN
+            SETRANGE(Type,Type::Item);
+            if not FIND('-') then
+              ERROR(Text005);
+
+            if not HideDialog then
+              if not CONFIRM(Text000) then
+                exit;
+
+            ReturnShptLine.COPY(Rec);
+            Code;
+            Rec := ReturnShptLine;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Do you really want to undo the selected Return Shipment lines?';
+      ReturnShptLine@1002 : Record "Return Shipment Line";
+      TempWhseJnlLine@1017 : TEMPORARY Record "Warehouse Journal Line";
+      TempGlobalItemLedgEntry@1027 : TEMPORARY Record "Item Ledger Entry";
+      TempGlobalItemEntryRelation@1026 : TEMPORARY Record "Item Entry Relation";
+      InvtSetup@1005 : Record "Inventory Setup";
+      UndoPostingMgt@1025 : Codeunit "Undo Posting Management";
+      ItemJnlPostLine@1003 : Codeunit "Item Jnl.-Post Line";
+      Text001@1001 : TextConst 'ENU=Undo quantity posting...';
+      Text002@1004 : TextConst 'ENU=There is not enough space to insert correction lines.';
+      WhseUndoQty@1016 : Codeunit "Whse. Undo Quantity";
+      InvtAdjmt@1006 : Codeunit "Inventory Adjustment";
+      HideDialog@1008 : Boolean;
+      Text003@1012 : TextConst 'ENU=Checking lines...';
+      JobItem@1011 : Boolean;
+      NextLineNo@1015 : Integer;
+      Text004@1010 : TextConst 'ENU=This shipment has already been invoiced. Undo Return Shipment can be applied only to posted, but not invoiced shipments.';
+      Text005@1009 : TextConst 'ENU=Undo Return Shipment can be performed only for lines of type Item. Please select a line of the Item type and repeat the procedure.';
+
+    [External]
+    PROCEDURE SetHideDialog@3(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    LOCAL PROCEDURE Code@1();
+    VAR
+      PostedWhseShptLine@1003 : Record "Posted Whse. Shipment Line";
+      SalesLine@1005 : Record "Sales Line";
+      Window@1001 : Dialog;
+      ItemShptEntryNo@1000 : Integer;
+      DocLineNo@1002 : Integer;
+      PostedWhseShptLineFound@1004 : Boolean;
+    BEGIN
+      with ReturnShptLine do begin
+        CLEAR(ItemJnlPostLine);
+        SETRANGE(Correction,false);
+
+        repeat
+          if not HideDialog then
+            Window.OPEN(Text003);
+          CheckReturnShptLine(ReturnShptLine);
+        until NEXT = 0;
+
+        FIND('-');
+        repeat
+          TempGlobalItemLedgEntry.RESET;
+          if not TempGlobalItemLedgEntry.ISEMPTY then
+            TempGlobalItemLedgEntry.DELETEALL;
+          TempGlobalItemEntryRelation.RESET;
+          if not TempGlobalItemEntryRelation.ISEMPTY then
+            TempGlobalItemEntryRelation.DELETEALL;
+
+          if not HideDialog then
+            Window.OPEN(Text001);
+
+          PostedWhseShptLineFound :=
+            WhseUndoQty.FindPostedWhseShptLine(
+              PostedWhseShptLine,
+              DATABASE::"Return Shipment Line",
+              "Document No.",
+              DATABASE::"Purchase Line",
+              SalesLine."Document Type"::"Return Order",
+              "Return Order No.",
+              "Return Order Line No.");
+
+          ItemShptEntryNo := PostItemJnlLine(ReturnShptLine,DocLineNo);
+
+          InsertNewReturnShptLine(ReturnShptLine,ItemShptEntryNo,DocLineNo);
+          if PostedWhseShptLineFound then
+            WhseUndoQty.UndoPostedWhseShptLine(PostedWhseShptLine);
+
+          UpdateOrderLine(ReturnShptLine);
+          if PostedWhseShptLineFound then
+            WhseUndoQty.UpdateShptSourceDocLines(PostedWhseShptLine);
+
+          "Quantity Invoiced" := Quantity;
+          "Qty. Invoiced (Base)" := "Quantity (Base)";
+          "Return Qty. Shipped Not Invd." := 0;
+          Correction := true;
+
+          MODIFY;
+          OnAfterReturnShptLineModify(ReturnShptLine);
+
+          if not JobItem then
+            JobItem := (Type = Type::Item) and ("Job No." <> '');
+        until NEXT = 0;
+
+        InvtSetup.GET;
+        if InvtSetup."Automatic Cost Adjustment" <>
+           InvtSetup."Automatic Cost Adjustment"::Never
+        then begin
+          InvtAdjmt.SetProperties(true,InvtSetup."Automatic Cost Posting");
+          InvtAdjmt.SetJobUpdateProperties(not JobItem);
+          InvtAdjmt.MakeMultiLevelAdjmt;
+        end;
+
+        WhseUndoQty.PostTempWhseJnlLine(TempWhseJnlLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckReturnShptLine@2(ReturnShptLine@1000 : Record "Return Shipment Line");
+    VAR
+      TempItemLedgEntry@1015 : TEMPORARY Record "Item Ledger Entry";
+    BEGIN
+      with ReturnShptLine do begin
+        TESTFIELD(Type,Type::Item);
+        if "Return Qty. Shipped Not Invd." <> Quantity then
+          ERROR(Text004);
+        TESTFIELD("Prod. Order No.",'');
+
+        UndoPostingMgt.TestReturnShptLine(ReturnShptLine);
+        UndoPostingMgt.CollectItemLedgEntries(TempItemLedgEntry,DATABASE::"Return Shipment Line",
+          "Document No.","Line No.","Quantity (Base)","Item Shpt. Entry No.");
+        UndoPostingMgt.CheckItemLedgEntries(TempItemLedgEntry,"Line No.");
+      end;
+    END;
+
+    LOCAL PROCEDURE PostItemJnlLine@4(ReturnShptLine@1000 : Record "Return Shipment Line";VAR DocLineNo@1007 : Integer) : Integer;
+    VAR
+      ItemJnlLine@1002 : Record "Item Journal Line";
+      PurchLine@1004 : Record "Purchase Line";
+      ReturnShptHeader@1009 : Record "Return Shipment Header";
+      ReturnShptLine2@1005 : Record "Return Shipment Line";
+      SourceCodeSetup@1001 : Record "Source Code Setup";
+      TempApplyToEntryList@1006 : TEMPORARY Record "Item Ledger Entry";
+      LineSpacing@1003 : Integer;
+    BEGIN
+      with ReturnShptLine do begin
+        ReturnShptLine2.SETRANGE("Document No.","Document No.");
+        ReturnShptLine2."Document No." := "Document No.";
+        ReturnShptLine2."Line No." := "Line No.";
+        ReturnShptLine2.FIND('=');
+
+        if ReturnShptLine2.FIND('>') then begin
+          LineSpacing := (ReturnShptLine2."Line No." - "Line No.") div 2;
+          if LineSpacing = 0 then
+            ERROR(Text002);
+        end else
+          LineSpacing := 10000;
+        DocLineNo := "Line No." + LineSpacing;
+
+        SourceCodeSetup.GET;
+        ReturnShptHeader.GET("Document No.");
+        ItemJnlLine.INIT;
+        ItemJnlLine."Entry Type" := ItemJnlLine."Entry Type"::Purchase;
+        ItemJnlLine."Item No." := "No.";
+        ItemJnlLine."Unit of Measure Code" := "Unit of Measure Code";
+        ItemJnlLine."Posting Date" := ReturnShptHeader."Posting Date";
+        ItemJnlLine."Document No." := "Document No.";
+        ItemJnlLine."Document Line No." := DocLineNo;
+        ItemJnlLine."Document Type" := ItemJnlLine."Document Type"::"Purchase Return Shipment";
+        ItemJnlLine."Gen. Bus. Posting Group" := "Gen. Bus. Posting Group";
+        ItemJnlLine."Gen. Prod. Posting Group" := "Gen. Prod. Posting Group";
+        ItemJnlLine."Location Code" := "Location Code";
+        ItemJnlLine."Source Code" := SourceCodeSetup.Purchases;
+        ItemJnlLine."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        ItemJnlLine."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+        ItemJnlLine."Dimension Set ID" := "Dimension Set ID";
+        if "Job No." = '' then begin
+          ItemJnlLine.Correction := true;
+          ItemJnlLine."Applies-to Entry" := "Item Shpt. Entry No.";
+        end else begin
+          ItemJnlLine."Job No." := "Job No.";
+          ItemJnlLine."Job Task No." := "Job Task No.";
+          ItemJnlLine."Job Purchase" := true;
+          ItemJnlLine."Unit Cost" := "Unit Cost (LCY)";
+        end;
+        ItemJnlLine."Variant Code" := "Variant Code";
+        ItemJnlLine."Bin Code" := "Bin Code";
+        ItemJnlLine.Quantity := "Quantity (Base)";
+        ItemJnlLine."Quantity (Base)" := "Quantity (Base)";
+        ItemJnlLine."Document Date" := ReturnShptHeader."Document Date";
+
+        WhseUndoQty.InsertTempWhseJnlLine(ItemJnlLine,
+          DATABASE::"Purchase Line",
+          PurchLine."Document Type"::"Return Order",
+          "Return Order No.",
+          "Return Order Line No.",
+          TempWhseJnlLine."Reference Document"::"Posted Rtrn. Shipment",
+          TempWhseJnlLine,
+          NextLineNo);
+
+        if "Item Shpt. Entry No." <> 0 then begin
+          if "Job No." <> '' then
+            UndoPostingMgt.TransferSourceValues(ItemJnlLine,"Item Shpt. Entry No.");
+          UndoPostingMgt.PostItemJnlLine(ItemJnlLine);
+          exit(ItemJnlLine."Item Shpt. Entry No.");
+        end;
+        UndoPostingMgt.CollectItemLedgEntries(TempApplyToEntryList,DATABASE::"Return Shipment Line",
+          "Document No.","Line No.","Quantity (Base)","Item Shpt. Entry No.");
+
+        UndoPostingMgt.PostItemJnlLineAppliedToList(ItemJnlLine,TempApplyToEntryList,
+          Quantity,"Quantity (Base)",TempGlobalItemLedgEntry,TempGlobalItemEntryRelation);
+
+        exit(0); // "Item Shpt. Entry No."
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertNewReturnShptLine@5(OldReturnShptLine@1000 : Record "Return Shipment Line";ItemShptEntryNo@1001 : Integer;DocLineNo@1002 : Integer);
+    VAR
+      NewReturnShptLine@1005 : Record "Return Shipment Line";
+    BEGIN
+      with OldReturnShptLine do begin
+        NewReturnShptLine.INIT;
+        NewReturnShptLine.COPY(OldReturnShptLine);
+        NewReturnShptLine."Line No." := DocLineNo;
+        NewReturnShptLine."Appl.-to Item Entry" := "Item Shpt. Entry No.";
+        NewReturnShptLine."Item Shpt. Entry No." := ItemShptEntryNo;
+        NewReturnShptLine.Quantity := -Quantity;
+        NewReturnShptLine."Quantity (Base)" := -"Quantity (Base)";
+        NewReturnShptLine."Quantity Invoiced" := NewReturnShptLine.Quantity;
+        NewReturnShptLine."Qty. Invoiced (Base)" := NewReturnShptLine."Quantity (Base)";
+        NewReturnShptLine."Return Qty. Shipped Not Invd." := 0;
+        NewReturnShptLine.Correction := true;
+        NewReturnShptLine."Dimension Set ID" := "Dimension Set ID";
+        NewReturnShptLine.INSERT;
+
+        InsertItemEntryRelation(TempGlobalItemEntryRelation,NewReturnShptLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateOrderLine@6(ReturnShptLine@1000 : Record "Return Shipment Line");
+    VAR
+      PurchLine@1001 : Record "Purchase Line";
+    BEGIN
+      with ReturnShptLine do begin
+        PurchLine.GET(PurchLine."Document Type"::"Return Order","Return Order No.","Return Order Line No.");
+        UndoPostingMgt.UpdatePurchLine(PurchLine,Quantity,"Quantity (Base)",TempGlobalItemLedgEntry);
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertItemEntryRelation@10(VAR TempItemEntryRelation@1003 : TEMPORARY Record "Item Entry Relation";NewReturnShptLine@1002 : Record "Return Shipment Line");
+    VAR
+      ItemEntryRelation@1001 : Record "Item Entry Relation";
+    BEGIN
+      if TempItemEntryRelation.FIND('-') then
+        repeat
+          ItemEntryRelation := TempItemEntryRelation;
+          ItemEntryRelation.TransferFieldsReturnShptLine(NewReturnShptLine);
+          ItemEntryRelation.INSERT;
+        until TempItemEntryRelation.NEXT = 0;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterReturnShptLineModify@7(VAR ReturnShptLine@1000 : Record "Return Shipment Line");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

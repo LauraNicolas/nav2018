@@ -1,0 +1,237 @@
+OBJECT Codeunit 1252 Match Bank Rec. Lines
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      MatchSummaryMsg@1000 : TextConst 'ENU=%1 reconciliation lines out of %2 are matched.\\';
+      MissingMatchMsg@1002 : TextConst 'ENU=Text shorter than %1 characters cannot be matched.';
+      ProgressBarMsg@1001 : TextConst 'ENU=Please wait while the operation is being completed.';
+      Relation@1003 : '"One-to-One","One-to-Many"';
+      MatchLengthTreshold@1061 : Integer;
+      NormalizingFactor@1065 : Integer;
+
+    [External]
+    PROCEDURE MatchManually@1(VAR SelectedBankAccReconciliationLine@1004 : Record "Bank Acc. Reconciliation Line";VAR SelectedBankAccountLedgerEntry@1003 : Record "Bank Account Ledger Entry");
+    VAR
+      BankAccReconciliationLine@1006 : Record "Bank Acc. Reconciliation Line";
+      BankAccountLedgerEntry@1002 : Record "Bank Account Ledger Entry";
+      BankAccEntrySetReconNo@1000 : Codeunit "Bank Acc. Entry Set Recon.-No.";
+    BEGIN
+      if SelectedBankAccReconciliationLine.FINDFIRST then begin
+        BankAccReconciliationLine.GET(
+          SelectedBankAccReconciliationLine."Statement Type",
+          SelectedBankAccReconciliationLine."Bank Account No.",
+          SelectedBankAccReconciliationLine."Statement No.",
+          SelectedBankAccReconciliationLine."Statement Line No.");
+        if BankAccReconciliationLine.Type <> BankAccReconciliationLine.Type::"Bank Account Ledger Entry" then
+          exit;
+
+        if SelectedBankAccountLedgerEntry.FINDSET then begin
+          repeat
+            BankAccountLedgerEntry.GET(SelectedBankAccountLedgerEntry."Entry No.");
+            BankAccEntrySetReconNo.RemoveApplication(BankAccountLedgerEntry);
+            BankAccEntrySetReconNo.ApplyEntries(BankAccReconciliationLine,BankAccountLedgerEntry,Relation::"One-to-Many");
+          until SelectedBankAccountLedgerEntry.NEXT = 0;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE RemoveMatch@2(VAR SelectedBankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line";VAR SelectedBankAccountLedgerEntry@1000 : Record "Bank Account Ledger Entry");
+    VAR
+      BankAccReconciliationLine@1004 : Record "Bank Acc. Reconciliation Line";
+      BankAccountLedgerEntry@1003 : Record "Bank Account Ledger Entry";
+      BankAccEntrySetReconNo@1002 : Codeunit "Bank Acc. Entry Set Recon.-No.";
+    BEGIN
+      if SelectedBankAccReconciliationLine.FINDSET then
+        repeat
+          BankAccReconciliationLine.GET(
+            SelectedBankAccReconciliationLine."Statement Type",
+            SelectedBankAccReconciliationLine."Bank Account No.",
+            SelectedBankAccReconciliationLine."Statement No.",
+            SelectedBankAccReconciliationLine."Statement Line No.");
+          BankAccountLedgerEntry.SETRANGE("Bank Account No.",BankAccReconciliationLine."Bank Account No.");
+          BankAccountLedgerEntry.SETRANGE("Statement No.",BankAccReconciliationLine."Statement No.");
+          BankAccountLedgerEntry.SETRANGE("Statement Line No.",BankAccReconciliationLine."Statement Line No.");
+          BankAccountLedgerEntry.SETRANGE(Open,true);
+          BankAccountLedgerEntry.SETRANGE("Statement Status",BankAccountLedgerEntry."Statement Status"::"Bank Acc. Entry Applied");
+          if BankAccountLedgerEntry.FINDSET then
+            repeat
+              BankAccEntrySetReconNo.RemoveApplication(BankAccountLedgerEntry);
+            until BankAccountLedgerEntry.NEXT = 0;
+        until SelectedBankAccReconciliationLine.NEXT = 0;
+
+      if SelectedBankAccountLedgerEntry.FINDSET then
+        repeat
+          BankAccountLedgerEntry.GET(SelectedBankAccountLedgerEntry."Entry No.");
+          BankAccEntrySetReconNo.RemoveApplication(BankAccountLedgerEntry);
+        until SelectedBankAccountLedgerEntry.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE MatchSingle@5(BankAccReconciliation@1003 : Record "Bank Acc. Reconciliation";DateRange@1008 : Integer);
+    VAR
+      TempBankStatementMatchingBuffer@1000 : TEMPORARY Record "Bank Statement Matching Buffer";
+      BankRecMatchCandidates@1001 : Query "Bank Rec. Match Candidates";
+      Window@1004 : Dialog;
+      Score@1002 : Integer;
+    BEGIN
+      TempBankStatementMatchingBuffer.DELETEALL;
+
+      Window.OPEN(ProgressBarMsg);
+      SetMatchLengthTreshold(4);
+      SetNormalizingFactor(10);
+      BankRecMatchCandidates.SETRANGE(Rec_Line_Bank_Account_No,BankAccReconciliation."Bank Account No.");
+      BankRecMatchCandidates.SETRANGE(Rec_Line_Statement_No,BankAccReconciliation."Statement No.");
+      if BankRecMatchCandidates.OPEN then
+        while BankRecMatchCandidates.READ do begin
+          Score := 0;
+
+          if BankRecMatchCandidates.Rec_Line_Difference = BankRecMatchCandidates.Remaining_Amount then
+            Score += 13;
+
+          Score += GetDescriptionMatchScore(BankRecMatchCandidates.Rec_Line_Description,BankRecMatchCandidates.Description,
+              BankRecMatchCandidates.Document_No,BankRecMatchCandidates.External_Document_No);
+
+          Score += GetDescriptionMatchScore(BankRecMatchCandidates.Rec_Line_RltdPty_Name,BankRecMatchCandidates.Description,
+              BankRecMatchCandidates.Document_No,BankRecMatchCandidates.External_Document_No);
+
+          Score += GetDescriptionMatchScore(BankRecMatchCandidates.Rec_Line_Transaction_Info,BankRecMatchCandidates.Description,
+              BankRecMatchCandidates.Document_No,BankRecMatchCandidates.External_Document_No);
+
+          if BankRecMatchCandidates.Rec_Line_Transaction_Date <> 0D then
+            case true of
+              BankRecMatchCandidates.Rec_Line_Transaction_Date = BankRecMatchCandidates.Posting_Date:
+                Score += 1;
+              ABS(BankRecMatchCandidates.Rec_Line_Transaction_Date - BankRecMatchCandidates.Posting_Date) > DateRange:
+                Score := 0;
+            end;
+
+          if Score > 2 then
+            TempBankStatementMatchingBuffer.AddMatchCandidate(BankRecMatchCandidates.Rec_Line_Statement_Line_No,
+              BankRecMatchCandidates.Entry_No,Score,0,'');
+        end;
+
+      SaveOneToOneMatching(TempBankStatementMatchingBuffer,BankAccReconciliation."Bank Account No.",
+        BankAccReconciliation."Statement No.");
+
+      Window.CLOSE;
+      ShowMatchSummary(BankAccReconciliation);
+    END;
+
+    LOCAL PROCEDURE SaveOneToOneMatching@28(VAR TempBankStatementMatchingBuffer@1000 : TEMPORARY Record "Bank Statement Matching Buffer";BankAccountNo@1005 : Code[20];StatementNo@1001 : Code[20]);
+    VAR
+      BankAccountLedgerEntry@1004 : Record "Bank Account Ledger Entry";
+      BankAccReconciliationLine@1003 : Record "Bank Acc. Reconciliation Line";
+      BankAccEntrySetReconNo@1002 : Codeunit "Bank Acc. Entry Set Recon.-No.";
+    BEGIN
+      TempBankStatementMatchingBuffer.RESET;
+      TempBankStatementMatchingBuffer.SETCURRENTKEY(Quality);
+      TempBankStatementMatchingBuffer.ASCENDING(false);
+
+      if TempBankStatementMatchingBuffer.FINDSET then
+        repeat
+          BankAccountLedgerEntry.GET(TempBankStatementMatchingBuffer."Entry No.");
+          BankAccReconciliationLine.GET(
+            BankAccReconciliationLine."Statement Type"::"Bank Reconciliation",
+            BankAccountNo,StatementNo,
+            TempBankStatementMatchingBuffer."Line No.");
+          BankAccEntrySetReconNo.ApplyEntries(BankAccReconciliationLine,BankAccountLedgerEntry,Relation::"One-to-One");
+        until TempBankStatementMatchingBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ShowMatchSummary@13(BankAccReconciliation@1000 : Record "Bank Acc. Reconciliation");
+    VAR
+      BankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line";
+      FinalText@1005 : Text;
+      AdditionalText@1004 : Text;
+      TotalCount@1002 : Integer;
+      MatchedCount@1003 : Integer;
+    BEGIN
+      BankAccReconciliationLine.SETRANGE("Bank Account No.",BankAccReconciliation."Bank Account No.");
+      BankAccReconciliationLine.SETRANGE("Statement Type",BankAccReconciliation."Statement Type");
+      BankAccReconciliationLine.SETRANGE("Statement No.",BankAccReconciliation."Statement No.");
+      BankAccReconciliationLine.SETRANGE(Type,BankAccReconciliationLine.Type::"Bank Account Ledger Entry");
+      TotalCount := BankAccReconciliationLine.COUNT;
+
+      BankAccReconciliationLine.SETFILTER("Applied Entries",'<>%1',0);
+      MatchedCount := BankAccReconciliationLine.COUNT;
+
+      if MatchedCount < TotalCount then
+        AdditionalText := STRSUBSTNO(MissingMatchMsg,FORMAT(GetMatchLengthTreshold));
+      FinalText := STRSUBSTNO(MatchSummaryMsg,MatchedCount,TotalCount) + AdditionalText;
+      MESSAGE(FinalText);
+    END;
+
+    LOCAL PROCEDURE GetDescriptionMatchScore@3(BankRecDescription@1002 : Text;BankEntryDescription@1003 : Text;DocumentNo@1004 : Code[20];ExternalDocumentNo@1005 : Code[35]) : Integer;
+    VAR
+      RecordMatchMgt@1006 : Codeunit "Record Match Mgt.";
+      Nearness@1001 : Integer;
+      Score@1000 : Integer;
+      MatchLengthTreshold@1091 : Integer;
+      NormalizingFactor@1090 : Integer;
+    BEGIN
+      BankRecDescription := RecordMatchMgt.Trim(BankRecDescription);
+      BankEntryDescription := RecordMatchMgt.Trim(BankEntryDescription);
+
+      MatchLengthTreshold := GetMatchLengthTreshold;
+      NormalizingFactor := GetNormalizingFactor;
+      Score := 0;
+
+      Nearness := RecordMatchMgt.CalculateStringNearness(BankRecDescription,DocumentNo,
+          MatchLengthTreshold,NormalizingFactor);
+      if Nearness = NormalizingFactor then
+        Score += 11;
+
+      Nearness := RecordMatchMgt.CalculateStringNearness(BankRecDescription,ExternalDocumentNo,
+          MatchLengthTreshold,NormalizingFactor);
+      if Nearness = NormalizingFactor then
+        Score += Nearness;
+
+      Nearness := RecordMatchMgt.CalculateStringNearness(BankRecDescription,BankEntryDescription,
+          MatchLengthTreshold,NormalizingFactor);
+      if Nearness >= 0.8 * NormalizingFactor then
+        Score += Nearness;
+
+      exit(Score);
+    END;
+
+    [External]
+    PROCEDURE SetMatchLengthTreshold@1060(NewMatchLengthThreshold@1060 : Integer);
+    BEGIN
+      MatchLengthTreshold := NewMatchLengthThreshold;
+    END;
+
+    [External]
+    PROCEDURE SetNormalizingFactor@4(NewNormalizingFactor@1060 : Integer);
+    BEGIN
+      NormalizingFactor := NewNormalizingFactor;
+    END;
+
+    LOCAL PROCEDURE GetMatchLengthTreshold@1062() : Integer;
+    BEGIN
+      exit(MatchLengthTreshold);
+    END;
+
+    LOCAL PROCEDURE GetNormalizingFactor@1063() : Integer;
+    BEGIN
+      exit(NormalizingFactor);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

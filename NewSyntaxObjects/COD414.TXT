@@ -1,0 +1,258 @@
+OBJECT Codeunit 414 Release Sales Document
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Sales Header";
+    OnRun=BEGIN
+            SalesHeader.COPY(Rec);
+            Code;
+            Rec := SalesHeader;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1001 : TextConst 'ENU=There is nothing to release for the document of type %1 with the number %2.';
+      SalesSetup@1002 : Record "Sales & Receivables Setup";
+      InvtSetup@1000 : Record "Inventory Setup";
+      SalesHeader@1008 : Record "Sales Header";
+      WhseSalesRelease@1004 : Codeunit "Whse.-Sales Release";
+      Text002@1005 : TextConst 'ENU=This document can only be released when the approval process is complete.';
+      Text003@1003 : TextConst 'ENU=The approval process must be cancelled or completed to reopen this document.';
+      Text005@1006 : TextConst 'ENU=There are unpaid prepayment invoices that are related to the document of type %1 with the number %2.';
+      UnpostedPrepaymentAmountsErr@1007 : TextConst '@@@="%1 - Document Type; %2 - Document No.";ENU=There are unposted prepayment amounts on the document of type %1 with the number %2.';
+      PreviewMode@1009 : Boolean;
+
+    LOCAL PROCEDURE Code@10() LinesWereModified : Boolean;
+    VAR
+      SalesLine@1006 : Record "Sales Line";
+      PrepaymentMgt@1003 : Codeunit "Prepayment Mgt.";
+      NotOnlyDropShipment@1002 : Boolean;
+      PostingDate@1001 : Date;
+      PrintPostedDocuments@1000 : Boolean;
+    BEGIN
+      with SalesHeader do begin
+        if Status = Status::Released then
+          exit;
+
+        OnBeforeReleaseSalesDoc(SalesHeader,PreviewMode);
+        if not PreviewMode then
+          OnCheckSalesReleaseRestrictions;
+
+        if "Document Type" = "Document Type"::Quote then
+          if CheckCustomerCreated(true) then
+            GET("Document Type"::Quote,"No.")
+          else
+            exit;
+
+        TESTFIELD("Sell-to Customer No.");
+
+        SalesLine.SETRANGE("Document Type","Document Type");
+        SalesLine.SETRANGE("Document No.","No.");
+        SalesLine.SETFILTER(Type,'>0');
+        SalesLine.SETFILTER(Quantity,'<>0');
+        if not SalesLine.FIND('-') then
+          ERROR(Text001,"Document Type","No.");
+        InvtSetup.GET;
+        if InvtSetup."Location Mandatory" then begin
+          SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+          if SalesLine.FINDSET then
+            repeat
+              if not SalesLine.IsServiceItem then
+                SalesLine.TESTFIELD("Location Code");
+            until SalesLine.NEXT = 0;
+          SalesLine.SETFILTER(Type,'>0');
+        end;
+        SalesLine.SETRANGE("Drop Shipment",false);
+        NotOnlyDropShipment := SalesLine.FINDFIRST;
+        SalesLine.RESET;
+
+        SalesSetup.GET;
+        if SalesSetup."Calc. Inv. Discount" then begin
+          PostingDate := "Posting Date";
+          PrintPostedDocuments := "Print Posted Documents";
+          CODEUNIT.RUN(CODEUNIT::"Sales-Calc. Discount",SalesLine);
+          LinesWereModified := true;
+          GET("Document Type","No.");
+          "Print Posted Documents" := PrintPostedDocuments;
+          if PostingDate <> "Posting Date" then
+            VALIDATE("Posting Date",PostingDate);
+        end;
+
+        if PrepaymentMgt.TestSalesPrepayment(SalesHeader) and ("Document Type" = "Document Type"::Order) then begin
+          Status := Status::"Pending Prepayment";
+          MODIFY(true);
+          exit;
+        end;
+        Status := Status::Released;
+
+        LinesWereModified := LinesWereModified or CalcAndUpdateVATOnLines(SalesHeader,SalesLine);
+
+        ReleaseATOs(SalesHeader);
+        OnAfterReleaseATOs(SalesHeader,SalesLine);
+
+        MODIFY(true);
+
+        if NotOnlyDropShipment then
+          if "Document Type" in ["Document Type"::Order,"Document Type"::"Return Order"] then
+            WhseSalesRelease.Release(SalesHeader);
+
+        OnAfterReleaseSalesDoc(SalesHeader,PreviewMode);
+      end;
+    END;
+
+    [External]
+    PROCEDURE Reopen@1(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+      OnBeforeReopenSalesDoc(SalesHeader);
+
+      with SalesHeader do begin
+        if Status = Status::Open then
+          exit;
+        Status := Status::Open;
+
+        if "Document Type" <> "Document Type"::Order then
+          ReopenATOs(SalesHeader);
+
+        MODIFY(true);
+        if "Document Type" in ["Document Type"::Order,"Document Type"::"Return Order"] then
+          WhseSalesRelease.Reopen(SalesHeader);
+      end;
+
+      OnAfterReopenSalesDoc(SalesHeader);
+    END;
+
+    [External]
+    PROCEDURE PerformManualRelease@2(VAR SalesHeader@1002 : Record "Sales Header");
+    VAR
+      PrepaymentMgt@1001 : Codeunit "Prepayment Mgt.";
+    BEGIN
+      if PrepaymentMgt.TestSalesPrepayment(SalesHeader) then
+        ERROR(UnpostedPrepaymentAmountsErr,SalesHeader."Document Type",SalesHeader."No.");
+
+      PerformManualCheckAndRelease(SalesHeader);
+    END;
+
+    PROCEDURE PerformManualCheckAndRelease@13(VAR SalesHeader@1002 : Record "Sales Header");
+    VAR
+      PrepaymentMgt@1001 : Codeunit "Prepayment Mgt.";
+      ApprovalsMgmt@1000 : Codeunit "Approvals Mgmt.";
+    BEGIN
+      with SalesHeader do
+        if ("Document Type" = "Document Type"::Order) and PrepaymentMgt.TestSalesPayment(SalesHeader) then begin
+          if Status <> Status::"Pending Prepayment" then begin
+            Status := Status::"Pending Prepayment";
+            MODIFY;
+            COMMIT;
+          end;
+          ERROR(STRSUBSTNO(Text005,"Document Type","No."));
+        end;
+
+      if ApprovalsMgmt.IsSalesApprovalsWorkflowEnabled(SalesHeader) and (SalesHeader.Status = SalesHeader.Status::Open) then
+        ERROR(Text002);
+
+      CODEUNIT.RUN(CODEUNIT::"Release Sales Document",SalesHeader);
+    END;
+
+    [External]
+    PROCEDURE PerformManualReopen@3(VAR SalesHeader@1002 : Record "Sales Header");
+    BEGIN
+      if SalesHeader.Status = SalesHeader.Status::"Pending Approval" then
+        ERROR(Text003);
+
+      Reopen(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE ReleaseATOs@5(SalesHeader@1000 : Record "Sales Header");
+    VAR
+      SalesLine@1001 : Record "Sales Line";
+      AsmHeader@1002 : Record "Assembly Header";
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      if SalesLine.FINDSET then
+        repeat
+          if SalesLine.AsmToOrderExists(AsmHeader) then
+            CODEUNIT.RUN(CODEUNIT::"Release Assembly Document",AsmHeader);
+        until SalesLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ReopenATOs@6(SalesHeader@1000 : Record "Sales Header");
+    VAR
+      SalesLine@1001 : Record "Sales Line";
+      AsmHeader@1002 : Record "Assembly Header";
+      ReleaseAssemblyDocument@1003 : Codeunit "Release Assembly Document";
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      if SalesLine.FINDSET then
+        repeat
+          if SalesLine.AsmToOrderExists(AsmHeader) then
+            ReleaseAssemblyDocument.Reopen(AsmHeader);
+        until SalesLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE ReleaseSalesHeader@11(VAR SalesHdr@1000 : Record "Sales Header";Preview@1001 : Boolean) LinesWereModified : Boolean;
+    BEGIN
+      PreviewMode := Preview;
+      SalesHeader.COPY(SalesHdr);
+      LinesWereModified := Code;
+      SalesHdr := SalesHeader;
+    END;
+
+    PROCEDURE CalcAndUpdateVATOnLines@14(VAR SalesHeader@1003 : Record "Sales Header";VAR SalesLine@1002 : Record "Sales Line") LinesWereModified : Boolean;
+    VAR
+      TempVATAmountLine0@1001 : TEMPORARY Record "VAT Amount Line";
+      TempVATAmountLine1@1000 : TEMPORARY Record "VAT Amount Line";
+    BEGIN
+      SalesLine.SetSalesHeader(SalesHeader);
+      SalesLine.CalcVATAmountLines(0,SalesHeader,SalesLine,TempVATAmountLine0);
+      SalesLine.CalcVATAmountLines(1,SalesHeader,SalesLine,TempVATAmountLine1);
+      LinesWereModified :=
+        SalesLine.UpdateVATOnLines(0,SalesHeader,SalesLine,TempVATAmountLine0) or
+        SalesLine.UpdateVATOnLines(1,SalesHeader,SalesLine,TempVATAmountLine1);
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnBeforeReleaseSalesDoc@7(VAR SalesHeader@1000 : Record "Sales Header";PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterReleaseSalesDoc@4(VAR SalesHeader@1000 : Record "Sales Header";PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnBeforeReopenSalesDoc@8(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterReopenSalesDoc@9(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterReleaseATOs@12(VAR SalesHeader@1000 : Record "Sales Header";VAR SalesLine@1001 : Record "Sales Line");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

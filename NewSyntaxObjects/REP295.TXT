@@ -1,0 +1,350 @@
+OBJECT Report 295 Combine Shipments
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Combine Shipments;
+    ProcessingOnly=true;
+  }
+  DATASET
+  {
+    { 2495;    ;DataItem;SalesOrderHeader    ;
+               DataItemTable="Sales Header";
+               DataItemTableView=SORTING("Document Type","Combine Shipments","Bill-to Customer No.","Currency Code","EU 3-Party Trade","Dimension Set ID") WHERE("Document Type"=CONST(Order),"Combine Shipments"=CONST(true));
+               ReqFilterHeadingML=ENU=Sales Order;
+               OnPreDataItem=BEGIN
+                               if PostingDateReq = 0D then
+                                 ERROR(Text000);
+                               if DocDateReq = 0D then
+                                 ERROR(Text001);
+
+                               Window.OPEN(
+                                 Text002 +
+                                 Text003 +
+                                 Text004 +
+                                 Text005);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  CurrReport.LANGUAGE := Language.GetLanguageID("Language Code");
+
+                                  Window.UPDATE(1,"Bill-to Customer No.");
+                                  Window.UPDATE(2,"No.");
+                                END;
+
+               OnPostDataItem=BEGIN
+                                CurrReport.LANGUAGE := GLOBALLANGUAGE;
+                                Window.CLOSE;
+                                if SalesHeader."No." <> '' then begin // Not the first time
+                                  FinalizeSalesInvHeader;
+                                  if (NoOfSalesInvErrors = 0) and not HideDialog then begin
+                                    if NoOfskippedShiment > 0 then begin
+                                      MESSAGE(
+                                        Text011,
+                                        NoOfSalesInv,NoOfskippedShiment)
+                                    end else
+                                      MESSAGE(
+                                        Text010,
+                                        NoOfSalesInv);
+                                  end else
+                                    if not HideDialog then
+                                      if PostInv then
+                                        MESSAGE(
+                                          Text007,
+                                          NoOfSalesInvErrors)
+                                      else
+                                        MESSAGE(
+                                          NotAllInvoicesCreatedMsg,
+                                          NoOfSalesInvErrors)
+                                end else
+                                  if not HideDialog then
+                                    MESSAGE(Text008);
+                              END;
+
+               ReqFilterFields="Sell-to Customer No.","Bill-to Customer No." }
+
+    { 3595;1   ;DataItem;Sales Shipment Header;
+               DataItemTable="Sales Shipment Header";
+               DataItemTableView=SORTING("Order No.");
+               ReqFilterHeadingML=ENU=Posted Sales Shipment;
+               OnAfterGetRecord=VAR
+                                  DueDate@1000 : Date;
+                                  PmtDiscDate@1001 : Date;
+                                  PmtDiscPct@1002 : Decimal;
+                                BEGIN
+                                  Window.UPDATE(3,"No.");
+
+                                  if IsCompletlyInvoiced then
+                                    CurrReport.SKIP;
+
+                                  if OnlyStdPmtTerms then begin
+                                    Cust.GET("Bill-to Customer No.");
+                                    PmtTerms.GET(Cust."Payment Terms Code");
+                                    if PmtTerms.Code = "Payment Terms Code" then begin
+                                      DueDate := CALCDATE(PmtTerms."Due Date Calculation","Document Date");
+                                      PmtDiscDate := CALCDATE(PmtTerms."Discount Date Calculation","Document Date");
+                                      PmtDiscPct := PmtTerms."Discount %";
+                                      if (DueDate <> "Due Date") or
+                                         (PmtDiscDate <> "Pmt. Discount Date") or
+                                         (PmtDiscPct <> "Payment Discount %")
+                                      then begin
+                                        NoOfskippedShiment := NoOfskippedShiment + 1;
+                                        CurrReport.SKIP;
+                                      end;
+                                    end else begin
+                                      NoOfskippedShiment := NoOfskippedShiment + 1;
+                                      CurrReport.SKIP;
+                                    end;
+                                  end;
+                                END;
+
+               ReqFilterFields="Posting Date";
+               DataItemLink="Order No."=FIELD("No.") }
+
+    { 2502;2   ;DataItem;Sales Shipment Line ;
+               DataItemTable="Sales Shipment Line";
+               DataItemTableView=SORTING("Document No.","Line No.");
+               OnAfterGetRecord=BEGIN
+                                  if Type = 0 then begin
+                                    if (not CopyTextLines) or ("Attached to Line No." <> 0) then
+                                      CurrReport.SKIP;
+                                  end;
+
+                                  if "Authorized for Credit Card" then
+                                    CurrReport.SKIP;
+
+                                  if ("Qty. Shipped Not Invoiced" <> 0) or (Type = 0) then begin
+                                    if ("Bill-to Customer No." <> Cust."No.") and
+                                       ("Sell-to Customer No." <> '')
+                                    then
+                                      Cust.GET("Bill-to Customer No.");
+                                    if not (Cust.Blocked in [Cust.Blocked::All,Cust.Blocked::Invoice]) then begin
+                                      if (SalesOrderHeader."Bill-to Customer No." <> SalesHeader."Bill-to Customer No.") or
+                                         (SalesOrderHeader."Currency Code" <> SalesHeader."Currency Code") or
+                                         (SalesOrderHeader."EU 3-Party Trade" <> SalesHeader."EU 3-Party Trade") or
+                                         (SalesOrderHeader."Dimension Set ID" <> SalesHeader."Dimension Set ID")
+                                      then begin
+                                        if SalesHeader."No." <> '' then
+                                          FinalizeSalesInvHeader;
+                                        InsertSalesInvHeader;
+                                        SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+                                        SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+                                        SalesLine."Document Type" := SalesHeader."Document Type";
+                                        SalesLine."Document No." := SalesHeader."No.";
+                                      end;
+                                      SalesShptLine := "Sales Shipment Line";
+                                      HasAmount := HasAmount or ("Qty. Shipped Not Invoiced" <> 0);
+                                      SalesShptLine.InsertInvLineFromShptLine(SalesLine);
+                                    end else
+                                      NoOfSalesInvErrors := NoOfSalesInvErrors + 1;
+                                  end;
+                                END;
+
+               OnPostDataItem=VAR
+                                SalesShipmentLine@1000 : Record "Sales Shipment Line";
+                                SalesLineInvoice@1002 : Record "Sales Line";
+                                SalesGetShpt@1001 : Codeunit "Sales-Get Shipment";
+                              BEGIN
+                                SalesShipmentLine.SETRANGE("Document No.","Document No.");
+                                SalesShipmentLine.SETRANGE(Type,Type::"Charge (Item)");
+                                if SalesShipmentLine.FINDSET then
+                                  repeat
+                                    SalesLineInvoice.SETRANGE("Document Type",SalesLineInvoice."Document Type"::Invoice);
+                                    SalesLineInvoice.SETRANGE("Document No.",SalesHeader."No.");
+                                    SalesLineInvoice.SETRANGE("Shipment Line No.",SalesShipmentLine."Line No.");
+                                    if SalesLineInvoice.FINDFIRST then
+                                      SalesGetShpt.GetItemChargeAssgnt(SalesShipmentLine,SalesLineInvoice."Qty. to Invoice");
+                                  until SalesShipmentLine.NEXT = 0;
+                              END;
+
+               DataItemLink="Document No."=FIELD("No.") }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=true;
+      OnOpenPage=BEGIN
+                   if PostingDateReq = 0D then
+                     PostingDateReq := WORKDATE;
+                   if DocDateReq = 0D then
+                     DocDateReq := WORKDATE;
+                   SalesSetup.GET;
+                   CalcInvDisc := SalesSetup."Calc. Inv. Discount";
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  Name=Container1900000001;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  Name=Options;
+                  CaptionML=ENU=Options }
+
+      { 1   ;2   ;Field     ;
+                  Name=PostingDate;
+                  CaptionML=ENU=Posting Date;
+                  ToolTipML=ENU=Specifies the posting date for the invoice(s) that the batch job creates. This field must be filled in.;
+                  ApplicationArea=#Advanced;
+                  SourceExpr=PostingDateReq }
+
+      { 4   ;2   ;Field     ;
+                  Name=Document Date;
+                  CaptionML=ENU=Document Date;
+                  ToolTipML=ENU=Specifies the document date for the invoice(s) that the batch job creates. This field must be filled in.;
+                  ApplicationArea=#Advanced;
+                  SourceExpr=DocDateReq }
+
+      { 2   ;2   ;Field     ;
+                  Name=Calc. Inv. Discount;
+                  CaptionML=ENU=Calc. Inv. Discount;
+                  ToolTipML=ENU=Specifies if you want the invoice discount amount to be automatically calculated on the shipment.;
+                  ApplicationArea=#Advanced;
+                  SourceExpr=CalcInvDisc;
+                  OnValidate=BEGIN
+                               SalesSetup.GET;
+                               SalesSetup.TESTFIELD("Calc. Inv. Discount",false);
+                             END;
+                              }
+
+      { 3   ;2   ;Field     ;
+                  Name=Post Invoices;
+                  CaptionML=ENU=Post Invoices;
+                  ToolTipML=ENU=Specifies if you want to have the invoices posted immediately.;
+                  ApplicationArea=#Advanced;
+                  SourceExpr=PostInv }
+
+      { 6   ;2   ;Field     ;
+                  Name=Only Std. Payment Terms;
+                  CaptionML=ENU=Only Std. Payment Terms;
+                  ToolTipML=ENU=Specifies if you want to include shipments with standard payments terms. If you select this option, you must manually invoice all other shipments.;
+                  ApplicationArea=#Advanced;
+                  SourceExpr=OnlyStdPmtTerms }
+
+      { 8   ;2   ;Field     ;
+                  Name=Copy Text Lines;
+                  CaptionML=ENU=Copy Text Lines;
+                  ToolTipML=ENU=Specifies if you want manually written text on the shipment lines to be copied to the invoice.;
+                  ApplicationArea=#Advanced;
+                  SourceExpr=CopyTextLines }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Enter the posting date.';
+      Text001@1001 : TextConst 'ENU=Enter the document date.';
+      Text002@1002 : TextConst 'ENU=Combining shipments...\\';
+      Text003@1003 : TextConst 'ENU=Customer No.    #1##########\';
+      Text004@1004 : TextConst 'ENU=Order No.       #2##########\';
+      Text005@1005 : TextConst 'ENU=Shipment No.    #3##########';
+      Text007@1006 : TextConst 'ENU=Not all the invoices were posted. A total of %1 invoices were not posted.';
+      Text008@1007 : TextConst 'ENU=There is nothing to combine.';
+      Text010@1008 : TextConst 'ENU=The shipments are now combined and the number of invoices created is %1.';
+      SalesHeader@1010 : Record "Sales Header";
+      SalesLine@1011 : Record "Sales Line";
+      SalesShptLine@1012 : Record "Sales Shipment Line";
+      SalesSetup@1013 : Record "Sales & Receivables Setup";
+      Cust@1018 : Record Customer;
+      Language@1009 : Record Language;
+      PmtTerms@1017 : Record "Payment Terms";
+      SalesCalcDisc@1019 : Codeunit "Sales-Calc. Discount";
+      SalesPost@1020 : Codeunit "Sales-Post";
+      Window@1021 : Dialog;
+      PostingDateReq@1022 : Date;
+      DocDateReq@1023 : Date;
+      CalcInvDisc@1024 : Boolean;
+      PostInv@1025 : Boolean;
+      OnlyStdPmtTerms@1015 : Boolean;
+      HasAmount@1102601000 : Boolean;
+      HideDialog@1034 : Boolean;
+      NoOfSalesInvErrors@1027 : Integer;
+      NoOfSalesInv@1028 : Integer;
+      Text011@1029 : TextConst '@@@=%1-Number of invoices,%2-Number Of shipments;ENU=The shipments are now combined, and the number of invoices created is %1.\%2 Shipments with nonstandard payment terms have not been combined.';
+      NoOfskippedShiment@1030 : Integer;
+      CopyTextLines@1035 : Boolean;
+      NotAllInvoicesCreatedMsg@1014 : TextConst 'ENU=Not all the invoices were created. A total of %1 invoices were not created.';
+
+    LOCAL PROCEDURE FinalizeSalesInvHeader@2();
+    BEGIN
+      with SalesHeader do begin
+        if not HasAmount then begin
+          DELETE(true);
+          exit;
+        end;
+        if CalcInvDisc then
+          SalesCalcDisc.RUN(SalesLine);
+        FIND;
+        COMMIT;
+        CLEAR(SalesCalcDisc);
+        CLEAR(SalesPost);
+        NoOfSalesInv := NoOfSalesInv + 1;
+        if PostInv then begin
+          CLEAR(SalesPost);
+          if not SalesPost.RUN(SalesHeader) then
+            NoOfSalesInvErrors := NoOfSalesInvErrors + 1;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertSalesInvHeader@1();
+    BEGIN
+      CLEAR(SalesHeader);
+      with SalesHeader do begin
+        INIT;
+        "Document Type" := "Document Type"::Invoice;
+        "No." := '';
+        INSERT(true);
+        VALIDATE("Sell-to Customer No.",SalesOrderHeader."Bill-to Customer No.");
+        if "Bill-to Customer No." <> "Sell-to Customer No." then
+          VALIDATE("Bill-to Customer No.",SalesOrderHeader."Bill-to Customer No.");
+        VALIDATE("Posting Date",PostingDateReq);
+        VALIDATE("Document Date",DocDateReq);
+        VALIDATE("Currency Code",SalesOrderHeader."Currency Code");
+        VALIDATE("EU 3-Party Trade",SalesOrderHeader."EU 3-Party Trade");
+        "Salesperson Code" := SalesOrderHeader."Salesperson Code";
+        "Shortcut Dimension 1 Code" := SalesOrderHeader."Shortcut Dimension 1 Code";
+        "Shortcut Dimension 2 Code" := SalesOrderHeader."Shortcut Dimension 2 Code";
+        "Dimension Set ID" := SalesOrderHeader."Dimension Set ID";
+        MODIFY;
+        COMMIT;
+        HasAmount := false;
+      end;
+    END;
+
+    PROCEDURE InitializeRequest@5(NewPostingDate@1002 : Date;NewDocDate@1003 : Date;NewCalcInvDisc@1000 : Boolean;NewPostInv@1001 : Boolean;NewOnlyStdPmtTerms@1004 : Boolean;NewCopyTextLines@1005 : Boolean);
+    BEGIN
+      PostingDateReq := NewPostingDate;
+      DocDateReq := NewDocDate;
+      CalcInvDisc := NewCalcInvDisc;
+      PostInv := NewPostInv;
+      OnlyStdPmtTerms := NewOnlyStdPmtTerms;
+      CopyTextLines := NewCopyTextLines;
+    END;
+
+    PROCEDURE SetHideDialog@7(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

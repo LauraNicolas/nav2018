@@ -1,0 +1,154 @@
+OBJECT Table 915 ATO Sales Buffer
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=ATO Sales Buffer;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Type                ;Option        ;CaptionML=ENU=Type;
+                                                   OptionCaptionML=ENU=,Sale,Total Sale,Assembly,Total Assembly;
+                                                   OptionString=,Sale,"Total Sale",Assembly,"Total Assembly" }
+    { 2   ;   ;Order No.           ;Code20        ;CaptionML=ENU=Order No. }
+    { 3   ;   ;Item No.            ;Code20        ;CaptionML=ENU=Item No. }
+    { 4   ;   ;Parent Item No.     ;Code20        ;CaptionML=ENU=Parent Item No. }
+    { 5   ;   ;Quantity            ;Decimal       ;CaptionML=ENU=Quantity }
+    { 6   ;   ;Sales Cost          ;Decimal       ;CaptionML=ENU=Sales Cost }
+    { 7   ;   ;Sales Amount        ;Decimal       ;CaptionML=ENU=Sales Amount }
+    { 8   ;   ;Profit %            ;Decimal       ;CaptionML=ENU=Profit % }
+    { 9   ;   ;Parent Description  ;Text50        ;CaptionML=ENU=Parent Description }
+  }
+  KEYS
+  {
+    {    ;Type,"Order No.","Item No.","Parent Item No.";
+                                                   Clustered=true }
+    {    ;"Item No.",Type,"Parent Item No."        }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+
+    [External]
+    PROCEDURE UpdateBufferWithComp@1(CompATOSalesBuffer@1000 : Record "ATO Sales Buffer";ProfitPct@1001 : Decimal;IsTotal@1002 : Boolean);
+    BEGIN
+      INIT;
+      if IsTotal then
+        Type := Type::"Total Assembly"
+      else
+        Type := Type::Assembly;
+      "Order No." := '';
+      "Item No." := CompATOSalesBuffer."Item No.";
+      if not IsTotal then
+        "Parent Item No." := CompATOSalesBuffer."Parent Item No."
+      else
+        "Parent Item No." := '';
+      if FIND then begin
+        Quantity += CompATOSalesBuffer.Quantity;
+        "Sales Cost" += CompATOSalesBuffer."Sales Cost";
+        "Sales Amount" += CalcSalesAmt(CompATOSalesBuffer."Sales Cost",ProfitPct);
+        "Profit %" := CalcSalesProfitPct("Sales Cost","Sales Amount");
+        MODIFY;
+        exit;
+      end;
+
+      Quantity := CompATOSalesBuffer.Quantity;
+      "Sales Cost" := CompATOSalesBuffer."Sales Cost";
+      "Sales Amount" := CalcSalesAmt(CompATOSalesBuffer."Sales Cost",ProfitPct);
+      "Profit %" := ProfitPct;
+      INSERT;
+    END;
+
+    [External]
+    PROCEDURE UpdateBufferWithItemLedgEntry@2(ItemLedgEntry@1000 : Record "Item Ledger Entry";IsTotal@1001 : Boolean);
+    BEGIN
+      ItemLedgEntry.CALCFIELDS("Cost Amount (Expected)","Cost Amount (Actual)","Sales Amount (Actual)","Sales Amount (Expected)");
+
+      INIT;
+      "Item No." := ItemLedgEntry."Item No.";
+      "Order No." := '';
+      "Parent Item No." := '';
+      case ItemLedgEntry."Entry Type" of
+        ItemLedgEntry."Entry Type"::Sale:
+          if IsTotal then
+            Type := Type::"Total Sale"
+          else begin
+            Type := Type::Sale;
+            "Order No." := FindATO(ItemLedgEntry);
+          end;
+        ItemLedgEntry."Entry Type"::"Assembly Consumption":
+          begin
+            if IsTotal then
+              Type := Type::"Total Assembly"
+            else
+              Type := Type::Assembly;
+            "Parent Item No." := ItemLedgEntry."Source No.";
+          end;
+      end;
+      if FIND then begin
+        Quantity += -ItemLedgEntry.Quantity;
+        "Sales Cost" += -(ItemLedgEntry."Cost Amount (Expected)" + ItemLedgEntry."Cost Amount (Actual)");
+        "Sales Amount" += ItemLedgEntry."Sales Amount (Actual)" + ItemLedgEntry."Sales Amount (Expected)";
+        "Profit %" := CalcSalesProfitPct("Sales Cost","Sales Amount");
+        MODIFY;
+        exit;
+      end;
+
+      Quantity := -ItemLedgEntry.Quantity;
+      "Sales Cost" := -(ItemLedgEntry."Cost Amount (Expected)" + ItemLedgEntry."Cost Amount (Actual)");
+      "Sales Amount" := ItemLedgEntry."Sales Amount (Actual)" + ItemLedgEntry."Sales Amount (Expected)";
+      "Profit %" := CalcSalesProfitPct("Sales Cost","Sales Amount");
+      INSERT;
+    END;
+
+    LOCAL PROCEDURE FindATO@3(ItemLedgEntry@1003 : Record "Item Ledger Entry") : Code[20];
+    VAR
+      PostedATOLink@1000 : Record "Posted Assemble-to-Order Link";
+      ItemApplnEntry@1001 : Record "Item Application Entry";
+    BEGIN
+      if not ItemLedgEntry."Assemble to Order" then
+        exit('');
+
+      if ItemLedgEntry."Document Type" <> ItemLedgEntry."Document Type"::"Sales Shipment" then
+        exit('');
+
+      PostedATOLink.SETCURRENTKEY("Document Type","Document No.","Document Line No.");
+      PostedATOLink.SETRANGE("Document Type",PostedATOLink."Document Type"::"Sales Shipment");
+      PostedATOLink.SETRANGE("Document No.",ItemLedgEntry."Document No.");
+      PostedATOLink.SETRANGE("Document Line No.",ItemLedgEntry."Document Line No.");
+      if PostedATOLink.FINDFIRST then
+        exit(PostedATOLink."Assembly Order No.");
+
+      if ItemLedgEntry.Correction then
+        if ItemApplnEntry.AppliedFromEntryExists(ItemLedgEntry."Entry No.") then begin
+          ItemLedgEntry.GET(ItemApplnEntry."Outbound Item Entry No.");
+          exit(FindATO(ItemLedgEntry));
+        end;
+    END;
+
+    LOCAL PROCEDURE CalcSalesAmt@5(SalesCost@1001 : Decimal;ProfitPct@1000 : Decimal) : Decimal;
+    BEGIN
+      if ProfitPct = 100 then
+        exit(0);
+      exit(ROUND(100 * SalesCost / (100 - ProfitPct)))
+    END;
+
+    LOCAL PROCEDURE CalcSalesProfitPct@6(CostAmt@1000 : Decimal;SalesAmt@1001 : Decimal) : Decimal;
+    BEGIN
+      if SalesAmt = 0 then
+        exit(0);
+      exit(ROUND(100 * (SalesAmt - CostAmt) / SalesAmt));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

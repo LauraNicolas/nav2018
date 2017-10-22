@@ -1,0 +1,945 @@
+OBJECT Codeunit 5944 SignServContractDoc
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Service Contract Header";
+    Permissions=TableData "Filed Service Contract Header"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GLAcc@1057 : Record "G/L Account";
+      ServHeader@1043 : Record "Service Header";
+      ServMgtSetup@1006 : Record "Service Mgt. Setup";
+      FromServContractHeader@1050 : Record "Service Contract Header";
+      FromServContractLine@1034 : Record "Service Contract Line";
+      ToServContractLine@1033 : Record "Service Contract Line";
+      ServContractAccGr@1003 : Record "Service Contract Account Group";
+      FiledServContractHeader@1016 : Record "Filed Service Contract Header";
+      FromContractServDisc@1037 : Record "Contract/Service Discount";
+      ToContractServDisc@1036 : Record "Contract/Service Discount";
+      ContractChangeLog@1029 : Record "Contract Change Log";
+      ContractGainLossEntry@1038 : Record "Contract Gain/Loss Entry";
+      FromServHour@1051 : Record "Service Hour";
+      ToServHour@1052 : Record "Service Hour";
+      ServContractMgt@1000 : Codeunit ServContractManagement;
+      ServLogMgt@1035 : Codeunit ServLogManagement;
+      Window@1001 : Dialog;
+      ServHeaderNo@1039 : Code[20];
+      InvoicingStartingPeriod@1019 : Boolean;
+      InvoiceNow@1021 : Boolean;
+      GoOut@1024 : Boolean;
+      Text001@1005 : TextConst 'ENU=You cannot convert the service contract quote %1 to a contract,\because some Service Contract Lines have a missing %2.';
+      Text003@1007 : TextConst 'ENU=%1 must be the first day of the month.';
+      Text004@1046 : TextConst 'ENU=You cannot sign service contract %1,\because some Service Contract Lines have a missing %2.';
+      Text005@1008 : TextConst 'ENU=%1 is not the last day of the month.\\Confirm that this is the correct date.';
+      Text010@1048 : TextConst 'ENU=Do you want to sign service contract %1?';
+      Text011@1014 : TextConst 'ENU=Do you want to convert the contract quote into a contract?';
+      Text012@1013 : TextConst 'ENU=Signing contract          #1######\';
+      Text013@1012 : TextConst 'ENU=Processing contract lines #2######\';
+      WPostLine@1018 : Integer;
+      Text015@1020 : TextConst 'ENU=Do you want to create an invoice for the period %1 .. %2?';
+      AppliedEntry@1044 : Integer;
+      InvoiceFrom@1023 : Date;
+      InvoiceTo@1022 : Date;
+      FirstPrepaidPostingDate@1026 : Date;
+      LastPrepaidPostingDate@1025 : Date;
+      PostingDate@1027 : Date;
+      Text016@1040 : TextConst 'ENU=Service Invoice %1 was created.';
+      Text018@1055 : TextConst 'ENU=It is not possible to add new lines to this service contract with the current working date\because it will cause a gap in the invoice period.';
+      HideDialog@1056 : Boolean;
+      Text019@1058 : TextConst 'ENU=You cannot sign service contract with negative annual amount.';
+      Text020@1059 : TextConst 'ENU=You cannot sign service contract with zero annual amount when invoice period is different from None.';
+      Text021@1004 : TextConst 'ENU=One or more service items on contract quote %1 does not belong to customer %2.';
+      Text022@1009 : TextConst 'ENU=The %1 field is empty on one or more service contract lines, and service orders cannot be created automatically. Do you want to continue?';
+      Text023@1010 : TextConst 'ENU=You cannot sign a service contract if its %1 is not equal to the %2 value.';
+      Text024@1011 : TextConst 'ENU=You cannot sign a canceled service contract.';
+
+    [Internal]
+    PROCEDURE SignContractQuote@2(FromServContractHeader@1000 : Record "Service Contract Header");
+    VAR
+      FromServContractLine@1008 : Record "Service Contract Line";
+      ToServContractHeader@1007 : Record "Service Contract Header";
+      FiledServContractHeader2@1009 : Record "Filed Service Contract Header";
+      RecordLinkManagement@1001 : Codeunit "Record Link Management";
+    BEGIN
+      if not HideDialog then
+        CLEARALL;
+      CheckServContractQuote(FromServContractHeader);
+
+      if not HideDialog then begin
+        FromServContractLine.RESET;
+        FromServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+        FromServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+        FromServContractLine.SETRANGE("Next Planned Service Date",0D);
+        if FromServContractLine.FINDFIRST then
+          if not
+             CONFIRM(
+               Text022,
+               true,
+               FromServContractLine.FIELDCAPTION("Next Planned Service Date"))
+          then
+            exit;
+      end;
+
+      Window.OPEN(
+        Text012 +
+        Text013);
+
+      FiledServContractHeader.FileQuotationBeforeSigning(FromServContractHeader);
+
+      Window.UPDATE(1,1);
+      WPostLine := 0;
+      InvoicingStartingPeriod := false;
+      SetInvoicing(FromServContractHeader);
+
+      FirstPrepaidPostingDate := 0D;
+      LastPrepaidPostingDate := 0D;
+
+      ToServContractHeader.TRANSFERFIELDS(FromServContractHeader);
+
+      if InvoiceNow then
+        PostingDate := InvoiceFrom;
+
+      ToServContractHeader."Contract Type" := ToServContractHeader."Contract Type"::Contract;
+      if InvoiceNow then begin
+        ToServContractHeader."Last Invoice Date" := ToServContractHeader."Starting Date";
+        ToServContractHeader.VALIDATE("Last Invoice Period End",InvoiceTo);
+      end;
+      ToServContractHeader.INSERT;
+      if ServMgtSetup."Register Contract Changes" then
+        ContractChangeLog.LogContractChange(
+          ToServContractHeader."Contract No.",0,ToServContractHeader.FIELDCAPTION(Status),0,
+          '',FORMAT(ToServContractHeader.Status),'',0);
+
+      FiledServContractHeader.RESET;
+      FiledServContractHeader.SETCURRENTKEY("Contract Type Relation","Contract No. Relation");
+      FiledServContractHeader.SETRANGE("Contract Type Relation",FromServContractHeader."Contract Type");
+      FiledServContractHeader.SETRANGE("Contract No. Relation",FromServContractHeader."Contract No.");
+      if FiledServContractHeader.FINDSET then
+        repeat
+          FiledServContractHeader2 := FiledServContractHeader;
+          FiledServContractHeader2."Contract Type Relation" := ToServContractHeader."Contract Type";
+          FiledServContractHeader2."Contract No. Relation" := ToServContractHeader."Contract No.";
+          FiledServContractHeader2.MODIFY;
+        until FiledServContractHeader.NEXT = 0;
+
+      FromServContractLine.RESET;
+      FromServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      FromServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      if FromServContractLine.FINDSET then
+        repeat
+          ToServContractLine := FromServContractLine;
+          ToServContractLine."Contract Type" := ToServContractLine."Contract Type"::Contract;
+          ToServContractLine."Contract No." := FromServContractLine."Contract No.";
+          ToServContractLine."Contract Status" := FromServContractLine."Contract Status"::Signed;
+          ToServContractLine.SuspendStatusCheck(true);
+          ToServContractLine.INSERT(true);
+          CLEAR(ServLogMgt);
+          WPostLine := WPostLine + 1;
+          Window.UPDATE(2,WPostLine);
+        until FromServContractLine.NEXT = 0;
+
+      CopyServComments(FromServContractHeader,ToServContractHeader);
+
+      if InvoicingStartingPeriod and
+         not ToServContractHeader.Prepaid and
+         InvoiceNow
+      then begin
+        ToServContractHeader.VALIDATE("Last Invoice Date",InvoiceTo);
+        ToServContractHeader.MODIFY;
+      end;
+
+      ToServContractHeader.Status := ToServContractHeader.Status::Signed;
+      ToServContractHeader."Change Status" := ToServContractHeader."Change Status"::Locked;
+      ToServContractHeader.MODIFY;
+      RecordLinkManagement.CopyLinks(FromServContractHeader,ToServContractHeader);
+
+      if InvoiceNow then begin
+        ServMgtSetup.GET;
+        CreateServiceLinesLedgerEntries(ToServContractHeader,false);
+      end;
+
+      FromContractServDisc.RESET;
+      FromContractServDisc.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      FromContractServDisc.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      if FromContractServDisc.FINDSET then
+        repeat
+          ToContractServDisc.COPY(FromContractServDisc);
+          ToContractServDisc."Contract Type" := FromContractServDisc."Contract Type"::Contract;
+          ToContractServDisc."Contract No." := ToServContractHeader."Contract No.";
+          if ToContractServDisc.INSERT then;
+          FromContractServDisc.DELETE;
+        until FromContractServDisc.NEXT = 0;
+
+      ContractGainLossEntry.AddEntry(
+        2,ToServContractHeader."Contract Type",
+        ToServContractHeader."Contract No.",
+        FromServContractHeader."Annual Amount",'');
+
+      ToServContractLine.RESET;
+      ToServContractLine.SETRANGE("Contract Type",ToServContractHeader."Contract Type");
+      ToServContractLine.SETRANGE("Contract No.",ToServContractHeader."Contract No.");
+      if ToServContractLine.FINDSET then
+        repeat
+          ToServContractLine."New Line" := false;
+          ToServContractLine.MODIFY;
+        until ToServContractLine.NEXT = 0;
+
+      FromServContractLine.RESET;
+      FromServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      FromServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      FromServContractLine.DELETEALL;
+      FromServContractHeader.DELETE;
+
+      FromServHour.RESET;
+      FromServHour.SETRANGE("Service Contract Type",FromServHour."Service Contract Type"::Quote);
+      FromServHour.SETRANGE("Service Contract No.",ToServContractHeader."Contract No.");
+      if FromServHour.FINDSET then
+        repeat
+          ToServHour := FromServHour;
+          ToServHour."Service Contract Type" := FromServHour."Service Contract Type"::Contract;
+          ToServHour."Service Contract No." := ToServContractHeader."Contract No.";
+          ToServHour.INSERT;
+        until FromServHour.NEXT = 0;
+
+      FromServHour.DELETEALL;
+
+      Window.CLOSE;
+
+      if not HideDialog then
+        if ServHeaderNo <> '' then
+          MESSAGE(Text016,ServHeaderNo);
+    END;
+
+    [Internal]
+    PROCEDURE SignContract@1(FromServContractHeader@1000 : Record "Service Contract Header");
+    VAR
+      ServContractLine@1008 : Record "Service Contract Line";
+      ServContractHeader@1007 : Record "Service Contract Header";
+      LockOpenServContract@1001 : Codeunit "Lock-OpenServContract";
+    BEGIN
+      if not HideDialog then
+        CLEARALL;
+
+      if not HideDialog then
+        if not CONFIRM(Text010,true,FromServContractHeader."Contract No.") then
+          exit;
+
+      ServContractHeader.GET(FromServContractHeader."Contract Type",FromServContractHeader."Contract No.");
+      CheckServContract(ServContractHeader);
+
+      if ServContractHeader.Status = ServContractHeader.Status::Signed then begin
+        LockOpenServContract.LockServContract(ServContractHeader);
+        exit;
+      end;
+
+      Window.OPEN(
+        Text012 +
+        Text013);
+
+      FiledServContractHeader.FileQuotationBeforeSigning(ServContractHeader);
+
+      Window.UPDATE(1,1);
+      WPostLine := 0;
+      InvoicingStartingPeriod := false;
+      SetInvoicing(ServContractHeader);
+
+      if InvoiceNow then
+        PostingDate := InvoiceFrom;
+
+      if InvoiceNow then begin
+        ServContractHeader."Last Invoice Date" := ServContractHeader."Starting Date";
+        ServContractHeader.VALIDATE("Last Invoice Period End",InvoiceTo);
+      end;
+
+      ServContractLine.RESET;
+      ServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      ServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      if ServContractLine.FINDSET then
+        repeat
+          ServContractLine."Contract Status" := ServContractLine."Contract Status"::Signed;
+          ServContractLine.MODIFY;
+          CLEAR(ServLogMgt);
+          WPostLine := WPostLine + 1;
+          Window.UPDATE(2,WPostLine);
+        until ServContractLine.NEXT = 0;
+
+      if InvoicingStartingPeriod and
+         not ServContractHeader.Prepaid and
+         InvoiceNow
+      then begin
+        ServContractHeader.VALIDATE("Last Invoice Date",InvoiceTo);
+        ServContractHeader.MODIFY;
+      end;
+
+      if InvoiceNow then begin
+        ServMgtSetup.GET;
+        CreateServiceLinesLedgerEntries(ServContractHeader,false);
+      end;
+
+      ContractGainLossEntry.AddEntry(
+        2,ServContractHeader."Contract Type",
+        ServContractHeader."Contract No.",
+        ServContractHeader."Annual Amount",'');
+
+      ServContractHeader.Status := ServContractHeader.Status::Signed;
+      ServContractHeader."Change Status" := ServContractHeader."Change Status"::Locked;
+      ServContractHeader.MODIFY;
+
+      ServContractLine.RESET;
+      ServContractLine.SETRANGE("Contract Type",ServContractHeader."Contract Type");
+      ServContractLine.SETRANGE("Contract No.",ServContractHeader."Contract No.");
+      if ServContractLine.FINDSET then
+        repeat
+          ServContractLine."New Line" := false;
+          ServContractLine.MODIFY;
+        until ServContractLine.NEXT = 0;
+
+      if ServMgtSetup."Register Contract Changes" then
+        ContractChangeLog.LogContractChange(
+          ServContractHeader."Contract No.",0,ServContractHeader.FIELDCAPTION(Status),0,
+          '',FORMAT(ServContractHeader.Status),'',0);
+
+      CLEAR(FromServContractHeader);
+
+      Window.CLOSE;
+
+      if not HideDialog then
+        if ServHeaderNo <> '' then
+          MESSAGE(Text016,ServHeaderNo);
+    END;
+
+    [Internal]
+    PROCEDURE AddendumToContract@4(ServContractHeader@1000 : Record "Service Contract Header");
+    VAR
+      Currency@1001 : Record Currency;
+      ServContractLine@1008 : Record "Service Contract Line";
+      TempDate@1005 : Date;
+      StartingDate@1010 : Date;
+      RemainingAmt@1011 : Decimal;
+      InvoicePrepaid@1007 : Boolean;
+      NonExpiredContractLineExists@1003 : Boolean;
+      NoOfMonthsAndMParts@1004 : Decimal;
+    BEGIN
+      if not HideDialog then
+        CLEARALL;
+      FromServContractHeader := ServContractHeader;
+      if (FromServContractHeader."Invoice Period" = FromServContractHeader."Invoice Period"::None) or
+         (FromServContractHeader."Next Invoice Date" = 0D)
+      then
+        exit;
+      FromServContractHeader.TESTFIELD("Serv. Contract Acc. Gr. Code");
+      ServContractAccGr.GET(FromServContractHeader."Serv. Contract Acc. Gr. Code");
+      ServContractAccGr.TESTFIELD("Non-Prepaid Contract Acc.");
+      GLAcc.GET(ServContractAccGr."Non-Prepaid Contract Acc.");
+      GLAcc.TESTFIELD("Direct Posting");
+
+      if FromServContractHeader.Prepaid then begin
+        ServContractAccGr.TESTFIELD("Prepaid Contract Acc.");
+        GLAcc.GET(ServContractAccGr."Prepaid Contract Acc.");
+        GLAcc.TESTFIELD("Direct Posting");
+      end;
+
+      ServMgtSetup.GET;
+      Currency.InitRoundingPrecision;
+
+      ServContractLine.RESET;
+      ServContractLine.SETCURRENTKEY("Contract Type","Contract No.",Credited,"New Line");
+      ServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      ServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      ServContractLine.SETRANGE("New Line",true);
+      StartingDate := WORKDATE;
+      if ServContractLine.FINDSET then
+        repeat
+          if ServMgtSetup."Contract Rsp. Time Mandatory" then
+            ServContractLine.TESTFIELD("Response Time (Hours)");
+          ServContractLine."Starting Date" := StartingDate;
+          if (ServContractLine."Next Planned Service Date" <> 0D) and
+             (ServContractLine."Next Planned Service Date" < StartingDate)
+          then
+            ServContractLine."Next Planned Service Date" := StartingDate;
+          ServContractLine.MODIFY;
+        until ServContractLine.NEXT = 0;
+
+      if not HideDialog then begin
+        ServContractLine.RESET;
+        ServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+        ServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+        ServContractLine.SETRANGE("New Line",true);
+        ServContractLine.SETRANGE("Next Planned Service Date",0D);
+        if ServContractLine.FINDFIRST then
+          if not
+             CONFIRM(
+               Text022,
+               true,
+               ServContractLine.FIELDCAPTION("Next Planned Service Date"))
+          then
+            ERROR('');
+      end;
+
+      Window.OPEN(
+        Text012 +
+        Text013);
+
+      FiledServContractHeader.FileQuotationBeforeSigning(FromServContractHeader);
+
+      Window.UPDATE(1,1);
+      WPostLine := 0;
+
+      InvoicePrepaid := FromServContractHeader.Prepaid;
+
+      TempDate := FromServContractHeader."Next Invoice Period Start";
+      if StartingDate < TempDate then begin
+        TempDate := TempDate - 1;
+      end else begin
+        if StartingDate > CALCDATE('<CM>',TempDate) then begin
+          Window.CLOSE;
+          ERROR(Text018);
+        end;
+        TempDate := CALCDATE('<CM>',StartingDate);
+        InvoicePrepaid := true;
+      end;
+
+      if StartingDate >= FromServContractHeader."Next Invoice Period Start" then begin
+        GoOut := true;
+        InvoicePrepaid := false;
+      end;
+
+      if not GoOut then begin
+        InvoiceFrom := StartingDate;
+        InvoiceTo := TempDate;
+        InvoicingStartingPeriod := true;
+      end;
+
+      if FromServContractHeader.Prepaid and InvoicePrepaid then begin
+        FirstPrepaidPostingDate := ServContractMgt.FindFirstPrepaidTransaction(FromServContractHeader."Contract No.");
+        if FirstPrepaidPostingDate <> 0D then begin
+          if StartingDate < FromServContractHeader."Next Invoice Date" then
+            LastPrepaidPostingDate := FromServContractHeader."Next Invoice Date" - 1
+          else
+            LastPrepaidPostingDate := FromServContractHeader."Next Invoice Period End";
+          case true of
+            InvoiceFrom < FirstPrepaidPostingDate:
+              InvoiceTo := FirstPrepaidPostingDate - 1;
+            InvoiceFrom > FirstPrepaidPostingDate:
+              if LastPrepaidPostingDate = CALCDATE('<CM>',InvoiceFrom) then
+                InvoicePrepaid := false
+              else begin
+                InvoiceTo := CALCDATE('<CM>',InvoiceFrom);
+                FirstPrepaidPostingDate := InvoiceTo + 1;
+                if InvoiceFrom > LastPrepaidPostingDate
+                then
+                  LastPrepaidPostingDate := FromServContractHeader."Next Invoice Period End";
+              end;
+          end;
+        end else
+          if InvoiceFrom > FromServContractHeader."Next Invoice Period Start" then begin
+            FirstPrepaidPostingDate := CALCDATE('<CM>',InvoiceFrom) + 1;
+            if FirstPrepaidPostingDate < FromServContractHeader."Next Invoice Period End" then
+              LastPrepaidPostingDate := FromServContractHeader."Next Invoice Period End"
+            else
+              InvoicePrepaid := false;
+          end else
+            InvoicePrepaid := false;
+      end;
+
+      if not GoOut then
+        if HideDialog then
+          InvoiceNow := true
+        else begin
+          if InvoicePrepaid and (LastPrepaidPostingDate <> 0D)
+          then
+            TempDate := LastPrepaidPostingDate;
+          if CONFIRM(
+               Text015,true,
+               StartingDate,TempDate)
+          then
+            InvoiceNow := true
+          else
+            InvoicePrepaid := false;
+        end;
+
+      if FromServContractHeader.Prepaid and InvoicePrepaid then
+        if InvoiceFrom = ServContractMgt.FindFirstPrepaidTransaction(FromServContractHeader."Contract No.")
+        then
+          InvoiceNow := false;
+
+      if InvoiceNow then begin
+        PostingDate := InvoiceFrom;
+        ServContractLine.RESET;
+        ServContractLine.SETCURRENTKEY("Contract Type","Contract No.",Credited,"New Line");
+        ServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+        ServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+        ServContractLine.SETRANGE("New Line",true);
+        if ServContractLine.FINDSET then
+          repeat
+            if (ServContractLine."Contract Expiration Date" <> 0D) and
+               (ServContractLine."Contract Expiration Date" < InvoiceTo)
+            then
+              NoOfMonthsAndMParts := ServContractMgt.NoOfMonthsAndMPartsInPeriod(
+                  InvoiceFrom,ServContractLine."Contract Expiration Date")
+            else
+              if (FromServContractHeader."Expiration Date" <> 0D) and
+                 (FromServContractHeader."Expiration Date" < InvoiceTo)
+              then
+                NoOfMonthsAndMParts := ServContractMgt.NoOfMonthsAndMPartsInPeriod(
+                    InvoiceFrom,FromServContractHeader."Expiration Date")
+              else
+                NoOfMonthsAndMParts :=
+                  ServContractMgt.NoOfMonthsAndMPartsInPeriod(InvoiceFrom,InvoiceTo);
+            RemainingAmt :=
+              RemainingAmt +
+              ROUND(
+                ServContractLine."Line Amount" / 12 * NoOfMonthsAndMParts,Currency."Amount Rounding Precision");
+          until ServContractLine.NEXT = 0;
+      end;
+
+      if InvoiceNow then
+        CreateServiceLinesLedgerEntries(FromServContractHeader,true);
+
+      if InvoicePrepaid and FromServContractHeader.Prepaid then begin
+        ServContractMgt.InitCodeUnit;
+        if ServHeaderNo = '' then
+          ServHeaderNo :=
+            ServContractMgt.CreateServHeader(FromServContractHeader,PostingDate,false);
+
+        RemainingAmt := 0;
+        ServContractLine.RESET;
+        ServContractLine.SETCURRENTKEY("Contract Type","Contract No.",Credited,"New Line");
+        ServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+        ServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+        ServContractLine.SETRANGE("New Line",true);
+
+        if ServContractLine.FINDSET then
+          repeat
+            InvoiceFrom := FirstPrepaidPostingDate;
+            InvoiceTo := LastPrepaidPostingDate;
+            if (ServContractLine."Contract Expiration Date" <> 0D) and
+               (ServContractLine."Contract Expiration Date" < InvoiceTo)
+            then
+              InvoiceTo := ServContractLine."Contract Expiration Date";
+            if (FromServContractHeader."Expiration Date" <> 0D) and
+               (FromServContractHeader."Expiration Date" < InvoiceTo)
+            then
+              InvoiceTo := FromServContractHeader."Expiration Date";
+            if ServContractLine."Starting Date" > InvoiceFrom then
+              InvoiceFrom := ServContractLine."Starting Date";
+            NoOfMonthsAndMParts :=
+              ServContractMgt.NoOfMonthsAndMPartsInPeriod(InvoiceFrom,InvoiceTo);
+            RemainingAmt :=
+              RemainingAmt +
+              ROUND(
+                ServContractLine."Line Amount" / 12 * NoOfMonthsAndMParts,Currency."Amount Rounding Precision");
+          until ServContractLine.NEXT = 0;
+        if RemainingAmt <> 0 then begin
+          ServHeader.GET(ServHeader."Document Type"::Invoice,ServHeaderNo);
+          if FromServContractHeader."Contract Lines on Invoice" then begin
+            ServContractLine.RESET;
+            ServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+            ServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+            ServContractLine.SETRANGE("New Line",true);
+            if ServContractLine.FINDSET then
+              repeat
+                if FromServContractHeader."Contract Lines on Invoice" then
+                  ServContractMgt.CreateDetailedServLine(
+                    ServHeader,
+                    ServContractLine,
+                    FromServContractHeader."Contract Type",
+                    FromServContractHeader."Contract No.");
+
+                AppliedEntry :=
+                  ServContractMgt.CreateServiceLedgerEntry(
+                    ServHeader,FromServContractHeader."Contract Type",
+                    FromServContractHeader."Contract No.",FirstPrepaidPostingDate,
+                    LastPrepaidPostingDate,false,true,
+                    ServContractLine."Line No.");
+
+                ServContractMgt.CreateServLine(
+                  ServHeader,
+                  FromServContractHeader."Contract Type",
+                  FromServContractHeader."Contract No.",
+                  FirstPrepaidPostingDate,LastPrepaidPostingDate,
+                  AppliedEntry,false);
+              until ServContractLine.NEXT = 0;
+          end else begin
+            ServContractMgt.CreateHeadingServLine(
+              ServHeader,
+              FromServContractHeader."Contract Type",
+              FromServContractHeader."Contract No.");
+
+            AppliedEntry :=
+              ServContractMgt.CreateServiceLedgerEntry(
+                ServHeader,FromServContractHeader."Contract Type",
+                FromServContractHeader."Contract No.",FirstPrepaidPostingDate,
+                LastPrepaidPostingDate,false,true,0);
+
+            ServContractMgt.CreateServLine(
+              ServHeader,
+              FromServContractHeader."Contract Type",
+              FromServContractHeader."Contract No.",
+              FirstPrepaidPostingDate,LastPrepaidPostingDate,
+              AppliedEntry,false);
+          end;
+        end;
+        ServContractMgt.FinishCodeunit;
+      end;
+
+      ServContractLine.RESET;
+      ServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      ServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      if ServContractLine.FINDSET then
+        repeat
+          if (ServContractLine."Contract Expiration Date" <> 0D) and (ServContractHeader."Last Invoice Date" <> 0D) then
+            if ServContractLine."Contract Expiration Date" > ServContractHeader."Last Invoice Date" then
+              NonExpiredContractLineExists := true;
+        until ServContractLine.NEXT = 0;
+      if InvoiceNow and (not NonExpiredContractLineExists) then begin
+        if not FromServContractHeader.Prepaid then
+          FromServContractHeader."Last Invoice Date" := InvoiceTo
+        else
+          FromServContractHeader."Last Invoice Date" := FromServContractHeader."Next Invoice Date";
+        FromServContractHeader.MODIFY;
+      end;
+
+      FromServContractHeader.GET(ServContractHeader."Contract Type",ServContractHeader."Contract No.");
+      FromServContractHeader."Change Status" := FromServContractHeader."Change Status"::Locked;
+      FromServContractHeader.MODIFY;
+
+      ServContractLine.RESET;
+      ServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      ServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      ServContractLine.MODIFYALL("New Line",false);
+      Window.CLOSE;
+
+      if not HideDialog then
+        if ServHeaderNo <> '' then
+          MESSAGE(Text016,ServHeaderNo);
+    END;
+
+    [External]
+    PROCEDURE SetHideDialog@3(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    LOCAL PROCEDURE SetInvoicing@8(ServContractHeader@1000 : Record "Service Contract Header");
+    VAR
+      TempDate@1001 : Date;
+    BEGIN
+      if ServContractHeader."Invoice Period" = ServContractHeader."Invoice Period"::None then
+        exit;
+
+      if ServContractHeader.Prepaid then begin
+        if ServContractHeader."Starting Date" < ServContractHeader."Next Invoice Date" then begin
+          if HideDialog then
+            InvoiceNow := true
+          else
+            if CONFIRM(Text015,true,
+                 ServContractHeader."Starting Date",ServContractHeader."Next Invoice Date" - 1)
+            then
+              InvoiceNow := true;
+          InvoiceFrom := ServContractHeader."Starting Date";
+          InvoiceTo := ServContractHeader."Next Invoice Date" - 1;
+        end
+      end else begin
+        GoOut := true;
+        TempDate := ServContractHeader."Next Invoice Period Start";
+        if ServContractHeader."Starting Date" < TempDate then begin
+          TempDate := TempDate - 1;
+          GoOut := false;
+        end;
+        if not GoOut then begin
+          if HideDialog then
+            InvoiceNow := true
+          else
+            if CONFIRM(
+                 Text015,true,
+                 ServContractHeader."Starting Date",TempDate)
+            then
+              InvoiceNow := true;
+          InvoiceFrom := ServContractHeader."Starting Date";
+          InvoiceTo := TempDate;
+          InvoicingStartingPeriod := true;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckServContractQuote@5(FromServContractHeader@1000 : Record "Service Contract Header");
+    VAR
+      ServItem@1001 : Record "Service Item";
+    BEGIN
+      FromServContractHeader.TESTFIELD("Serv. Contract Acc. Gr. Code");
+      FromServContractHeader.TESTFIELD("Service Period");
+      FromServContractHeader.CALCFIELDS("Calcd. Annual Amount");
+      if FromServContractHeader."Calcd. Annual Amount" < 0 then
+        ERROR(Text019);
+      FromServContractHeader.TESTFIELD("Annual Amount",FromServContractHeader."Calcd. Annual Amount");
+      ServContractAccGr.GET(FromServContractHeader."Serv. Contract Acc. Gr. Code");
+      ServContractAccGr.TESTFIELD("Non-Prepaid Contract Acc.");
+      GLAcc.GET(ServContractAccGr."Non-Prepaid Contract Acc.");
+      GLAcc.TESTFIELD("Direct Posting");
+
+      if FromServContractHeader.Prepaid then begin
+        ServContractAccGr.TESTFIELD("Prepaid Contract Acc.");
+        GLAcc.GET(ServContractAccGr."Prepaid Contract Acc.");
+        GLAcc.TESTFIELD("Direct Posting");
+      end;
+
+      FromServContractLine.RESET;
+      FromServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      FromServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      FromServContractLine.SETRANGE("Line Amount",0);
+      FromServContractLine.SETFILTER("Line Discount %",'<%1',100);
+      if FromServContractLine.FINDFIRST then
+        ERROR(
+          Text001,
+          FromServContractHeader."Contract No.",
+          FromServContractLine.FIELDCAPTION("Line Amount"));
+
+      FromServContractHeader.TESTFIELD("Starting Date");
+      CheckServContractNonZeroAmounts(FromServContractHeader);
+
+      FromServContractLine.RESET;
+      FromServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      FromServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      FromServContractLine.SETFILTER("Service Item No.",'<>%1','');
+      if FromServContractLine.FINDSET then
+        repeat
+          ServItem.GET(FromServContractLine."Service Item No.");
+          if ServItem."Customer No." <> FromServContractHeader."Customer No." then
+            ERROR(
+              Text021,
+              FromServContractHeader."Contract No.",
+              FromServContractHeader."Customer No.");
+        until FromServContractLine.NEXT = 0;
+
+      ServMgtSetup.GET;
+      if ServMgtSetup."Salesperson Mandatory" then
+        FromServContractHeader.TESTFIELD("Salesperson Code");
+      CheckServContractNextInvoiceDate(FromServContractHeader);
+
+      FromServContractLine.RESET;
+      FromServContractLine.SETRANGE("Contract Type",FromServContractHeader."Contract Type");
+      FromServContractLine.SETRANGE("Contract No.",FromServContractHeader."Contract No.");
+      if FromServContractLine.FINDSET then
+        repeat
+          if ServMgtSetup."Contract Rsp. Time Mandatory" then
+            FromServContractLine.TESTFIELD("Response Time (Hours)");
+        until FromServContractLine.NEXT = 0;
+
+      ServContractMgt.CopyCheckSCDimToTempSCDim(FromServContractHeader);
+      if not HideDialog then
+        if not CONFIRM(Text011,true) then
+          exit;
+
+      if not HideDialog then
+        CheckServContractNextPlannedServiceDate(FromServContractHeader);
+    END;
+
+    [External]
+    PROCEDURE CheckServContract@14(VAR ServContractHeader@1002 : Record "Service Contract Header");
+    VAR
+      ServContractLine@1001 : Record "Service Contract Line";
+    BEGIN
+      if ServContractHeader.Status = ServContractHeader.Status::Signed then
+        exit;
+      if ServContractHeader.Status = ServContractHeader.Status::Canceled then
+        ERROR(Text024);
+      ServContractHeader.TESTFIELD("Serv. Contract Acc. Gr. Code");
+      ServContractHeader.TESTFIELD("Service Period");
+      ServContractHeader.CALCFIELDS("Calcd. Annual Amount");
+
+      if ServContractHeader."Annual Amount" <> ServContractHeader."Calcd. Annual Amount" then
+        ERROR(Text023,ServContractHeader.FIELDCAPTION("Annual Amount"),
+          ServContractHeader.FIELDCAPTION("Calcd. Annual Amount"));
+
+      if ServContractHeader."Annual Amount" < 0 then
+        ERROR(Text019);
+      ServContractAccGr.GET(ServContractHeader."Serv. Contract Acc. Gr. Code");
+      ServContractAccGr.TESTFIELD("Non-Prepaid Contract Acc.");
+      GLAcc.GET(ServContractAccGr."Non-Prepaid Contract Acc.");
+      GLAcc.TESTFIELD("Direct Posting");
+
+      if ServContractHeader.Prepaid then begin
+        ServContractAccGr.TESTFIELD("Prepaid Contract Acc.");
+        GLAcc.GET(ServContractAccGr."Prepaid Contract Acc.");
+        GLAcc.TESTFIELD("Direct Posting");
+      end;
+
+      ServContractLine.RESET;
+      ServContractLine.SETRANGE("Contract Type",ServContractHeader."Contract Type");
+      ServContractLine.SETRANGE("Contract No.",ServContractHeader."Contract No.");
+      ServContractLine.SETRANGE("Line Amount",0);
+      ServContractLine.SETFILTER("Line Discount %",'<%1',100);
+      if not ServContractLine.ISEMPTY then
+        ERROR(
+          Text004,
+          ServContractHeader."Contract No.",
+          ServContractLine.FIELDCAPTION("Line Amount"));
+
+      ServContractHeader.TESTFIELD("Starting Date");
+      CheckServContractNonZeroAmounts(ServContractHeader);
+
+      ServMgtSetup.GET;
+      if ServMgtSetup."Salesperson Mandatory" then
+        ServContractHeader.TESTFIELD("Salesperson Code");
+
+      CheckServContractNextInvoiceDate(ServContractHeader);
+
+      if ServMgtSetup."Contract Rsp. Time Mandatory" then begin
+        ServContractLine.RESET;
+        ServContractLine.SETRANGE("Contract Type",ServContractHeader."Contract Type");
+        ServContractLine.SETRANGE("Contract No.",ServContractHeader."Contract No.");
+        ServContractLine.SETRANGE("Response Time (Hours)",0);
+        if ServContractLine.FINDFIRST then
+          ServContractLine.FIELDERROR("Response Time (Hours)");
+      end;
+      ServContractMgt.CopyCheckSCDimToTempSCDim(ServContractHeader);
+
+      if not HideDialog then
+        CheckServContractNextPlannedServiceDate(ServContractHeader);
+    END;
+
+    LOCAL PROCEDURE CheckServContractNextInvoiceDate@22(ServContractHeader@1000 : Record "Service Contract Header");
+    BEGIN
+      if ServContractHeader."Invoice Period" <> ServContractHeader."Invoice Period"::None then
+        if ServContractHeader.Prepaid then begin
+          if CALCDATE('<-CM>',ServContractHeader."Next Invoice Date") <> ServContractHeader."Next Invoice Date"
+          then
+            ERROR(Text003,ServContractHeader.FIELDCAPTION("Next Invoice Date"));
+        end else begin
+          if
+             CALCDATE('<CM>',ServContractHeader."Next Invoice Date") <> ServContractHeader."Next Invoice Date"
+          then
+            if not HideDialog then
+              if not CONFIRM(
+                   STRSUBSTNO(
+                     Text005,
+                     ServContractHeader.FIELDCAPTION("Next Invoice Date")))
+              then
+                exit;
+        end;
+    END;
+
+    LOCAL PROCEDURE CheckServContractNextPlannedServiceDate@28(ServContractHeader@1001 : Record "Service Contract Header");
+    VAR
+      ServContractLine@1000 : Record "Service Contract Line";
+    BEGIN
+      ServContractLine.RESET;
+      ServContractLine.SETRANGE("Contract Type",ServContractHeader."Contract Type");
+      ServContractLine.SETRANGE("Contract No.",ServContractHeader."Contract No.");
+      ServContractLine.SETRANGE("Next Planned Service Date",0D);
+      if ServContractLine.FINDFIRST then
+        if not
+           CONFIRM(
+             Text022,
+             true,
+             ServContractLine.FIELDCAPTION("Next Planned Service Date"))
+        then
+          exit;
+    END;
+
+    LOCAL PROCEDURE CheckServContractNonZeroAmounts@38(ServContractHeader@1000 : Record "Service Contract Header");
+    BEGIN
+      if ServContractHeader."Invoice Period" <> ServContractHeader."Invoice Period"::None then begin
+        if ServContractHeader."Annual Amount" = 0 then
+          ERROR(Text020);
+        ServContractHeader.TESTFIELD("Amount per Period");
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLinesLedgerEntries@53(VAR ServContractHeader@1000 : Record "Service Contract Header";NewLine@1004 : Boolean);
+    VAR
+      ServContractLine@1001 : Record "Service Contract Line";
+    BEGIN
+      ServContractMgt.InitCodeUnit;
+      ServHeaderNo :=
+        ServContractMgt.CreateServHeader(ServContractHeader,PostingDate,false);
+
+      ServHeader.GET(ServHeader."Document Type"::Invoice,ServHeaderNo);
+      if ServContractHeader."Contract Lines on Invoice" then begin
+        ServContractLine.RESET;
+        ServContractLine.SETRANGE("Contract Type",ServContractHeader."Contract Type");
+        ServContractLine.SETRANGE("Contract No.",ServContractHeader."Contract No.");
+        if NewLine then
+          ServContractLine.SETRANGE("New Line",true);
+        if ServContractLine.FINDSET then
+          repeat
+            ServContractMgt.CreateDetailedServLine(
+              ServHeader,ServContractLine,
+              ServContractHeader."Contract Type",
+              ServContractHeader."Contract No.");
+
+            AppliedEntry :=
+              ServContractMgt.CreateServiceLedgerEntry(
+                ServHeader,ServContractHeader."Contract Type",
+                ServContractHeader."Contract No.",InvoiceFrom,
+                InvoiceTo,not NewLine,NewLine,
+                ServContractLine."Line No.");
+
+            ServContractMgt.CreateServLine(
+              ServHeader,
+              ServContractHeader."Contract Type",
+              ServContractHeader."Contract No.",
+              InvoiceFrom,InvoiceTo,AppliedEntry,not NewLine);
+          until ServContractLine.NEXT = 0;
+      end else begin
+        ServContractMgt.CreateHeadingServLine(
+          ServHeader,
+          ServContractHeader."Contract Type",
+          ServContractHeader."Contract No.");
+
+        AppliedEntry :=
+          ServContractMgt.CreateServiceLedgerEntry(
+            ServHeader,ServContractHeader."Contract Type",
+            ServContractHeader."Contract No.",InvoiceFrom,
+            InvoiceTo,not NewLine,NewLine,0);
+
+        ServContractMgt.CreateServLine(
+          ServHeader,
+          ServContractHeader."Contract Type",
+          ServContractHeader."Contract No.",
+          InvoiceFrom,InvoiceTo,AppliedEntry,not NewLine);
+      end;
+
+      ServContractHeader.MODIFY;
+      ServContractMgt.FinishCodeunit;
+    END;
+
+    LOCAL PROCEDURE CopyServComments@6(FromServContractHeader@1000 : Record "Service Contract Header";ToServContractHeader@1001 : Record "Service Contract Header");
+    VAR
+      FromServCommentLine@1003 : Record "Service Comment Line";
+      ToServCommentLine@1002 : Record "Service Comment Line";
+    BEGIN
+      FromServCommentLine.SETRANGE("Table Name",FromServCommentLine."Table Name"::"Service Contract");
+      FromServCommentLine.SETRANGE("Table Subtype",FromServContractHeader."Contract Type");
+      FromServCommentLine.SETRANGE("No.",FromServContractHeader."Contract No.");
+      if FromServCommentLine.FINDSET then
+        repeat
+          ToServCommentLine."Table Name" := ToServCommentLine."Table Name"::"Service Contract";
+          ToServCommentLine."Table Subtype" := ToServContractHeader."Contract Type"::Contract;
+          ToServCommentLine."Table Line No." := FromServCommentLine."Table Line No.";
+          ToServCommentLine."No." := ToServContractHeader."Contract No.";
+          ToServCommentLine."Line No." := FromServCommentLine."Line No.";
+          ToServCommentLine.Comment := FromServCommentLine.Comment;
+          ToServCommentLine.Date := FromServCommentLine.Date;
+          ToServCommentLine.INSERT;
+        until FromServCommentLine.NEXT = 0;
+      FromServCommentLine.DELETEALL;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

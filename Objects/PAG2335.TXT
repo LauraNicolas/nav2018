@@ -2,9 +2,9 @@ OBJECT Page 2335 BC O365 Email Account Settings
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -32,23 +32,23 @@ OBJECT Page 2335 BC O365 Email Account Settings
                    IF SMTPMailSetup.INSERT THEN;
                  END;
                  INSERT;
+
                  IF SMTPMailSetup.HasPassword THEN
                    Password := DummyPasswordTxt;
+
+                 PasswordModified := FALSE;
                END;
 
-    OnModifyRecord=VAR
-                     SMTPMailSetup@1000 : Record 409;
-                   BEGIN
-                     SMTPMailSetup := Rec;
-                     IF Password <> DummyPasswordTxt THEN
-                       SMTPMailSetup.SetPassword(Password);
-                     SMTPMailSetup.MODIFY(TRUE);
-                     Rec := SMTPMailSetup;
+    OnModifyRecord=BEGIN
+                     IF NOT CurrPage.LOOKUPMODE THEN
+                       IF ValidateSettings(TRUE) THEN
+                         StoreSMTPSetup;
                    END;
 
     OnQueryClosePage=BEGIN
-                       IF "User ID" = '' THEN
-                         RemovePassword;
+                       IF NOT CurrPage.LOOKUPMODE THEN
+                         IF ValidateSettings(TRUE) THEN
+                           StoreSMTPSetup;
                      END;
 
     ActionList=ACTIONS
@@ -66,13 +66,12 @@ OBJECT Page 2335 BC O365 Email Account Settings
                 GroupType=Group;
                 InstructionalTextML=ENU=Your invoices will be sent from the following email account. }
 
-    { 2   ;2   ;Field     ;
+    { 2   ;1   ;Field     ;
                 Name=Email Provider;
-                CaptionML=ENU=Email Account type;
+                CaptionML=ENU=Email Account Type;
+                ToolTipML=ENU=Specifies your email provider.;
                 ApplicationArea=#Basic,#Suite,#Invoicing;
                 SourceExpr=EmailProvider;
-                Style=Strong;
-                StyleExpr=TRUE;
                 OnValidate=BEGIN
                              CASE EmailProvider OF
                                EmailProvider::"Office 365":
@@ -86,12 +85,18 @@ OBJECT Page 2335 BC O365 Email Account Settings
                                EmailProvider::"Other Email Provider":
                                  "SMTP Server" := '';
                              END;
+
                              AdvancedSettingsVisible := EmailProvider = EmailProvider::"Other Email Provider";
+
+                             Password := '';
+                             PasswordModified := TRUE;
                            END;
+                            }
 
-                ShowCaption=No }
+    { 12  ;1   ;Group     ;
+                GroupType=Group }
 
-    { 12  ;2   ;Group     ;
+    { 13  ;2   ;Group     ;
                 Visible=AdvancedSettingsVisible;
                 GroupType=Group;
                 InstructionalTextML=ENU=Enter the SMTP Server Details. }
@@ -115,21 +120,33 @@ OBJECT Page 2335 BC O365 Email Account Settings
                 ApplicationArea=#Basic,#Suite,#Invoicing;
                 SourceExpr="Secure Connection" }
 
-    { 10  ;2   ;Field     ;
+    { 10  ;1   ;Field     ;
                 ExtendedDatatype=E-Mail;
                 CaptionML=ENU=Email;
                 ApplicationArea=#Basic,#Suite,#Invoicing;
-                SourceExpr="User ID" }
+                SourceExpr="User ID";
+                OnValidate=VAR
+                             MailManagement@1000 : Codeunit 9520;
+                           BEGIN
+                             IF "User ID" <> '' THEN
+                               MailManagement.CheckValidEmailAddress("User ID");
+                           END;
+                            }
 
-    { 9   ;2   ;Field     ;
+    { 9   ;1   ;Field     ;
                 Name=Password;
                 ExtendedDatatype=Masked;
                 CaptionML=ENU=Password;
                 ToolTipML=ENU=Specifies the password used for logging into the server.;
                 ApplicationArea=#Basic,#Suite,#Invoicing;
-                SourceExpr=Password }
+                SourceExpr=Password;
+                OnValidate=BEGIN
+                             PasswordModified := TRUE;
+                             "Password Key" := CREATEGUID; // trigger modify
+                           END;
+                            }
 
-    { 11  ;2   ;Field     ;
+    { 11  ;1   ;Field     ;
                 Name=TestEmailLbl;
                 ApplicationArea=#Basic,#Suite,#Invoicing;
                 SourceExpr=TestEmailLbl;
@@ -137,8 +154,8 @@ OBJECT Page 2335 BC O365 Email Account Settings
                 Style=StandardAccent;
                 StyleExpr=TRUE;
                 OnDrillDown=BEGIN
-                              IF ("User ID" = '') OR (Password = '') THEN
-                                ERROR(SetupEmailErr);
+                              ValidateSettings(FALSE);
+
                               SendTestEmailAction;
                             END;
 
@@ -151,12 +168,14 @@ OBJECT Page 2335 BC O365 Email Account Settings
       SMTPMail@1016 : Codeunit 400;
       AdvancedSettingsVisible@1013 : Boolean;
       Password@1005 : Text[250];
+      PasswordModified@1006 : Boolean;
       EmailProvider@1003 : 'Office 365,Outlook,Gmail,Yahoo,Other Email Provider';
       DummyPasswordTxt@1001 : TextConst '@@@={Locked};ENU=***';
       TestEmailLbl@1000 : TextConst 'ENU=Send test email';
-      SetupEmailErr@1002 : TextConst 'ENU=You must setup the email account before sending a test email.';
+      EmailMissingUserPassErr@1004 : TextConst 'ENU=You must provide a user name and password to send email.';
+      MissingServerSettingsErr@1002 : TextConst 'ENU=You must provide server information to send email.';
 
-    LOCAL PROCEDURE StoreSMTPSetup@31();
+    PROCEDURE StoreSMTPSetup@31();
     VAR
       SMTPMailSetup@1000 : Record 409;
     BEGIN
@@ -165,16 +184,25 @@ OBJECT Page 2335 BC O365 Email Account Settings
         SMTPMailSetup.INSERT;
       END;
 
+      // preserve old password key in case we need to remove it
+      "Password Key" := SMTPMailSetup."Password Key";
+
       SMTPMailSetup.TRANSFERFIELDS(Rec,FALSE);
-      IF Password <> DummyPasswordTxt THEN
-        SMTPMailSetup.SetPassword(Password);
+
+      IF PasswordModified THEN BEGIN
+        IF Password = '' THEN
+          SMTPMailSetup.RemovePassword
+        ELSE
+          SMTPMailSetup.SetPassword(Password);
+      END;
+
       SMTPMailSetup.MODIFY(TRUE);
-      COMMIT;
     END;
 
     LOCAL PROCEDURE SendTestEmailAction@10();
     BEGIN
       StoreSMTPSetup;
+      COMMIT;
       CODEUNIT.RUN(CODEUNIT::"SMTP Test Mail");
     END;
 
@@ -193,6 +221,24 @@ OBJECT Page 2335 BC O365 Email Account Settings
               EmailProvider := EmailProvider::Yahoo
             ELSE
               EmailProvider := EmailProvider::"Other Email Provider";
+
+      AdvancedSettingsVisible := EmailProvider = EmailProvider::"Other Email Provider";
+    END;
+
+    [TryFunction]
+    PROCEDURE ValidateSettings@1(EmptyAuthInfoValid@1000 : Boolean);
+    BEGIN
+      IF EmailProvider = EmailProvider::"Other Email Provider" THEN BEGIN
+        IF (NOT EmptyAuthInfoValid) AND ("SMTP Server" = '') THEN
+          ERROR(MissingServerSettingsErr);
+        EXIT;
+      END;
+
+      IF EmptyAuthInfoValid AND ("User ID" = '') AND (Password = '') THEN
+        EXIT;
+
+      IF ("User ID" = '') OR (Password = '') THEN
+        ERROR(EmailMissingUserPassErr);
     END;
 
     BEGIN

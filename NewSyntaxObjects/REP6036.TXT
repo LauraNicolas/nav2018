@@ -1,0 +1,288 @@
+OBJECT Report 6036 Create Contract Service Orders
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Create Contract Service Orders;
+    ProcessingOnly=true;
+    OnInitReport=BEGIN
+                   ServMgtSetup.GET;
+                   if ServMgtSetup."Last Contract Service Date" <> 0D then
+                     StartDate := ServMgtSetup."Last Contract Service Date" + 1;
+                 END;
+
+    OnPostReport=BEGIN
+                   if CreateServOrders = CreateServOrders::"Create Service Order" then begin
+                     ServMgtSetup.GET;
+                     ServMgtSetup."Last Contract Service Date" := EndDate;
+                     ServMgtSetup.MODIFY;
+
+                     if not HideDialog then
+                       if ServOrderCreated > 1 then
+                         MESSAGE(Text000,ServOrderCreated)
+                       else
+                         MESSAGE(Text001,ServOrderCreated)
+                   end;
+                 END;
+
+  }
+  DATASET
+  {
+    { 9952;    ;DataItem;Service Contract Header;
+               DataItemTable="Service Contract Header";
+               DataItemTableView=WHERE("Contract Type"=CONST(Contract),"Change Status"=CONST(Locked),Status=CONST(Signed));
+               OnPreDataItem=BEGIN
+                               if CreateServOrders = CreateServOrders::"Print Only" then begin
+                                 CLEAR(ContrServOrdersTest);
+                                 ContrServOrdersTest.InitVariables(StartDate,EndDate);
+                                 ContrServOrdersTest.SETTABLEVIEW("Service Contract Header");
+                                 ContrServOrdersTest.RUNMODAL;
+                                 CurrReport.BREAK;
+                               end;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  VerifyServiceContractHeader;
+                                END;
+
+               ReqFilterFields="Contract No." }
+
+    { 6062;1   ;DataItem;Service Contract Line;
+               DataItemTable="Service Contract Line";
+               DataItemTableView=SORTING("Contract Type","Contract No.","Line No.") ORDER(Ascending) WHERE("Service Period"=FILTER(<>''));
+               OnPreDataItem=BEGIN
+                               if EndDate = 0D then
+                                 ERROR(Text002);
+                               if EndDate < StartDate then
+                                 ERROR(Text003);
+
+                               if StartDate <> 0D then begin
+                                 if EndDate - StartDate + 1 > ServMgtSetup."Contract Serv. Ord.  Max. Days" then
+                                   ERROR(
+                                     Text004,
+                                     ServMgtSetup.TABLECAPTION);
+                               end;
+
+                               SETRANGE("Next Planned Service Date",StartDate,EndDate);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  if "Contract Expiration Date" <> 0D then begin
+                                    if "Contract Expiration Date" <= "Next Planned Service Date" then
+                                      CurrReport.SKIP;
+                                  end else
+                                    if ("Service Contract Header"."Expiration Date" <> 0D) and
+                                       ("Service Contract Header"."Expiration Date" <= "Next Planned Service Date")
+                                    then
+                                      CurrReport.SKIP;
+
+                                  Cust.GET("Service Contract Header"."Bill-to Customer No.");
+                                  if Cust.Blocked = Cust.Blocked::All then
+                                    CurrReport.SKIP;
+
+                                  ServHeader.SETCURRENTKEY("Contract No.",Status,"Posting Date");
+                                  ServHeader.SETRANGE("Document Type",ServHeader."Document Type"::Order);
+                                  ServHeader.SETRANGE("Contract No.","Contract No.");
+                                  ServHeader.SETRANGE(Status,ServHeader.Status::Pending);
+
+                                  ServOrderExist := ServHeader.FINDFIRST;
+                                  if ServOrderExist then begin
+                                    ServItemLine.SETCURRENTKEY("Document Type","Document No.","Service Item No.");
+                                    ServItemLine.SETRANGE("Document Type",ServHeader."Document Type");
+                                    ServItemLine.SETRANGE("Document No.",ServHeader."No.");
+                                    ServItemLine.SETRANGE("Contract No.","Contract No.");
+                                    ServItemLine.SETRANGE("Contract Line No.","Line No.");
+                                    if ServItemLine.FINDFIRST then
+                                      CurrReport.SKIP;
+                                  end;
+                                  CreateOrAddToServOrder;
+                                END;
+
+               DataItemLink="Contract Type"=FIELD("Contract Type"),"Contract No."=FIELD("Contract No.") }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=true;
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  Name=Container1900000001;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  Name=Options;
+                  CaptionML=ENU=Options }
+
+      { 5   ;2   ;Field     ;
+                  Name=StartingDate;
+                  CaptionML=ENU=Starting Date;
+                  ToolTipML=ENU=Specifies the starting date for the period that you want to create contract service orders for. The batch job includes contracts with service items that have next planned service dates on or later than this date.;
+                  ApplicationArea=#Service;
+                  SourceExpr=StartDate }
+
+      { 1   ;2   ;Field     ;
+                  Name=EndingDate;
+                  CaptionML=ENU=Ending Date;
+                  ToolTipML=ENU=Specifies the ending date for the period that you want to create contract service orders for. The batch job includes contracts with service items with next planned service date on or earlier than this date.;
+                  ApplicationArea=#Service;
+                  SourceExpr=EndDate;
+                  OnValidate=BEGIN
+                               if EndDate < StartDate then
+                                 ERROR(Text003);
+                             END;
+                              }
+
+      { 8   ;2   ;Field     ;
+                  Name=CreateServiceOrders;
+                  CaptionML=ENU=Action;
+                  ToolTipML=ENU=Specifies the desired action relating to contract service orders.;
+                  OptionCaptionML=ENU=Create Service Order,Print Only;
+                  ApplicationArea=#Service;
+                  SourceExpr=CreateServOrders }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=%1 service orders were created.';
+      Text001@1001 : TextConst 'ENU=%1 service order was created.';
+      Text002@1002 : TextConst 'ENU=You must fill in the ending date field.';
+      Text003@1003 : TextConst 'ENU=The starting date is after the ending date.';
+      Text004@1004 : TextConst 'ENU=The date range you have entered is a longer period than is allowed in the %1 table.';
+      ServMgtSetup@1006 : Record "Service Mgt. Setup";
+      ServHeader@1007 : Record "Service Header";
+      ServItemLine@1008 : Record "Service Item Line";
+      Cust@1010 : Record Customer;
+      ServItem@1021 : Record "Service Item";
+      RepairStatus@1022 : Record "Repair Status";
+      ContrServOrdersTest@1005 : Report "Contr. Serv. Orders - Test";
+      ServOrderCreated@1011 : Integer;
+      RecordNo@1012 : Integer;
+      StartDate@1014 : Date;
+      EndDate@1015 : Date;
+      CreateServOrders@1016 : '"Create Service Order","Print Only"';
+      ServOrderExist@1018 : Boolean;
+      HideDialog@1023 : Boolean;
+      Text005@1009 : TextConst 'ENU=A service order cannot be created for contract no. %1 because customer no. %2 does not have a %3.';
+
+    LOCAL PROCEDURE CreateOrAddToServOrder@2();
+    BEGIN
+      CLEAR(ServHeader);
+      ServHeader.SETCURRENTKEY("Contract No.",Status,"Posting Date");
+      ServHeader.SETRANGE("Document Type",ServHeader."Document Type"::Order);
+      ServHeader.SETRANGE("Contract No.","Service Contract Header"."Contract No.");
+      ServHeader.SETRANGE(Status,ServHeader.Status::Pending);
+      ServHeader.SETFILTER("Order Date",'>=%1',"Service Contract Line"."Next Planned Service Date");
+      if not ServHeader.FINDFIRST then begin
+        CLEAR(ServHeader);
+        ServHeader.INIT;
+        ServHeader."Document Type" := ServHeader."Document Type"::Order;
+        ServHeader.INSERT(true);
+        ServHeader.SetHideValidationDialog(true);
+        ServHeader."Contract No." := "Service Contract Header"."Contract No.";
+        ServHeader.VALIDATE("Order Date","Service Contract Line"."Next Planned Service Date");
+        ServHeader.VALIDATE("Customer No.","Service Contract Header"."Customer No.");
+        ServHeader.VALIDATE("Bill-to Customer No.","Service Contract Header"."Bill-to Customer No.");
+        ServHeader."Default Response Time (Hours)" := "Service Contract Header"."Response Time (Hours)";
+        ServHeader.VALIDATE("Ship-to Code","Service Contract Header"."Ship-to Code");
+        ServHeader."Service Order Type" := "Service Contract Header"."Service Order Type";
+        ServHeader.VALIDATE("Currency Code","Service Contract Header"."Currency Code");
+        ServHeader."Salesperson Code" := "Service Contract Header"."Salesperson Code";
+        ServHeader."Max. Labor Unit Price" := "Service Contract Header"."Max. Labor Unit Price";
+        ServHeader."Your Reference" := "Service Contract Header"."Your Reference";
+        ServHeader."Service Zone Code" := "Service Contract Header"."Service Zone Code";
+        ServHeader."Shortcut Dimension 1 Code" := "Service Contract Header"."Shortcut Dimension 1 Code";
+        ServHeader."Shortcut Dimension 2 Code" := "Service Contract Header"."Shortcut Dimension 2 Code";
+        ServHeader.VALIDATE("Service Order Type","Service Contract Header"."Service Order Type");
+        ServHeader."Dimension Set ID" := "Service Contract Header"."Dimension Set ID";
+        ServHeader.MODIFY(true);
+
+        ServOrderCreated := ServOrderCreated + 1;
+      end;
+
+      RecordNo := 0;
+      CLEAR(ServItemLine);
+      ServItemLine.SETRANGE("Document Type",ServHeader."Document Type");
+      ServItemLine.SETRANGE("Document No.",ServHeader."No.");
+      if ServItemLine.FINDLAST then
+        RecordNo := ServItemLine."Line No."
+      else
+        RecordNo := 0;
+      CLEAR(ServItemLine);
+      ServItemLine.SETCURRENTKEY("Document Type","Document No.","Service Item No.");
+      ServItemLine.SETRANGE("Document Type",ServHeader."Document Type");
+      ServItemLine.SETRANGE("Document No.",ServHeader."No.");
+      ServItemLine.SETRANGE("Contract No.","Service Contract Line"."Contract No.");
+      ServItemLine.SETRANGE("Contract Line No.","Service Contract Line"."Line No.");
+      if not ServItemLine.FINDFIRST then begin
+        RecordNo := RecordNo + 10000;
+        ServItemLine.INIT;
+        ServItemLine.SetHideDialogBox(true);
+        ServItemLine."Document No." := ServHeader."No.";
+        ServItemLine."Document Type" := ServHeader."Document Type";
+        RepairStatus.RESET;
+        RepairStatus.Initial := true;
+        ServItemLine."Repair Status Code" := RepairStatus.ReturnStatusCode(RepairStatus);
+        ServItemLine."Line No." := RecordNo;
+        if "Service Contract Line"."Service Item No." <> '' then begin
+          ServItem.GET("Service Contract Line"."Service Item No.");
+          ServItemLine.VALIDATE("Service Item No.",ServItem."No.");
+          ServItemLine."Location of Service Item" := ServItem."Location of Service Item";
+          ServItemLine.Priority := ServItem.Priority;
+        end else
+          ServItemLine.Description := "Service Contract Line".Description;
+        ServItemLine."Serial No." := "Service Contract Line"."Serial No.";
+        ServItemLine."Item No." := "Service Contract Line"."Item No.";
+        ServItemLine."Variant Code" := "Service Contract Line"."Variant Code";
+        ServItemLine."Contract No." := "Service Contract Line"."Contract No.";
+        ServItemLine."Contract Line No." := "Service Contract Line"."Line No.";
+        ServItemLine.UpdateResponseTimeHours;
+        ServItemLine.INSERT(true);
+      end;
+    END;
+
+    PROCEDURE SetHideDialog@3(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    PROCEDURE InitializeRequest@4(StartDateFrom@1000 : Date;EndDateFrom@1001 : Date;CreateServOrdersFrom@1002 : Option);
+    BEGIN
+      StartDate := StartDateFrom;
+      EndDate := EndDateFrom;
+      CreateServOrders := CreateServOrdersFrom;
+    END;
+
+    LOCAL PROCEDURE VerifyServiceContractHeader@1();
+    VAR
+      ShipToAddress@1000 : Record "Ship-to Address";
+    BEGIN
+      with "Service Contract Header" do
+        if "Ship-to Code" <> '' then
+          if not ShipToAddress.GET("Customer No.","Ship-to Code") then begin
+            MESSAGE(Text005,"Contract No.","Customer No.","Ship-to Code");
+            CurrReport.SKIP;
+          end;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

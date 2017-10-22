@@ -2,9 +2,9 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -17,7 +17,6 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
     VAR
       SyncVendorsUriTxt@1020 : TextConst '@@@={Locked};ENU=masterdata/rest/%1/suppliers';
       SyncVendorBankAccountsUriTxt@1019 : TextConst '@@@={Locked};ENU=masterdata/rest/%1/supplierbankaccounts';
-      SyncDeletedVendorsMsg@1018 : TextConst 'ENU=Send deleted vendors to the OCR service.';
       SyncModifiedVendorsMsg@1017 : TextConst 'ENU=Send updated vendors to the OCR service.';
       SyncBankAccountsMsg@1016 : TextConst 'ENU=Send vendor bank accounts to the OCR service.';
       SyncSuccessfulSimpleMsg@1003 : TextConst 'ENU=Synchronization succeeded.';
@@ -30,7 +29,6 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
       MaxPortionSizeTxt@1004 : TextConst '@@@={Locked};ENU=3000';
       MethodPutTok@1002 : TextConst '@@@={Locked};ENU=PUT';
       MethodPostTok@1001 : TextConst '@@@={Locked};ENU=POST';
-      MethodDeleteTok@1000 : TextConst '@@@={Locked};ENU=DELETE';
       OCRServiceSetup@1021 : Record 1270;
       OCRServiceMgt@1022 : Codeunit 1294;
       Window@1011 : Dialog;
@@ -69,6 +67,19 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
       IF NOT Silent THEN
         MESSAGE(SyncSuccessfulSimpleMsg);
       EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE ResetLastSyncTime@2();
+    BEGIN
+      IF NOT IsSyncEnabled THEN
+        EXIT;
+      OCRServiceSetup.GET;
+      IF OCRServiceSetup."Master Data Last Sync" = 0DT THEN
+        EXIT;
+      CLEAR(OCRServiceSetup."Master Data Last Sync");
+      OCRServiceSetup.MODIFY;
+      COMMIT;
     END;
 
     [External]
@@ -135,27 +146,20 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
 
     LOCAL PROCEDURE SyncVendors@92(StartDateTime@1001 : DateTime;EndDateTime@1000 : DateTime) : Boolean;
     VAR
-      TempBlobDeletedVendor@1002 : TEMPORARY Record 99008535;
       TempBlobModifiedVendor@1003 : TEMPORARY Record 99008535;
       TempBlobBankAccount@1004 : TEMPORARY Record 99008535;
-      DeletedVendorCount@1012 : Integer;
       ModifiedVendorCount@1011 : Integer;
       BankAccountCount@1010 : Integer;
-      DeleteVendorPackageCount@1007 : Integer;
       ModifyVendorPackageCount@1008 : Integer;
       BankAccountPackageCount@1009 : Integer;
       TotalPackageCount@1005 : Integer;
       Success@1006 : Boolean;
       ModifiedVendorFirstPortionAction@1015 : Code[6];
     BEGIN
-      IF StartDateTime > 0DT THEN BEGIN
-        GetDeletedVendors(TempBlobDeletedVendor,StartDateTime,EndDateTime);
-        DeletedVendorCount := TempBlobDeletedVendor.COUNT;
-        ModifiedVendorFirstPortionAction := MethodPostTok;
-      END ELSE BEGIN
-        DeletedVendorCount := 0;
+      IF StartDateTime > 0DT THEN
+        ModifiedVendorFirstPortionAction := MethodPostTok
+      ELSE
         ModifiedVendorFirstPortionAction := MethodPutTok;
-      END;
 
       GetModifiedVendors(TempBlobModifiedVendor,StartDateTime,EndDateTime);
       GetVendorBankAccounts(TempBlobBankAccount,StartDateTime,EndDateTime);
@@ -163,13 +167,11 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
       ModifiedVendorCount := TempBlobModifiedVendor.COUNT;
       BankAccountCount := TempBlobBankAccount.COUNT;
 
-      IF DeletedVendorCount > 0 THEN
-        DeleteVendorPackageCount := (DeletedVendorCount DIV MaxPortionSize) + 1;
       IF (ModifiedVendorCount > 0) OR (StartDateTime = 0DT) THEN
         ModifyVendorPackageCount := (ModifiedVendorCount DIV MaxPortionSize) + 1;
       IF BankAccountCount > 0 THEN
         BankAccountPackageCount := (TempBlobBankAccount.COUNT DIV MaxPortionSize) + 1;
-      TotalPackageCount := DeleteVendorPackageCount + ModifyVendorPackageCount + BankAccountPackageCount;
+      TotalPackageCount := ModifyVendorPackageCount + BankAccountPackageCount;
 
       IF TotalPackageCount = 0 THEN
         EXIT(TRUE);
@@ -178,17 +180,9 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
 
       OpenWindow(TotalPackageCount);
 
-      IF DeleteVendorPackageCount > 0 THEN
-        Success := SyncMasterDataEntities(
-            TempBlobDeletedVendor,VendorsUri,MethodDeleteTok,MethodDeleteTok,
-            'Suppliers',SyncDeletedVendorsMsg,MaxPortionSize)
-      ELSE
-        Success := TRUE;
-
-      IF Success THEN
-        Success := SyncMasterDataEntities(
-            TempBlobModifiedVendor,VendorsUri,ModifiedVendorFirstPortionAction,MethodPostTok,
-            'Suppliers',SyncModifiedVendorsMsg,MaxPortionSize);
+      Success := SyncMasterDataEntities(
+          TempBlobModifiedVendor,VendorsUri,ModifiedVendorFirstPortionAction,MethodPostTok,
+          'Suppliers',SyncModifiedVendorsMsg,MaxPortionSize);
 
       IF Success THEN
         Success := SyncMasterDataEntities(
@@ -237,22 +231,6 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
         RequestAction := NextPortionAction;
       END;
       EXIT(TRUE);
-    END;
-
-    LOCAL PROCEDURE GetDeletedVendors@77(VAR TempBlob@1003 : Record 99008535;StartDateTime@1001 : DateTime;EndDateTime@1002 : DateTime);
-    VAR
-      IntegrationRecord@1000 : Record 5151;
-      Index@1005 : Integer;
-      Data@1004 : Text;
-    BEGIN
-      IntegrationRecord.SETRANGE("Table ID",DATABASE::Vendor);
-      IntegrationRecord.SETRANGE("Deleted On",StartDateTime,EndDateTime);
-      IF IntegrationRecord.FINDSET THEN
-        REPEAT
-          Index += 1;
-          Data := GetDeletedVendorXml(IntegrationRecord);
-          PutToBuffer(TempBlob,Index,Data);
-        UNTIL IntegrationRecord.NEXT = 0;
     END;
 
     LOCAL PROCEDURE GetModifiedVendors@76(VAR TempBlob@1003 : Record 99008535;StartDateTime@1001 : DateTime;EndDateTime@1000 : DateTime);
@@ -318,41 +296,21 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
       EXIT(Data);
     END;
 
-    LOCAL PROCEDURE GetDeletedVendorXml@70(VAR IntegrationRecord@1004 : Record 5151) : Text;
-    VAR
-      IntegrationManagement@1000 : Codeunit 5150;
-      XMLDOMManagement@1003 : Codeunit 6224;
-      DotNetXmlDocument@1006 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
-      XmlNode@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
-      XmlNodeChild@1001 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
-      VendorId@1005 : Text;
-    BEGIN
-      VendorId := IntegrationManagement.GetIdWithoutBrackets(IntegrationRecord."Integration ID");
-      DotNetXmlDocument := DotNetXmlDocument.XmlDocument;
-      XMLDOMManagement.AddRootElement(DotNetXmlDocument,'Supplier',XmlNode);
-      XMLDOMManagement.AddElement(XmlNode,'SupplierNumber',VendorId,'',XmlNodeChild);
-      EXIT(DotNetXmlDocument.OuterXml);
-    END;
-
     LOCAL PROCEDURE GetModifiedVendorXml@69(VAR OCRVendors@1000 : Query 134) : Text;
     VAR
-      IntegrationManagement@1004 : Codeunit 5150;
       XMLDOMManagement@1003 : Codeunit 6224;
       DotNetXmlDocument@1006 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
       XmlNode@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
       XmlNodeChild@1001 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
-      VendorId@1005 : Text;
       Blocked@1007 : Boolean;
     BEGIN
-      VendorId := IntegrationManagement.GetIdWithoutBrackets(OCRVendors.Id);
       Blocked := OCRVendors.Blocked <> OCRVendors.Blocked::" ";
       DotNetXmlDocument := DotNetXmlDocument.XmlDocument;
       XMLDOMManagement.AddRootElement(DotNetXmlDocument,'Supplier',XmlNode);
 
       // when using XML as the input for API, the element order needs to match exactly
-      XMLDOMManagement.AddElement(XmlNode,'SupplierNumber',VendorId,'',XmlNodeChild);
+      XMLDOMManagement.AddElement(XmlNode,'SupplierNumber',OCRVendors.No,'',XmlNodeChild);
       XMLDOMManagement.AddElement(XmlNode,'Name',OCRVendors.Name,'',XmlNodeChild);
-      XMLDOMManagement.AddElement(XmlNode,'Description',OCRVendors.No,'',XmlNodeChild);
       XMLDOMManagement.AddElement(XmlNode,'TaxRegistrationNumber',OCRVendors.VAT_Registration_No,'',XmlNodeChild);
       XMLDOMManagement.AddElement(XmlNode,'Street',OCRVendors.Address,'',XmlNodeChild);
       XMLDOMManagement.AddElement(XmlNode,'PostalCode',OCRVendors.Post_Code,'',XmlNodeChild);
@@ -365,20 +323,17 @@ OBJECT Codeunit 884 ReadSoft OCR Master Data Sync
 
     LOCAL PROCEDURE GetVendorBankAccountXml@68(VAR OCRVendorBankAccounts@1000 : Query 135) : Text;
     VAR
-      IntegrationManagement@1005 : Codeunit 5150;
       XMLDOMManagement@1001 : Codeunit 6224;
       DotNetXmlDocument@1004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
       XmlNode@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
       XmlNodeChild@1008 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
-      VendorId@1003 : Text;
     BEGIN
-      VendorId := IntegrationManagement.GetIdWithoutBrackets(OCRVendorBankAccounts.Id);
       DotNetXmlDocument := DotNetXmlDocument.XmlDocument;
       XMLDOMManagement.AddRootElement(DotNetXmlDocument,'SupplierBankAccount',XmlNode);
 
       // when using XML as the input for API, the element order needs to match exactly
       XMLDOMManagement.AddElement(XmlNode,'BankName',OCRVendorBankAccounts.Name,'',XmlNodeChild);
-      XMLDOMManagement.AddElement(XmlNode,'SupplierNumber',VendorId,'',XmlNodeChild);
+      XMLDOMManagement.AddElement(XmlNode,'SupplierNumber',OCRVendorBankAccounts.No,'',XmlNodeChild);
       XMLDOMManagement.AddElement(XmlNode,'BankNumber',OCRVendorBankAccounts.Bank_Branch_No,'',XmlNodeChild);
       XMLDOMManagement.AddElement(XmlNode,'AccountNumber',OCRVendorBankAccounts.Bank_Account_No,'',XmlNodeChild);
 

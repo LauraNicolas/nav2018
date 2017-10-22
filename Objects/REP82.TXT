@@ -2,9 +2,9 @@ OBJECT Report 82 Export Budget to Excel
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -23,6 +23,7 @@ OBJECT Report 82 Export Budget to Excel
                DataItemTableView=SORTING(Budget Name,G/L Account No.,Business Unit Code,Global Dimension 1 Code,Global Dimension 2 Code,Budget Dimension 1 Code,Budget Dimension 2 Code,Budget Dimension 3 Code,Budget Dimension 4 Code,Date);
                OnPreDataItem=VAR
                                BusUnit@1000 : Record 220;
+                               DimensionValue@1001 : Record 349;
                              BEGIN
                                IF GETRANGEMIN("Budget Name") <> GETRANGEMAX("Budget Name") THEN
                                  ERROR(Text001);
@@ -46,10 +47,13 @@ OBJECT Report 82 Export Budget to Excel
                                END;
                                IF SelectedDim.FIND('-') THEN
                                  REPEAT
-                                   i := i + 1;
-                                   IF i > ARRAYLEN(ColumnDimCode) THEN
-                                     ERROR(Text003,ARRAYLEN(ColumnDimCode));
-                                   ColumnDimCode[i] := SelectedDim."Dimension Code";
+                                   DimensionValue.SETRANGE("Dimension Code",SelectedDim."Dimension Code");
+                                   IF NOT DimensionValue.ISEMPTY THEN BEGIN
+                                     i := i + 1;
+                                     IF i > ARRAYLEN(ColumnDimCode) THEN
+                                       ERROR(Text003,ARRAYLEN(ColumnDimCode));
+                                     ColumnDimCode[i] := SelectedDim."Dimension Code";
+                                   END;
                                  UNTIL (SelectedDim.NEXT = 0) OR (i = 8);
                                NoOfDimensions := i;
 
@@ -209,31 +213,7 @@ OBJECT Report 82 Export Budget to Excel
                                 Window.CLOSE;
                                 LastBudgetRowNo := RowNo;
 
-                                RowNo := RowNo + 200; // Move way below the budget
-                                FOR i := 1 TO NoOfDimensions DO
-                                  IF i = BusUnitDimIndex THEN BEGIN
-                                    IF BusUnit.FINDSET THEN BEGIN
-                                      DimensionRange[1,i] := RowNo;
-                                      REPEAT
-                                        EnterCell(RowNo,1,BusUnit.Code,FALSE,FALSE,'',ExcelBuf."Cell Type"::Text);
-                                        RowNo := RowNo + 1;
-                                      UNTIL BusUnit.NEXT = 0;
-                                      DimensionRange[2,i] := RowNo - 1;
-                                    END;
-                                  END ELSE BEGIN
-                                    DimValue.SETRANGE("Dimension Code",ColumnDimCode[i]);
-                                    DimValue.SETFILTER("Dimension Value Type",'%1|%2',
-                                      DimValue."Dimension Value Type"::Standard,DimValue."Dimension Value Type"::"Begin-Total");
-                                    IF DimValue.FINDSET(FALSE,FALSE) THEN BEGIN
-                                      DimensionRange[1,i] := RowNo;
-                                      REPEAT
-                                        EnterCell(RowNo,1,DimValue.Code,FALSE,FALSE,'',ExcelBuf."Cell Type"::Text);
-                                        RowNo := RowNo + 1;
-                                      UNTIL DimValue.NEXT = 0;
-                                      DimensionRange[2,i] := RowNo - 1;
-                                    END;
-                                  END;
-
+                                EnterRangeOfValues(DimensionRange,BusUnit,DimValue);
                                 IF HasFormulaError THEN
                                   IF NOT CONFIRM(STRSUBSTNO(Text007,ExcelBuf.GetExcelReference(7))) THEN
                                     CurrReport.BREAK;
@@ -306,24 +286,28 @@ OBJECT Report 82 Export Budget to Excel
                   CaptionML=ENU=Options }
 
       { 1   ;2   ;Field     ;
+                  Name=StartDate;
                   CaptionML=ENU=Start Date;
                   ToolTipML=ENU=Specifies the date from which the report or batch job processes information.;
                   ApplicationArea=#Suite;
                   SourceExpr=StartDate }
 
       { 5   ;2   ;Field     ;
+                  Name=NoOfPeriods;
                   CaptionML=ENU=No. of Periods;
                   ToolTipML=ENU=Specifies how many accounting periods to include.;
                   ApplicationArea=#Suite;
                   SourceExpr=NoOfPeriods }
 
       { 3   ;2   ;Field     ;
+                  Name=PeriodLength;
                   CaptionML=ENU=Period Length;
-                  ToolTipML=ENU=Specifies the length of each period, for example, enter "1M" for one month.;
+                  ToolTipML=ENU=Specifies the period for which data is shown in the report. For example, enter "1M" for one month, "30D" for thirty days, "3Q" for three quarters, or "5Y" for five years.;
                   ApplicationArea=#Suite;
                   SourceExpr=PeriodLength }
 
       { 7   ;2   ;Field     ;
+                  Name=ColumnDimensions;
                   CaptionML=ENU=Column Dimensions;
                   ToolTipML=ENU=Specifies dimensions that apply to the columns.;
                   ApplicationArea=#Suite;
@@ -335,6 +319,7 @@ OBJECT Report 82 Export Budget to Excel
                                 }
 
       { 10  ;2   ;Field     ;
+                  Name=IncludeTotalingFormulas;
                   CaptionML=ENU=Include Totaling Formulas;
                   ToolTipML=ENU=Specifies if you want sum formulas to be created in Excel based on the totaling fields used in the Chart of Accounts window and for dimension values.;
                   ApplicationArea=#Suite;
@@ -429,9 +414,16 @@ OBJECT Report 82 Export Budget to Excel
     END;
 
     LOCAL PROCEDURE EnterDimValue@7(ColDimIndex@1000 : Integer;DimValueCode@1001 : Code[20]);
+    VAR
+      DimFilter@1002 : Text;
     BEGIN
       IF ColumnDimCode[ColDimIndex] <> '' THEN BEGIN
         ColNo := ColNo + 1;
+        IF (DimValueCode = '') AND (ColDimIndex > BusUnitDimIndex) THEN BEGIN
+          DimFilter := GetGLBudgetEntryDimFilter(ColumnDimCode[ColDimIndex]);
+          IF GetDimValueCount(ColumnDimCode[ColDimIndex],DimFilter) = 1 THEN
+            DimValueCode := COPYSTR(DimFilter,1,MAXSTRLEN(DimValueCode));
+        END;
         EnterCell(RowNo,ColNo,DimValueCode,FALSE,FALSE,'',ExcelBuf."Cell Type"::Text);
       END;
     END;
@@ -502,6 +494,76 @@ OBJECT Report 82 Export Budget to Excel
         (BudgetBuf1."Dimension Value Code 6" <> BudgetBuf2."Dimension Value Code 6") OR
         (BudgetBuf1."Dimension Value Code 7" <> BudgetBuf2."Dimension Value Code 7") OR
         (BudgetBuf1."Dimension Value Code 8" <> BudgetBuf2."Dimension Value Code 8"));
+    END;
+
+    LOCAL PROCEDURE GetGLBudgetEntryDimFilter@12(DimensionCode@1000 : Code[20]) : Text;
+    BEGIN
+      IF DimensionCode = '' THEN
+        EXIT;
+
+      CASE DimensionCode OF
+        GLSetup."Global Dimension 1 Code":
+          EXIT("G/L Budget Entry".GETFILTER("Global Dimension 1 Code"));
+        GLSetup."Global Dimension 2 Code":
+          EXIT("G/L Budget Entry".GETFILTER("Global Dimension 2 Code"));
+        GLBudgetName."Budget Dimension 1 Code":
+          EXIT("G/L Budget Entry".GETFILTER("Budget Dimension 1 Code"));
+        GLBudgetName."Budget Dimension 2 Code":
+          EXIT("G/L Budget Entry".GETFILTER("Budget Dimension 2 Code"));
+        GLBudgetName."Budget Dimension 3 Code":
+          EXIT("G/L Budget Entry".GETFILTER("Budget Dimension 3 Code"));
+        GLBudgetName."Budget Dimension 4 Code":
+          EXIT("G/L Budget Entry".GETFILTER("Budget Dimension 4 Code"));
+      END;
+    END;
+
+    LOCAL PROCEDURE GetDimValueCount@15(DimCode@1001 : Code[20];DimFilter@1002 : Text) : Integer;
+    VAR
+      DimValue@1000 : Record 349;
+    BEGIN
+      DimValue.SETRANGE("Dimension Code",DimCode);
+      DimValue.SETFILTER("Dimension Value Type",'%1|%2',
+        DimValue."Dimension Value Type"::Standard,DimValue."Dimension Value Type"::"Begin-Total");
+      DimValue.SETFILTER(Code,DimFilter);
+      EXIT(DimValue.COUNT);
+    END;
+
+    LOCAL PROCEDURE EnterRangeOfValues@16(VAR DimensionRange@1002 : ARRAY [2,8] OF Integer;VAR BusUnit@1000 : Record 220;VAR DimValue@1001 : Record 349);
+    VAR
+      RecRef@1004 : RecordRef;
+      DimFilter@1003 : Text;
+    BEGIN
+      RowNo := RowNo + 200; // Move way below the budget
+      FOR i := 1 TO NoOfDimensions DO
+        IF i = BusUnitDimIndex THEN BEGIN
+          RecRef.GETTABLE(BusUnit);
+          EnterRange(BusUnit,DimensionRange,BusUnit.FIELDNO(Code));
+        END ELSE BEGIN
+          DimValue.SETRANGE("Dimension Code",ColumnDimCode[i]);
+          DimValue.SETFILTER("Dimension Value Type",'%1|%2',
+            DimValue."Dimension Value Type"::Standard,DimValue."Dimension Value Type"::"Begin-Total");
+          DimFilter := GetGLBudgetEntryDimFilter(ColumnDimCode[i]);
+          IF DimFilter <> '' THEN
+            DimValue.SETFILTER(Code,DimFilter);
+          EnterRange(DimValue,DimensionRange,DimValue.FIELDNO(Code));
+        END;
+    END;
+
+    LOCAL PROCEDURE EnterRange@18(RecVariant@1002 : Variant;VAR DimensionRange@1001 : ARRAY [2,8] OF Integer;FieldID@1000 : Integer);
+    VAR
+      RecRef@1003 : RecordRef;
+      FieldRef@1004 : FieldRef;
+    BEGIN
+      RecRef.GETTABLE(RecVariant);
+      IF RecRef.FINDSET THEN BEGIN
+        DimensionRange[1,i] := RowNo;
+        REPEAT
+          FieldRef := RecRef.FIELD(FieldID);
+          EnterCell(RowNo,1,FORMAT(FieldRef.VALUE),FALSE,FALSE,'',ExcelBuf."Cell Type"::Text);
+          RowNo := RowNo + 1;
+        UNTIL RecRef.NEXT = 0;
+        DimensionRange[2,i] := RowNo - 1;
+      END;
     END;
 
     BEGIN

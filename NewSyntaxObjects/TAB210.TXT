@@ -1,0 +1,1552 @@
+OBJECT Table 210 Job Journal Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               LOCKTABLE;
+               JobJnlTemplate.GET("Journal Template Name");
+               JobJnlBatch.GET("Journal Template Name","Journal Batch Name");
+
+               ValidateShortcutDimCode(1,"Shortcut Dimension 1 Code");
+               ValidateShortcutDimCode(2,"Shortcut Dimension 2 Code");
+             END;
+
+    OnModify=BEGIN
+               if (Type = Type::Item) and (xRec.Type = Type::Item) then
+                 ReserveJobJnlLine.VerifyChange(Rec,xRec)
+               else
+                 if (Type <> Type::Item) and (xRec.Type = Type::Item) then
+                   ReserveJobJnlLine.DeleteLine(xRec);
+             END;
+
+    OnDelete=BEGIN
+               if Type = Type::Item then
+                 ReserveJobJnlLine.DeleteLine(Rec);
+             END;
+
+    OnRename=BEGIN
+               ReserveJobJnlLine.RenameLine(Rec,xRec);
+             END;
+
+    CaptionML=ENU=Job Journal Line;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Journal Template Name;Code10       ;TableRelation="Job Journal Template";
+                                                   CaptionML=ENU=Journal Template Name }
+    { 2   ;   ;Line No.            ;Integer       ;CaptionML=ENU=Line No. }
+    { 3   ;   ;Job No.             ;Code20        ;TableRelation=Job;
+                                                   OnValidate=BEGIN
+                                                                if "Job No." = '' then begin
+                                                                  VALIDATE("Currency Code",'');
+                                                                  VALIDATE("Job Task No.",'');
+                                                                  CreateDim(
+                                                                    DATABASE::Job,"Job No.",
+                                                                    DimMgt.TypeToTableID2(Type),"No.",
+                                                                    DATABASE::"Resource Group","Resource Group No.");
+                                                                  exit;
+                                                                end;
+
+                                                                GetJob;
+                                                                Job.TestBlocked;
+                                                                Job.TESTFIELD("Bill-to Customer No.");
+                                                                Cust.GET(Job."Bill-to Customer No.");
+                                                                VALIDATE("Job Task No.",'');
+                                                                "Customer Price Group" := Job."Customer Price Group";
+                                                                VALIDATE("Currency Code",Job."Currency Code");
+                                                                CreateDim(
+                                                                  DATABASE::Job,"Job No.",
+                                                                  DimMgt.TypeToTableID2(Type),"No.",
+                                                                  DATABASE::"Resource Group","Resource Group No.");
+                                                                VALIDATE("Country/Region Code",Cust."Country/Region Code");
+                                                              END;
+
+                                                   CaptionML=ENU=Job No. }
+    { 4   ;   ;Posting Date        ;Date          ;OnValidate=BEGIN
+                                                                VALIDATE("Document Date","Posting Date");
+                                                                if "Currency Code" <> '' then begin
+                                                                  UpdateCurrencyFactor;
+                                                                  UpdateAllAmounts;
+                                                                end
+                                                              END;
+
+                                                   CaptionML=ENU=Posting Date }
+    { 5   ;   ;Document No.        ;Code20        ;CaptionML=ENU=Document No. }
+    { 6   ;   ;Type                ;Option        ;OnValidate=BEGIN
+                                                                VALIDATE("No.",'');
+                                                                if Type = Type::Item then begin
+                                                                  GetLocation("Location Code");
+                                                                  Location.TESTFIELD("Directed Put-away and Pick",false);
+                                                                end;
+                                                              END;
+
+                                                   CaptionML=ENU=Type;
+                                                   OptionCaptionML=ENU=Resource,Item,G/L Account;
+                                                   OptionString=Resource,Item,"G/L Account" }
+    { 8   ;   ;No.                 ;Code20        ;TableRelation=IF (Type=CONST(Resource)) Resource
+                                                                 ELSE IF (Type=CONST(Item)) Item
+                                                                 ELSE IF (Type=CONST("G/L Account")) "G/L Account";
+                                                   OnValidate=BEGIN
+                                                                if ("No." = '') or ("No." <> xRec."No.") then begin
+                                                                  Description := '';
+                                                                  "Unit of Measure Code" := '';
+                                                                  "Qty. per Unit of Measure" := 1;
+                                                                  "Variant Code" := '';
+                                                                  "Work Type Code" := '';
+                                                                  DeleteAmounts;
+                                                                  "Cost Factor" := 0;
+                                                                  "Applies-to Entry" := 0;
+                                                                  "Applies-from Entry" := 0;
+                                                                  CheckedAvailability := false;
+                                                                  "Job Planning Line No." := 0;
+                                                                  if "No." = '' then begin
+                                                                    UpdateDimensions;
+                                                                    exit;
+                                                                  end
+                                                                end;
+
+                                                                case Type of
+                                                                  Type::Resource:
+                                                                    CopyFromResource;
+                                                                  Type::Item:
+                                                                    CopyFromItem;
+                                                                  Type::"G/L Account":
+                                                                    CopyFromGLAccount;
+                                                                end;
+
+                                                                VALIDATE(Quantity);
+                                                                UpdateDimensions;
+                                                              END;
+
+                                                   CaptionML=ENU=No. }
+    { 9   ;   ;Description         ;Text50        ;CaptionML=ENU=Description }
+    { 10  ;   ;Quantity            ;Decimal       ;OnValidate=BEGIN
+                                                                "Quantity (Base)" := CalcBaseQty(Quantity);
+                                                                UpdateAllAmounts;
+
+                                                                if "Job Planning Line No." <> 0 then
+                                                                  VALIDATE("Job Planning Line No.");
+
+                                                                CheckItemAvailable;
+                                                                if Item."Item Tracking Code" <> '' then
+                                                                  ReserveJobJnlLine.VerifyQuantity(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=Quantity;
+                                                   DecimalPlaces=0:5 }
+    { 12  ;   ;Direct Unit Cost (LCY);Decimal     ;CaptionML=ENU=Direct Unit Cost (LCY);
+                                                   MinValue=0;
+                                                   AutoFormatType=2 }
+    { 13  ;   ;Unit Cost (LCY)     ;Decimal       ;OnValidate=BEGIN
+                                                                if (Type = Type::Item) and
+                                                                   Item.GET("No.") and
+                                                                   (Item."Costing Method" = Item."Costing Method"::Standard)
+                                                                then
+                                                                  UpdateAllAmounts
+                                                                else begin
+                                                                  InitRoundingPrecisions;
+                                                                  "Unit Cost" := ROUND(
+                                                                      CurrExchRate.ExchangeAmtLCYToFCY(
+                                                                        "Posting Date","Currency Code",
+                                                                        "Unit Cost (LCY)","Currency Factor"),
+                                                                      UnitAmountRoundingPrecisionFCY);
+                                                                  UpdateAllAmounts;
+                                                                end;
+                                                              END;
+
+                                                   CaptionML=ENU=Unit Cost (LCY);
+                                                   MinValue=0;
+                                                   Editable=false;
+                                                   AutoFormatType=2 }
+    { 14  ;   ;Total Cost (LCY)    ;Decimal       ;CaptionML=ENU=Total Cost (LCY);
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 15  ;   ;Unit Price (LCY)    ;Decimal       ;OnValidate=BEGIN
+                                                                InitRoundingPrecisions;
+                                                                "Unit Price" := ROUND(
+                                                                    CurrExchRate.ExchangeAmtLCYToFCY(
+                                                                      "Posting Date","Currency Code",
+                                                                      "Unit Price (LCY)","Currency Factor"),
+                                                                    UnitAmountRoundingPrecisionFCY);
+                                                                UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Unit Price (LCY);
+                                                   Editable=false;
+                                                   AutoFormatType=2 }
+    { 16  ;   ;Total Price (LCY)   ;Decimal       ;CaptionML=ENU=Total Price (LCY);
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 17  ;   ;Resource Group No.  ;Code20        ;TableRelation="Resource Group";
+                                                   OnValidate=BEGIN
+                                                                CreateDim(
+                                                                  DATABASE::"Resource Group","Resource Group No.",
+                                                                  DATABASE::Job,"Job No.",
+                                                                  DimMgt.TypeToTableID2(Type),"No.");
+                                                              END;
+
+                                                   CaptionML=ENU=Resource Group No.;
+                                                   Editable=false }
+    { 18  ;   ;Unit of Measure Code;Code10        ;TableRelation=IF (Type=CONST(Item)) "Item Unit of Measure".Code WHERE ("Item No."=FIELD("No."))
+                                                                 ELSE IF (Type=CONST(Resource)) "Resource Unit of Measure".Code WHERE ("Resource No."=FIELD("No."))
+                                                                 ELSE "Unit of Measure";
+                                                   OnValidate=VAR
+                                                                Resource@1000 : Record Resource;
+                                                              BEGIN
+                                                                GetGLSetup;
+                                                                case Type of
+                                                                  Type::Item:
+                                                                    begin
+                                                                      Item.GET("No.");
+                                                                      "Qty. per Unit of Measure" := UOMMgt.GetQtyPerUnitOfMeasure(Item,"Unit of Measure Code");
+                                                                      OnAfterAssignItemUoM(Rec,Item);
+                                                                    end;
+                                                                  Type::Resource:
+                                                                    begin
+                                                                      if CurrFieldNo <> FIELDNO("Work Type Code") then
+                                                                        if "Work Type Code" <> '' then begin
+                                                                          WorkType.GET("Work Type Code");
+                                                                          if WorkType."Unit of Measure Code" <> '' then
+                                                                            TESTFIELD("Unit of Measure Code",WorkType."Unit of Measure Code");
+                                                                        end else
+                                                                          TESTFIELD("Work Type Code",'');
+                                                                      if "Unit of Measure Code" = '' then begin
+                                                                        Resource.GET("No.");
+                                                                        "Unit of Measure Code" := Resource."Base Unit of Measure";
+                                                                      end;
+                                                                      ResUnitofMeasure.GET("No.","Unit of Measure Code");
+                                                                      "Qty. per Unit of Measure" := ResUnitofMeasure."Qty. per Unit of Measure";
+                                                                      "Quantity (Base)" := Quantity * "Qty. per Unit of Measure";
+                                                                      OnAfterAssignResourceUoM(Rec,Res);
+                                                                    end;
+                                                                  Type::"G/L Account":
+                                                                    "Qty. per Unit of Measure" := 1;
+                                                                end;
+                                                                VALIDATE(Quantity);
+                                                              END;
+
+                                                   CaptionML=ENU=Unit of Measure Code }
+    { 21  ;   ;Location Code       ;Code10        ;TableRelation=Location WHERE ("Use As In-Transit"=CONST(false));
+                                                   OnValidate=BEGIN
+                                                                "Bin Code" := '';
+                                                                if "Location Code" <> '' then
+                                                                  if IsServiceItem then
+                                                                    Item.TESTFIELD(Type,Item.Type::Inventory);
+                                                                GetLocation("Location Code");
+                                                                Location.TESTFIELD("Directed Put-away and Pick",false);
+                                                                VALIDATE(Quantity);
+                                                              END;
+
+                                                   CaptionML=ENU=Location Code }
+    { 22  ;   ;Chargeable          ;Boolean       ;InitValue=true;
+                                                   OnValidate=BEGIN
+                                                                if Chargeable <> xRec.Chargeable then
+                                                                  if not Chargeable then
+                                                                    VALIDATE("Unit Price",0)
+                                                                  else
+                                                                    VALIDATE("No.");
+                                                              END;
+
+                                                   CaptionML=ENU=Chargeable }
+    { 30  ;   ;Posting Group       ;Code20        ;TableRelation=IF (Type=CONST(Item)) "Inventory Posting Group";
+                                                   CaptionML=ENU=Posting Group;
+                                                   Editable=false }
+    { 31  ;   ;Shortcut Dimension 1 Code;Code20   ;TableRelation="Dimension Value".Code WHERE ("Global Dimension No."=CONST(1));
+                                                   OnValidate=BEGIN
+                                                                ValidateShortcutDimCode(1,"Shortcut Dimension 1 Code");
+                                                              END;
+
+                                                   CaptionML=ENU=Shortcut Dimension 1 Code;
+                                                   CaptionClass='1,2,1' }
+    { 32  ;   ;Shortcut Dimension 2 Code;Code20   ;TableRelation="Dimension Value".Code WHERE ("Global Dimension No."=CONST(2));
+                                                   OnValidate=BEGIN
+                                                                ValidateShortcutDimCode(2,"Shortcut Dimension 2 Code");
+                                                              END;
+
+                                                   CaptionML=ENU=Shortcut Dimension 2 Code;
+                                                   CaptionClass='1,2,2' }
+    { 33  ;   ;Work Type Code      ;Code10        ;TableRelation="Work Type";
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD(Type,Type::Resource);
+                                                                VALIDATE("Line Discount %",0);
+                                                                if ("Work Type Code" = '') and (xRec."Work Type Code" <> '') then begin
+                                                                  Res.GET("No.");
+                                                                  "Unit of Measure Code" := Res."Base Unit of Measure";
+                                                                  VALIDATE("Unit of Measure Code");
+                                                                end;
+                                                                if WorkType.GET("Work Type Code") then
+                                                                  if WorkType."Unit of Measure Code" <> '' then begin
+                                                                    "Unit of Measure Code" := WorkType."Unit of Measure Code";
+                                                                    if ResUnitofMeasure.GET("No.","Unit of Measure Code") then
+                                                                      "Qty. per Unit of Measure" := ResUnitofMeasure."Qty. per Unit of Measure";
+                                                                  end else begin
+                                                                    Res.GET("No.");
+                                                                    "Unit of Measure Code" := Res."Base Unit of Measure";
+                                                                    VALIDATE("Unit of Measure Code");
+                                                                  end;
+                                                                OnBeforeValidateWorkTypeCodeQty(Rec,xRec,Res,WorkType);
+                                                                VALIDATE(Quantity);
+                                                              END;
+
+                                                   CaptionML=ENU=Work Type Code }
+    { 34  ;   ;Customer Price Group;Code10        ;TableRelation="Customer Price Group";
+                                                   OnValidate=BEGIN
+                                                                if (Type = Type::Item) and ("No." <> '') then
+                                                                  UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Customer Price Group }
+    { 37  ;   ;Applies-to Entry    ;Integer       ;OnValidate=VAR
+                                                                ItemLedgEntry@1000 : Record "Item Ledger Entry";
+                                                              BEGIN
+                                                                InitRoundingPrecisions;
+                                                                TESTFIELD(Type,Type::Item);
+                                                                if "Applies-to Entry" <> 0 then begin
+                                                                  ItemLedgEntry.GET("Applies-to Entry");
+                                                                  TESTFIELD(Quantity);
+                                                                  if Quantity < 0 then
+                                                                    FIELDERROR(Quantity,Text002);
+                                                                  ItemLedgEntry.TESTFIELD(Open,true);
+                                                                  ItemLedgEntry.TESTFIELD(Positive,true);
+                                                                  "Location Code" := ItemLedgEntry."Location Code";
+                                                                  "Variant Code" := ItemLedgEntry."Variant Code";
+                                                                  GetItem;
+                                                                  if Item."Costing Method" <> Item."Costing Method"::Standard then begin
+                                                                    "Unit Cost" := ROUND(
+                                                                        CurrExchRate.ExchangeAmtLCYToFCY(
+                                                                          "Posting Date","Currency Code",
+                                                                          CalcUnitCost(ItemLedgEntry),"Currency Factor"),
+                                                                        UnitAmountRoundingPrecisionFCY);
+                                                                    UpdateAllAmounts;
+                                                                  end;
+                                                                end;
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              SelectItemEntry(FIELDNO("Applies-to Entry"));
+                                                            END;
+
+                                                   AccessByPermission=TableData Item=R;
+                                                   CaptionML=ENU=Applies-to Entry }
+    { 61  ;   ;Entry Type          ;Option        ;CaptionML=ENU=Entry Type;
+                                                   OptionCaptionML=ENU=Usage,Sale;
+                                                   OptionString=Usage,Sale;
+                                                   Editable=false }
+    { 62  ;   ;Source Code         ;Code10        ;TableRelation="Source Code";
+                                                   CaptionML=ENU=Source Code;
+                                                   Editable=false }
+    { 73  ;   ;Journal Batch Name  ;Code10        ;TableRelation="Job Journal Batch".Name WHERE ("Journal Template Name"=FIELD("Journal Template Name"));
+                                                   CaptionML=ENU=Journal Batch Name }
+    { 74  ;   ;Reason Code         ;Code10        ;TableRelation="Reason Code";
+                                                   CaptionML=ENU=Reason Code }
+    { 75  ;   ;Recurring Method    ;Option        ;CaptionML=ENU=Recurring Method;
+                                                   OptionCaptionML=ENU=,Fixed,Variable;
+                                                   OptionString=,Fixed,Variable;
+                                                   BlankZero=true }
+    { 76  ;   ;Expiration Date     ;Date          ;CaptionML=ENU=Expiration Date }
+    { 77  ;   ;Recurring Frequency ;DateFormula   ;CaptionML=ENU=Recurring Frequency }
+    { 79  ;   ;Gen. Bus. Posting Group;Code20     ;TableRelation="Gen. Business Posting Group";
+                                                   CaptionML=ENU=Gen. Bus. Posting Group }
+    { 80  ;   ;Gen. Prod. Posting Group;Code20    ;TableRelation="Gen. Product Posting Group";
+                                                   CaptionML=ENU=Gen. Prod. Posting Group }
+    { 81  ;   ;Transaction Type    ;Code10        ;TableRelation="Transaction Type";
+                                                   CaptionML=ENU=Transaction Type }
+    { 82  ;   ;Transport Method    ;Code10        ;TableRelation="Transport Method";
+                                                   CaptionML=ENU=Transport Method }
+    { 83  ;   ;Country/Region Code ;Code10        ;TableRelation="Country/Region";
+                                                   CaptionML=ENU=Country/Region Code }
+    { 86  ;   ;Entry/Exit Point    ;Code10        ;TableRelation="Entry/Exit Point";
+                                                   CaptionML=ENU=Entry/Exit Point }
+    { 87  ;   ;Document Date       ;Date          ;CaptionML=ENU=Document Date }
+    { 88  ;   ;External Document No.;Code35       ;CaptionML=ENU=External Document No. }
+    { 89  ;   ;Area                ;Code10        ;TableRelation=Area;
+                                                   CaptionML=ENU=Area }
+    { 90  ;   ;Transaction Specification;Code10   ;TableRelation="Transaction Specification";
+                                                   CaptionML=ENU=Transaction Specification }
+    { 91  ;   ;Serial No.          ;Code20        ;OnLookup=BEGIN
+                                                              TESTFIELD(Type,Type::Item);
+                                                              SelectItemEntry(FIELDNO("Serial No."));
+                                                            END;
+
+                                                   CaptionML=ENU=Serial No. }
+    { 92  ;   ;Posting No. Series  ;Code20        ;TableRelation="No. Series";
+                                                   CaptionML=ENU=Posting No. Series }
+    { 93  ;   ;Source Currency Code;Code10        ;TableRelation=Currency;
+                                                   CaptionML=ENU=Source Currency Code;
+                                                   Editable=false }
+    { 94  ;   ;Source Currency Total Cost;Decimal ;CaptionML=ENU=Source Currency Total Cost;
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 95  ;   ;Source Currency Total Price;Decimal;CaptionML=ENU=Source Currency Total Price;
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 96  ;   ;Source Currency Line Amount;Decimal;CaptionML=ENU=Source Currency Line Amount;
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 480 ;   ;Dimension Set ID    ;Integer       ;TableRelation="Dimension Set Entry";
+                                                   OnValidate=BEGIN
+                                                                DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              ShowDimensions;
+                                                            END;
+
+                                                   CaptionML=ENU=Dimension Set ID;
+                                                   Editable=false }
+    { 950 ;   ;Time Sheet No.      ;Code20        ;TableRelation="Time Sheet Header";
+                                                   CaptionML=ENU=Time Sheet No. }
+    { 951 ;   ;Time Sheet Line No. ;Integer       ;TableRelation="Time Sheet Line"."Line No." WHERE ("Time Sheet No."=FIELD("Time Sheet No."));
+                                                   CaptionML=ENU=Time Sheet Line No. }
+    { 952 ;   ;Time Sheet Date     ;Date          ;TableRelation="Time Sheet Detail".Date WHERE ("Time Sheet No."=FIELD("Time Sheet No."),
+                                                                                                 "Time Sheet Line No."=FIELD("Time Sheet Line No."));
+                                                   CaptionML=ENU=Time Sheet Date }
+    { 1000;   ;Job Task No.        ;Code20        ;TableRelation="Job Task"."Job Task No." WHERE ("Job No."=FIELD("Job No."));
+                                                   OnValidate=VAR
+                                                                JobTask@1000 : Record "Job Task";
+                                                              BEGIN
+                                                                if ("Job Task No." = '') or (("Job Task No." <> xRec."Job Task No.") and (xRec."Job Task No." <> '')) then begin
+                                                                  VALIDATE("No.",'');
+                                                                  exit;
+                                                                end;
+
+                                                                TESTFIELD("Job No.");
+                                                                JobTask.GET("Job No.","Job Task No.");
+                                                                JobTask.TESTFIELD("Job Task Type",JobTask."Job Task Type"::Posting);
+                                                                UpdateDimensions;
+                                                              END;
+
+                                                   CaptionML=ENU=Job Task No. }
+    { 1001;   ;Total Cost          ;Decimal       ;CaptionML=ENU=Total Cost;
+                                                   Editable=false;
+                                                   AutoFormatType=1;
+                                                   AutoFormatExpr="Currency Code" }
+    { 1002;   ;Unit Price          ;Decimal       ;OnValidate=BEGIN
+                                                                UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Unit Price;
+                                                   MinValue=0;
+                                                   AutoFormatType=2;
+                                                   AutoFormatExpr="Currency Code" }
+    { 1003;   ;Line Type           ;Option        ;OnValidate=BEGIN
+                                                                if "Job Planning Line No." <> 0 then
+                                                                  ERROR(Text006,FIELDCAPTION("Line Type"),FIELDCAPTION("Job Planning Line No."));
+                                                              END;
+
+                                                   CaptionML=ENU=Line Type;
+                                                   OptionCaptionML=ENU=" ,Budget,Billable,Both Budget and Billable";
+                                                   OptionString=" ",Budget,Billable,"Both Budget and Billable" }
+    { 1004;   ;Applies-from Entry  ;Integer       ;OnValidate=VAR
+                                                                ItemLedgEntry@1000 : Record "Item Ledger Entry";
+                                                              BEGIN
+                                                                InitRoundingPrecisions;
+                                                                TESTFIELD(Type,Type::Item);
+                                                                if "Applies-from Entry" <> 0 then begin
+                                                                  TESTFIELD(Quantity);
+                                                                  if Quantity > 0 then
+                                                                    FIELDERROR(Quantity,Text003);
+                                                                  ItemLedgEntry.GET("Applies-from Entry");
+                                                                  ItemLedgEntry.TESTFIELD(Positive,false);
+                                                                  if Item."Costing Method" <> Item."Costing Method"::Standard then begin
+                                                                    "Unit Cost" := ROUND(
+                                                                        CurrExchRate.ExchangeAmtLCYToFCY(
+                                                                          "Posting Date","Currency Code",
+                                                                          CalcUnitCostFrom(ItemLedgEntry),"Currency Factor"),
+                                                                        UnitAmountRoundingPrecisionFCY);
+                                                                    UpdateAllAmounts;
+                                                                  end;
+                                                                end;
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              SelectItemEntry(FIELDNO("Applies-from Entry"));
+                                                            END;
+
+                                                   CaptionML=ENU=Applies-from Entry;
+                                                   MinValue=0 }
+    { 1005;   ;Job Posting Only    ;Boolean       ;CaptionML=ENU=Job Posting Only }
+    { 1006;   ;Line Discount %     ;Decimal       ;OnValidate=BEGIN
+                                                                UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Line Discount %;
+                                                   DecimalPlaces=0:5;
+                                                   MinValue=0;
+                                                   MaxValue=100 }
+    { 1007;   ;Line Discount Amount;Decimal       ;OnValidate=BEGIN
+                                                                UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Line Discount Amount;
+                                                   AutoFormatType=1;
+                                                   AutoFormatExpr="Currency Code" }
+    { 1008;   ;Currency Code       ;Code10        ;TableRelation=Currency;
+                                                   OnValidate=BEGIN
+                                                                UpdateCurrencyFactor;
+                                                              END;
+
+                                                   CaptionML=ENU=Currency Code;
+                                                   Editable=false }
+    { 1009;   ;Line Amount         ;Decimal       ;OnValidate=BEGIN
+                                                                UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Line Amount;
+                                                   AutoFormatType=1;
+                                                   AutoFormatExpr="Currency Code" }
+    { 1010;   ;Currency Factor     ;Decimal       ;OnValidate=BEGIN
+                                                                if ("Currency Code" = '') and ("Currency Factor" <> 0) then
+                                                                  FIELDERROR("Currency Factor",STRSUBSTNO(Text001,FIELDCAPTION("Currency Code")));
+                                                                UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Currency Factor;
+                                                   DecimalPlaces=0:15;
+                                                   MinValue=0;
+                                                   Editable=false }
+    { 1011;   ;Unit Cost           ;Decimal       ;OnValidate=BEGIN
+                                                                UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Unit Cost;
+                                                   AutoFormatType=2;
+                                                   AutoFormatExpr="Currency Code" }
+    { 1012;   ;Line Amount (LCY)   ;Decimal       ;OnValidate=BEGIN
+                                                                InitRoundingPrecisions;
+                                                                "Line Amount" := ROUND(
+                                                                    CurrExchRate.ExchangeAmtLCYToFCY(
+                                                                      "Posting Date","Currency Code",
+                                                                      "Line Amount (LCY)","Currency Factor"),
+                                                                    AmountRoundingPrecisionFCY);
+                                                                UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Line Amount (LCY);
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 1013;   ;Line Discount Amount (LCY);Decimal ;OnValidate=BEGIN
+                                                                InitRoundingPrecisions;
+                                                                "Line Discount Amount" := ROUND(
+                                                                    CurrExchRate.ExchangeAmtLCYToFCY(
+                                                                      "Posting Date","Currency Code",
+                                                                      "Line Discount Amount (LCY)","Currency Factor"),
+                                                                    AmountRoundingPrecisionFCY);
+                                                                UpdateAllAmounts;
+                                                              END;
+
+                                                   CaptionML=ENU=Line Discount Amount (LCY);
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 1014;   ;Total Price         ;Decimal       ;CaptionML=ENU=Total Price;
+                                                   Editable=false;
+                                                   AutoFormatType=1;
+                                                   AutoFormatExpr="Currency Code" }
+    { 1015;   ;Cost Factor         ;Decimal       ;CaptionML=ENU=Cost Factor;
+                                                   Editable=false }
+    { 1016;   ;Description 2       ;Text50        ;CaptionML=ENU=Description 2 }
+    { 1017;   ;Ledger Entry Type   ;Option        ;CaptionML=ENU=Ledger Entry Type;
+                                                   OptionCaptionML=ENU=" ,Resource,Item,G/L Account";
+                                                   OptionString=" ",Resource,Item,"G/L Account" }
+    { 1018;   ;Ledger Entry No.    ;Integer       ;TableRelation=IF ("Ledger Entry Type"=CONST(Resource)) "Res. Ledger Entry"
+                                                                 ELSE IF ("Ledger Entry Type"=CONST(Item)) "Item Ledger Entry"
+                                                                 ELSE IF ("Ledger Entry Type"=CONST("G/L Account")) "G/L Entry";
+                                                   CaptionML=ENU=Ledger Entry No.;
+                                                   BlankZero=true }
+    { 1019;   ;Job Planning Line No.;Integer      ;OnValidate=VAR
+                                                                JobPlanningLine@1000 : Record "Job Planning Line";
+                                                              BEGIN
+                                                                if "Job Planning Line No." <> 0 then begin
+                                                                  ValidateJobPlanningLineLink;
+                                                                  JobPlanningLine.GET("Job No.","Job Task No.","Job Planning Line No.");
+
+                                                                  JobPlanningLine.TESTFIELD("Job No.","Job No.");
+                                                                  JobPlanningLine.TESTFIELD("Job Task No.","Job Task No.");
+                                                                  JobPlanningLine.TESTFIELD(Type,Type);
+                                                                  JobPlanningLine.TESTFIELD("No.","No.");
+                                                                  JobPlanningLine.TESTFIELD("Usage Link",true);
+                                                                  JobPlanningLine.TESTFIELD("System-Created Entry",false);
+
+                                                                  "Line Type" := JobPlanningLine."Line Type" + 1;
+                                                                  VALIDATE("Remaining Qty.",CalcQtyFromBaseQty(JobPlanningLine."Remaining Qty. (Base)" - "Quantity (Base)"));
+                                                                end else
+                                                                  VALIDATE("Remaining Qty.",0);
+                                                              END;
+
+                                                   OnLookup=VAR
+                                                              JobPlanningLine@1000 : Record "Job Planning Line";
+                                                              Resource@1002 : Record Resource;
+                                                              Filter@1003 : Text;
+                                                            BEGIN
+                                                              JobPlanningLine.SETRANGE("Job No.","Job No.");
+                                                              JobPlanningLine.SETRANGE("Job Task No.","Job Task No.");
+                                                              JobPlanningLine.SETRANGE(Type,Type);
+                                                              JobPlanningLine.SETRANGE("No.","No.");
+                                                              JobPlanningLine.SETRANGE("Usage Link",true);
+                                                              JobPlanningLine.SETRANGE("System-Created Entry",false);
+                                                              if Type = Type::Resource then begin
+                                                                Filter := Resource.GetUnitOfMeasureFilter("No.","Unit of Measure Code");
+                                                                JobPlanningLine.SETFILTER("Unit of Measure Code",Filter);
+                                                              end;
+
+                                                              if PAGE.RUNMODAL(0,JobPlanningLine) = ACTION::LookupOK then
+                                                                VALIDATE("Job Planning Line No.",JobPlanningLine."Line No.");
+                                                            END;
+
+                                                   CaptionML=ENU=Job Planning Line No.;
+                                                   BlankZero=true }
+    { 1030;   ;Remaining Qty.      ;Decimal       ;OnValidate=VAR
+                                                                JobPlanningLine@1000 : Record "Job Planning Line";
+                                                              BEGIN
+                                                                if ("Remaining Qty." <> 0) and ("Job Planning Line No." = 0) then
+                                                                  ERROR(Text004,FIELDCAPTION("Remaining Qty."),FIELDCAPTION("Job Planning Line No."));
+
+                                                                if "Job Planning Line No." <> 0 then begin
+                                                                  JobPlanningLine.GET("Job No.","Job Task No.","Job Planning Line No.");
+                                                                  if JobPlanningLine.Quantity >= 0 then begin
+                                                                    if "Remaining Qty." < 0 then
+                                                                      "Remaining Qty." := 0;
+                                                                  end else begin
+                                                                    if "Remaining Qty." > 0 then
+                                                                      "Remaining Qty." := 0;
+                                                                  end;
+                                                                end;
+                                                                "Remaining Qty. (Base)" := CalcBaseQty("Remaining Qty.");
+
+                                                                CheckItemAvailable;
+                                                              END;
+
+                                                   CaptionML=ENU=Remaining Qty.;
+                                                   DecimalPlaces=0:5 }
+    { 1031;   ;Remaining Qty. (Base);Decimal      ;OnValidate=BEGIN
+                                                                VALIDATE("Remaining Qty.",CalcQtyFromBaseQty("Remaining Qty. (Base)"));
+                                                              END;
+
+                                                   CaptionML=ENU=Remaining Qty. (Base) }
+    { 5402;   ;Variant Code        ;Code10        ;TableRelation=IF (Type=CONST(Item)) "Item Variant".Code WHERE ("Item No."=FIELD("No."));
+                                                   OnValidate=BEGIN
+                                                                if "Variant Code" = '' then begin
+                                                                  if Type = Type::Item then begin
+                                                                    Item.GET("No.");
+                                                                    Description := Item.Description;
+                                                                    "Description 2" := Item."Description 2";
+                                                                    GetItemTranslation;
+                                                                  end;
+                                                                  exit;
+                                                                end;
+
+                                                                TESTFIELD(Type,Type::Item);
+
+                                                                ItemVariant.GET("No.","Variant Code");
+                                                                Description := ItemVariant.Description;
+                                                                "Description 2" := ItemVariant."Description 2";
+
+                                                                VALIDATE(Quantity);
+                                                              END;
+
+                                                   CaptionML=ENU=Variant Code }
+    { 5403;   ;Bin Code            ;Code20        ;OnValidate=BEGIN
+                                                                TESTFIELD("Location Code");
+                                                                if "Bin Code" <> '' then begin
+                                                                  GetLocation("Location Code");
+                                                                  Location.TESTFIELD("Bin Mandatory");
+                                                                end;
+                                                                TESTFIELD(Type,Type::Item);
+                                                                CheckItemAvailable;
+                                                                WMSManagement.FindBinContent("Location Code","Bin Code","No.","Variant Code",'')
+                                                              END;
+
+                                                   OnLookup=VAR
+                                                              BinCode@1000 : Code[20];
+                                                            BEGIN
+                                                              TESTFIELD("Location Code");
+                                                              TESTFIELD(Type,Type::Item);
+                                                              BinCode := WMSManagement.BinContentLookUp("Location Code","No.","Variant Code",'',"Bin Code");
+                                                              if BinCode <> '' then
+                                                                VALIDATE("Bin Code",BinCode);
+                                                            END;
+
+                                                   AccessByPermission=TableData "Warehouse Source Filter"=R;
+                                                   CaptionML=ENU=Bin Code }
+    { 5404;   ;Qty. per Unit of Measure;Decimal   ;InitValue=1;
+                                                   CaptionML=ENU=Qty. per Unit of Measure;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 5410;   ;Quantity (Base)     ;Decimal       ;OnValidate=BEGIN
+                                                                VALIDATE(Quantity,CalcQtyFromBaseQty("Quantity (Base)"));
+                                                              END;
+
+                                                   CaptionML=ENU=Quantity (Base);
+                                                   DecimalPlaces=0:5 }
+    { 5468;   ;Reserved Qty. (Base);Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Reservation Entry"."Quantity (Base)" WHERE ("Source ID"=FIELD("Journal Template Name"),
+                                                                                                                "Source Ref. No."=FIELD("Line No."),
+                                                                                                                "Source Type"=CONST(1011),
+                                                                                                                "Source Subtype"=FIELD("Entry Type"),
+                                                                                                                "Source Batch Name"=FIELD("Journal Batch Name"),
+                                                                                                                "Source Prod. Order Line"=CONST(0),
+                                                                                                                "Reservation Status"=CONST(Reservation)));
+                                                   AccessByPermission=TableData Item=R;
+                                                   CaptionML=ENU=Reserved Qty. (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 5900;   ;Service Order No.   ;Code20        ;CaptionML=ENU=Service Order No. }
+    { 5901;   ;Posted Service Shipment No.;Code20 ;CaptionML=ENU=Posted Service Shipment No. }
+    { 6501;   ;Lot No.             ;Code20        ;CaptionML=ENU=Lot No.;
+                                                   Editable=false }
+  }
+  KEYS
+  {
+    {    ;"Journal Template Name","Journal Batch Name","Line No.";
+                                                   Clustered=true }
+    {    ;"Journal Template Name","Journal Batch Name",Type,"No.","Unit of Measure Code","Work Type Code";
+                                                   MaintainSQLIndex=false }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=You cannot change %1 when %2 is %3.';
+      Location@1007 : Record Location;
+      Item@1001 : Record Item;
+      Res@1002 : Record Resource;
+      Cust@1039 : Record Customer;
+      ItemJnlLine@1003 : Record "Item Journal Line";
+      GLAcc@1004 : Record "G/L Account";
+      Job@1005 : Record Job;
+      WorkType@1009 : Record "Work Type";
+      JobJnlTemplate@1011 : Record "Job Journal Template";
+      JobJnlBatch@1012 : Record "Job Journal Batch";
+      JobJnlLine@1013 : Record "Job Journal Line";
+      ItemVariant@1015 : Record "Item Variant";
+      ResUnitofMeasure@1008 : Record "Resource Unit of Measure";
+      ResCost@1018 : Record "Resource Cost";
+      ItemTranslation@1040 : Record "Item Translation";
+      CurrExchRate@1029 : Record "Currency Exchange Rate";
+      SKU@1028 : Record "Stockkeeping Unit";
+      GLSetup@1010 : Record "General Ledger Setup";
+      ItemCheckAvail@1020 : Codeunit "Item-Check Avail.";
+      NoSeriesMgt@1021 : Codeunit NoSeriesManagement;
+      UOMMgt@1022 : Codeunit "Unit of Measure Management";
+      DimMgt@1023 : Codeunit DimensionManagement;
+      ReserveJobJnlLine@1032 : Codeunit "Job Jnl. Line-Reserve";
+      WMSManagement@1035 : Codeunit "WMS Management";
+      DontCheckStandardCost@1037 : Boolean;
+      Text001@1060 : TextConst 'ENU=cannot be specified without %1';
+      Text002@1033 : TextConst 'ENU=must be positive';
+      Text003@1038 : TextConst 'ENU=must be negative';
+      HasGotGLSetup@1016 : Boolean;
+      CurrencyDate@1030 : Date;
+      UnitAmountRoundingPrecision@1024 : Decimal;
+      AmountRoundingPrecision@1025 : Decimal;
+      UnitAmountRoundingPrecisionFCY@1026 : Decimal;
+      AmountRoundingPrecisionFCY@1036 : Decimal;
+      CheckedAvailability@1017 : Boolean;
+      Text004@1019 : TextConst 'ENU=%1 is only editable when a %2 is defined.';
+      Text006@1034 : TextConst 'ENU=%1 cannot be changed when %2 is set.';
+      Text007@1006 : TextConst '@@@=Job Journal Line job DEFAULT 30000 is already linked to Job Planning Line  DEERFIELD, 8 WP 1120 10000. Hence Remaining Qty. cannot be calculated correctly. Posting the line may update the linked %3 unexpectedly. Do you want to continue?;ENU=%1 %2 is already linked to %3 %4. Hence %5 cannot be calculated correctly. Posting the line may update the linked %3 unexpectedly. Do you want to continue?';
+
+    LOCAL PROCEDURE CalcBaseQty@14(Qty@1000 : Decimal) : Decimal;
+    BEGIN
+      TESTFIELD("Qty. per Unit of Measure");
+      exit(ROUND(Qty * "Qty. per Unit of Measure",0.00001));
+    END;
+
+    LOCAL PROCEDURE CalcQtyFromBaseQty@20(BaseQty@1000 : Decimal) : Decimal;
+    BEGIN
+      TESTFIELD("Qty. per Unit of Measure");
+      exit(ROUND(BaseQty / "Qty. per Unit of Measure",0.00001));
+    END;
+
+    LOCAL PROCEDURE CopyFromResource@27();
+    VAR
+      Resource@1000 : Record Resource;
+    BEGIN
+      Resource.GET("No.");
+      Resource.TESTFIELD(Blocked,false);
+      Description := Resource.Name;
+      "Description 2" := Resource."Name 2";
+      "Resource Group No." := Resource."Resource Group No.";
+      "Gen. Prod. Posting Group" := Resource."Gen. Prod. Posting Group";
+      VALIDATE("Unit of Measure Code",Resource."Base Unit of Measure");
+      if "Time Sheet No." = '' then
+        Resource.TESTFIELD("Use Time Sheet",false);
+
+      OnAfterAssignResourceValues(Rec,Res);
+    END;
+
+    LOCAL PROCEDURE CopyFromItem@30();
+    BEGIN
+      GetItem;
+      Item.TESTFIELD(Blocked,false);
+      Description := Item.Description;
+      "Description 2" := Item."Description 2";
+      GetJob;
+      if Job."Language Code" <> '' then
+        GetItemTranslation;
+      "Posting Group" := Item."Inventory Posting Group";
+      "Gen. Prod. Posting Group" := Item."Gen. Prod. Posting Group";
+      VALIDATE("Unit of Measure Code",Item."Base Unit of Measure");
+
+      OnAfterAssignItemValues(Rec,Item);
+    END;
+
+    LOCAL PROCEDURE CopyFromGLAccount@38();
+    BEGIN
+      GLAcc.GET("No.");
+      GLAcc.CheckGLAcc;
+      GLAcc.TESTFIELD("Direct Posting",true);
+      Description := GLAcc.Name;
+      "Gen. Bus. Posting Group" := GLAcc."Gen. Bus. Posting Group";
+      "Gen. Prod. Posting Group" := GLAcc."Gen. Prod. Posting Group";
+      "Unit of Measure Code" := '';
+      "Direct Unit Cost (LCY)" := 0;
+      "Unit Cost (LCY)" := 0;
+      "Unit Price" := 0;
+
+      OnAfterAssignGLAccountValues(Rec,GLAcc);
+    END;
+
+    LOCAL PROCEDURE CheckItemAvailable@5();
+    VAR
+      JobPlanningLine@1000 : Record "Job Planning Line";
+    BEGIN
+      if (CurrFieldNo <> 0) and (Type = Type::Item) and (Quantity > 0) and not CheckedAvailability then begin
+        ItemJnlLine."Item No." := "No.";
+        ItemJnlLine."Entry Type" := ItemJnlLine."Entry Type"::"Negative Adjmt.";
+        ItemJnlLine."Location Code" := "Location Code";
+        ItemJnlLine."Variant Code" := "Variant Code";
+        ItemJnlLine."Bin Code" := "Bin Code";
+        ItemJnlLine."Unit of Measure Code" := "Unit of Measure Code";
+        ItemJnlLine."Qty. per Unit of Measure" := "Qty. per Unit of Measure";
+        if "Job Planning Line No." = 0 then
+          ItemJnlLine.Quantity := Quantity
+        else begin
+          JobPlanningLine.GET("Job No.","Job Task No.","Job Planning Line No.");
+          if JobPlanningLine."Remaining Qty." < (Quantity + "Remaining Qty.") then
+            ItemJnlLine.Quantity := (Quantity + "Remaining Qty.") - JobPlanningLine."Remaining Qty."
+          else
+            exit;
+        end;
+        if ItemCheckAvail.ItemJnlCheckLine(ItemJnlLine) then
+          ItemCheckAvail.RaiseUpdateInterruptedError;
+        CheckedAvailability := true;
+      end;
+    END;
+
+    [External]
+    PROCEDURE EmptyLine@8() : Boolean;
+    BEGIN
+      exit(("Job No." = '') and ("No." = '') and (Quantity = 0));
+    END;
+
+    [External]
+    PROCEDURE SetUpNewLine@9(LastJobJnlLine@1000 : Record "Job Journal Line");
+    BEGIN
+      JobJnlTemplate.GET("Journal Template Name");
+      JobJnlBatch.GET("Journal Template Name","Journal Batch Name");
+      JobJnlLine.SETRANGE("Journal Template Name","Journal Template Name");
+      JobJnlLine.SETRANGE("Journal Batch Name","Journal Batch Name");
+      if JobJnlLine.FINDFIRST then begin
+        "Posting Date" := LastJobJnlLine."Posting Date";
+        "Document Date" := LastJobJnlLine."Posting Date";
+        "Document No." := LastJobJnlLine."Document No.";
+        Type := LastJobJnlLine.Type;
+        VALIDATE("Line Type",LastJobJnlLine."Line Type");
+      end else begin
+        "Posting Date" := WORKDATE;
+        "Document Date" := WORKDATE;
+        if JobJnlBatch."No. Series" <> '' then begin
+          CLEAR(NoSeriesMgt);
+          "Document No." := NoSeriesMgt.TryGetNextNo(JobJnlBatch."No. Series","Posting Date");
+        end;
+      end;
+      "Recurring Method" := LastJobJnlLine."Recurring Method";
+      "Entry Type" := "Entry Type"::Usage;
+      "Source Code" := JobJnlTemplate."Source Code";
+      "Reason Code" := JobJnlBatch."Reason Code";
+      "Posting No. Series" := JobJnlBatch."Posting No. Series";
+    END;
+
+    LOCAL PROCEDURE CreateDim@13(Type1@1000 : Integer;No1@1001 : Code[20];Type2@1002 : Integer;No2@1003 : Code[20];Type3@1004 : Integer;No3@1005 : Code[20]);
+    VAR
+      TableID@1006 : ARRAY [10] OF Integer;
+      No@1007 : ARRAY [10] OF Code[20];
+    BEGIN
+      TableID[1] := Type1;
+      No[1] := No1;
+      TableID[2] := Type2;
+      No[2] := No2;
+      TableID[3] := Type3;
+      No[3] := No3;
+      OnAfterCreateDimTableIDs(Rec,CurrFieldNo,TableID,No);
+
+      "Shortcut Dimension 1 Code" := '';
+      "Shortcut Dimension 2 Code" := '';
+      "Dimension Set ID" :=
+        DimMgt.GetRecDefaultDimID(
+          Rec,CurrFieldNo,TableID,No,"Source Code","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code",0,0);
+    END;
+
+    LOCAL PROCEDURE CreateDimForHigherPriorities@21(PriorityTableID@1000 : Integer) : Integer;
+    VAR
+      TableID@1006 : ARRAY [10] OF Integer;
+      No@1007 : ARRAY [10] OF Code[20];
+    BEGIN
+      if GetTableIDsForHigherPriorities(TableID,No,PriorityTableID) then
+        exit(
+          DimMgt.GetRecDefaultDimID(
+            Rec,CurrFieldNo,TableID,No,"Source Code","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code",0,0));
+    END;
+
+    LOCAL PROCEDURE GetTableIDsForHigherPriorities@28(VAR TableID@1000 : ARRAY [10] OF Integer;VAR No@1001 : ARRAY [10] OF Code[20];PriorityTableID@1002 : Integer) Result : Boolean;
+    VAR
+      DefaultDimensionPriority@1008 : Record "Default Dimension Priority";
+      DimTableIDs@1005 : ARRAY [3] OF Integer;
+      InitialPriority@1007 : Integer;
+      i@1004 : Integer;
+      j@1006 : Integer;
+    BEGIN
+      DimTableIDs[1] := DATABASE::Job;
+      DimTableIDs[2] := DimMgt.TypeToTableID2(Type);
+      DimTableIDs[3] := DATABASE::"Resource Group";
+
+      CLEAR(TableID);
+      CLEAR(No);
+      if DefaultDimensionPriority.GET("Source Code",PriorityTableID) then
+        InitialPriority := DefaultDimensionPriority.Priority;
+      DefaultDimensionPriority.SETRANGE("Source Code","Source Code");
+      DefaultDimensionPriority.SETFILTER(Priority,'<=%1',InitialPriority);
+      i := 1;
+      for j := 1 to 3 do begin
+        DefaultDimensionPriority.Priority := 0;
+        DefaultDimensionPriority.SETRANGE("Table ID",DimTableIDs[j]);
+        if ((InitialPriority = 0) or DefaultDimensionPriority.FINDFIRST) and
+           ((DefaultDimensionPriority.Priority < InitialPriority) or
+            ((DefaultDimensionPriority.Priority = InitialPriority) and (DimTableIDs[j] < PriorityTableID)))
+        then begin
+          Result := true;
+          TableID[i] := DimTableIDs[j];
+          case TableID[i] of
+            DATABASE::Job:
+              No[i] := "Job No.";
+            DATABASE::"Resource Group":
+              No[i] := "Resource Group No.";
+            DimMgt.TypeToTableID2(Type):
+              No[i] := "No.";
+          end;
+          i += 1;
+        end;
+      end;
+      exit(Result);
+    END;
+
+    [External]
+    PROCEDURE ValidateShortcutDimCode@10(FieldNumber@1000 : Integer;VAR ShortcutDimCode@1001 : Code[20]);
+    BEGIN
+      DimMgt.ValidateShortcutDimValues(FieldNumber,ShortcutDimCode,"Dimension Set ID");
+    END;
+
+    [External]
+    PROCEDURE LookupShortcutDimCode@18(FieldNumber@1000 : Integer;VAR ShortcutDimCode@1001 : Code[20]);
+    BEGIN
+      DimMgt.LookupDimValueCode(FieldNumber,ShortcutDimCode);
+      DimMgt.ValidateShortcutDimValues(FieldNumber,ShortcutDimCode,"Dimension Set ID");
+    END;
+
+    [External]
+    PROCEDURE ShowShortcutDimCode@15(VAR ShortcutDimCode@1000 : ARRAY [8] OF Code[20]);
+    BEGIN
+      DimMgt.GetShortcutDimensions("Dimension Set ID",ShortcutDimCode);
+    END;
+
+    LOCAL PROCEDURE GetLocation@7300(LocationCode@1000 : Code[10]);
+    BEGIN
+      if LocationCode = '' then
+        CLEAR(Location)
+      else
+        if Location.Code <> LocationCode then
+          Location.GET(LocationCode);
+    END;
+
+    LOCAL PROCEDURE GetJob@16();
+    BEGIN
+      TESTFIELD("Job No.");
+      if "Job No." <> Job."No." then
+        Job.GET("Job No.");
+    END;
+
+    LOCAL PROCEDURE UpdateCurrencyFactor@17();
+    BEGIN
+      if "Currency Code" <> '' then begin
+        if "Posting Date" = 0D then
+          CurrencyDate := WORKDATE
+        else
+          CurrencyDate := "Posting Date";
+        "Currency Factor" := CurrExchRate.ExchangeRate(CurrencyDate,"Currency Code");
+      end else
+        "Currency Factor" := 0;
+    END;
+
+    LOCAL PROCEDURE GetItem@19();
+    BEGIN
+      TESTFIELD("No.");
+      if "No." <> Item."No." then
+        Item.GET("No.");
+    END;
+
+    LOCAL PROCEDURE GetSKU@5806() : Boolean;
+    BEGIN
+      if (SKU."Location Code" = "Location Code") and
+         (SKU."Item No." = "No.") and
+         (SKU."Variant Code" = "Variant Code")
+      then
+        exit(true);
+
+      if SKU.GET("Location Code","No.","Variant Code") then
+        exit(true);
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE IsInbound@7() : Boolean;
+    BEGIN
+      if "Entry Type" in ["Entry Type"::Usage,"Entry Type"::Sale] then
+        exit("Quantity (Base)" < 0);
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE OpenItemTrackingLines@6500(IsReclass@1000 : Boolean);
+    BEGIN
+      TESTFIELD(Type,Type::Item);
+      TESTFIELD("No.");
+      ReserveJobJnlLine.CallItemTracking(Rec,IsReclass);
+    END;
+
+    LOCAL PROCEDURE InitRoundingPrecisions@23();
+    VAR
+      Currency@1000 : Record Currency;
+    BEGIN
+      if (AmountRoundingPrecision = 0) or
+         (UnitAmountRoundingPrecision = 0) or
+         (AmountRoundingPrecisionFCY = 0) or
+         (UnitAmountRoundingPrecisionFCY = 0)
+      then begin
+        CLEAR(Currency);
+        Currency.InitRoundingPrecision;
+        AmountRoundingPrecision := Currency."Amount Rounding Precision";
+        UnitAmountRoundingPrecision := Currency."Unit-Amount Rounding Precision";
+
+        if "Currency Code" <> '' then begin
+          Currency.GET("Currency Code");
+          Currency.TESTFIELD("Amount Rounding Precision");
+          Currency.TESTFIELD("Unit-Amount Rounding Precision");
+        end;
+
+        AmountRoundingPrecisionFCY := Currency."Amount Rounding Precision";
+        UnitAmountRoundingPrecisionFCY := Currency."Unit-Amount Rounding Precision";
+      end;
+    END;
+
+    [External]
+    PROCEDURE DontCheckStdCost@26();
+    BEGIN
+      DontCheckStandardCost := true;
+    END;
+
+    LOCAL PROCEDURE CalcUnitCost@5809(ItemLedgEntry@1000 : Record "Item Ledger Entry") : Decimal;
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+      UnitCost@1004 : Decimal;
+    BEGIN
+      ValueEntry.SETCURRENTKEY("Item Ledger Entry No.");
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgEntry."Entry No.");
+      ValueEntry.CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)");
+      UnitCost :=
+        (ValueEntry."Cost Amount (Expected)" + ValueEntry."Cost Amount (Actual)") / ItemLedgEntry.Quantity;
+
+      exit(ABS(UnitCost * "Qty. per Unit of Measure"));
+    END;
+
+    LOCAL PROCEDURE CalcUnitCostFrom@5804(ItemLedgEntry@1000 : Record "Item Ledger Entry") : Decimal;
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      ValueEntry.RESET;
+      ValueEntry.SETCURRENTKEY("Item Ledger Entry No.");
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgEntry."Entry No.");
+      ValueEntry.CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)");
+      exit(
+        (ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)") /
+        ItemLedgEntry.Quantity * "Qty. per Unit of Measure");
+    END;
+
+    LOCAL PROCEDURE SelectItemEntry@1(CurrentFieldNo@1000 : Integer);
+    VAR
+      ItemLedgEntry@1001 : Record "Item Ledger Entry";
+      JobJnlLine2@1002 : Record "Job Journal Line";
+    BEGIN
+      ItemLedgEntry.SETCURRENTKEY("Item No.",Open,"Variant Code");
+      ItemLedgEntry.SETRANGE("Item No.","No.");
+      ItemLedgEntry.SETRANGE(Correction,false);
+
+      if "Location Code" <> '' then
+        ItemLedgEntry.SETRANGE("Location Code","Location Code");
+
+      if CurrentFieldNo = FIELDNO("Applies-to Entry") then begin
+        ItemLedgEntry.SETRANGE(Positive,true);
+        ItemLedgEntry.SETRANGE(Open,true);
+      end else
+        ItemLedgEntry.SETRANGE(Positive,false);
+
+      if PAGE.RUNMODAL(PAGE::"Item Ledger Entries",ItemLedgEntry) = ACTION::LookupOK then begin
+        JobJnlLine2 := Rec;
+        if CurrentFieldNo = FIELDNO("Applies-to Entry") then
+          JobJnlLine2.VALIDATE("Applies-to Entry",ItemLedgEntry."Entry No.")
+        else
+          JobJnlLine2.VALIDATE("Applies-from Entry",ItemLedgEntry."Entry No.");
+        Rec := JobJnlLine2;
+      end;
+    END;
+
+    [External]
+    PROCEDURE DeleteAmounts@4();
+    BEGIN
+      Quantity := 0;
+      "Quantity (Base)" := 0;
+      "Direct Unit Cost (LCY)" := 0;
+      "Unit Cost (LCY)" := 0;
+      "Unit Cost" := 0;
+      "Total Cost (LCY)" := 0;
+      "Total Cost" := 0;
+      "Unit Price (LCY)" := 0;
+      "Unit Price" := 0;
+      "Total Price (LCY)" := 0;
+      "Total Price" := 0;
+      "Line Amount (LCY)" := 0;
+      "Line Amount" := 0;
+      "Line Discount %" := 0;
+      "Line Discount Amount (LCY)" := 0;
+      "Line Discount Amount" := 0;
+      "Remaining Qty." := 0;
+      "Remaining Qty. (Base)" := 0;
+
+      OnAfterDeleteAmounts(Rec);
+    END;
+
+    [External]
+    PROCEDURE SetCurrencyFactor@11(Factor@1000 : Decimal);
+    BEGIN
+      "Currency Factor" := Factor;
+    END;
+
+    LOCAL PROCEDURE GetItemTranslation@42();
+    BEGIN
+      GetJob;
+      if ItemTranslation.GET("No.","Variant Code",Job."Language Code") then begin
+        Description := ItemTranslation.Description;
+        "Description 2" := ItemTranslation."Description 2";
+      end;
+    END;
+
+    LOCAL PROCEDURE GetGLSetup@24();
+    BEGIN
+      if HasGotGLSetup then
+        exit;
+      GLSetup.GET;
+      HasGotGLSetup := true;
+    END;
+
+    LOCAL PROCEDURE UpdateAllAmounts@37();
+    BEGIN
+      InitRoundingPrecisions;
+
+      UpdateUnitCost;
+      UpdateTotalCost;
+      FindPriceAndDiscount(Rec,CurrFieldNo);
+      HandleCostFactor;
+      UpdateUnitPrice;
+      UpdateTotalPrice;
+      UpdateAmountsAndDiscounts;
+    END;
+
+    LOCAL PROCEDURE UpdateUnitCost@36();
+    VAR
+      RetrievedCost@1000 : Decimal;
+    BEGIN
+      if (Type = Type::Item) and Item.GET("No.") then begin
+        if Item."Costing Method" = Item."Costing Method"::Standard then begin
+          if not DontCheckStandardCost then begin
+            // Prevent manual change of unit cost on items with standard cost
+            if (("Unit Cost" <> xRec."Unit Cost") or ("Unit Cost (LCY)" <> xRec."Unit Cost (LCY)")) and
+               (("No." = xRec."No.") and ("Location Code" = xRec."Location Code") and
+                ("Variant Code" = xRec."Variant Code") and ("Unit of Measure Code" = xRec."Unit of Measure Code"))
+            then
+              ERROR(
+                Text000,
+                FIELDCAPTION("Unit Cost"),Item.FIELDCAPTION("Costing Method"),Item."Costing Method");
+          end;
+          if RetrieveCostPrice then begin
+            if GetSKU then
+              "Unit Cost (LCY)" := ROUND(SKU."Unit Cost" * "Qty. per Unit of Measure",UnitAmountRoundingPrecision)
+            else
+              "Unit Cost (LCY)" := ROUND(Item."Unit Cost" * "Qty. per Unit of Measure",UnitAmountRoundingPrecision);
+            "Unit Cost" := ROUND(
+                CurrExchRate.ExchangeAmtLCYToFCY(
+                  "Posting Date","Currency Code",
+                  "Unit Cost (LCY)","Currency Factor"),
+                UnitAmountRoundingPrecisionFCY);
+          end else begin
+            if "Unit Cost" <> xRec."Unit Cost" then
+              "Unit Cost (LCY)" := ROUND(
+                  CurrExchRate.ExchangeAmtFCYToLCY(
+                    "Posting Date","Currency Code",
+                    "Unit Cost","Currency Factor"),
+                  UnitAmountRoundingPrecision)
+            else
+              "Unit Cost" := ROUND(
+                  CurrExchRate.ExchangeAmtLCYToFCY(
+                    "Posting Date","Currency Code",
+                    "Unit Cost (LCY)","Currency Factor"),
+                  UnitAmountRoundingPrecisionFCY);
+          end;
+        end else begin
+          if RetrieveCostPrice then begin
+            if GetSKU then
+              RetrievedCost := SKU."Unit Cost" * "Qty. per Unit of Measure"
+            else
+              RetrievedCost := Item."Unit Cost" * "Qty. per Unit of Measure";
+            "Unit Cost" := ROUND(
+                CurrExchRate.ExchangeAmtLCYToFCY(
+                  "Posting Date","Currency Code",
+                  RetrievedCost,"Currency Factor"),
+                UnitAmountRoundingPrecisionFCY);
+            "Unit Cost (LCY)" := ROUND(RetrievedCost,UnitAmountRoundingPrecision);
+          end else
+            "Unit Cost (LCY)" := ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  "Posting Date","Currency Code",
+                  "Unit Cost","Currency Factor"),
+                UnitAmountRoundingPrecision);
+        end;
+      end else
+        if (Type = Type::Resource) and Res.GET("No.") then begin
+          if RetrieveCostPrice then begin
+            ResCost.INIT;
+            ResCost.Code := "No.";
+            ResCost."Work Type Code" := "Work Type Code";
+            CODEUNIT.RUN(CODEUNIT::"Resource-Find Cost",ResCost);
+            "Direct Unit Cost (LCY)" := ROUND(ResCost."Direct Unit Cost" * "Qty. per Unit of Measure",UnitAmountRoundingPrecision);
+            RetrievedCost := ResCost."Unit Cost" * "Qty. per Unit of Measure";
+            "Unit Cost" := ROUND(
+                CurrExchRate.ExchangeAmtLCYToFCY(
+                  "Posting Date","Currency Code",
+                  RetrievedCost,"Currency Factor"),
+                UnitAmountRoundingPrecisionFCY);
+            "Unit Cost (LCY)" := ROUND(RetrievedCost,UnitAmountRoundingPrecision);
+          end else
+            "Unit Cost (LCY)" := ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  "Posting Date","Currency Code",
+                  "Unit Cost","Currency Factor"),
+                UnitAmountRoundingPrecision);
+        end else
+          "Unit Cost (LCY)" := ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                "Posting Date","Currency Code",
+                "Unit Cost","Currency Factor"),
+              UnitAmountRoundingPrecision);
+    END;
+
+    LOCAL PROCEDURE RetrieveCostPrice@35() : Boolean;
+    BEGIN
+      case Type of
+        Type::Item:
+          if ("No." <> xRec."No.") or
+             ("Location Code" <> xRec."Location Code") or
+             ("Variant Code" <> xRec."Variant Code") or
+             (Quantity <> xRec.Quantity) or
+             ("Unit of Measure Code" <> xRec."Unit of Measure Code") and
+             (("Applies-to Entry" = 0) and ("Applies-from Entry" = 0))
+          then
+            exit(true);
+        Type::Resource:
+          if ("No." <> xRec."No.") or
+             ("Work Type Code" <> xRec."Work Type Code") or
+             ("Unit of Measure Code" <> xRec."Unit of Measure Code")
+          then
+            exit(true);
+        Type::"G/L Account":
+          if "No." <> xRec."No." then
+            exit(true);
+        else
+          exit(false);
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE UpdateTotalCost@34();
+    BEGIN
+      "Total Cost" := ROUND("Unit Cost" * Quantity,AmountRoundingPrecisionFCY);
+      "Total Cost (LCY)" := ROUND(
+          CurrExchRate.ExchangeAmtFCYToLCY(
+            "Posting Date","Currency Code","Total Cost","Currency Factor"),AmountRoundingPrecision);
+
+      OnAfterUpdateTotalCost(Rec);
+    END;
+
+    LOCAL PROCEDURE FindPriceAndDiscount@33(VAR JobJnlLine@1000 : Record "Job Journal Line";CalledByFieldNo@1001 : Integer);
+    VAR
+      SalesPriceCalcMgt@1002 : Codeunit "Sales Price Calc. Mgt.";
+      PurchPriceCalcMgt@1003 : Codeunit "Purch. Price Calc. Mgt.";
+    BEGIN
+      if RetrieveCostPrice and ("No." <> '') then begin
+        SalesPriceCalcMgt.FindJobJnlLinePrice(JobJnlLine,CalledByFieldNo);
+
+        if Type <> Type::"G/L Account" then
+          PurchPriceCalcMgt.FindJobJnlLinePrice(JobJnlLine,CalledByFieldNo)
+        else begin
+          // Because the SalesPriceCalcMgt.FindJobJnlLinePrice function also retrieves costs for G/L Account,
+          // cost and total cost need to get updated again.
+          UpdateUnitCost;
+          UpdateTotalCost;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE HandleCostFactor@32();
+    BEGIN
+      if ("Cost Factor" <> 0) and
+         ((("Unit Cost" <> xRec."Unit Cost") or ("Cost Factor" <> xRec."Cost Factor")) or
+          ((Quantity <> xRec.Quantity) or ("Location Code" <> xRec."Location Code")))
+      then
+        "Unit Price" := ROUND("Unit Cost" * "Cost Factor",UnitAmountRoundingPrecisionFCY)
+      else
+        if (Item."Price/Profit Calculation" = Item."Price/Profit Calculation"::"Price=Cost+Profit") and
+           (Item."Profit %" < 100) and
+           ("Unit Cost" <> xRec."Unit Cost")
+        then
+          "Unit Price" := ROUND("Unit Cost" / (1 - Item."Profit %" / 100),UnitAmountRoundingPrecisionFCY);
+    END;
+
+    LOCAL PROCEDURE UpdateUnitPrice@25();
+    BEGIN
+      "Unit Price (LCY)" := ROUND(
+          CurrExchRate.ExchangeAmtFCYToLCY(
+            "Posting Date","Currency Code",
+            "Unit Price","Currency Factor"),
+          UnitAmountRoundingPrecision);
+    END;
+
+    LOCAL PROCEDURE UpdateTotalPrice@6();
+    BEGIN
+      "Total Price" := Quantity * "Unit Price";
+      "Total Price (LCY)" := ROUND(
+          CurrExchRate.ExchangeAmtFCYToLCY(
+            "Posting Date","Currency Code","Total Price","Currency Factor"),AmountRoundingPrecision);
+      "Total Price" := ROUND("Total Price",AmountRoundingPrecisionFCY);
+
+      OnAfterUpdateTotalPrice(Rec);
+    END;
+
+    LOCAL PROCEDURE UpdateAmountsAndDiscounts@31();
+    BEGIN
+      if "Total Price" <> 0 then begin
+        if ("Line Amount" <> xRec."Line Amount") and ("Line Discount Amount" = xRec."Line Discount Amount") then begin
+          "Line Amount" := ROUND("Line Amount",AmountRoundingPrecisionFCY);
+          "Line Discount Amount" := "Total Price" - "Line Amount";
+          "Line Amount (LCY)" := ROUND("Line Amount (LCY)",AmountRoundingPrecision);
+          "Line Discount Amount (LCY)" := "Total Price (LCY)" - "Line Amount (LCY)";
+          "Line Discount %" := ROUND("Line Discount Amount" / "Total Price" * 100,0.00001);
+        end else
+          if ("Line Discount Amount" <> xRec."Line Discount Amount") and ("Line Amount" = xRec."Line Amount") then begin
+            "Line Discount Amount" := ROUND("Line Discount Amount",AmountRoundingPrecisionFCY);
+            "Line Amount" := "Total Price" - "Line Discount Amount";
+            "Line Discount Amount (LCY)" := ROUND("Line Discount Amount (LCY)",AmountRoundingPrecision);
+            "Line Amount (LCY)" := "Total Price (LCY)" - "Line Discount Amount (LCY)";
+            "Line Discount %" := ROUND("Line Discount Amount" / "Total Price" * 100,0.00001);
+          end else
+            if ("Line Discount Amount" <> xRec."Line Discount Amount") or ("Line Amount" <> xRec."Line Amount") or
+               ("Total Price" <> xRec."Total Price") or ("Line Discount %" <> xRec."Line Discount %")
+            then begin
+              "Line Discount Amount" := ROUND("Total Price" * "Line Discount %" / 100,AmountRoundingPrecisionFCY);
+              "Line Amount" := "Total Price" - "Line Discount Amount";
+              "Line Discount Amount (LCY)" := ROUND("Total Price (LCY)" * "Line Discount %" / 100,AmountRoundingPrecision);
+              "Line Amount (LCY)" := "Total Price (LCY)" - "Line Discount Amount (LCY)";
+            end;
+      end else begin
+        "Line Amount" := 0;
+        "Line Discount Amount" := 0;
+        "Line Amount (LCY)" := 0;
+        "Line Discount Amount (LCY)" := 0;
+      end;
+
+      OnAfterUpdateAmountsAndDiscounts(Rec);
+    END;
+
+    LOCAL PROCEDURE ValidateJobPlanningLineLink@3();
+    VAR
+      JobPlanningLine@1000 : Record "Job Planning Line";
+      JobJournalLine@1001 : Record "Job Journal Line";
+    BEGIN
+      JobJournalLine.SETRANGE("Job No.","Job No.");
+      JobJournalLine.SETRANGE("Job Task No.","Job Task No.");
+      JobJournalLine.SETRANGE("Job Planning Line No.","Job Planning Line No.");
+
+      if JobJournalLine.FINDFIRST then
+        if ("Journal Template Name" <> JobJournalLine."Journal Template Name") or
+           ("Journal Batch Name" <> JobJournalLine."Journal Batch Name") or
+           ("Line No." <> JobJournalLine."Line No.")
+        then begin
+          JobPlanningLine.GET("Job No.","Job Task No.","Job Planning Line No.");
+          if not CONFIRM(Text007,false,
+               TABLECAPTION,
+               STRSUBSTNO('%1, %2, %3',"Journal Template Name","Journal Batch Name","Line No."),
+               JobPlanningLine.TABLECAPTION,
+               STRSUBSTNO('%1, %2, %3',JobPlanningLine."Job No.",JobPlanningLine."Job Task No.",JobPlanningLine."Line No."),
+               FIELDCAPTION("Remaining Qty."))
+          then
+            ERROR('');
+        end;
+    END;
+
+    [External]
+    PROCEDURE ShowDimensions@2();
+    BEGIN
+      "Dimension Set ID" :=
+        DimMgt.EditDimensionSet("Dimension Set ID",STRSUBSTNO('%1 %2 %3',"Journal Template Name","Journal Batch Name","Line No."));
+      DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+    END;
+
+    [External]
+    PROCEDURE UpdateDimensions@12();
+    VAR
+      DimensionSetIDArr@1000 : ARRAY [10] OF Integer;
+    BEGIN
+      CreateDim(
+        DimMgt.TypeToTableID2(Type),"No.",
+        DATABASE::Job,"Job No.",
+        DATABASE::"Resource Group","Resource Group No.");
+      if "Job Task No." <> '' then begin
+        DimensionSetIDArr[1] := "Dimension Set ID";
+        DimensionSetIDArr[2] :=
+          DimMgt.CreateDimSetFromJobTaskDim("Job No.",
+            "Job Task No.","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+        DimensionSetIDArr[3] := CreateDimForHigherPriorities(DATABASE::Job);
+        "Dimension Set ID" :=
+          DimMgt.GetCombinedDimensionSetID(
+            DimensionSetIDArr,"Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+      end
+    END;
+
+    [External]
+    PROCEDURE IsOpenedFromBatch@22() : Boolean;
+    VAR
+      JobJournalBatch@1002 : Record "Job Journal Batch";
+      TemplateFilter@1001 : Text;
+      BatchFilter@1000 : Text;
+    BEGIN
+      BatchFilter := GETFILTER("Journal Batch Name");
+      if BatchFilter <> '' then begin
+        TemplateFilter := GETFILTER("Journal Template Name");
+        if TemplateFilter <> '' then
+          JobJournalBatch.SETFILTER("Journal Template Name",TemplateFilter);
+        JobJournalBatch.SETFILTER(Name,BatchFilter);
+        JobJournalBatch.FINDFIRST;
+      end;
+
+      exit((("Journal Batch Name" <> '') and ("Journal Template Name" = '')) or (BatchFilter <> ''));
+    END;
+
+    [External]
+    PROCEDURE IsServiceItem@68() : Boolean;
+    BEGIN
+      if Type <> Type::Item then
+        exit(false);
+      if "No." = '' then
+        exit(false);
+      GetItem;
+      exit(Item.Type = Item.Type::Service);
+    END;
+
+    [External]
+    PROCEDURE RowID1@44() : Text[250];
+    VAR
+      ItemTrackingMgt@1000 : Codeunit "Item Tracking Management";
+    BEGIN
+      exit(
+        ItemTrackingMgt.ComposeRowID(DATABASE::"Job Journal Line","Entry Type",
+          "Journal Template Name","Journal Batch Name",0,"Line No."));
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterAssignGLAccountValues@39(VAR JobJournalLine@1000 : Record "Job Journal Line";GLAccount@1001 : Record "G/L Account");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterAssignItemValues@136(VAR JobJournalLine@1000 : Record "Job Journal Line";Item@1001 : Record Item);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterAssignResourceValues@29(VAR JobJournalLine@1000 : Record "Job Journal Line";Resource@1001 : Record Resource);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterAssignItemUoM@43(VAR JobJournalLine@1000 : Record "Job Journal Line";Item@1001 : Record Item);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterAssignResourceUoM@45(VAR JobJournalLine@1000 : Record "Job Journal Line";Resource@1001 : Record Resource);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterDeleteAmounts@41(VAR JobJournalLine@1000 : Record "Job Journal Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterUpdateTotalCost@46(VAR JobJournalLine@1000 : Record "Job Journal Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterUpdateTotalPrice@47(VAR JobJournalLine@1000 : Record "Job Journal Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterUpdateAmountsAndDiscounts@48(VAR JobJournalLine@1000 : Record "Job Journal Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateDimTableIDs@164(VAR JobJournalLine@1000 : Record "Job Journal Line";FieldNo@1001 : Integer;TableID@1003 : ARRAY [10] OF Integer;No@1002 : ARRAY [10] OF Code[20]);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeValidateWorkTypeCodeQty@40(VAR JobJournalLine@1000 : Record "Job Journal Line";xJobJournalLine@1001 : Record "Job Journal Line";Resource@1002 : Record Resource;WorkType@1003 : Record "Work Type");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,1649 @@
+OBJECT Codeunit 5845 Get Inventory Report
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Inventory Report Entry";
+    OnRun=BEGIN
+            WindowUpdateDateTime := CURRENTDATETIME;
+            WindowIsOpen := false;
+
+            RESET;
+            DELETEALL;
+            Calculate(Rec);
+
+            if WindowIsOpen then
+              Window.CLOSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      InvtReportHeader@1000 : Record "Inventory Report Header";
+      Item@1002 : Record Item;
+      GLAcc@1001 : Record "G/L Account";
+      ValueEntry@1003 : Record "Value Entry";
+      Text000@1009 : TextConst 'ENU=Calculating...\';
+      Text001@1008 : TextConst 'ENU=Type         #1######\';
+      Text002@1007 : TextConst 'ENU=No.          #2######\';
+      Text003@1006 : TextConst 'ENU=Posting Type #3######';
+      Window@1004 : Dialog;
+      WindowIsOpen@1005 : Boolean;
+      WindowType@1010 : Text[80];
+      WindowNo@1011 : Text[20];
+      WindowPostingType@1012 : Text[80];
+      WindowUpdateDateTime@1013 : DateTime;
+      Text004@1014 : TextConst 'ENU=Show Item Direct Costs,Show Assembly Direct Cost,Show Revaluations,Show Roundings';
+      Text005@1015 : TextConst 'ENU=Show WIP Consumption,Show WIP Capacity,Show WIP Output';
+      Text006@1016 : TextConst 'ENU=Show Item Direct Costs,Show Assembly Direct Costs';
+      Text007@1017 : TextConst 'ENU=Show Item Indirect Costs,Show Assembly Indirect Costs';
+
+    LOCAL PROCEDURE Calculate@4(VAR InventoryReportLine@1000 : Record "Inventory Report Entry");
+    BEGIN
+      CalcGLPostings(InventoryReportLine);
+      CalcInvtPostings(InventoryReportLine);
+      InsertDiffReportEntry(InventoryReportLine);
+
+      if InvtReportHeader."Show Warning" then
+        DetermineDiffError(InventoryReportLine);
+    END;
+
+    LOCAL PROCEDURE CalcGLPostings@30(VAR InventoryReportLine@1000 : Record "Inventory Report Entry");
+    BEGIN
+      CalcGenPostingSetup(InventoryReportLine);
+      CalcInvtPostingSetup(InventoryReportLine);
+    END;
+
+    LOCAL PROCEDURE CalcInvtPostings@33(VAR InventoryReportLine@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        RESET;
+        CLEAR(InventoryReportLine);
+        SETCURRENTKEY(
+          "Item No.","Posting Date","Item Ledger Entry Type","Entry Type","Variance Type",
+          "Item Charge No.","Location Code","Variant Code");
+        SETFILTER("Item No.",InvtReportHeader.GETFILTER("Item Filter"));
+        if FIND('-') then
+          repeat
+            UpDateWindow(Item.TABLECAPTION,"Item No.",'');
+            SETRANGE("Item No.","Item No.");
+            if not Item.GET("Item No.") then
+              CLEAR(Item);
+            if Item.Type = Item.Type::Inventory then
+              InsertItemInvtReportEntry(InventoryReportLine);
+
+            SETFILTER("Item No.",InvtReportHeader.GETFILTER("Item Filter"));
+          until NEXT = 0;
+      end
+    END;
+
+    LOCAL PROCEDURE InsertDiffReportEntry@62(VAR InventoryReportLine@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with InventoryReportLine do begin
+        INIT;
+        CalcDiff(InventoryReportLine);
+        Type := Type::" ";
+        "No." := '';
+        Description := '';
+        "Entry No." := "Entry No." + 1;
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE DetermineDiffError@63(VAR InventoryReportLine@1000 : Record "Inventory Report Entry");
+    BEGIN
+      InventoryReportLine.SETRANGE(Type,InventoryReportLine.Type::" ");
+      if not InventoryReportLine.FINDFIRST then
+        exit;
+
+      CheckExpectedCostPosting(InventoryReportLine);
+      case true of
+        CheckIfNoDifference(InventoryReportLine):
+          ;
+        CheckCostIsPostedToGL(InventoryReportLine):
+          ;
+        CheckValueGLCompression(InventoryReportLine):
+          ;
+        CheckGLClosingOverlaps(InventoryReportLine):
+          ;
+        CheckDeletedGLAcc(InventoryReportLine):
+          ;
+        CheckPostingDateToGLNotTheSame(InventoryReportLine):
+          ;
+        CheckDirectPostings(InventoryReportLine):
+          ;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcInvtPostingSetup@22(VAR InventoryReportLine@1002 : Record "Inventory Report Entry");
+    VAR
+      InvtPostingSetup@1001 : Record "Inventory Posting Setup";
+      TempInvtPostingSetup@1000 : TEMPORARY Record "Inventory Posting Setup";
+    BEGIN
+      with InvtPostingSetup do begin
+        if FIND('-') then
+          repeat
+            TempInvtPostingSetup.RESET;
+            TempInvtPostingSetup.SETRANGE("Inventory Account","Inventory Account");
+            if not TempInvtPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Inventory Account"));
+              InsertGLInvtReportEntry(InventoryReportLine,"Inventory Account",InventoryReportLine.Inventory);
+            end;
+
+            TempInvtPostingSetup.RESET;
+            TempInvtPostingSetup.SETRANGE("Inventory Account (Interim)","Inventory Account (Interim)");
+            if not TempInvtPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Inventory Account (Interim)"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Inventory Account (Interim)",InventoryReportLine."Inventory (Interim)");
+            end;
+
+            TempInvtPostingSetup.RESET;
+            TempInvtPostingSetup.SETRANGE("Material Variance Account","Material Variance Account");
+            if not TempInvtPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Material Variance Account"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Material Variance Account",InventoryReportLine."Material Variance");
+            end;
+
+            TempInvtPostingSetup.RESET;
+            TempInvtPostingSetup.SETRANGE("Capacity Variance Account","Capacity Variance Account");
+            if not TempInvtPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Capacity Variance Account"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Capacity Variance Account",InventoryReportLine."Capacity Variance");
+            end;
+
+            TempInvtPostingSetup.RESET;
+            TempInvtPostingSetup.SETRANGE("Mfg. Overhead Variance Account","Mfg. Overhead Variance Account");
+            if not TempInvtPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Mfg. Overhead Variance Account"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Mfg. Overhead Variance Account",InventoryReportLine."Mfg. Overhead Variance");
+            end;
+
+            TempInvtPostingSetup.RESET;
+            TempInvtPostingSetup.SETRANGE("Cap. Overhead Variance Account","Cap. Overhead Variance Account");
+            if not TempInvtPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Cap. Overhead Variance Account"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Cap. Overhead Variance Account",InventoryReportLine."Capacity Overhead Variance");
+            end;
+
+            TempInvtPostingSetup.RESET;
+            TempInvtPostingSetup.SETRANGE("Subcontracted Variance Account","Subcontracted Variance Account");
+            if not TempInvtPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Subcontracted Variance Account"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Subcontracted Variance Account",InventoryReportLine."Subcontracted Variance");
+            end;
+
+            TempInvtPostingSetup.RESET;
+            TempInvtPostingSetup.SETRANGE("WIP Account","WIP Account");
+            if not TempInvtPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("WIP Account"));
+              InsertGLInvtReportEntry(InventoryReportLine,"WIP Account",InventoryReportLine."WIP Inventory");
+            end;
+
+            TempInvtPostingSetup := InvtPostingSetup;
+            TempInvtPostingSetup.INSERT;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcGenPostingSetup@23(VAR InventoryReportLine@1002 : Record "Inventory Report Entry");
+    VAR
+      GenPostingSetup@1001 : Record "General Posting Setup";
+      TempGenPostingSetup@1000 : TEMPORARY Record "General Posting Setup";
+    BEGIN
+      with GenPostingSetup do begin
+        if FIND('-') then
+          repeat
+            TempGenPostingSetup.RESET;
+            TempGenPostingSetup.SETRANGE("COGS Account","COGS Account");
+            if not TempGenPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("COGS Account"));
+              InsertGLInvtReportEntry(InventoryReportLine,"COGS Account",InventoryReportLine.COGS);
+            end;
+
+            TempGenPostingSetup.RESET;
+            TempGenPostingSetup.SETRANGE("Inventory Adjmt. Account","Inventory Adjmt. Account");
+            if not TempGenPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Inventory Adjmt. Account"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Inventory Adjmt. Account",InventoryReportLine."Inventory Adjmt.");
+            end;
+
+            TempGenPostingSetup.RESET;
+            TempGenPostingSetup.SETRANGE("Invt. Accrual Acc. (Interim)","Invt. Accrual Acc. (Interim)");
+            if not TempGenPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Invt. Accrual Acc. (Interim)"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Invt. Accrual Acc. (Interim)",InventoryReportLine."Invt. Accrual (Interim)");
+            end;
+
+            TempGenPostingSetup.RESET;
+            TempGenPostingSetup.SETRANGE("COGS Account (Interim)","COGS Account (Interim)");
+            if not TempGenPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("COGS Account (Interim)"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"COGS Account (Interim)",InventoryReportLine."COGS (Interim)");
+            end;
+
+            TempGenPostingSetup.RESET;
+            TempGenPostingSetup.SETRANGE("Direct Cost Applied Account","Direct Cost Applied Account");
+            if not TempGenPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Direct Cost Applied Account"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Direct Cost Applied Account",InventoryReportLine."Direct Cost Applied");
+            end;
+
+            TempGenPostingSetup.RESET;
+            TempGenPostingSetup.SETRANGE("Overhead Applied Account","Overhead Applied Account");
+            if not TempGenPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Overhead Applied Account"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Overhead Applied Account",InventoryReportLine."Overhead Applied");
+            end;
+
+            TempGenPostingSetup.RESET;
+            TempGenPostingSetup.SETRANGE("Purchase Variance Account","Purchase Variance Account");
+            if not TempGenPostingSetup.FINDFIRST then begin
+              UpDateWindow(WindowType,WindowNo,FIELDCAPTION("Purchase Variance Account"));
+              InsertGLInvtReportEntry(
+                InventoryReportLine,"Purchase Variance Account",InventoryReportLine."Purchase Variance");
+            end;
+
+            TempGenPostingSetup := GenPostingSetup;
+            TempGenPostingSetup.INSERT;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertGLInvtReportEntry@58(VAR InventoryReportLine@1000 : Record "Inventory Report Entry";GLAccNo@1001 : Code[20];VAR CostAmount@1002 : Decimal);
+    BEGIN
+      with InventoryReportLine do begin
+        INIT;
+        if not GLAcc.GET(GLAccNo) then
+          exit;
+        GLAcc.SETFILTER("Date Filter",InvtReportHeader.GETFILTER("Posting Date Filter"));
+        CostAmount := CalcGLAccount(GLAcc);
+
+        if CostAmount = 0 then
+          exit;
+        Type := Type::"G/L Account";
+        "No." := GLAcc."No.";
+        Description := GLAcc.Name;
+        "Entry No." := "Entry No." + 1;
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertItemInvtReportEntry@57(VAR InventoryReportLine@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with InventoryReportLine do begin
+        INIT;
+        CalcItem(InventoryReportLine);
+        "No." := ValueEntry."Item No.";
+        Description := Item.Description;
+        Type := Type::Item;
+        "Entry No." := "Entry No." + 1;
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcItem@2(VAR InventoryReportLine@1001 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do
+        repeat
+          SETRANGE("Posting Date","Posting Date");
+          repeat
+            if ValueEntryInFilteredSet(ValueEntry,InvtReportHeader,false) then begin
+              if Item."No." <> "Item No." then
+                if not Item.GET("Item No.") then
+                  Item.INIT;
+              SETRANGE("Entry Type","Entry Type");
+              SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type");
+              SETRANGE("Location Code","Location Code");
+              SETRANGE("Variance Type","Variance Type");
+              SETRANGE("Item Charge No.","Item Charge No.");
+
+              if ValueEntryInFilteredSet(ValueEntry,InvtReportHeader,true) then
+                CalcValueEntries(InventoryReportLine);
+
+              FINDLAST;
+              SETRANGE("Entry Type");
+              SETRANGE("Item Ledger Entry Type");
+              SETRANGE("Location Code");
+              SETRANGE("Variance Type");
+              SETRANGE("Item Charge No.");
+            end else
+              FINDLAST;
+          until NEXT = 0;
+
+          FINDLAST;
+          SETFILTER("Posting Date",InvtReportHeader.GETFILTER("Posting Date Filter"));
+        until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ValueEntryInFilteredSet@21(VAR ValueEntry@1000 : Record "Value Entry";VAR InvtReportHeader@1001 : Record "Inventory Report Header";Detailed@1003 : Boolean) : Boolean;
+    VAR
+      TempValueEntry@1002 : TEMPORARY Record "Value Entry";
+    BEGIN
+      with TempValueEntry do begin
+        SETFILTER("Item No.",InvtReportHeader.GETFILTER("Item Filter"));
+        SETFILTER("Posting Date",InvtReportHeader.GETFILTER("Posting Date Filter"));
+        if Detailed then
+          SETFILTER("Location Code",InvtReportHeader.GETFILTER("Location Filter"));
+
+        TempValueEntry := ValueEntry;
+        INSERT;
+        exit(not ISEMPTY);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcValueEntries@10(VAR InventoryReportLine@1002 : Record "Inventory Report Entry");
+    BEGIN
+      with InventoryReportLine do begin
+        UpDateWindow(WindowType,WindowNo,FORMAT(ValueEntry."Entry Type"));
+        "Direct Cost Applied Actual" := "Direct Cost Applied Actual" + CalcDirectCostAppliedActual(ValueEntry);
+        "Overhead Applied Actual" := "Overhead Applied Actual" + CalcOverheadAppliedActual(ValueEntry);
+        "Purchase Variance" := "Purchase Variance" + CalcPurchaseVariance(ValueEntry);
+        "Inventory Adjmt." := "Inventory Adjmt." + CalcInventoryAdjmt(ValueEntry);
+        "Invt. Accrual (Interim)" := "Invt. Accrual (Interim)" + CalcInvtAccrualInterim(ValueEntry);
+        COGS := COGS + CalcCOGS(ValueEntry);
+        "COGS (Interim)" := "COGS (Interim)" + CalcCOGSInterim(ValueEntry);
+        "WIP Inventory" := "WIP Inventory" + CalcWIPInventory(ValueEntry);
+        "Material Variance" := "Material Variance" + CalcMaterialVariance(ValueEntry);
+        "Capacity Variance" := "Capacity Variance" + CalcCapVariance(ValueEntry);
+        "Subcontracted Variance" := "Subcontracted Variance" + CalcSubcontractedVariance(ValueEntry);
+        "Capacity Overhead Variance" := "Capacity Overhead Variance" + CalcCapOverheadVariance(ValueEntry);
+        "Mfg. Overhead Variance" := "Mfg. Overhead Variance" + CalcMfgOverheadVariance(ValueEntry);
+        "Inventory (Interim)" := "Inventory (Interim)" + CalcInventoryInterim(ValueEntry);
+        "Direct Cost Applied WIP" := "Direct Cost Applied WIP" + CalcDirectCostAppliedToWIP(ValueEntry);
+        "Overhead Applied WIP" := "Overhead Applied WIP" + CalcOverheadAppliedToWIP(ValueEntry);
+        "Inventory To WIP" := "Inventory To WIP" + CalcInvtToWIP(ValueEntry);
+        "WIP To Interim" := "WIP To Interim" + CalcWIPToInvtInterim(ValueEntry);
+        Inventory := Inventory + CalcInventory(ValueEntry);
+        "Direct Cost Applied" := "Direct Cost Applied" + CalcDirectCostApplied(ValueEntry);
+        "Overhead Applied" := "Overhead Applied" + CalcOverheadApplied(ValueEntry);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcGLAccount@28(VAR GLAcc@1000 : Record "G/L Account") : Decimal;
+    BEGIN
+      with GLAcc do begin
+        UpDateWindow(TABLECAPTION,"No.",WindowPostingType);
+        CALCFIELDS("Net Change");
+        exit("Net Change");
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcDiff@60(VAR InventoryReportLine@1000 : Record "Inventory Report Entry");
+    VAR
+      CalcInventoryReportLine@1001 : Record "Inventory Report Entry";
+    BEGIN
+      with InventoryReportLine do begin
+        CalcInventoryReportLine.COPY(InventoryReportLine);
+        RESET;
+
+        SETRANGE(Type,Type::"G/L Account");
+        CALCSUMS(
+          Inventory,"Inventory (Interim)","WIP Inventory",
+          "Direct Cost Applied Actual","Overhead Applied Actual","Purchase Variance",
+          "Inventory Adjmt.","Invt. Accrual (Interim)",COGS,
+          "COGS (Interim)","Material Variance");
+        CALCSUMS(
+          "Capacity Variance","Subcontracted Variance","Capacity Overhead Variance",
+          "Mfg. Overhead Variance","Direct Cost Applied WIP","Overhead Applied WIP",
+          "Inventory To WIP","WIP To Interim","Direct Cost Applied","Overhead Applied");
+        CalcInventoryReportLine := InventoryReportLine;
+
+        SETRANGE(Type,Type::Item);
+        CALCSUMS(
+          Inventory,"Inventory (Interim)","WIP Inventory",
+          "Direct Cost Applied Actual","Overhead Applied Actual","Purchase Variance",
+          "Inventory Adjmt.","Invt. Accrual (Interim)",COGS,
+          "COGS (Interim)","Material Variance");
+        CALCSUMS(
+          "Capacity Variance","Subcontracted Variance","Capacity Overhead Variance",
+          "Mfg. Overhead Variance","Direct Cost Applied WIP","Overhead Applied WIP",
+          "Inventory To WIP","WIP To Interim","Direct Cost Applied","Overhead Applied");
+      end;
+
+      with CalcInventoryReportLine do begin
+        Inventory := Inventory - InventoryReportLine.Inventory;
+        "Inventory (Interim)" := "Inventory (Interim)" - InventoryReportLine."Inventory (Interim)";
+        "WIP Inventory" := "WIP Inventory" - InventoryReportLine."WIP Inventory";
+        "Direct Cost Applied Actual" := "Direct Cost Applied Actual" - InventoryReportLine."Direct Cost Applied Actual";
+        "Overhead Applied Actual" := "Overhead Applied Actual" - InventoryReportLine."Overhead Applied Actual";
+        "Purchase Variance" := "Purchase Variance" - InventoryReportLine."Purchase Variance";
+        "Inventory Adjmt." := "Inventory Adjmt." - InventoryReportLine."Inventory Adjmt.";
+        "Invt. Accrual (Interim)" := "Invt. Accrual (Interim)" - InventoryReportLine."Invt. Accrual (Interim)";
+        COGS := COGS - InventoryReportLine.COGS;
+        "COGS (Interim)" := "COGS (Interim)" - InventoryReportLine."COGS (Interim)";
+        "Material Variance" := "Material Variance" - InventoryReportLine."Material Variance";
+        "Capacity Variance" := "Capacity Variance" - InventoryReportLine."Capacity Variance";
+        "Subcontracted Variance" := "Subcontracted Variance" - InventoryReportLine."Subcontracted Variance";
+        "Capacity Overhead Variance" := "Capacity Overhead Variance" - InventoryReportLine."Capacity Overhead Variance";
+        "Mfg. Overhead Variance" := "Mfg. Overhead Variance" - InventoryReportLine."Mfg. Overhead Variance";
+        "Direct Cost Applied WIP" := "Direct Cost Applied WIP" - InventoryReportLine."Direct Cost Applied WIP";
+        "Overhead Applied WIP" := "Overhead Applied WIP" - InventoryReportLine."Overhead Applied WIP";
+        "Inventory To WIP" := "Inventory To WIP" - InventoryReportLine."Inventory To WIP";
+        "WIP To Interim" := "WIP To Interim" - InventoryReportLine."WIP To Interim";
+        "Direct Cost Applied" := "Direct Cost Applied" - InventoryReportLine."Direct Cost Applied";
+        "Overhead Applied" := "Overhead Applied" - InventoryReportLine."Overhead Applied";
+        InventoryReportLine.COPY(CalcInventoryReportLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE DrillDownGL@55(VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    VAR
+      GLEntry@1001 : Record "G/L Entry";
+    BEGIN
+      with GLEntry do begin
+        SETRANGE("G/L Account No.",InvtReportEntry."No.");
+        SETFILTER("Posting Date",InvtReportEntry.GETFILTER("Posting Date Filter"));
+        PAGE.RUN(0,GLEntry,Amount);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcDirectCostAppliedActual@1(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if "Entry Type" = "Entry Type"::"Direct Cost" then
+          case "Item Ledger Entry Type" of
+            "Item Ledger Entry Type"::Purchase:
+              begin
+                CALCSUMS("Cost Amount (Actual)");
+                exit(-"Cost Amount (Actual)");
+              end;
+            "Item Ledger Entry Type"::" ":
+              if "Order Type" = "Order Type"::Assembly then begin
+                CALCSUMS("Cost Amount (Actual)");
+                exit(-"Cost Amount (Actual)");
+              end;
+          end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcOverheadAppliedActual@3(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if "Entry Type" = "Entry Type"::"Indirect Cost" then
+          case "Item Ledger Entry Type" of
+            "Item Ledger Entry Type"::Purchase,
+            "Item Ledger Entry Type"::Output,
+            "Item Ledger Entry Type"::"Assembly Output":
+              begin
+                CALCSUMS("Cost Amount (Actual)");
+                exit(-"Cost Amount (Actual)");
+              end;
+            "Item Ledger Entry Type"::" ":
+              if "Order Type" = "Order Type"::Assembly then begin
+                CALCSUMS("Cost Amount (Actual)");
+                exit(-"Cost Amount (Actual)");
+              end;
+          end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcPurchaseVariance@5(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::Variance) and
+           ("Item Ledger Entry Type" = "Item Ledger Entry Type"::Purchase)
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit(-"Cost Amount (Actual)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcInventoryAdjmt@6(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do
+        case "Entry Type" of
+          "Entry Type"::Rounding,
+          "Entry Type"::Revaluation:
+            begin
+              CALCSUMS("Cost Amount (Actual)");
+              exit(-"Cost Amount (Actual)");
+            end;
+          "Entry Type"::"Direct Cost":
+            case "Item Ledger Entry Type" of
+              "Item Ledger Entry Type"::"Positive Adjmt.",
+              "Item Ledger Entry Type"::"Negative Adjmt.",
+              "Item Ledger Entry Type"::"Assembly Output",
+              "Item Ledger Entry Type"::"Assembly Consumption",
+              "Item Ledger Entry Type"::Transfer:
+                begin
+                  CALCSUMS("Cost Amount (Actual)");
+                  exit(-"Cost Amount (Actual)");
+                end;
+              "Item Ledger Entry Type"::" ":
+                if "Order Type" = "Order Type"::Assembly then begin
+                  CALCSUMS("Cost Amount (Actual)");
+                  exit(-"Cost Amount (Actual)");
+                end;
+            end;
+        end;
+      exit(0);
+    END;
+
+    LOCAL PROCEDURE CalcInvtAccrualInterim@8(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::"Direct Cost") and
+           ("Item Ledger Entry Type" = "Item Ledger Entry Type"::Purchase)
+        then begin
+          CALCSUMS("Cost Amount (Expected)");
+          exit(-"Cost Amount (Expected)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcCOGS@9(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::"Direct Cost") and
+           ("Item Ledger Entry Type" = "Item Ledger Entry Type"::Sale)
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit(-"Cost Amount (Actual)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcCOGSInterim@11(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" in ["Entry Type"::"Direct Cost","Entry Type"::Revaluation]) and
+           ("Item Ledger Entry Type" = "Item Ledger Entry Type"::Sale)
+        then begin
+          CALCSUMS("Cost Amount (Expected)");
+          exit(-"Cost Amount (Expected)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcWIPInventory@12(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if "Order Type" = "Order Type"::Production then
+          case "Item Ledger Entry Type" of
+            "Item Ledger Entry Type"::Consumption:
+              if "Entry Type" = "Entry Type"::"Direct Cost" then begin
+                CALCSUMS("Cost Amount (Actual)");
+                exit(-"Cost Amount (Actual)");
+              end;
+            "Item Ledger Entry Type"::Output:
+              case "Entry Type" of
+                "Entry Type"::"Direct Cost":
+                  begin
+                    CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)");
+                    exit(-"Cost Amount (Actual)" - "Cost Amount (Expected)");
+                  end;
+                "Entry Type"::Revaluation:
+                  begin
+                    CALCSUMS("Cost Amount (Expected)");
+                    exit(-"Cost Amount (Expected)");
+                  end;
+              end;
+            "Item Ledger Entry Type"::" ":
+              if "Entry Type" in ["Entry Type"::"Direct Cost","Entry Type"::"Indirect Cost"] then begin
+                CALCSUMS("Cost Amount (Actual)");
+                exit("Cost Amount (Actual)");
+              end;
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcMaterialVariance@14(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::Variance) and
+           ("Item Ledger Entry Type" in ["Item Ledger Entry Type"::Output,
+                                         "Item Ledger Entry Type"::"Assembly Output"]) and
+           ("Variance Type" = "Variance Type"::Material)
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit(-"Cost Amount (Actual)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcCapVariance@15(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::Variance) and
+           ("Item Ledger Entry Type" in ["Item Ledger Entry Type"::Output,
+                                         "Item Ledger Entry Type"::"Assembly Output"]) and
+           ("Variance Type" = "Variance Type"::Capacity)
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit(-"Cost Amount (Actual)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcSubcontractedVariance@16(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::Variance) and
+           ("Item Ledger Entry Type" in ["Item Ledger Entry Type"::Output,
+                                         "Item Ledger Entry Type"::"Assembly Output"]) and
+           ("Variance Type" = "Variance Type"::Subcontracted)
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit(-"Cost Amount (Actual)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcCapOverheadVariance@17(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::Variance) and
+           ("Item Ledger Entry Type" in ["Item Ledger Entry Type"::Output,
+                                         "Item Ledger Entry Type"::"Assembly Output"]) and
+           ("Variance Type" = "Variance Type"::"Capacity Overhead")
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit(-"Cost Amount (Actual)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcMfgOverheadVariance@18(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::Variance) and
+           ("Item Ledger Entry Type" in ["Item Ledger Entry Type"::Output,
+                                         "Item Ledger Entry Type"::"Assembly Output"]) and
+           ("Variance Type" = "Variance Type"::"Manufacturing Overhead")
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit(-"Cost Amount (Actual)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcInventoryInterim@19(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" in ["Entry Type"::"Direct Cost","Entry Type"::Revaluation]) and
+           ("Item Ledger Entry Type" in
+            ["Item Ledger Entry Type"::Purchase,
+             "Item Ledger Entry Type"::Sale,
+             "Item Ledger Entry Type"::Output])
+        then begin
+          CALCSUMS("Cost Amount (Expected)");
+          exit("Cost Amount (Expected)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcOverheadAppliedToWIP@24(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::"Indirect Cost") and
+           ("Item Ledger Entry Type" = "Item Ledger Entry Type"::" ") and
+           ("Order Type" = "Order Type"::Production)
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit(-"Cost Amount (Actual)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcDirectCostAppliedToWIP@25(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" = "Entry Type"::"Direct Cost") and
+           ("Item Ledger Entry Type" = "Item Ledger Entry Type"::" ") and
+           ("Order Type" = "Order Type"::Production)
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit(-"Cost Amount (Actual)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcWIPToInvtInterim@26(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if ("Entry Type" in ["Entry Type"::"Direct Cost","Entry Type"::Revaluation]) and
+           ("Item Ledger Entry Type" = "Item Ledger Entry Type"::Output)
+        then begin
+          CALCSUMS("Cost Amount (Expected)");
+          exit(-"Cost Amount (Expected)");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcInvtToWIP@29(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do
+        if ("Entry Type" = "Entry Type"::"Direct Cost") and
+           ("Item Ledger Entry Type" in
+            ["Item Ledger Entry Type"::Output,"Item Ledger Entry Type"::Consumption])
+        then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit("Cost Amount (Actual)");
+        end;
+    END;
+
+    LOCAL PROCEDURE CalcInventory@20(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if "Item Ledger Entry Type" = "Item Ledger Entry Type"::" " then
+          exit(0);
+        CALCSUMS("Cost Amount (Actual)");
+        exit("Cost Amount (Actual)");
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcDirectCostApplied@32(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if "Entry Type" = "Entry Type"::"Direct Cost" then
+          case "Item Ledger Entry Type" of
+            "Item Ledger Entry Type"::Purchase:
+              begin
+                CALCSUMS("Cost Amount (Actual)");
+                exit(-"Cost Amount (Actual)");
+              end;
+            "Item Ledger Entry Type"::" ":
+              begin
+                if "Order Type" = "Order Type"::Assembly then begin
+                  CALCSUMS("Cost Amount (Actual)");
+                  exit(-"Cost Amount (Actual)");
+                end;
+                CALCSUMS("Cost Amount (Actual)");
+                exit(-"Cost Amount (Actual)");
+              end;
+          end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcOverheadApplied@31(VAR ValueEntry@1000 : Record "Value Entry") : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        if "Entry Type" = "Entry Type"::"Indirect Cost" then
+          case "Item Ledger Entry Type" of
+            "Item Ledger Entry Type"::Purchase,
+            "Item Ledger Entry Type"::Output,
+            "Item Ledger Entry Type"::"Assembly Output":
+              begin
+                CALCSUMS("Cost Amount (Actual)");
+                exit(-"Cost Amount (Actual)");
+              end;
+            "Item Ledger Entry Type"::" ":
+              begin
+                if "Order Type" = "Order Type"::Assembly then begin
+                  CALCSUMS("Cost Amount (Actual)");
+                  exit(-"Cost Amount (Actual)");
+                end;
+                CALCSUMS("Cost Amount (Actual)");
+                exit(-"Cost Amount (Actual)");
+              end;
+          end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyFiltersFronInventoryReportLine@73(VAR ValueEntry@1000 : Record "Value Entry";VAR InventoryReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      ValueEntry.SETCURRENTKEY("Item No.","Posting Date","Item Ledger Entry Type","Entry Type");
+      ValueEntry.SETRANGE("Item No.",InventoryReportEntry."No.");
+      ValueEntry.SETFILTER("Posting Date",InventoryReportEntry.GETFILTER("Posting Date Filter"));
+      ValueEntry.SETFILTER("Location Code",InventoryReportEntry.GETFILTER("Location Filter"));
+    END;
+
+    [External]
+    PROCEDURE DrillDownDirectCostApplActual@54(VAR InvtReportEntry@1002 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Direct Cost Applied Actual"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersDirectCostApplActual@78(VAR ValueEntry@1003 : Record "Value Entry";VAR InvtReportEntry@1002 : Record "Inventory Report Entry");
+    VAR
+      Selection@1000 : Integer;
+    BEGIN
+      Selection := STRMENU(Text006,2);
+      CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+      with ValueEntry do begin
+        SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+        SETRANGE("Variance Type");
+        case Selection of
+          1:
+            SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::Purchase);
+          2:
+            begin
+              SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::" ");
+              SETRANGE("Order Type","Order Type"::Assembly);
+            end;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownOverheadAppliedActual@53(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Overhead Applied Actual"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersOverheadAppliedActual@79(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1002 : Record "Inventory Report Entry");
+    VAR
+      Selection@1000 : Integer;
+    BEGIN
+      Selection := STRMENU(Text007,2);
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::"Indirect Cost");
+        SETRANGE("Variance Type");
+        case Selection of
+          1:
+            SETFILTER("Item Ledger Entry Type",'%1|%2|%3',
+              "Item Ledger Entry Type"::Purchase,
+              "Item Ledger Entry Type"::Output,
+              "Item Ledger Entry Type"::"Assembly Output");
+          2:
+            begin
+              SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::" ");
+              SETRANGE("Order Type","Order Type"::Assembly);
+            end;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownPurchaseVariance@52(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Purchase Variance"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersPurchaseVariance@80(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::Variance);
+        SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::Purchase);
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownInventoryAdjmt@51(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Inventory Adjmt."),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersInventoryAdjmt@81(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1002 : Record "Inventory Report Entry");
+    VAR
+      Selection@1000 : Integer;
+    BEGIN
+      Selection := STRMENU(Text004,3);
+      if Selection = 0 then
+        exit;
+
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+
+        case Selection of
+          1:
+            begin
+              SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+              SETFILTER("Item Ledger Entry Type",'%1|%2|%3|%4|%5',
+                "Item Ledger Entry Type"::"Positive Adjmt.",
+                "Item Ledger Entry Type"::"Negative Adjmt.",
+                "Item Ledger Entry Type"::"Assembly Output",
+                "Item Ledger Entry Type"::"Assembly Consumption",
+                "Item Ledger Entry Type"::Transfer);
+            end;
+          2:
+            begin
+              SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+              SETRANGE("Order Type","Order Type"::Assembly);
+              SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::" ");
+            end;
+          3:
+            SETRANGE("Entry Type","Entry Type"::Revaluation);
+          4:
+            SETRANGE("Entry Type","Entry Type"::Rounding);
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownInvtAccrualInterim@49(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Invt. Accrual (Interim)"),ValueEntry.FIELDNO("Cost Amount (Expected)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersInvtAccrualInterim@82(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+        SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::Purchase);
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownCOGS@48(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(InvtReportEntry,InvtReportEntry.FIELDNO(COGS),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersCOGS@83(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+        SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::Sale);
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownCOGSInterim@47(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("COGS (Interim)"),ValueEntry.FIELDNO("Cost Amount (Expected)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersCOGSInterim@84(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETFILTER("Entry Type",'%1|%2',"Entry Type"::"Direct Cost","Entry Type"::Revaluation);
+        SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::Sale);
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownWIPInventory@46(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("WIP Inventory"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersWIPInventory@85(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1002 : Record "Inventory Report Entry");
+    VAR
+      Selection@1000 : Integer;
+    BEGIN
+      Selection := STRMENU(Text005,3);
+      if Selection = 0 then
+        exit;
+
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Order Type","Order Type"::Production);
+
+        case Selection of
+          1:
+            begin
+              SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+              SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::Consumption);
+            end;
+          2:
+            begin
+              SETFILTER("Entry Type",'%1|%2',"Entry Type"::"Direct Cost","Entry Type"::"Indirect Cost");
+              SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::" ");
+            end;
+          3:
+            begin
+              SETFILTER("Entry Type",'%1|%2',"Entry Type"::"Direct Cost","Entry Type"::Revaluation);
+              SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::Output);
+            end;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownMaterialVariance@45(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Material Variance"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersMaterialVariance@86(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::Variance);
+        SETRANGE("Variance Type","Variance Type"::Material);
+        SETFILTER("Item Ledger Entry Type",'%1|%2',
+          "Item Ledger Entry Type"::Output,
+          "Item Ledger Entry Type"::"Assembly Output");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownCapVariance@44(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Capacity Variance"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersCapVariance@87(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::Variance);
+        SETRANGE("Variance Type","Variance Type"::Capacity);
+        SETFILTER("Item Ledger Entry Type",'%1|%2',
+          "Item Ledger Entry Type"::Output,
+          "Item Ledger Entry Type"::"Assembly Output");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownSubcontractedVariance@43(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Subcontracted Variance"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersSubcontractedVariance@88(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::Variance);
+        SETRANGE("Variance Type","Variance Type"::Subcontracted);
+        SETFILTER("Item Ledger Entry Type",'%1|%2',
+          "Item Ledger Entry Type"::Output,
+          "Item Ledger Entry Type"::"Assembly Output");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownCapOverheadVariance@42(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Capacity Overhead Variance"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersCapOverheadVariance@89(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::Variance);
+        SETRANGE("Variance Type","Variance Type"::"Capacity Overhead");
+        SETFILTER("Item Ledger Entry Type",'%1|%2',
+          "Item Ledger Entry Type"::Output,
+          "Item Ledger Entry Type"::"Assembly Output");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownMfgOverheadVariance@41(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Mfg. Overhead Variance"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersMfgOverheadVariance@90(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::Variance);
+        SETRANGE("Variance Type","Variance Type"::"Manufacturing Overhead");
+        SETFILTER("Item Ledger Entry Type",'%1|%2',
+          "Item Ledger Entry Type"::Output,
+          "Item Ledger Entry Type"::"Assembly Output");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownInventoryInterim@40(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Inventory (Interim)"),ValueEntry.FIELDNO("Cost Amount (Expected)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersInventoryInterim@91(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETFILTER("Entry Type",'%1|%2',"Entry Type"::"Direct Cost","Entry Type"::Revaluation);
+        SETFILTER("Item Ledger Entry Type",'%1|%2|%3',
+          "Item Ledger Entry Type"::Output,
+          "Item Ledger Entry Type"::Purchase,
+          "Item Ledger Entry Type"::Sale);
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownOverheadAppliedToWIP@39(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Overhead Applied WIP"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersOverheadAppliedToWIP@92(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::"Indirect Cost");
+        SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::" ");
+        SETRANGE("Order Type","Order Type"::Production);
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownDirectCostApplToWIP@38(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Direct Cost Applied WIP"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersDirectCostApplToWIP@93(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+        SETRANGE("Order Type","Order Type"::Production);
+        SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::" ");
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownWIPToInvtInterim@37(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("WIP To Interim"),ValueEntry.FIELDNO("Cost Amount (Expected)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersWIPToInvtInterim@94(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETFILTER("Entry Type",'%1|%2',"Entry Type"::"Direct Cost","Entry Type"::Revaluation);
+        SETRANGE("Item Ledger Entry Type","Item Ledger Entry Type"::Output);
+        SETRANGE("Order Type","Order Type"::Production);
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownInvtToWIP@36(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Inventory To WIP"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersInvtToWIP@95(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+        SETRANGE("Order Type","Order Type"::Production);
+        SETFILTER("Item Ledger Entry Type",'%1|%2',
+          "Item Ledger Entry Type"::Output,
+          "Item Ledger Entry Type"::Consumption);
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownInventory@35(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO(Inventory),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersInventory@96(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type");
+        SETFILTER("Item Ledger Entry Type",'<>%1',"Item Ledger Entry Type"::" ");
+        SETRANGE("Variance Type");
+        SETFILTER("Item Ledger Entry Type",'<>%1',"Item Ledger Entry Type"::" ");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownDirectCostApplied@34(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Direct Cost Applied"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersDirectCostApplied@97(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+        SETFILTER("Item Ledger Entry Type",'%1|%2',
+          "Item Ledger Entry Type"::Purchase,
+          "Item Ledger Entry Type"::" ");
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownOverheadApplied@27(VAR InvtReportEntry@1001 : Record "Inventory Report Entry");
+    BEGIN
+      DrillDownInventoryReportEntryAmount(
+        InvtReportEntry,InvtReportEntry.FIELDNO("Overhead Applied"),ValueEntry.FIELDNO("Cost Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE SetFiltersOverheadApplied@98(VAR ValueEntry@1001 : Record "Value Entry";VAR InvtReportEntry@1000 : Record "Inventory Report Entry");
+    BEGIN
+      with ValueEntry do begin
+        CopyFiltersFronInventoryReportLine(ValueEntry,InvtReportEntry);
+        SETRANGE("Entry Type","Entry Type"::"Indirect Cost");
+        SETFILTER("Item Ledger Entry Type",'%1|%2|%3|%4',
+          "Item Ledger Entry Type"::Purchase,
+          "Item Ledger Entry Type"::Output,
+          "Item Ledger Entry Type"::"Assembly Output",
+          "Item Ledger Entry Type"::" ");
+        SETRANGE("Variance Type");
+      end;
+    END;
+
+    LOCAL PROCEDURE DrillDownInventoryReportEntryAmount@72(VAR InvtReportEntry@1001 : Record "Inventory Report Entry";DrillDownFieldNo@1000 : Integer;ActiveFieldNo@1002 : Integer);
+    BEGIN
+      if InvtReportEntry.Type = InvtReportEntry.Type::"G/L Account" then
+        DrillDownGL(InvtReportEntry)
+      else
+        DrillDownInventoryReportValueEntry(InvtReportEntry,DrillDownFieldNo,ActiveFieldNo);
+    END;
+
+    LOCAL PROCEDURE DrillDownInventoryReportValueEntry@76(VAR InvtReportEntry@1001 : Record "Inventory Report Entry";DrillDownFieldNo@1000 : Integer;ActiveFieldNo@1003 : Integer);
+    VAR
+      ValueEntry@1002 : Record "Value Entry";
+    BEGIN
+      case DrillDownFieldNo of
+        InvtReportEntry.FIELDNO("Direct Cost Applied Actual"):
+          SetFiltersDirectCostApplActual(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Overhead Applied Actual"):
+          SetFiltersOverheadAppliedActual(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Purchase Variance"):
+          SetFiltersPurchaseVariance(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Inventory Adjmt."):
+          SetFiltersInventoryAdjmt(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Invt. Accrual (Interim)"):
+          SetFiltersInvtAccrualInterim(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO(COGS):
+          SetFiltersCOGS(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("COGS (Interim)"):
+          SetFiltersCOGSInterim(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("WIP Inventory"):
+          SetFiltersWIPInventory(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Material Variance"):
+          SetFiltersMaterialVariance(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Capacity Variance"):
+          SetFiltersCapVariance(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Subcontracted Variance"):
+          SetFiltersSubcontractedVariance(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Capacity Overhead Variance"):
+          SetFiltersCapOverheadVariance(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Mfg. Overhead Variance"):
+          SetFiltersMfgOverheadVariance(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Inventory (Interim)"):
+          SetFiltersInventoryInterim(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Overhead Applied WIP"):
+          SetFiltersOverheadAppliedToWIP(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Direct Cost Applied WIP"):
+          SetFiltersDirectCostApplToWIP(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("WIP To Interim"):
+          SetFiltersWIPToInvtInterim(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Inventory To WIP"):
+          SetFiltersInvtToWIP(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO(Inventory):
+          SetFiltersInventory(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Direct Cost Applied"):
+          SetFiltersDirectCostApplied(ValueEntry,InvtReportEntry);
+        InvtReportEntry.FIELDNO("Overhead Applied"):
+          SetFiltersOverheadApplied(ValueEntry,InvtReportEntry);
+      end;
+
+      PAGE.RUN(0,ValueEntry,ActiveFieldNo);
+    END;
+
+    [External]
+    PROCEDURE SetReportHeader@13(VAR InvtReportHeader2@1000 : Record "Inventory Report Header");
+    BEGIN
+      InvtReportHeader.COPY(InvtReportHeader2);
+    END;
+
+    LOCAL PROCEDURE OpenWindow@59();
+    BEGIN
+      Window.OPEN(
+        Text000 +
+        Text001 +
+        Text002 +
+        Text003);
+      WindowIsOpen := true;
+      WindowUpdateDateTime := CURRENTDATETIME;
+    END;
+
+    LOCAL PROCEDURE UpDateWindow@56(NewWindowType@1002 : Text[80];NewWindowNo@1001 : Code[20];NewWindowPostingType@1000 : Text[80]);
+    BEGIN
+      WindowType := NewWindowType;
+      WindowNo := NewWindowNo;
+      WindowPostingType := NewWindowPostingType;
+
+      if IsTimeForUpdate then begin
+        if not WindowIsOpen then
+          OpenWindow;
+        Window.UPDATE(1,WindowType);
+        Window.UPDATE(2,WindowNo);
+        Window.UPDATE(3,WindowPostingType);
+      end;
+    END;
+
+    LOCAL PROCEDURE IsTimeForUpdate@69() : Boolean;
+    BEGIN
+      if CURRENTDATETIME - WindowUpdateDateTime >= 1000 then begin
+        WindowUpdateDateTime := CURRENTDATETIME;
+        exit(true);
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE CheckExpectedCostPosting@61(VAR InventoryReportLine@1000 : Record "Inventory Report Entry") : Boolean;
+    VAR
+      InvtSetup@1012 : Record "Inventory Setup";
+    BEGIN
+      with InventoryReportLine do begin
+        if ("Inventory (Interim)" <> 0) or
+           ("WIP Inventory" <> 0) or
+           ("Invt. Accrual (Interim)" <> 0) or
+           ("COGS (Interim)" <> 0)
+        then begin
+          InvtSetup.GET;
+          "Expected Cost Posting Warning" := not InvtSetup."Expected Cost Posting to G/L";
+          MODIFY;
+          exit(true);
+        end;
+        exit(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckIfNoDifference@64(VAR InventoryReportLine@1000 : Record "Inventory Report Entry") : Boolean;
+    BEGIN
+      with InventoryReportLine do begin
+        if (Inventory = 0) and
+           ("WIP Inventory" = 0) and
+           ("Direct Cost Applied Actual" = 0) and
+           ("Overhead Applied Actual" = 0) and
+           ("Purchase Variance" = 0) and
+           ("Inventory Adjmt." = 0) and
+           ("Invt. Accrual (Interim)" = 0) and
+           (COGS = 0) and
+           ("COGS (Interim)" = 0) and
+           ("Material Variance" = 0) and
+           ("Capacity Variance" = 0) and
+           ("Subcontracted Variance" = 0) and
+           ("Capacity Overhead Variance" = 0) and
+           ("Mfg. Overhead Variance" = 0) and
+           ("Direct Cost Applied WIP" = 0) and
+           ("Overhead Applied WIP" = 0) and
+           ("Inventory To WIP" = 0) and
+           ("WIP To Interim" = 0) and
+           ("Direct Cost Applied" = 0) and
+           ("Overhead Applied" = 0)
+        then
+          exit(true);
+        exit(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckCostIsPostedToGL@65(VAR InventoryReportLine@1000 : Record "Inventory Report Entry") : Boolean;
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      with InventoryReportLine do begin
+        ValueEntry.SETCURRENTKEY("Item No.","Posting Date");
+        if ValueEntry.FINDFIRST then
+          repeat
+            ValueEntry.SETRANGE("Item No.",ValueEntry."Item No.");
+            ValueEntry.SETRANGE("Posting Date",ValueEntry."Posting Date");
+            if ValueEntryInFilteredSet(ValueEntry,InvtReportHeader,false) then
+              repeat
+                ValueEntry.SETRANGE("Entry Type",ValueEntry."Entry Type");
+                ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type");
+                ValueEntry.SETRANGE("Location Code",ValueEntry."Location Code");
+                ValueEntry.SETRANGE("Variance Type",ValueEntry."Variance Type");
+
+                if ValueEntryInFilteredSet(ValueEntry,InvtReportHeader,true) then begin
+                  ValueEntry.SETRANGE("Cost Posted to G/L",0);
+                  ValueEntry.SETFILTER("Cost Amount (Actual)",'<>%1',0);
+                  if ValueEntry.FINDLAST then begin
+                    "Cost is Posted to G/L Warning" := true;
+                    MODIFY;
+                    exit(true);
+                  end;
+                  ValueEntry.SETRANGE("Cost Posted to G/L");
+                  ValueEntry.SETRANGE("Cost Amount (Actual)");
+                end;
+                ValueEntry.FINDLAST;
+                ValueEntry.SETRANGE("Entry Type");
+                ValueEntry.SETRANGE("Item Ledger Entry Type");
+                ValueEntry.SETRANGE("Location Code");
+                ValueEntry.SETRANGE("Variance Type");
+              until ValueEntry.NEXT = 0;
+
+            if ValueEntry.FINDLAST then;
+            ValueEntry.SETRANGE("Item No.");
+            ValueEntry.SETRANGE("Posting Date");
+          until ValueEntry.NEXT = 0;
+        exit(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckValueGLCompression@66(VAR InventoryReportLine@1000 : Record "Inventory Report Entry") : Boolean;
+    VAR
+      DateComprRegister@1010 : Record "Date Compr. Register";
+      InStartDateCompr@1003 : Boolean;
+      InEndDateCompr@1002 : Boolean;
+    BEGIN
+      with InventoryReportLine do begin
+        DateComprRegister.SETCURRENTKEY("Table ID");
+        DateComprRegister.SETFILTER("Table ID",'%1|%2',DATABASE::"Value Entry",DATABASE::"G/L Entry");
+        DateComprRegister.SETFILTER("Starting Date",InvtReportHeader.GETFILTER("Posting Date Filter"));
+        InStartDateCompr := DateComprRegister.FINDFIRST;
+        DateComprRegister.SETFILTER("Ending Date",InvtReportHeader.GETFILTER("Posting Date Filter"));
+        InEndDateCompr := DateComprRegister.FINDFIRST;
+        if InEndDateCompr or InStartDateCompr then begin
+          "Compression Warning" := true;
+          MODIFY;
+          exit(true);
+        end;
+        exit(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckGLClosingOverlaps@67(VAR InventoryReportLine@1000 : Record "Inventory Report Entry") : Boolean;
+    VAR
+      AccountingPeriod@1006 : Record "Accounting Period";
+      GLEntry@1005 : Record "G/L Entry";
+      MinDate@1001 : Date;
+      found@1002 : Boolean;
+    BEGIN
+      with InventoryReportLine do begin
+        if not (("Direct Cost Applied Actual" = 0) and
+                ("Overhead Applied Actual" = 0) and
+                ("Purchase Variance" = 0) and
+                ("Inventory Adjmt." = 0) and
+                (COGS = 0) and
+                ("Material Variance" = 0) and
+                ("Capacity Variance" = 0) and
+                ("Subcontracted Variance" = 0) and
+                ("Capacity Overhead Variance" = 0) and
+                ("Mfg. Overhead Variance" = 0) and
+                ("Direct Cost Applied WIP" = 0) and
+                ("Overhead Applied WIP" = 0) and
+                ("Inventory To WIP" = 0) and
+                ("Direct Cost Applied" = 0) and
+                ("Overhead Applied" = 0))
+        then begin
+          AccountingPeriod.SETFILTER("Starting Date",InvtReportHeader.GETFILTER("Posting Date Filter"));
+          if InvtReportHeader.GETFILTER("Posting Date Filter") <> '' then
+            MinDate := InvtReportHeader.GETRANGEMIN("Posting Date Filter")
+          else
+            MinDate := 0D;
+
+          found :=
+            AccountingPeriod.FIND('-') and AccountingPeriod.Closed and
+            (AccountingPeriod."Starting Date" <= MinDate);
+          if AccountingPeriod."Starting Date" > MinDate then begin
+            AccountingPeriod.SETRANGE("Starting Date");
+            if not found then
+              found :=
+                AccountingPeriod.NEXT(-1) <> 0;
+            if not found then
+              found := AccountingPeriod.Closed;
+          end;
+          if found then
+            repeat
+              repeat
+              until (AccountingPeriod.NEXT = 0) or AccountingPeriod."New Fiscal Year";
+              if AccountingPeriod."New Fiscal Year" then
+                AccountingPeriod."Starting Date" := CLOSINGDATE(CALCDATE('<-1D>',AccountingPeriod."Starting Date"))
+              else
+                AccountingPeriod."Starting Date" := CLOSINGDATE(AccountingPeriod."Starting Date");
+              AccountingPeriod.SETFILTER("Starting Date",InvtReportHeader.GETFILTER("Posting Date Filter"));
+              GLEntry.SETRANGE("Posting Date",AccountingPeriod."Starting Date");
+              if not GLEntry.ISEMPTY then begin
+                "Closing Period Overlap Warning" := true;
+                MODIFY;
+                exit(true);
+              end;
+              AccountingPeriod.SETRANGE(Closed,true);
+            until AccountingPeriod.NEXT = 0;
+        end;
+        exit(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckDeletedGLAcc@68(VAR InventoryReportLine@1000 : Record "Inventory Report Entry") : Boolean;
+    VAR
+      GLEntry@1004 : Record "G/L Entry";
+    BEGIN
+      with InventoryReportLine do begin
+        GLEntry.RESET;
+        GLEntry.SETCURRENTKEY("G/L Account No.","Posting Date");
+        GLEntry.SETRANGE("G/L Account No.",'');
+        GLEntry.SETFILTER("Posting Date",InvtReportHeader.GETFILTER("Posting Date Filter"));
+        if GLEntry.FINDFIRST then begin
+          "Deleted G/L Accounts Warning" := true;
+          MODIFY;
+          exit(true);
+        end;
+        exit(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckPostingDateToGLNotTheSame@70(VAR InventoryReportLine@1000 : Record "Inventory Report Entry") : Boolean;
+    VAR
+      ValueEntry@1002 : Record "Value Entry";
+      InvtPostingSetup@1003 : Record "Inventory Posting Setup";
+      TempInvtPostingSetup@1004 : TEMPORARY Record "Inventory Posting Setup";
+      TotalInventory@1001 : Decimal;
+    BEGIN
+      with InventoryReportLine do begin
+        ValueEntry.RESET;
+        ValueEntry.SETCURRENTKEY("Item No.");
+        if ValueEntry.FINDFIRST then
+          repeat
+            ValueEntry.SETRANGE("Item No.",ValueEntry."Item No.");
+            if ValueEntry."Item No." <> '' then
+              TotalInventory := TotalInventory + CalcInventory(ValueEntry);
+            ValueEntry.FINDLAST;
+            ValueEntry.SETRANGE("Item No.");
+          until ValueEntry.NEXT = 0;
+
+        if InvtPostingSetup.FIND('-') then
+          repeat
+            TempInvtPostingSetup.RESET;
+            TempInvtPostingSetup.SETRANGE("Inventory Account",InvtPostingSetup."Inventory Account");
+            if not TempInvtPostingSetup.FINDFIRST then
+              if GLAcc.GET(InvtPostingSetup."Inventory Account") then
+                TotalInventory := TotalInventory - CalcGLAccount(GLAcc);
+            TempInvtPostingSetup := InvtPostingSetup;
+            TempInvtPostingSetup.INSERT;
+          until InvtPostingSetup.NEXT = 0;
+        if TotalInventory = 0 then begin
+          "Posting Date Warning" := true;
+          MODIFY;
+          exit(true);
+        end;
+        exit(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckDirectPostings@71(VAR InventoryReportLine@1000 : Record "Inventory Report Entry") : Boolean;
+    BEGIN
+      with InventoryReportLine do begin
+        if Inventory +
+           "Inventory (Interim)" +
+           "WIP Inventory" +
+           "Direct Cost Applied Actual" +
+           "Overhead Applied Actual" +
+           "Purchase Variance" +
+           "Inventory Adjmt." +
+           "Invt. Accrual (Interim)" +
+           COGS +
+           "COGS (Interim)" +
+           "Material Variance" +
+           "Capacity Variance" +
+           "Subcontracted Variance" +
+           "Capacity Overhead Variance" +
+           "Mfg. Overhead Variance" +
+           "Direct Cost Applied WIP" +
+           "Overhead Applied WIP" +
+           "Direct Cost Applied" +
+           "Overhead Applied" <>
+           0
+        then begin
+          "Direct Postings Warning" := true;
+          MODIFY;
+          exit(true);
+        end;
+        exit(false);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

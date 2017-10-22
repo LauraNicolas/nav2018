@@ -1,0 +1,222 @@
+OBJECT Codeunit 5309 Outlook Synch. Process Links
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OSynchEntity@1021 : Record "Outlook Synch. Entity";
+      OSynchLink@1019 : Record "Outlook Synch. Link";
+      OSynchUserSetup@1016 : Record "Outlook Synch. User Setup";
+      OSynchTypeConversion@1010 : Codeunit "Outlook Synch. Type Conv";
+      OSynchProcessLine@1011 : Codeunit "Outlook Synch. Process Line";
+      OsynchOutlookMgt@1000 : Codeunit "Outlook Synch. Outlook Mgt.";
+      ErrorXMLWriter@1007 : DotNet "'Microsoft.Dynamics.Nav.OLSync.Common, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.NAV.OLSync.Common.XmlTextWriter";
+      OResponseXMLTextReader@1005 : DotNet "'Microsoft.Dynamics.Nav.OLSync.Common, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.NAV.OLSync.Common.XmlTextReader";
+      StartDateTime@1003 : DateTime;
+      RootIterator@1001 : Text[38];
+      Text001@1002 : TextConst 'ENU=The synchronization failed because the synchronization data from Microsoft Outlook cannot be processed. Try again later and if the problem persists contact your system administrator.';
+      Text002@1008 : TextConst 'ENU=The synchronization for an item in the %1 entity completed with an error. Please try to synchronize this item again later. If the problem persists contact your system administrator.';
+      Text003@1025 : TextConst 'ENU=An Outlook item in the %1 entity was not synchronized because this entity does not exist. Try again later and if the problem persists contact your system administrator.';
+      Text004@1024 : TextConst 'ENU=An Outlook item in the %1 entity was not synchronized because this item could not be found in the synchronization folders. Try again later and if the problem persists contact your system administrator.';
+      Text005@1023 : TextConst 'ENU=An Outlook item in the %1 entity was not synchronized because the synchronization data from Microsoft Outlook cannot be processed. Try again later and if the problem persists contact your system administrator.';
+      Text006@1022 : TextConst '@@@=%1 - product name;ENU=The synchronization failed because the synchronization data could not be sent from %1. Try again later and if the problem persists contact your system administrator.';
+
+    [Internal]
+    PROCEDURE ProcessOutlookEntryIDResponse@28(UserID@1000 : Code[50];VAR XMLMessage@1005 : Text);
+    VAR
+      EntityRecRef@1013 : RecordRef;
+      EntityRecID@1006 : RecordID;
+      EntryIDContainer@1001 : Text;
+      NewEntryIDContainer@1009 : Text;
+      SynchEntityCode@1008 : Code[10];
+      TagName@1003 : Text[1024];
+      EntityIterator@1011 : Text[38];
+      OEntryIDHash@1007 : Text[32];
+      NewOEntryIDHash@1002 : Text[32];
+      RecordIDTextValue@1012 : Text[250];
+      StartSynchTimeText@1004 : Text[30];
+    BEGIN
+      OResponseXMLTextReader := OResponseXMLTextReader.XmlTextReader;
+
+      if not OResponseXMLTextReader.LoadXml(XMLMessage) then
+        ERROR(Text001);
+
+      OSynchUserSetup.RESET;
+      OSynchUserSetup.SETRANGE("User ID",UserID);
+      if not OSynchUserSetup.FINDFIRST then
+        exit;
+
+      TagName := OResponseXMLTextReader.RootLocalName;
+      if TagName <> 'PostUpdate' then
+        ERROR(Text001);
+
+      OResponseXMLTextReader.SelectElements(RootIterator,'PostUpdate');
+      StartSynchTimeText := OResponseXMLTextReader.GetCurrentNodeAttribute(RootIterator,'StartSynchTime');
+      if not OSynchTypeConversion.TextToDateTime(StartSynchTimeText,StartDateTime) then
+        ERROR(Text001);
+
+      if OResponseXMLTextReader.SelectElements(RootIterator,'*') < 1 then
+        exit;
+
+      TagName := OResponseXMLTextReader.GetName(RootIterator);
+      if TagName <> 'BriefOutlookItem' then
+        ERROR(Text001);
+
+      if ISNULL(ErrorXMLWriter) then begin
+        ErrorXMLWriter := ErrorXMLWriter.XmlTextWriter;
+        ErrorXMLWriter.WriteStartDocument;
+        ErrorXMLWriter.WriteStartElement('PostUpdate');
+      end;
+
+      if OResponseXMLTextReader.SelectElements(RootIterator,'child::BriefOutlookItem') > 0 then begin
+        CLEAR(EntryIDContainer);
+        CLEAR(NewEntryIDContainer);
+
+        repeat
+          OEntryIDHash := '';
+          NewOEntryIDHash := '';
+          CLEAR(EntityRecID);
+
+          SynchEntityCode := COPYSTR(
+              OResponseXMLTextReader.GetCurrentNodeAttribute(RootIterator,'SynchEntityCode'),1,MAXSTRLEN(SynchEntityCode));
+          if OSynchUserSetup.GET(UserID,SynchEntityCode) then begin
+            if OSynchEntity.GET(SynchEntityCode) then begin
+              RecordIDTextValue := OResponseXMLTextReader.GetCurrentNodeAttribute(RootIterator,'RecordID');
+              OResponseXMLTextReader.GetAllCurrentChildNodes(RootIterator,EntityIterator);
+              TagName := OResponseXMLTextReader.GetName(EntityIterator);
+              if TagName <> 'EntryID' then
+                ERROR(Text001);
+              OEntryIDHash := GetEntryIDHash(EntryIDContainer,EntityIterator);
+              if OEntryIDHash <> '' then begin
+                OResponseXMLTextReader.MoveNext(EntityIterator);
+                TagName := OResponseXMLTextReader.GetName(EntityIterator);
+                NewOEntryIDHash := GetEntryIDHash(NewEntryIDContainer,EntityIterator);
+                OSynchLink.RESET;
+                OSynchLink.SETRANGE("User ID",UserID);
+                OSynchLink.SETRANGE("Outlook Entry ID Hash",OEntryIDHash);
+                if OSynchLink.FINDFIRST then begin
+                  EVALUATE(EntityRecID,FORMAT(OSynchLink."Record ID"));
+                  EntityRecRef.OPEN(OSynchEntity."Table No.");
+                  if TagName <> 'NewEntryID' then
+                    WriteErrorLog(
+                      EntityRecID,
+                      SynchEntityCode,
+                      Text001,
+                      StartDateTime,
+                      EntryIDContainer);
+                  if NewOEntryIDHash <> '' then
+                    OSynchLink.PutEntryID(NewEntryIDContainer,NewOEntryIDHash)
+                  else
+                    WriteErrorLog(
+                      EntityRecID,
+                      SynchEntityCode,
+                      STRSUBSTNO(Text004,SynchEntityCode),
+                      StartDateTime,
+                      NewEntryIDContainer);
+                  EntityRecRef.CLOSE;
+                end else
+                  if RecordIDTextValue = '' then
+                    WriteErrorLog(
+                      EntityRecID,
+                      SynchEntityCode,
+                      STRSUBSTNO(Text005,SynchEntityCode),
+                      StartDateTime,
+                      EntryIDContainer)
+                  else begin
+                    EVALUATE(EntityRecID,RecordIDTextValue);
+                    EntityRecRef.OPEN(EntityRecID.TABLENO);
+                    if EntityRecRef.GET(EntityRecID) then begin
+                      if NewOEntryIDHash <> '' then
+                        OSynchLink.InsertOSynchLink(OSynchUserSetup."User ID",NewEntryIDContainer,EntityRecRef,NewOEntryIDHash)
+                      else
+                        OSynchLink.InsertOSynchLink(OSynchUserSetup."User ID",EntryIDContainer,EntityRecRef,OEntryIDHash);
+                      OSynchProcessLine.UpdateSynchronizationDate(OSynchUserSetup."User ID",EntityRecID);
+                    end else
+                      WriteErrorLog(
+                        EntityRecID,
+                        SynchEntityCode,
+                        STRSUBSTNO(Text002,SynchEntityCode),
+                        StartDateTime,
+                        EntryIDContainer);
+                    EntityRecRef.CLOSE;
+                  end;
+              end else
+                WriteErrorLog(
+                  EntityRecID,
+                  SynchEntityCode,
+                  STRSUBSTNO(Text004,SynchEntityCode),
+                  StartDateTime,
+                  EntryIDContainer);
+              OResponseXMLTextReader.RemoveIterator(EntityIterator);
+            end else
+              WriteErrorLog(
+                EntityRecID,
+                SynchEntityCode,
+                STRSUBSTNO(Text003,SynchEntityCode),
+                StartDateTime,
+                EntryIDContainer);
+          end;
+        until not OResponseXMLTextReader.MoveNext(RootIterator);
+      end;
+
+      OResponseXMLTextReader.RemoveIterator(RootIterator);
+      CLEAR(OResponseXMLTextReader);
+
+      ErrorXMLWriter.WriteEndElement;
+      ErrorXMLWriter.WriteEndDocument;
+
+      XMLMessage := ErrorXMLWriter.ToString;
+      CLEAR(ErrorXMLWriter);
+
+      if STRLEN(XMLMessage) = 0 then
+        ERROR(Text006,PRODUCTNAME.FULL);
+    END;
+
+    [Internal]
+    PROCEDURE GetEntryIDHash@63(VAR Container@1000 : Text;EntityIterator@1002 : Text[38]) EntryIDHash : Text[32];
+    BEGIN
+      if (OResponseXMLTextReader.GetName(EntityIterator) = 'EntryID') or
+         (OResponseXMLTextReader.GetName(EntityIterator) = 'NewEntryID')
+      then begin
+        Container := OsynchOutlookMgt.ConvertValueFromBase64(OResponseXMLTextReader.GetValue(EntityIterator));
+        EntryIDHash := OsynchOutlookMgt.ComputeHash(Container);
+      end;
+    END;
+
+    LOCAL PROCEDURE WriteErrorLog@14(ErrorRecordID@1005 : RecordID;SynchEntityCode@1003 : Code[10];Description@1002 : Text[1024];StartDateTimeIn@1001 : DateTime;Container@1000 : Text);
+    BEGIN
+      ErrorXMLWriter.WriteStartElement('Error');
+      ErrorXMLWriter.WriteAttribute('SynchEntityCode',SynchEntityCode);
+
+      ErrorXMLWriter.WriteAttribute('RecordID',FORMAT(ErrorRecordID));
+      ErrorXMLWriter.WriteAttribute('OccurrenceTime',OSynchTypeConversion.SetDateTimeFormat(CURRENTDATETIME));
+      ErrorXMLWriter.WriteAttribute('Description',Description);
+
+      ErrorXMLWriter.WriteAttribute(
+        'LastModificationTime',
+        OSynchTypeConversion.SetDateTimeFormat(StartDateTimeIn));
+
+      ErrorXMLWriter.WriteAttribute('RecordID',FORMAT(ErrorRecordID));
+      ErrorXMLWriter.WriteStartElement('EntryID');
+      ErrorXMLWriter.WriteElementTextContent(OsynchOutlookMgt.ConvertValueToBase64(Container));
+      ErrorXMLWriter.WriteEndElement;
+
+      ErrorXMLWriter.WriteEndElement;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

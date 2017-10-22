@@ -1,0 +1,282 @@
+OBJECT Codeunit 1210 Payment Export Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Gen. Journal Line"=rm,
+                TableData "Data Exch."=rimd,
+                TableData "Data Exch. Field"=rimd,
+                TableData "Payment Export Data"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ServerFileExtension@1005 : Text[3];
+      ServerFileName@1004 : Text;
+      SilentServerMode@1003 : Boolean;
+      IncorrectLengthOfValuesErr@1000 : TextConst '@@@="%1=Data Exch.Def Type;%2=Data Exch. Def Code;%3=Field;%4=Expected length;%5=Actual length;%6=Actual Value";ENU=The payment that you are trying to export is different from the specified %1, %2.\\The value in the %3 field does not have the length that is required by the export format. \Expected: %4 \Actual: %5 \Field Value: %6.';
+      FormatNotDefinedErr@1006 : TextConst '@@@="%1 = Data Exch. Def. Code";ENU=You must choose a valid export format for the bank account. Format %1 is not correctly defined.';
+      DataExchLineDefNotFoundErr@1007 : TextConst '@@@="%1=Data Exch. Def. Name;%2=Data Exch. Line Def. Code";ENU=The %1 export format does not support the Payment Method Code %2.';
+
+    [External]
+    PROCEDURE CreateDataExch@4(VAR DataExch@1000 : Record "Data Exch.";BankAccountCode@1001 : Code[20]);
+    VAR
+      BankAccount@1002 : Record "Bank Account";
+      BankExportImportSetup@1003 : Record "Bank Export/Import Setup";
+    BEGIN
+      BankAccount.GET(BankAccountCode);
+      BankAccount.TESTFIELD("Payment Export Format");
+      BankExportImportSetup.GET(BankAccount."Payment Export Format");
+      BankExportImportSetup.TESTFIELD("Data Exch. Def. Code");
+      with DataExch do begin
+        INIT;
+        "Data Exch. Def Code" := BankExportImportSetup."Data Exch. Def. Code";
+        INSERT(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CreatePaymentLines@10(VAR PaymentExportData@1000 : Record "Payment Export Data");
+    VAR
+      BankAccount@1007 : Record "Bank Account";
+      DataExch@1006 : Record "Data Exch.";
+      PaymentExportDataRecRef@1001 : RecordRef;
+    BEGIN
+      BankAccount.GET(PaymentExportData."Sender Bank Account Code");
+      PaymentExportData."Sender Bank Account No." :=
+        COPYSTR(BankAccount.GetBankAccountNo,1,MAXSTRLEN(PaymentExportData."Sender Bank Account No."));
+      PaymentExportData.MODIFY;
+
+      DataExch.GET(PaymentExportData."Data Exch Entry No.");
+      PaymentExportDataRecRef.GETTABLE(PaymentExportData);
+      ProcessColumnMapping(DataExch,PaymentExportDataRecRef,
+        PaymentExportData."Line No.",PaymentExportData."Data Exch. Line Def Code",PaymentExportDataRecRef.NUMBER);
+    END;
+
+    [External]
+    PROCEDURE ProcessColumnMapping@11(DataExch@1004 : Record "Data Exch.";RecRef@1016 : RecordRef;LineNo@1017 : Integer;DataExchLineDefCode@1003 : Code[20];TableID@1005 : Integer);
+    VAR
+      DataExchDef@1023 : Record "Data Exch. Def";
+      DataExchColumnDef@1001 : Record "Data Exch. Column Def";
+      DataExchField@1009 : Record "Data Exch. Field";
+      DataExchFieldMapping@1010 : Record "Data Exch. Field Mapping";
+      ValueAsDestType@1007 : Variant;
+      FieldRef@1002 : FieldRef;
+      ValueAsString@1000 : Text[250];
+    BEGIN
+      if not DataExchDef.GET(DataExch."Data Exch. Def Code") then
+        ERROR(FormatNotDefinedErr,DataExch."Data Exch. Def Code");
+
+      PrepopulateColumns(DataExchDef,DataExchLineDefCode,DataExch."Entry No.",LineNo);
+
+      DataExchFieldMapping.SETRANGE("Data Exch. Def Code",DataExchDef.Code);
+      DataExchFieldMapping.SETRANGE("Data Exch. Line Def Code",DataExchLineDefCode);
+      DataExchFieldMapping.SETRANGE("Table ID",TableID);
+      DataExchFieldMapping.FINDSET;
+
+      repeat
+        DataExchColumnDef.GET(DataExchDef.Code,DataExchLineDefCode,DataExchFieldMapping."Column No.");
+
+        if DataExchFieldMapping."Use Default Value" then
+          ValueAsString := DataExchFieldMapping."Default Value"
+        else begin
+          FieldRef := RecRef.FIELD(DataExchFieldMapping."Field ID");
+          CheckOptional(DataExchFieldMapping.Optional,FieldRef);
+          CastToDestinationType(ValueAsDestType,FieldRef.VALUE,DataExchColumnDef,DataExchFieldMapping.Multiplier);
+          ValueAsString := FormatToText(ValueAsDestType,DataExchDef,DataExchColumnDef);
+        end;
+
+        CheckLength(ValueAsString,RecRef.FIELD(DataExchFieldMapping."Field ID"),DataExchDef,DataExchColumnDef);
+
+        DataExchField.GET(DataExch."Entry No.",LineNo,DataExchFieldMapping."Column No.");
+        DataExchField.Value := ValueAsString;
+        DataExchField.MODIFY;
+      until DataExchFieldMapping.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE PrepopulateColumns@39(DataExchDef@1000 : Record "Data Exch. Def";DataExchLineDefCode@1001 : Code[20];DataExchEntryNo@1004 : Integer;DataExchLineNo@1005 : Integer);
+    VAR
+      DataExchField@1002 : Record "Data Exch. Field";
+      DataExchLineDef@1007 : Record "Data Exch. Line Def";
+      DataExchColumnDef@1003 : Record "Data Exch. Column Def";
+      ColumnIndex@1006 : Integer;
+    BEGIN
+      if DataExchDef."File Type" in
+         [DataExchDef."File Type"::"Fixed Text",
+          DataExchDef."File Type"::Xml,
+          DataExchDef."File Type"::Json]
+      then begin
+        DataExchColumnDef.SETRANGE("Data Exch. Def Code",DataExchDef.Code);
+        DataExchColumnDef.SETRANGE("Data Exch. Line Def Code",DataExchLineDefCode);
+        if not DataExchColumnDef.FINDSET then
+          ERROR(DataExchLineDefNotFoundErr,DataExchDef.Name,DataExchLineDefCode);
+        repeat
+          DataExchField.InsertRec(
+            DataExchEntryNo,DataExchLineNo,DataExchColumnDef."Column No.",
+            PADSTR(DataExchColumnDef.Constant,DataExchColumnDef.Length),DataExchLineDefCode)
+        until DataExchColumnDef.NEXT = 0;
+      end else begin
+        if not DataExchLineDef.GET(DataExchDef.Code,DataExchLineDefCode) then
+          ERROR(DataExchLineDefNotFoundErr,DataExchDef.Name,DataExchLineDefCode);
+        for ColumnIndex := 1 to DataExchLineDef."Column Count" do
+          if DataExchColumnDef.GET(DataExchDef.Code,DataExchLineDef.Code,ColumnIndex) then
+            DataExchField.InsertRec(
+              DataExchEntryNo,DataExchLineNo,ColumnIndex,DataExchColumnDef.Constant,DataExchLineDefCode)
+          else
+            DataExchField.InsertRec(DataExchEntryNo,DataExchLineNo,ColumnIndex,'',DataExchLineDefCode);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckOptional@21(Optional@1000 : Boolean;FieldRef@1001 : FieldRef);
+    VAR
+      Value@1002 : Variant;
+      StringValue@1003 : Text;
+    BEGIN
+      if Optional then
+        exit;
+
+      Value := FieldRef.VALUE;
+      StringValue := FORMAT(Value);
+
+      if ((Value.ISDECIMAL or Value.ISINTEGER or Value.ISBIGINTEGER) and (StringValue = '0')) or
+         (StringValue = '')
+      then
+        FieldRef.TESTFIELD
+    END;
+
+    LOCAL PROCEDURE CastToDestinationType@44(VAR DestinationValue@1004 : Variant;SourceValue@1005 : Variant;DataExchColumnDef@1003 : Record "Data Exch. Column Def";Multiplier@1001 : Decimal);
+    VAR
+      ValueAsDecimal@1002 : Decimal;
+      ValueAsDate@1000 : Date;
+      ValueAsDateTime@1006 : DateTime;
+    BEGIN
+      with DataExchColumnDef do
+        case "Data Type" of
+          "Data Type"::Decimal:
+            begin
+              if FORMAT(SourceValue) = '' then
+                ValueAsDecimal := 0
+              else
+                EVALUATE(ValueAsDecimal,FORMAT(SourceValue));
+              DestinationValue := Multiplier * ValueAsDecimal;
+            end;
+          "Data Type"::Text:
+            DestinationValue := FORMAT(SourceValue);
+          "Data Type"::Date:
+            begin
+              EVALUATE(ValueAsDate,FORMAT(SourceValue));
+              DestinationValue := ValueAsDate;
+            end;
+          "Data Type"::DateTime:
+            begin
+              EVALUATE(ValueAsDateTime,FORMAT(SourceValue,0,9),9);
+              DestinationValue := ValueAsDateTime;
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE FormatToText@46(ValueToFormat@1003 : Variant;DataExchDef@1001 : Record "Data Exch. Def";DataExchColumnDef@1000 : Record "Data Exch. Column Def") : Text[250];
+    BEGIN
+      if DataExchColumnDef."Data Format" <> '' then
+        exit(FORMAT(ValueToFormat,0,DataExchColumnDef."Data Format"));
+
+      if DataExchDef."File Type" in [DataExchDef."File Type"::Xml,
+                                     DataExchDef."File Type"::Json]
+      then
+        exit(FORMAT(ValueToFormat,0,9));
+
+      if (DataExchDef."File Type" = DataExchDef."File Type"::"Fixed Text") and
+         (DataExchColumnDef."Data Type" = DataExchColumnDef."Data Type"::Text)
+      then
+        exit(FORMAT(ValueToFormat,0,STRSUBSTNO('<Text,%1>',DataExchColumnDef.Length)));
+
+      exit(FORMAT(ValueToFormat));
+    END;
+
+    LOCAL PROCEDURE CheckLength@49(Value@1001 : Text;FieldRef@1002 : FieldRef;DataExchDef@1003 : Record "Data Exch. Def";DataExchColumnDef@1000 : Record "Data Exch. Column Def");
+    VAR
+      DataExchDefCode@1004 : Code[20];
+    BEGIN
+      DataExchDefCode := DataExchColumnDef."Data Exch. Def Code";
+
+      if (DataExchColumnDef.Length > 0) and (STRLEN(Value) > DataExchColumnDef.Length) then
+        ERROR(IncorrectLengthOfValuesErr,GetType(DataExchDefCode),DataExchDefCode,
+          FieldRef.CAPTION,DataExchColumnDef.Length,STRLEN(Value),Value);
+
+      if (DataExchDef."File Type" = DataExchDef."File Type"::"Fixed Text") and
+         (STRLEN(Value) <> DataExchColumnDef.Length)
+      then
+        ERROR(IncorrectLengthOfValuesErr,GetType(DataExchDefCode),DataExchDefCode,FieldRef.CAPTION,
+          DataExchColumnDef.Length,STRLEN(Value),Value);
+    END;
+
+    LOCAL PROCEDURE GetType@6(DataExchDefCode@1000 : Code[20]) : Text;
+    VAR
+      DataExchDef@1001 : Record "Data Exch. Def";
+    BEGIN
+      DataExchDef.GET(DataExchDefCode);
+      exit(FORMAT(DataExchDef.Type));
+    END;
+
+    [Internal]
+    PROCEDURE ExportToFile@5(EntryNo@1000 : Integer);
+    VAR
+      DataExch@1003 : Record "Data Exch.";
+      DataExchDef@1001 : Record "Data Exch. Def";
+      DataExchField@1002 : Record "Data Exch. Field";
+    BEGIN
+      DataExch.GET(EntryNo);
+      DataExchDef.GET(DataExch."Data Exch. Def Code");
+      DataExchField.SETRANGE("Data Exch. No.",DataExch."Entry No.");
+      DataExchDef.TESTFIELD("Reading/Writing XMLport");
+      if not SilentServerMode then
+        XMLPORT.RUN(DataExchDef."Reading/Writing XMLport",false,false,DataExchField)
+      else
+        ExportToServerTempFile(DataExchDef."Reading/Writing XMLport",DataExchField);
+
+      DataExchField.DELETEALL;
+      DataExch.DELETE
+    END;
+
+    [External]
+    PROCEDURE EnableExportToServerTempFile@27(NewMode@1000 : Boolean;NewExtension@1001 : Text[3]);
+    BEGIN
+      SilentServerMode := NewMode;
+      ServerFileExtension := NewExtension;
+    END;
+
+    LOCAL PROCEDURE ExportToServerTempFile@25(XMLPortID@1006 : Integer;VAR DataExchField@1000 : Record "Data Exch. Field");
+    VAR
+      FileManagement@1005 : Codeunit "File Management";
+      ExportFile@1003 : File;
+      OutStream@1004 : OutStream;
+    BEGIN
+      ServerFileName := FileManagement.ServerTempFileName(ServerFileExtension);
+
+      ExportFile.WRITEMODE := true;
+      ExportFile.TEXTMODE := true;
+      ExportFile.CREATE(ServerFileName);
+      ExportFile.CREATEOUTSTREAM(OutStream);
+      XMLPORT.EXPORT(XMLPortID,OutStream,DataExchField);
+      ExportFile.CLOSE;
+    END;
+
+    [External]
+    PROCEDURE GetServerTempFileName@29() : Text[1024];
+    BEGIN
+      exit(ServerFileName);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,233 @@
+OBJECT Codeunit 2003 Machine Learning Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=06.10.17;
+    Time=12:00:00;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AzureMLConnector@1008 : Codeunit 2001;
+      NotInitializedErr@1003 : TextConst 'ENU=The request has not been properly initialized.';
+      RecordVar@1004 : Variant;
+      LabelNo@1007 : Integer;
+      FeatureNos@1006 : ARRAY [25] OF Integer;
+      LastFeatureIndex@1005 : Integer;
+      NotRecordVariantErr@1009 : TextConst 'ENU=The variant must be a record variant.';
+      FieldDoesNotExistErr@1010 : TextConst '@@@="%1 = field ID";ENU=A field with the ID %1 does not exist.';
+      TooManyFeaturesErr@1011 : TextConst '@@@="%1 = max number of features";ENU=Cannot train or predict because you have added more than %1 features to the model.';
+      LabelCannotBeFeatureErr@1012 : TextConst 'ENU=You have used the same field as the feature and as the label. A field can be either the label or feature, but not both.';
+      FeatureRepeatedErr@1013 : TextConst 'ENU=You can only add a field once as a feature.';
+      ApiUri@1000 : Text;
+      ApiKey@1001 : Text;
+      ApiTimeout@1002 : Integer;
+
+    PROCEDURE Initialize@4(Uri@1000 : Text;Key@1001 : Text;TimeOutSeconds@1002 : Integer);
+    BEGIN
+      ApiUri := Uri;
+      ApiKey := Key;
+      ApiTimeout := TimeOutSeconds;
+      LabelNo := 0;
+      LastFeatureIndex := 0;
+    END;
+
+    PROCEDURE SetMessageHandler@7(MessageHandler@1000 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpMessageHandler");
+    BEGIN
+      AzureMLConnector.SetMessageHandler(MessageHandler);
+    END;
+
+    PROCEDURE SetRecord@1(RecordVariant@1000 : Variant);
+    VAR
+      DataTypeManagement@1001 : Codeunit 701;
+      RecRef@1002 : RecordRef;
+    BEGIN
+      IF NOT DataTypeManagement.GetRecordRef(RecordVariant,RecRef) THEN
+        ERROR(NotRecordVariantErr);
+      RecordVar := RecordVariant;
+    END;
+
+    PROCEDURE AddFeature@13(FeatureFieldNo@1000 : Integer);
+    VAR
+      FeatureIndex@1001 : Integer;
+    BEGIN
+      IF LastFeatureIndex >= MaxNoFeatures THEN
+        ERROR(STRSUBSTNO(TooManyFeaturesErr,MaxNoFeatures));
+
+      IF FeatureFieldNo = LabelNo THEN
+        ERROR(LabelCannotBeFeatureErr);
+
+      TestFieldNumber(FeatureFieldNo);
+
+      FOR FeatureIndex := 1 TO LastFeatureIndex DO BEGIN
+        IF FeatureNos[FeatureIndex] = FeatureFieldNo THEN
+          ERROR(FeatureRepeatedErr);
+      END;
+
+      LastFeatureIndex := LastFeatureIndex + 1;
+      FeatureNos[LastFeatureIndex] := FeatureFieldNo;
+    END;
+
+    PROCEDURE SetLabel@5(LabelFieldNo@1000 : Integer);
+    VAR
+      DataTypeManagement@1003 : Codeunit 701;
+      RecRef@1001 : RecordRef;
+    BEGIN
+      DataTypeManagement.GetRecordRef(RecordVar,RecRef);
+      TestFieldNumber(LabelFieldNo);
+      LabelNo := LabelFieldNo;
+    END;
+
+    PROCEDURE Train@2(VAR Model@1004 : Text;VAR Quality@1005 : Decimal);
+    VAR
+      OutputValue@1000 : Text;
+    BEGIN
+      AzureMLConnector.Initialize(ApiKey,ApiUri,ApiTimeout);
+      TestInitialized;
+      AzureMLConnector.AddParameter('method','train');
+      AzureMLConnector.AddParameter('train_percent',FORMAT(0.8,0,9));
+      CreateInput;
+      AzureMLConnector.SendToAzureML;
+
+      AzureMLConnector.GetOutput(1,1,OutputValue);
+      Model := OutputValue;
+      AzureMLConnector.GetOutput(1,2,OutputValue);
+      EVALUATE(Quality,OutputValue);
+    END;
+
+    PROCEDURE Predict@15(Model@1002 : Text);
+    BEGIN
+      AzureMLConnector.Initialize(ApiKey,ApiUri,ApiTimeout);
+      TestInitialized;
+      AzureMLConnector.AddParameter('method','predict');
+      AzureMLConnector.AddParameter('model',Model);
+      CreateInput;
+      AzureMLConnector.SendToAzureML;
+
+      LoadPrediction;
+    END;
+
+    LOCAL PROCEDURE TestFieldNumber@54(FieldNumber@1000 : Integer);
+    VAR
+      DataTypeManagement@1002 : Codeunit 701;
+      RecRef@1001 : RecordRef;
+    BEGIN
+      DataTypeManagement.GetRecordRef(RecordVar,RecRef);
+      IF NOT RecRef.FIELDEXIST(FieldNumber) THEN
+        ERROR(STRSUBSTNO(FieldDoesNotExistErr,FieldNumber));
+    END;
+
+    LOCAL PROCEDURE TestInitialized@8();
+    VAR
+      Initialized@1000 : Boolean;
+    BEGIN
+      Initialized := TRUE;
+      IF NOT AzureMLConnector.IsInitialized THEN
+        Initialized := FALSE;
+      IF FORMAT(RecordVar) = '' THEN
+        Initialized := FALSE;
+      IF LabelNo = 0 THEN
+        Initialized := FALSE;
+      IF LastFeatureIndex = 0 THEN
+        Initialized := FALSE;
+
+      IF NOT Initialized THEN
+        ERROR(NotInitializedErr);
+    END;
+
+    LOCAL PROCEDURE CreateInput@9();
+    VAR
+      DataTypeManagement@1001 : Codeunit 701;
+      RecRef@1003 : RecordRef;
+      FieldRef@1006 : FieldRef;
+      ColumnNo@1000 : Integer;
+    BEGIN
+      FOR ColumnNo := 1 TO MaxNoFeatures DO
+        AzureMLConnector.AddInputColumnName(STRSUBSTNO('feature%1',ColumnNo));
+      AzureMLConnector.AddInputColumnName('label');
+
+      DataTypeManagement.GetRecordRef(RecordVar,RecRef);
+      IF RecRef.FINDSET THEN
+        REPEAT
+          AzureMLConnector.AddInputRow;
+          FOR ColumnNo := 1 TO MaxNoFeatures DO BEGIN
+            IF ColumnNo <= LastFeatureIndex THEN BEGIN
+              FieldRef := RecRef.FIELD(FeatureNos[ColumnNo]);
+              AzureMLConnector.AddInputValue(FORMAT(FieldRef.VALUE,0,9));
+            END ELSE
+              AzureMLConnector.AddInputValue('');
+          END;
+
+          FieldRef := RecRef.FIELD(LabelNo);
+          AzureMLConnector.AddInputValue(FORMAT(FieldRef.VALUE,0,9));
+        UNTIL RecRef.NEXT = 0;
+    END;
+
+    PROCEDURE GetParameter@14(Name@1000 : Text) : Text;
+    VAR
+      ParameterValue@1001 : Text;
+    BEGIN
+      AzureMLConnector.GetParameter(Name,ParameterValue);
+      EXIT(ParameterValue);
+    END;
+
+    PROCEDURE GetInput@3(RowNo@1000 : Integer;ColumnNo@1001 : Integer) : Text;
+    VAR
+      InputValue@1002 : Text;
+    BEGIN
+      AzureMLConnector.GetInput(RowNo,ColumnNo,InputValue);
+      EXIT(InputValue);
+    END;
+
+    PROCEDURE GetInputLength@10() : Integer;
+    VAR
+      Length@1000 : Integer;
+    BEGIN
+      AzureMLConnector.GetInputLength(Length);
+      EXIT(Length);
+    END;
+
+    LOCAL PROCEDURE LoadPrediction@30();
+    VAR
+      DataTypeManagement@1002 : Codeunit 701;
+      ConfigValidateManagement@1001 : Codeunit 8617;
+      RecRef@1003 : RecordRef;
+      FieldRef@1000 : FieldRef;
+      LabelColumnNumber@1005 : Integer;
+      RowNumber@1004 : Integer;
+      Label@1006 : Text[250];
+      OutputValue@1007 : Text;
+    BEGIN
+      RowNumber := 1;
+      LabelColumnNumber := MaxNoFeatures + 1;
+
+      DataTypeManagement.GetRecordRef(RecordVar,RecRef);
+      IF RecRef.FINDSET THEN
+        REPEAT
+          AzureMLConnector.GetOutput(RowNumber,LabelColumnNumber,OutputValue);
+          Label := COPYSTR(OutputValue,1,MAXSTRLEN(Label));
+          FieldRef := RecRef.FIELD(LabelNo);
+
+          ConfigValidateManagement.EvaluateValueWithValidate(FieldRef,Label,TRUE);
+          RecRef.MODIFY(TRUE);
+          RowNumber := RowNumber + 1;
+        UNTIL RecRef.NEXT = 0;
+    END;
+
+    PROCEDURE MaxNoFeatures@62() : Integer;
+    BEGIN
+      EXIT(ARRAYLEN(FeatureNos));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

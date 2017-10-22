@@ -1,0 +1,345 @@
+OBJECT Table 8631 Config. Table Processing Rule
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               CheckAction
+             END;
+
+    OnModify=BEGIN
+               CheckAction
+             END;
+
+    OnDelete=VAR
+               ConfigPackageFilter@1000 : Record "Config. Package Filter";
+             BEGIN
+               ConfigPackageFilter.SETRANGE("Package Code","Package Code");
+               ConfigPackageFilter.SETRANGE("Table ID","Table ID");
+               ConfigPackageFilter.SETRANGE("Processing Rule No.","Rule No.");
+               ConfigPackageFilter.DELETEALL(true);
+             END;
+
+    CaptionML=ENU=Config. Table Processing Rule;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Package Code        ;Code20        ;TableRelation="Config. Package";
+                                                   CaptionML=ENU=Package Code }
+    { 2   ;   ;Table ID            ;Integer       ;CaptionML=ENU=Table ID }
+    { 3   ;   ;Rule No.            ;Integer       ;CaptionML=ENU=Rule No. }
+    { 4   ;   ;Action              ;Option        ;OnValidate=BEGIN
+                                                                if not IsActionAllowed then
+                                                                  FIELDERROR(Action);
+                                                              END;
+
+                                                   CaptionML=ENU=Action;
+                                                   OptionCaptionML=ENU=,Custom,Post,Invoice,Ship,Receive;
+                                                   OptionString=,Custom,Post,Invoice,Ship,Receive }
+    { 5   ;   ;Custom Processing Codeunit ID;Integer;
+                                                   TableRelation=AllObjWithCaption."Object ID" WHERE ("Object Type"=CONST(Codeunit));
+                                                   OnValidate=BEGIN
+                                                                if "Custom Processing Codeunit ID" <> 0 then
+                                                                  TESTFIELD(Action,Action::Custom)
+                                                                else
+                                                                  if Action = Action::Custom then
+                                                                    TESTFIELD("Custom Processing Codeunit ID");
+                                                              END;
+
+                                                   CaptionML=ENU=Custom Processing Codeunit ID }
+  }
+  KEYS
+  {
+    {    ;"Package Code","Table ID","Rule No."    ;Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+
+    LOCAL PROCEDURE CheckAction@1012();
+    BEGIN
+      TESTFIELD(Action);
+      if Action = Action::Custom then
+        TESTFIELD("Custom Processing Codeunit ID")
+      else
+        TESTFIELD("Custom Processing Codeunit ID",0);
+    END;
+
+    LOCAL PROCEDURE FilterProcessingFilters@1007(VAR ConfigPackageFilter@1000 : Record "Config. Package Filter");
+    BEGIN
+      ConfigPackageFilter.SETRANGE("Package Code","Package Code");
+      ConfigPackageFilter.SETRANGE("Table ID","Table ID");
+      ConfigPackageFilter.SETRANGE("Processing Rule No.","Rule No.");
+    END;
+
+    [External]
+    PROCEDURE FindTableRules@1002(ConfigPackageTable@1000 : Record "Config. Package Table") : Boolean;
+    BEGIN
+      RESET;
+      SETRANGE("Package Code",ConfigPackageTable."Package Code");
+      SETRANGE("Table ID",ConfigPackageTable."Table ID");
+      exit(FINDSET);
+    END;
+
+    [External]
+    PROCEDURE GetFilterInfo@1005() FilterInfo : Text;
+    VAR
+      ConfigPackageFilter@1000 : Record "Config. Package Filter";
+      Separator@1001 : Text[2];
+    BEGIN
+      if "Rule No." = 0 then
+        exit('');
+
+      FilterProcessingFilters(ConfigPackageFilter);
+      ConfigPackageFilter.SETAUTOCALCFIELDS("Field Caption");
+      if ConfigPackageFilter.FINDSET then
+        repeat
+          FilterInfo := FilterInfo + Separator + ConfigPackageFilter."Field Caption" + '=' + ConfigPackageFilter."Field Filter";
+          Separator := ', ';
+        until ConfigPackageFilter.NEXT = 0
+    END;
+
+    LOCAL PROCEDURE IsActionAllowed@1001() : Boolean;
+    BEGIN
+      if Action = Action::Custom then
+        exit(true);
+
+      case "Table ID" of
+        DATABASE::"Sales Header":
+          exit(Action in [Action::Invoice,Action::Ship]);
+        DATABASE::"Purchase Header":
+          exit(Action in [Action::Invoice,Action::Receive]);
+        DATABASE::"Gen. Journal Line",DATABASE::"Gen. Journal Batch":
+          exit(Action = Action::Post);
+        DATABASE::"Custom Report Layout":
+          exit(Action = Action::Post);
+        DATABASE::"Transfer Header":
+          exit(Action in [Action::Ship,Action::Receive]);
+        DATABASE::Item:
+          exit(Action in [Action::Post]);
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE DoesTableHaveCustomRuleInRapidStart@1014() Result : Boolean;
+    BEGIN
+      OnDoesTableHaveCustomRuleInRapidStart("Table ID",Result);
+    END;
+
+    [External]
+    PROCEDURE Process@1004(ConfigRecordForProcessing@1000 : Record "Config. Record For Processing") : Boolean;
+    VAR
+      ConfigPackageRecord@1002 : Record "Config. Package Record";
+      RecRef@1001 : RecordRef;
+    BEGIN
+      ConfigRecordForProcessing.FindConfigRule(Rec);
+      if (Action = Action::Custom) and not DoesTableHaveCustomRuleInRapidStart then begin
+        if ConfigRecordForProcessing.FindConfigRecord(ConfigPackageRecord) then
+          exit(CODEUNIT.RUN("Custom Processing Codeunit ID",ConfigPackageRecord));
+        exit(false);
+      end;
+      if ConfigRecordForProcessing.FindInsertedRecord(RecRef) then
+        exit(RunActionOnInsertedRecord(RecRef));
+    END;
+
+    [External]
+    PROCEDURE RunActionOnInsertedRecord@1006(RecRef@1000 : RecordRef) : Boolean;
+    BEGIN
+      case "Table ID" of
+        DATABASE::"Sales Header":
+          exit(RunActionOnSalesHeader(RecRef));
+        DATABASE::"Purchase Header":
+          exit(RunActionOnPurchHeader(RecRef));
+        DATABASE::"Gen. Journal Line":
+          exit(RunActionOnGenJnlLine(RecRef));
+        DATABASE::"Gen. Journal Batch":
+          exit(RunActionOnGenJnlBatch(RecRef));
+        DATABASE::"Custom Report Layout":
+          exit(RunActionOnCustomReportLayout(RecRef));
+        DATABASE::"Transfer Header":
+          exit(RunActionOnTransferHeader(RecRef));
+        DATABASE::Item:
+          exit(RunActionOnItem(RecRef));
+        else
+          exit(RunCustomActionOnRecRef(RecRef));
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE RunCustomActionOnRecRef@1013(RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      RecRefVariant@1002 : Variant;
+    BEGIN
+      if Action = Action::Custom then begin
+        RecRefVariant := RecRef;
+        exit(CODEUNIT.RUN("Custom Processing Codeunit ID",RecRefVariant));
+      end;
+    END;
+
+    LOCAL PROCEDURE RunActionOnGenJnlBatch@1003(RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      GenJnlBatch@1001 : Record "Gen. Journal Batch";
+      GenJnlLine@1002 : Record "Gen. Journal Line";
+    BEGIN
+      if Action = Action::Post then begin
+        RecRef.SETTABLE(GenJnlBatch);
+        GenJnlLine.RESET;
+        GenJnlLine.SETRANGE("Journal Template Name",GenJnlBatch."Journal Template Name");
+        GenJnlLine.SETRANGE("Journal Batch Name",GenJnlBatch.Name);
+        if GenJnlLine.FINDFIRST then
+          exit(CODEUNIT.RUN(CODEUNIT::"Gen. Jnl.-Post Batch",GenJnlLine));
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE RunActionOnGenJnlLine@1008(RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      GenJnlLine@1001 : Record "Gen. Journal Line";
+    BEGIN
+      if Action = Action::Post then begin
+        RecRef.SETTABLE(GenJnlLine);
+        GenJnlLine.RESET;
+        GenJnlLine.SETRANGE("Journal Template Name",GenJnlLine."Journal Template Name");
+        GenJnlLine.SETRANGE("Journal Batch Name",GenJnlLine."Journal Batch Name");
+        GenJnlLine.SETRANGE("Line No.",GenJnlLine."Line No.");
+        exit(CODEUNIT.RUN(CODEUNIT::"Gen. Jnl.-Post Batch",GenJnlLine));
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE RunActionOnPurchHeader@1009(RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      PurchHeader@1001 : Record "Purchase Header";
+    BEGIN
+      RecRef.SETTABLE(PurchHeader);
+      case Action of
+        Action::Custom:
+          exit(CODEUNIT.RUN("Custom Processing Codeunit ID",PurchHeader));
+        Action::Invoice:
+          begin
+            PurchHeader.VALIDATE(Invoice,true);
+            PurchHeader.VALIDATE(Receive,true);
+            exit(CODEUNIT.RUN(CODEUNIT::"Purch.-Post",PurchHeader));
+          end;
+        Action::Receive:
+          begin
+            PurchHeader.TESTFIELD("Document Type",PurchHeader."Document Type"::Order);
+            PurchHeader.VALIDATE(Invoice,false);
+            PurchHeader.VALIDATE(Receive,true);
+            exit(CODEUNIT.RUN(CODEUNIT::"Purch.-Post",PurchHeader));
+          end;
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE RunActionOnSalesHeader@1011(RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      SalesHeader@1001 : Record "Sales Header";
+    BEGIN
+      RecRef.SETTABLE(SalesHeader);
+      case Action of
+        Action::Custom:
+          exit(CODEUNIT.RUN("Custom Processing Codeunit ID",SalesHeader));
+        Action::Invoice:
+          begin
+            SalesHeader.VALIDATE(Invoice,true);
+            SalesHeader.VALIDATE(Ship,true);
+            exit(CODEUNIT.RUN(CODEUNIT::"Sales-Post",SalesHeader));
+          end;
+        Action::Ship:
+          begin
+            SalesHeader.TESTFIELD("Document Type",SalesHeader."Document Type"::Order);
+            SalesHeader.VALIDATE(Invoice,false);
+            SalesHeader.VALIDATE(Ship,true);
+            exit(CODEUNIT.RUN(CODEUNIT::"Sales-Post",SalesHeader));
+          end;
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE RunActionOnTransferHeader@1018(RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      TransferHeader@1001 : Record "Transfer Header";
+      TransferOrderPostShipment@1002 : Codeunit "TransferOrder-Post Shipment";
+      TransferOrderPostReceipt@1003 : Codeunit "TransferOrder-Post Receipt";
+    BEGIN
+      RecRef.SETTABLE(TransferHeader);
+      case Action of
+        Action::Ship:
+          begin
+            TransferOrderPostShipment.SetHideValidationDialog(true);
+            exit(TransferOrderPostShipment.RUN(TransferHeader));
+          end;
+        Action::Receive:
+          begin
+            TransferOrderPostReceipt.SetHideValidationDialog(true);
+            exit(TransferOrderPostReceipt.RUN(TransferHeader));
+          end;
+      end;
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE ShowFilters@1010();
+    VAR
+      ConfigPackageFilter@1001 : Record "Config. Package Filter";
+      ConfigPackageFilters@1000 : Page "Config. Package Filters";
+    BEGIN
+      ConfigPackageFilter.FILTERGROUP(2);
+      FilterProcessingFilters(ConfigPackageFilter);
+      ConfigPackageFilter.FILTERGROUP(0);
+      ConfigPackageFilters.SETTABLEVIEW(ConfigPackageFilter);
+      ConfigPackageFilters.RUNMODAL;
+      CLEAR(ConfigPackageFilters);
+    END;
+
+    LOCAL PROCEDURE RunActionOnCustomReportLayout@1015(RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      CustomReportLayout@1001 : Record "Custom Report Layout";
+      ReportLayoutSelection@1002 : Record "Report Layout Selection";
+    BEGIN
+      RecRef.SETTABLE(CustomReportLayout);
+      case Action of
+        Action::Custom:
+          exit(CODEUNIT.RUN("Custom Processing Codeunit ID",CustomReportLayout));
+        Action::Post:
+          begin
+            ReportLayoutSelection.VALIDATE("Report ID",CustomReportLayout."Report ID");
+            ReportLayoutSelection.VALIDATE("Company Name",COMPANYNAME);
+            ReportLayoutSelection.VALIDATE(Type,ReportLayoutSelection.Type::"Custom Layout");
+            ReportLayoutSelection.VALIDATE("Custom Report Layout Code",CustomReportLayout.Code);
+            if ReportLayoutSelection.INSERT(true) then;
+            exit(true);
+          end;
+      end;
+      exit(false);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnDoesTableHaveCustomRuleInRapidStart@1(TableID@1000 : Integer;VAR Result@1001 : Boolean);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE RunActionOnItem@4(RecRef@1001 : RecordRef) : Boolean;
+    VAR
+      Item@1002 : Record Item;
+    BEGIN
+      if Action = Action::Post then begin
+        RecRef.SETTABLE(Item);
+        exit(CODEUNIT.RUN(CODEUNIT::"Setup Item Costing Method",Item));
+      end;
+      exit(false);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

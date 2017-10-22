@@ -1,0 +1,151 @@
+OBJECT Codeunit 5336 Integration Record Synch.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            WasModified := TransferFields;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempParameterTempIntegrationFieldMapping@1001 : TEMPORARY Record "Temp Integration Field Mapping";
+      OutlookSynchTypeConv@1000 : Codeunit "Outlook Synch. Type Conv";
+      ParameterSourceRecordRef@1003 : RecordRef;
+      ParameterDestinationRecordRef@1002 : RecordRef;
+      ParameterOnlyModified@1005 : Boolean;
+      WasModified@1004 : Boolean;
+
+    [External]
+    PROCEDURE SetFieldMapping@1(VAR TempIntegrationFieldMapping@1000 : TEMPORARY Record "Temp Integration Field Mapping");
+    BEGIN
+      if TempParameterTempIntegrationFieldMapping.ISEMPTY then
+        TempParameterTempIntegrationFieldMapping.RESET;
+      TempParameterTempIntegrationFieldMapping.COPY(TempIntegrationFieldMapping,true);
+    END;
+
+    [External]
+    PROCEDURE SetParameters@4(VAR SourceRecordRef@1002 : RecordRef;VAR DestinationRecordRef@1001 : RecordRef;OnlyTransferModifiedFields@1003 : Boolean);
+    BEGIN
+      ParameterSourceRecordRef := SourceRecordRef;
+      ParameterDestinationRecordRef := DestinationRecordRef;
+      ParameterOnlyModified := OnlyTransferModifiedFields;
+    END;
+
+    [External]
+    PROCEDURE GetWasModified@8() : Boolean;
+    BEGIN
+      exit(WasModified);
+    END;
+
+    LOCAL PROCEDURE IsConstantDiffToDestination@13(ConstantValue@1001 : Text;DestinationFieldRef@1000 : FieldRef) : Boolean;
+    VAR
+      ConstantOptionIndex@1003 : Integer;
+      CurrentOptionIndex@1002 : Integer;
+    BEGIN
+      if FORMAT(DestinationFieldRef.TYPE) = 'Option' then begin
+        ConstantOptionIndex := OutlookSynchTypeConv.TextToOptionValue(ConstantValue,DestinationFieldRef.OPTIONCAPTION);
+        CurrentOptionIndex :=
+          OutlookSynchTypeConv.TextToOptionValue(FORMAT(DestinationFieldRef.VALUE),DestinationFieldRef.OPTIONCAPTION);
+        exit(CurrentOptionIndex <> ConstantOptionIndex);
+      end;
+      exit(FORMAT(DestinationFieldRef.VALUE) <> ConstantValue);
+    END;
+
+    LOCAL PROCEDURE IsFieldModified@2(VAR SourceFieldRef@1000 : FieldRef;VAR DestinationFieldRef@1001 : FieldRef) : Boolean;
+    BEGIN
+      if FORMAT(DestinationFieldRef.TYPE) = 'Code' then
+        exit(FORMAT(DestinationFieldRef.VALUE) <> UPPERCASE(DELCHR(FORMAT(SourceFieldRef.VALUE),'<>')));
+
+      if DestinationFieldRef.LENGTH <> SourceFieldRef.LENGTH then begin
+        if DestinationFieldRef.LENGTH < SourceFieldRef.LENGTH then
+          exit(FORMAT(DestinationFieldRef.VALUE) <> COPYSTR(FORMAT(SourceFieldRef),1,DestinationFieldRef.LENGTH));
+        exit(COPYSTR(FORMAT(DestinationFieldRef.VALUE),1,SourceFieldRef.LENGTH) <> FORMAT(SourceFieldRef));
+      end;
+
+      exit(FORMAT(DestinationFieldRef.VALUE) <> FORMAT(SourceFieldRef.VALUE));
+    END;
+
+    LOCAL PROCEDURE TransferFields@17() AnyFieldWasModified : Boolean;
+    BEGIN
+      with TempParameterTempIntegrationFieldMapping do begin
+        FINDSET;
+        repeat
+          AnyFieldWasModified :=
+            AnyFieldWasModified or
+            TransferField("Source Field No.","Destination Field No.","Constant Value","Validate Destination Field");
+        until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE TransferField@11(SourceFieldNo@1004 : Integer;DestinationFieldNo@1005 : Integer;ConstantValue@1003 : Text;ValidateDestinationField@1007 : Boolean) : Boolean;
+    VAR
+      SourceFieldRef@1001 : FieldRef;
+      DestinationFieldRef@1002 : FieldRef;
+    BEGIN
+      DestinationFieldRef := ParameterDestinationRecordRef.FIELD(DestinationFieldNo);
+      if SourceFieldNo < 1 then begin // using ConstantValue as a source value
+        if (not ParameterOnlyModified) or IsConstantDiffToDestination(ConstantValue,DestinationFieldRef) then
+          exit(OutlookSynchTypeConv.EvaluateTextToFieldRef(ConstantValue,DestinationFieldRef,true));
+      end else begin
+        SourceFieldRef := ParameterSourceRecordRef.FIELD(SourceFieldNo);
+        if FORMAT(SourceFieldRef.CLASS,0,9) = 'FlowField' then
+          SourceFieldRef.CALCFIELD;
+        if (not ParameterOnlyModified) or IsFieldModified(SourceFieldRef,DestinationFieldRef) then
+          exit(TransferFieldData(SourceFieldRef,DestinationFieldRef,ValidateDestinationField));
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE TransferFieldData@6(VAR SourceFieldRef@1000 : FieldRef;VAR DestinationFieldRef@1001 : FieldRef;ValidateDestinationField@1002 : Boolean) : Boolean;
+    VAR
+      NewValue@1005 : Variant;
+      IsValueFound@1006 : Boolean;
+      NeedsConversion@1003 : Boolean;
+    BEGIN
+      // OnTransferFieldData is an event for handling an exceptional mapping that is not implemented by integration records
+      OnTransferFieldData(SourceFieldRef,DestinationFieldRef,NewValue,IsValueFound,NeedsConversion);
+      if IsValueFound then begin
+        if not NeedsConversion then
+          exit(SetDestinationValue(DestinationFieldRef,NewValue,ValidateDestinationField));
+      end else
+        NewValue := SourceFieldRef.VALUE;
+
+      if not NeedsConversion and
+         (SourceFieldRef.TYPE = DestinationFieldRef.TYPE) and (DestinationFieldRef.LENGTH >= SourceFieldRef.LENGTH)
+      then
+        exit(SetDestinationValue(DestinationFieldRef,SourceFieldRef.VALUE,ValidateDestinationField));
+      exit(OutlookSynchTypeConv.EvaluateTextToFieldRef(FORMAT(NewValue),DestinationFieldRef,ValidateDestinationField));
+    END;
+
+    LOCAL PROCEDURE SetDestinationValue@3(VAR DestinationFieldRef@1001 : FieldRef;NewValue@1002 : Variant;ValidateDestinationField@1000 : Boolean) : Boolean;
+    VAR
+      CurrValue@1004 : Variant;
+      IsModified@1003 : Boolean;
+    BEGIN
+      CurrValue := FORMAT(DestinationFieldRef.VALUE);
+      IsModified := (FORMAT(CurrValue) <> FORMAT(NewValue)) or not ParameterOnlyModified;
+      DestinationFieldRef.VALUE := NewValue;
+      if IsModified and ValidateDestinationField then
+        DestinationFieldRef.VALIDATE;
+      exit(IsModified);
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnTransferFieldData@10(SourceFieldRef@1002 : FieldRef;DestinationFieldRef@1001 : FieldRef;VAR NewValue@1000 : Variant;VAR IsValueFound@1004 : Boolean;VAR NeedsConversion@1003 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

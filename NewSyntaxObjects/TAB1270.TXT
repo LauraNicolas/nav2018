@@ -1,0 +1,292 @@
+OBJECT Table 1270 OCR Service Setup
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Service Password"=rimd;
+    OnInsert=BEGIN
+               TESTFIELD("Primary Key",'');
+               SetURLsToDefault;
+             END;
+
+    OnDelete=VAR
+               OCRServiceDocTemplate@1000 : Record "OCR Service Document Template";
+             BEGIN
+               DeletePassword("Password Key");
+               DeletePassword("Authorization Key");
+               OCRServiceDocTemplate.DELETEALL(true)
+             END;
+
+    CaptionML=ENU=OCR Service Setup;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Primary Key         ;Code10        ;CaptionML=ENU=Primary Key }
+    { 2   ;   ;User Name           ;Text50        ;CaptionML=ENU=User Name }
+    { 3   ;   ;Password Key        ;GUID          ;TableRelation="Service Password".Key;
+                                                   CaptionML=ENU=Password Key }
+    { 4   ;   ;Sign-up URL         ;Text250       ;ExtendedDatatype=URL;
+                                                   CaptionML=ENU=Sign-up URL }
+    { 5   ;   ;Service URL         ;Text250       ;OnValidate=VAR
+                                                                HttpWebRequestMgt@1000 : Codeunit "Http Web Request Mgt.";
+                                                              BEGIN
+                                                                if "Service URL" = '' then
+                                                                  exit;
+                                                                HttpWebRequestMgt.CheckUrl("Service URL");
+                                                                while (STRLEN("Service URL") > 8) and ("Service URL"[STRLEN("Service URL")] = '/') do
+                                                                  "Service URL" := COPYSTR("Service URL",1,STRLEN("Service URL") - 1);
+                                                              END;
+
+                                                   ExtendedDatatype=URL;
+                                                   CaptionML=ENU=Service URL }
+    { 6   ;   ;Sign-in URL         ;Text250       ;ExtendedDatatype=URL;
+                                                   CaptionML=ENU=Sign-in URL }
+    { 7   ;   ;Authorization Key   ;GUID          ;TableRelation="Service Password".Key;
+                                                   CaptionML=ENU=Authorization Key }
+    { 8   ;   ;Customer Name       ;Text80        ;CaptionML=ENU=Customer Name;
+                                                   Editable=false }
+    { 9   ;   ;Customer ID         ;Text50        ;CaptionML=ENU=Customer ID;
+                                                   Editable=false }
+    { 10  ;   ;Customer Status     ;Text30        ;CaptionML=ENU=Customer Status;
+                                                   Editable=false }
+    { 11  ;   ;Organization ID     ;Text50        ;CaptionML=ENU=Organization ID;
+                                                   Editable=false }
+    { 12  ;   ;Default OCR Doc. Template;Code20   ;TableRelation="OCR Service Document Template";
+                                                   OnValidate=VAR
+                                                                IncomingDocument@1000 : Record "Incoming Document";
+                                                              BEGIN
+                                                                if xRec."Default OCR Doc. Template" <> '' then
+                                                                  exit;
+                                                                IncomingDocument.SETRANGE("OCR Service Doc. Template Code",'');
+                                                                IncomingDocument.MODIFYALL("OCR Service Doc. Template Code","Default OCR Doc. Template");
+                                                              END;
+
+                                                   OnLookup=VAR
+                                                              OCRServiceDocumentTemplate@1000 : Record "OCR Service Document Template";
+                                                              OCRServiceMgt@1001 : Codeunit "OCR Service Mgt.";
+                                                            BEGIN
+                                                              if OCRServiceDocumentTemplate.ISEMPTY then begin
+                                                                OCRServiceMgt.SetupConnection(Rec);
+                                                                COMMIT;
+                                                              end;
+
+                                                              if PAGE.RUNMODAL(PAGE::"OCR Service Document Templates",OCRServiceDocumentTemplate) = ACTION::LookupOK then
+                                                                "Default OCR Doc. Template" := OCRServiceDocumentTemplate.Code;
+                                                            END;
+
+                                                   CaptionML=ENU=Default OCR Doc. Template }
+    { 13  ;   ;Enabled             ;Boolean       ;OnValidate=VAR
+                                                                CompanyInformation@1001 : Record "Company Information";
+                                                                OCRServiceMgt@1002 : Codeunit "OCR Service Mgt.";
+                                                                OCRMasterDataMgt@1000 : Codeunit "OCR Master Data Mgt.";
+                                                              BEGIN
+                                                                if Enabled then begin
+                                                                  OCRServiceMgt.SetupConnection(Rec);
+                                                                  if "Default OCR Doc. Template" = '' then
+                                                                    if CompanyInformation.GET then
+                                                                      case CompanyInformation."Country/Region Code" of
+                                                                        'US','USA':
+                                                                          VALIDATE("Default OCR Doc. Template",'USA_PO');
+                                                                        'CA':
+                                                                          VALIDATE("Default OCR Doc. Template",'CAN_PO');
+                                                                      end;
+                                                                  MODIFY;
+                                                                  TESTFIELD("Default OCR Doc. Template");
+                                                                  if "Master Data Sync Enabled" then
+                                                                    OCRMasterDataMgt.UpdateIntegrationRecords(true);
+                                                                  ScheduleJobQueueEntries;
+                                                                  if CONFIRM(JobQEntriesCreatedQst) then
+                                                                    ShowJobQueueEntry;
+                                                                end else
+                                                                  CancelJobQueueEntries;
+                                                              END;
+
+                                                   CaptionML=ENU=Enabled }
+    { 14  ;   ;Master Data Sync Enabled;Boolean   ;OnValidate=VAR
+                                                                OCRMasterDataMgt@1001 : Codeunit "OCR Master Data Mgt.";
+                                                              BEGIN
+                                                                if "Master Data Sync Enabled" and Enabled then begin
+                                                                  MODIFY;
+                                                                  OCRMasterDataMgt.UpdateIntegrationRecords(true);
+                                                                  ScheduleJobQueueSync;
+                                                                end else
+                                                                  CancelJobQueueSync;
+                                                              END;
+
+                                                   CaptionML=ENU=Master Data Sync Enabled }
+    { 15  ;   ;Master Data Last Sync;DateTime     ;CaptionML=ENU=Master Data Last Sync }
+  }
+  KEYS
+  {
+    {    ;"Primary Key"                           ;Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      MustBeEnabledErr@1001 : TextConst '@@@="OCR = Optical Character Recognition";ENU=The OCR service is not enabled.\\In the OCR Service Setup window, select the Enabled check box.';
+      JobQEntriesCreatedQst@1002 : TextConst 'ENU=Job queue entries for sending and receiving electronic documents have been created.\\Do you want to open the Job Queue Entries window?';
+
+    [External]
+    PROCEDURE SavePassword@1(VAR PasswordKey@1001 : GUID;PasswordText@1000 : Text);
+    VAR
+      ServicePassword@1002 : Record "Service Password";
+    BEGIN
+      if ISNULLGUID(PasswordKey) or not ServicePassword.GET(PasswordKey) then begin
+        ServicePassword.SavePassword(PasswordText);
+        ServicePassword.INSERT(true);
+        PasswordKey := ServicePassword.Key;
+        MODIFY;
+      end else begin
+        ServicePassword.SavePassword(PasswordText);
+        ServicePassword.MODIFY;
+      end;
+      COMMIT;
+    END;
+
+    [External]
+    PROCEDURE GetPassword@2(PasswordKey@1001 : GUID) : Text;
+    VAR
+      ServicePassword@1000 : Record "Service Password";
+    BEGIN
+      ServicePassword.GET(PasswordKey);
+      exit(ServicePassword.GetPassword);
+    END;
+
+    LOCAL PROCEDURE DeletePassword@4(PasswordKey@1000 : GUID);
+    VAR
+      ServicePassword@1001 : Record "Service Password";
+    BEGIN
+      if ServicePassword.GET(PasswordKey) then
+        ServicePassword.DELETE;
+    END;
+
+    [External]
+    PROCEDURE HasPassword@3(PasswordKey@1001 : GUID) : Boolean;
+    VAR
+      ServicePassword@1000 : Record "Service Password";
+    BEGIN
+      if not ServicePassword.GET(PasswordKey) then
+        exit(false);
+      exit(ServicePassword.GetPassword <> '');
+    END;
+
+    [External]
+    PROCEDURE SetURLsToDefault@5();
+    VAR
+      OCRServiceMgt@1000 : Codeunit "OCR Service Mgt.";
+    BEGIN
+      OCRServiceMgt.SetURLsToDefaultRSO(Rec);
+    END;
+
+    [External]
+    PROCEDURE CheckEnabled@7();
+    BEGIN
+      if not Enabled then
+        ERROR(MustBeEnabledErr);
+    END;
+
+    LOCAL PROCEDURE ScheduleJobQueueEntries@10();
+    BEGIN
+      ScheduleJobQueueReceive;
+      ScheduleJobQueueSend;
+      ScheduleJobQueueSync;
+    END;
+
+    [External]
+    PROCEDURE ScheduleJobQueueSend@13();
+    VAR
+      JobQueueEntry@1000 : Record "Job Queue Entry";
+      DummyRecId@1001 : RecordID;
+    BEGIN
+      CancelJobQueueSend;
+      JobQueueEntry.ScheduleRecurrentJobQueueEntry(JobQueueEntry."Object Type to Run"::Codeunit,
+        CODEUNIT::"OCR - Send to Service",DummyRecId);
+    END;
+
+    [External]
+    PROCEDURE ScheduleJobQueueReceive@14();
+    VAR
+      JobQueueEntry@1000 : Record "Job Queue Entry";
+      DummyRecId@1001 : RecordID;
+    BEGIN
+      CancelJobQueueReceive;
+      JobQueueEntry.ScheduleRecurrentJobQueueEntry(JobQueueEntry."Object Type to Run"::Codeunit,
+        CODEUNIT::"OCR - Receive from Service",DummyRecId);
+    END;
+
+    [External]
+    PROCEDURE ScheduleJobQueueSync@6();
+    VAR
+      OCRSyncMasterData@1001 : Codeunit "OCR - Sync Master Data";
+    BEGIN
+      OCRSyncMasterData.ScheduleJob;
+    END;
+
+    LOCAL PROCEDURE CancelJobQueueEntries@11();
+    BEGIN
+      CancelJobQueueReceive;
+      CancelJobQueueSend;
+      CancelJobQueueSync;
+    END;
+
+    LOCAL PROCEDURE CancelJobQueueEntry@16(ObjType@1001 : Option;ObjID@1002 : Integer);
+    VAR
+      JobQueueEntry@1000 : Record "Job Queue Entry";
+    BEGIN
+      if JobQueueEntry.FindJobQueueEntry(ObjType,ObjID) then
+        JobQueueEntry.Cancel;
+    END;
+
+    [External]
+    PROCEDURE CancelJobQueueSend@9();
+    VAR
+      JobQueueEntry@1000 : Record "Job Queue Entry";
+    BEGIN
+      CancelJobQueueEntry(JobQueueEntry."Object Type to Run"::Codeunit,
+        CODEUNIT::"OCR - Send to Service");
+    END;
+
+    [External]
+    PROCEDURE CancelJobQueueReceive@12();
+    VAR
+      JobQueueEntry@1000 : Record "Job Queue Entry";
+    BEGIN
+      CancelJobQueueEntry(JobQueueEntry."Object Type to Run"::Codeunit,
+        CODEUNIT::"OCR - Receive from Service");
+    END;
+
+    [External]
+    PROCEDURE CancelJobQueueSync@15();
+    VAR
+      OCRSyncMasterData@1000 : Codeunit "OCR - Sync Master Data";
+    BEGIN
+      OCRSyncMasterData.CancelJob;
+    END;
+
+    [External]
+    PROCEDURE ShowJobQueueEntry@8();
+    VAR
+      JobQueueEntry@1000 : Record "Job Queue Entry";
+    BEGIN
+      JobQueueEntry.SETRANGE("Object Type to Run",JobQueueEntry."Object Type to Run"::Codeunit);
+      JobQueueEntry.SETFILTER("Object ID to Run",'%1|%2|%3',
+        CODEUNIT::"OCR - Send to Service",
+        CODEUNIT::"OCR - Receive from Service",
+        CODEUNIT::"OCR - Sync Master Data");
+      if JobQueueEntry.FINDFIRST then
+        PAGE.RUN(PAGE::"Job Queue Entries",JobQueueEntry);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,373 @@
+OBJECT Codeunit 1266 Encryption Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Service Password"=rm;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ExportEncryptionKeyFileDialogTxt@1000 : TextConst 'ENU=Choose the location where you want to save the encryption key.';
+      ExportEncryptionKeyConfirmQst@1006 : TextConst 'ENU=The encryption key file must be protected by a password and stored in a safe location.\\Do you want to save the encryption key?';
+      FileImportCaptionMsg@1008 : TextConst 'ENU=Select a key file to import.';
+      DefaultEncryptionKeyFileNameTxt@1009 : TextConst 'ENU=EncryptionKey.key';
+      EncryptionKeyFilExtnTxt@1010 : TextConst 'ENU=.key';
+      KeyFileFilterTxt@1012 : TextConst 'ENU=Key File(*.key)|*.key';
+      ReencryptConfirmQst@1013 : TextConst 'ENU=The encryption is already enabled. Continuing will decrypt the encrypted data and encrypt it again with the new key.\\Do you want to continue?';
+      EncryptionKeyImportedMsg@1014 : TextConst 'ENU=The key was imported successfully.';
+      EnableEncryptionConfirmTxt@1015 : TextConst 'ENU=Enabling encryption will generate an encryption key on the server.\It is recommended that you save a copy of the encryption key in a safe location.\\Do you want to continue?';
+      DisableEncryptionConfirmQst@1016 : TextConst 'ENU=Disabling encryption will decrypt the encrypted data and store it in the database in an unsecure way.\\Do you want to continue?';
+      EncryptionCheckFailErr@1017 : TextConst 'ENU=Encryption is either not enabled or the encryption key cannot be found.';
+      GlblSilentFileUploadDownload@1011 : Boolean;
+      GlblTempClientFileName@1018 : Text;
+      FileNameNotSetForSilentUploadErr@1019 : TextConst 'ENU=A file name was not specified for silent upload.';
+      DeleteEncryptedDataConfirmQst@1002 : TextConst 'ENU=If you continue with this action all data that is encrypted will be deleted and lost.\Are you sure you want to delete all encrypted data?';
+      EncryptionIsNotActivatedQst@1001 : TextConst 'ENU=Data encryption is not activated. It is recommended that you encrypt data. \Do you want to open the Data Encryption Management window?';
+
+    [External]
+    PROCEDURE Encrypt@1(Text@1000 : Text) : Text;
+    BEGIN
+      AssertEncryptionPossible;
+      if Text = '' then
+        exit('');
+      exit(ENCRYPT(Text));
+    END;
+
+    [External]
+    PROCEDURE Decrypt@5(Text@1000 : Text) : Text;
+    BEGIN
+      AssertEncryptionPossible;
+      if Text = '' then
+        exit('');
+      exit(DECRYPT(Text))
+    END;
+
+    [Internal]
+    PROCEDURE ExportKey@4();
+    VAR
+      StdPasswordDialog@1000 : Page "Std. Password Dialog";
+      ServerFilename@1001 : Text;
+    BEGIN
+      AssertEncryptionPossible;
+      if CONFIRM(ExportEncryptionKeyConfirmQst,true) then begin
+        StdPasswordDialog.EnableBlankPassword(false);
+        if StdPasswordDialog.RUNMODAL <> ACTION::OK then
+          exit;
+        ServerFilename := EXPORTENCRYPTIONKEY(StdPasswordDialog.GetPasswordValue);
+        DownloadFile(ServerFilename);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE ImportKey@3();
+    VAR
+      FileManagement@1003 : Codeunit "File Management";
+      StdPasswordDialog@1002 : Page "Std. Password Dialog";
+      TempKeyFilePath@1000 : Text;
+    BEGIN
+      TempKeyFilePath := UploadFile;
+
+      // TempKeyFilePath is '' if the used cancelled the Upload file dialog.
+      if TempKeyFilePath = '' then
+        exit;
+
+      StdPasswordDialog.EnableGetPasswordMode(false);
+      StdPasswordDialog.DisablePasswordConfirmation;
+      if StdPasswordDialog.RUNMODAL = ACTION::OK then begin
+        if ENCRYPTIONENABLED then
+          // Encryption is already enabled so we're just importing the key. If the imported
+          // key does not match the already enabled encryption key the process will fail.
+          ImportKeyWithoutEncryptingData(TempKeyFilePath,StdPasswordDialog.GetPasswordValue)
+        else
+          ImportKeyAndEncryptData(TempKeyFilePath,StdPasswordDialog.GetPasswordValue);
+      end;
+
+      FileManagement.DeleteServerFile(TempKeyFilePath);
+    END;
+
+    [Internal]
+    PROCEDURE ChangeKey@15();
+    VAR
+      FileManagement@1000 : Codeunit "File Management";
+      StdPasswordDialog@1001 : Page "Std. Password Dialog";
+      TempKeyFilePath@1002 : Text;
+    BEGIN
+      TempKeyFilePath := UploadFile;
+
+      // TempKeyFilePath is '' if the used cancelled the Upload file dialog.
+      if TempKeyFilePath = '' then
+        exit;
+
+      StdPasswordDialog.EnableGetPasswordMode(false);
+      StdPasswordDialog.DisablePasswordConfirmation;
+      if StdPasswordDialog.RUNMODAL = ACTION::OK then begin
+        if IsEncryptionEnabled then begin
+          if not CONFIRM(ReencryptConfirmQst,true) then
+            exit;
+          DisableEncryption(true);
+        end;
+
+        ImportKeyAndEncryptData(TempKeyFilePath,StdPasswordDialog.GetPasswordValue);
+      end;
+
+      FileManagement.DeleteServerFile(TempKeyFilePath);
+    END;
+
+    [Internal]
+    PROCEDURE EnableEncryption@2();
+    BEGIN
+      if CONFIRM(EnableEncryptionConfirmTxt,true) then
+        EnableEncryptionSilently;
+    END;
+
+    [Internal]
+    PROCEDURE EnableEncryptionSilently@28();
+    BEGIN
+      // no user interaction on webservices
+      CREATEENCRYPTIONKEY;
+      ExportKey;
+      EncryptDataInAllCompanies;
+    END;
+
+    [Internal]
+    PROCEDURE DisableEncryption@7(Silent@1000 : Boolean);
+    BEGIN
+      // Silent is FALSE when we want the user to take action on if the encryption should be disabled or not. In cases like import key
+      // Silent should be TRUE as disabling encryption is a must before importing a new key, else data will be lost.
+      if not Silent then
+        if not CONFIRM(DisableEncryptionConfirmQst,true) then
+          exit;
+
+      DecryptDataInAllCompanies;
+      DELETEENCRYPTIONKEY;
+    END;
+
+    [External]
+    PROCEDURE DeleteEncryptedDataInAllCompanies@14();
+    VAR
+      Company@1000 : Record Company;
+    BEGIN
+      if CONFIRM(DeleteEncryptedDataConfirmQst) then begin
+        Company.FINDSET;
+        repeat
+          DeleteServicePasswordData(Company.Name);
+          DeleteKeyValueData(Company.Name);
+        until Company.NEXT = 0;
+        DELETEENCRYPTIONKEY;
+      end;
+    END;
+
+    [External]
+    PROCEDURE IsEncryptionEnabled@20() : Boolean;
+    BEGIN
+      exit(ENCRYPTIONENABLED);
+    END;
+
+    [External]
+    PROCEDURE IsEncryptionPossible@27() : Boolean;
+    BEGIN
+      // ENCRYPTIONKEYEXISTS checks if the correct key is present, which only works if encryption is enabled
+      exit(ENCRYPTIONKEYEXISTS);
+    END;
+
+    LOCAL PROCEDURE AssertEncryptionPossible@6();
+    BEGIN
+      if IsEncryptionEnabled then
+        if IsEncryptionPossible then
+          exit;
+
+      ERROR(EncryptionCheckFailErr);
+    END;
+
+    [Internal]
+    PROCEDURE EncryptDataInAllCompanies@11();
+    VAR
+      Company@1000 : Record Company;
+    BEGIN
+      Company.FINDSET;
+      repeat
+        EncryptServicePasswordData(Company.Name);
+        EncryptKeyValueData(Company.Name);
+      until Company.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DecryptDataInAllCompanies@12();
+    VAR
+      Company@1000 : Record Company;
+    BEGIN
+      Company.FINDSET;
+      repeat
+        DecryptServicePasswordData(Company.Name);
+        DecryptKeyValueData(Company.Name);
+      until Company.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE EncryptServicePasswordData@8(CompanyName@1001 : Text[30]);
+    VAR
+      ServicePassword@1000 : Record "Service Password";
+      InStream@1004 : InStream;
+      UnencryptedText@1006 : Text;
+    BEGIN
+      ServicePassword.CHANGECOMPANY(CompanyName);
+      if ServicePassword.FINDSET then
+        repeat
+          ServicePassword.CALCFIELDS(Value);
+          ServicePassword.Value.CREATEINSTREAM(InStream);
+          InStream.READTEXT(UnencryptedText);
+
+          CLEAR(ServicePassword.Value);
+          ServicePassword.SavePassword(UnencryptedText);
+          ServicePassword.MODIFY;
+        until ServicePassword.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DecryptServicePasswordData@9(CompanyName@1001 : Text[30]);
+    VAR
+      ServicePassword@1000 : Record "Service Password";
+      OutStream@1005 : OutStream;
+      EncryptedText@1006 : Text;
+    BEGIN
+      ServicePassword.CHANGECOMPANY(CompanyName);
+      if ServicePassword.FINDSET then
+        repeat
+          EncryptedText := ServicePassword.GetPassword;
+
+          CLEAR(ServicePassword.Value);
+          ServicePassword.Value.CREATEOUTSTREAM(OutStream);
+          OutStream.WRITETEXT(EncryptedText);
+          ServicePassword.MODIFY;
+        until ServicePassword.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE DeleteServicePasswordData@16(CompanyName@1001 : Text[30]);
+    VAR
+      ServicePassword@1000 : Record "Service Password";
+    BEGIN
+      ServicePassword.CHANGECOMPANY(CompanyName);
+      if ServicePassword.FINDSET then
+        repeat
+          CLEAR(ServicePassword.Value);
+          ServicePassword.MODIFY;
+        until ServicePassword.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE EncryptKeyValueData@23(CompanyName@1001 : Text[30]);
+    VAR
+      EncryptedKeyValue@1000 : Record "Encrypted Key/Value";
+      InStream@1004 : InStream;
+      UnencryptedText@1006 : Text;
+    BEGIN
+      EncryptedKeyValue.CHANGECOMPANY(CompanyName);
+      if EncryptedKeyValue.FINDSET then
+        repeat
+          EncryptedKeyValue.CALCFIELDS(Value);
+          EncryptedKeyValue.Value.CREATEINSTREAM(InStream);
+          InStream.READTEXT(UnencryptedText);
+
+          CLEAR(EncryptedKeyValue.Value);
+          EncryptedKeyValue.InsertValue(UnencryptedText);
+          EncryptedKeyValue.MODIFY;
+        until EncryptedKeyValue.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DecryptKeyValueData@22(CompanyName@1001 : Text[30]);
+    VAR
+      EncryptedKeyValue@1000 : Record "Encrypted Key/Value";
+      OutStream@1005 : OutStream;
+      EncryptedText@1006 : Text;
+    BEGIN
+      EncryptedKeyValue.CHANGECOMPANY(CompanyName);
+      if EncryptedKeyValue.FINDSET then
+        repeat
+          EncryptedText := EncryptedKeyValue.GetValue;
+
+          CLEAR(EncryptedKeyValue.Value);
+          EncryptedKeyValue.Value.CREATEOUTSTREAM(OutStream);
+          OutStream.WRITETEXT(EncryptedText);
+          EncryptedKeyValue.MODIFY;
+        until EncryptedKeyValue.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DeleteKeyValueData@19(CompanyName@1001 : Text[30]);
+    VAR
+      EncryptedKeyValue@1000 : Record "Encrypted Key/Value";
+    BEGIN
+      EncryptedKeyValue.CHANGECOMPANY(CompanyName);
+      if EncryptedKeyValue.FINDSET then
+        repeat
+          CLEAR(EncryptedKeyValue.Value);
+          EncryptedKeyValue.MODIFY;
+        until EncryptedKeyValue.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UploadFile@17() : Text;
+    VAR
+      FileManagement@1000 : Codeunit "File Management";
+    BEGIN
+      if GlblSilentFileUploadDownload then begin
+        if GlblTempClientFileName = '' then
+          ERROR(FileNameNotSetForSilentUploadErr);
+        exit(FileManagement.UploadFileSilent(GlblTempClientFileName));
+      end;
+
+      exit(FileManagement.UploadFileWithFilter(FileImportCaptionMsg,
+          DefaultEncryptionKeyFileNameTxt,KeyFileFilterTxt,EncryptionKeyFilExtnTxt));
+    END;
+
+    LOCAL PROCEDURE DownloadFile@18(ServerFileName@1001 : Text);
+    VAR
+      FileManagement@1000 : Codeunit "File Management";
+    BEGIN
+      if GlblSilentFileUploadDownload then
+        GlblTempClientFileName := FileManagement.DownloadTempFile(ServerFileName)
+      else
+        FileManagement.DownloadHandler(ServerFileName,ExportEncryptionKeyFileDialogTxt,
+          '',KeyFileFilterTxt,DefaultEncryptionKeyFileNameTxt);
+    END;
+
+    [External]
+    PROCEDURE SetSilentFileUploadDownload@10(IsSilent@1000 : Boolean;SilentFileUploadName@1001 : Text);
+    BEGIN
+      GlblSilentFileUploadDownload := IsSilent;
+      GlblTempClientFileName := SilentFileUploadName;
+    END;
+
+    [External]
+    PROCEDURE GetGlblTempClientFileName@13() : Text;
+    BEGIN
+      exit(GlblTempClientFileName);
+    END;
+
+    LOCAL PROCEDURE ImportKeyAndEncryptData@21(KeyFilePath@1000 : Text;Password@1002 : Text);
+    BEGIN
+      IMPORTENCRYPTIONKEY(KeyFilePath,Password);
+      EncryptDataInAllCompanies;
+      MESSAGE(EncryptionKeyImportedMsg);
+    END;
+
+    LOCAL PROCEDURE ImportKeyWithoutEncryptingData@25(KeyFilePath@1001 : Text;Password@1000 : Text);
+    BEGIN
+      IMPORTENCRYPTIONKEY(KeyFilePath,Password);
+      MESSAGE(EncryptionKeyImportedMsg);
+    END;
+
+    PROCEDURE GetEncryptionIsNotActivatedQst@24() : Text;
+    BEGIN
+      exit(EncryptionIsNotActivatedQst);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

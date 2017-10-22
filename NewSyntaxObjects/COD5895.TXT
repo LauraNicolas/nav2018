@@ -1,0 +1,2367 @@
+OBJECT Codeunit 5895 Inventory Adjustment
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData Item=rm,
+                TableData "Item Ledger Entry"=rm,
+                TableData "Item Application Entry"=rimd,
+                TableData "Value Entry"=rim,
+                TableData "Avg. Cost Adjmt. Entry Point"=rimd,
+                TableData "Inventory Adjmt. Entry (Order)"=rm;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Adjusting value entries...\\';
+      Text001@1001 : TextConst 'ENU=Adjmt. Level      #2######\';
+      Text002@1002 : TextConst 'ENU=%1 %2';
+      Text003@1003 : TextConst 'ENU=Adjust            #3######\';
+      Text004@1004 : TextConst 'ENU=Cost FW. Level    #4######\';
+      Text005@1005 : TextConst 'ENU=Entry No.         #5######\';
+      Text006@1044 : TextConst 'ENU=Remaining Entries #6######';
+      Text007@1007 : TextConst 'ENU=Applied cost';
+      Text008@1008 : TextConst 'ENU=Average cost';
+      Item@1026 : Record Item;
+      FilterItem@1040 : Record Item;
+      GLSetup@1009 : Record "General Ledger Setup";
+      Currency@1010 : Record Currency;
+      InvtSetup@1011 : Record "Inventory Setup";
+      SourceCodeSetup@1012 : Record "Source Code Setup";
+      TempInvtAdjmtBuf@1030 : TEMPORARY Record "Inventory Adjustment Buffer";
+      RndgResidualBuf@1023 : TEMPORARY Record "Rounding Residual Buffer";
+      AppliedEntryToAdjustBuf@1006 : TEMPORARY Record Integer;
+      AvgCostExceptionBuf@1029 : TEMPORARY Record Integer;
+      AvgCostBuf@1028 : Record "Cost Element Buffer";
+      AvgCostRndgBuf@1025 : TEMPORARY Record "Rounding Residual Buffer";
+      RevaluationPoint@1022 : TEMPORARY Record Integer;
+      TempFixApplBuffer@1046 : TEMPORARY Record Integer;
+      TempOpenItemLedgEntry@1047 : TEMPORARY Record Integer;
+      TempJobToAdjustBuf@1043 : TEMPORARY Record Job;
+      ItemJnlPostLine@1015 : Codeunit "Item Jnl.-Post Line";
+      CostCalcMgt@1016 : Codeunit "Cost Calculation Management";
+      ItemCostMgt@1024 : Codeunit ItemCostManagement;
+      Window@1017 : Dialog;
+      WindowUpdateTime@1013 : Time;
+      PostingDateForClosedPeriod@1018 : Date;
+      LevelNo@1019 : ARRAY [3] OF Integer;
+      MaxLevels@1020 : Integer;
+      LevelExceeded@1021 : Boolean;
+      IsDeletedItem@1027 : Boolean;
+      IsOnlineAdjmt@1031 : Boolean;
+      PostToGL@1041 : Boolean;
+      SkipUpdateJobItemCost@1042 : Boolean;
+      WindowIsOpen@1037 : Boolean;
+      WindowAdjmtLevel@1032 : Integer;
+      WindowItem@1033 : Code[20];
+      WindowAdjust@1036 : Text[20];
+      WindowFWLevel@1035 : Integer;
+      WindowEntry@1034 : Integer;
+      Text009@1039 : TextConst 'ENU=WIP';
+      Text010@1014 : TextConst 'ENU=Assembly';
+      IsAvgCostCalcTypeItem@1038 : Boolean;
+      WindowOutbndEntry@1045 : Integer;
+      ConsumpAdjmtInPeriodWithOutput@1048 : Date;
+
+    [External]
+    PROCEDURE SetProperties@29(NewIsOnlineAdjmt@1001 : Boolean;NewPostToGL@1003 : Boolean);
+    BEGIN
+      IsOnlineAdjmt := NewIsOnlineAdjmt;
+      PostToGL := NewPostToGL;
+    END;
+
+    [External]
+    PROCEDURE SetFilterItem@16(VAR NewItem@1000 : Record Item);
+    BEGIN
+      FilterItem.COPYFILTERS(NewItem);
+    END;
+
+    [External]
+    PROCEDURE MakeMultiLevelAdjmt@34();
+    VAR
+      TempItem@1004 : TEMPORARY Record Item;
+      TempInventoryAdjmtEntryOrder@1000 : TEMPORARY Record "Inventory Adjmt. Entry (Order)";
+      IsFirstTime@1005 : Boolean;
+    BEGIN
+      InitializeAdjmt;
+
+      IsFirstTime := true;
+      while (InvtToAdjustExist(TempItem) or IsFirstTime) and not LevelExceeded do begin
+        MakeSingleLevelAdjmt(TempItem);
+        if AssemblyToAdjustExists(TempInventoryAdjmtEntryOrder) then
+          MakeAssemblyAdjmt(TempInventoryAdjmtEntryOrder);
+        if WIPToAdjustExist(TempInventoryAdjmtEntryOrder) then
+          MakeWIPAdjmt(TempInventoryAdjmtEntryOrder);
+        IsFirstTime := false;
+      end;
+
+      SetAppliedEntryToAdjustFromBuf;
+      FinalizeAdjmt;
+      UpdateJobItemCost;
+    END;
+
+    LOCAL PROCEDURE InitializeAdjmt@37();
+    BEGIN
+      CLEAR(LevelNo);
+      MaxLevels := 100;
+      WindowUpdateTime := TIME;
+      if not IsOnlineAdjmt then
+        OpenWindow;
+
+      CLEAR(ItemJnlPostLine);
+      ItemJnlPostLine.SetCalledFromAdjustment(true,PostToGL);
+
+      InvtSetup.GET;
+      GLSetup.GET;
+      PostingDateForClosedPeriod := GLSetup.FirstAllowedPostingDate;
+      GetAddReportingCurrency;
+
+      SourceCodeSetup.GET;
+
+      ItemCostMgt.SetProperties(true,0);
+      TempJobToAdjustBuf.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE FinalizeAdjmt@85();
+    BEGIN
+      CLEAR(ItemJnlPostLine);
+      CLEAR(CostCalcMgt);
+      CLEAR(ItemCostMgt);
+      AvgCostRndgBuf.DELETEALL;
+      if WindowIsOpen then
+        Window.CLOSE;
+      WindowIsOpen := false;
+    END;
+
+    LOCAL PROCEDURE GetAddReportingCurrency@30();
+    BEGIN
+      if GLSetup."Additional Reporting Currency" <> '' then begin
+        Currency.GET(GLSetup."Additional Reporting Currency");
+        Currency.CheckAmountRoundingPrecision;
+      end;
+    END;
+
+    LOCAL PROCEDURE InvtToAdjustExist@64(VAR ToItem@1000 : Record Item) : Boolean;
+    VAR
+      Item@1001 : Record Item;
+      ItemLedgEntry@1002 : Record "Item Ledger Entry";
+    BEGIN
+      with Item do begin
+        RESET;
+        COPYFILTERS(FilterItem);
+        if GETFILTER("No.") = '' then
+          SETCURRENTKEY("Cost is Adjusted","Allow Online Adjustment");
+        SETRANGE("Cost is Adjusted",false);
+        if IsOnlineAdjmt then
+          SETRANGE("Allow Online Adjustment",true);
+
+        CopyItemToItem(Item,ToItem);
+
+        if ItemLedgEntry.AppliedEntryToAdjustExists('') then
+          InsertDeletedItem(ToItem);
+
+        exit(not ToItem.ISEMPTY);
+      end;
+    END;
+
+    LOCAL PROCEDURE MakeSingleLevelAdjmt@12(VAR TheItem@1001 : Record Item);
+    VAR
+      TempAvgCostAdjmtEntryPoint@1000 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point";
+    BEGIN
+      LevelNo[1] := LevelNo[1] + 1;
+
+      UpDateWindow(LevelNo[1],WindowItem,WindowAdjust,WindowFWLevel,WindowEntry,0);
+
+      ConsumpAdjmtInPeriodWithOutput := 0D;
+
+      TheItem.SETCURRENTKEY("Low-Level Code");
+      if TheItem.FINDLAST then
+        TheItem.SETRANGE("Low-Level Code",TheItem."Low-Level Code");
+
+      with Item do
+        if TheItem.FINDSET then
+          repeat
+            Item := TheItem;
+            GetItem("No.");
+            UpDateWindow(WindowAdjmtLevel,"No.",WindowAdjust,WindowFWLevel,WindowEntry,0);
+
+            TempAvgCostAdjmtEntryPoint.RESET;
+            TempAvgCostAdjmtEntryPoint.DELETEALL;
+            repeat
+              LevelExceeded := false;
+              AdjustItemAppliedCost(TempAvgCostAdjmtEntryPoint);
+            until not LevelExceeded;
+
+            AdjustItemAvgCost(TempAvgCostAdjmtEntryPoint);
+            PostAdjmtBuf;
+            UpdateItemUnitCost(TempAvgCostAdjmtEntryPoint);
+          until (TheItem.NEXT = 0) or LevelExceeded;
+    END;
+
+    LOCAL PROCEDURE AdjustItemAppliedCost@4(VAR TempAvgCostAdjmtEntryPoint@1003 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      ItemLedgEntry@1002 : Record "Item Ledger Entry";
+      TempItemLedgEntry@1000 : TEMPORARY Record "Item Ledger Entry";
+      AppliedQty@1001 : Decimal;
+    BEGIN
+      UpDateWindow(WindowAdjmtLevel,WindowItem,Text007,WindowFWLevel,WindowEntry,0);
+
+      with ItemLedgEntry do
+        if AppliedEntryToAdjustExists(Item."No.") then begin
+          CopyILEToILE(ItemLedgEntry,TempItemLedgEntry);
+          TempItemLedgEntry.FINDSET;
+          repeat
+            GET(TempItemLedgEntry."Entry No.");
+            UpDateWindow(WindowAdjmtLevel,WindowItem,WindowAdjust,WindowFWLevel,"Entry No.",0);
+
+            RndgResidualBuf.AddAdjustedCost("Entry No.",0,0,"Completely Invoiced");
+
+            AppliedQty := ForwardAppliedCost(ItemLedgEntry,false,TempAvgCostAdjmtEntryPoint);
+
+            EliminateRndgResidual(ItemLedgEntry,AppliedQty);
+          until (TempItemLedgEntry.NEXT = 0) or LevelExceeded;
+        end;
+    END;
+
+    LOCAL PROCEDURE ForwardAppliedCost@1(ItemLedgEntry@1000 : Record "Item Ledger Entry";Recursion@1002 : Boolean;VAR TempAvgCostAdjmtEntryPoint@1001 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point") AppliedQty : Decimal;
+    VAR
+      AppliedEntryToAdjust@1004 : Boolean;
+    BEGIN
+      with ItemLedgEntry do begin
+        // Avoid stack overflow, if too many recursions
+        if Recursion then
+          LevelNo[3] := LevelNo[3] + 1
+        else
+          LevelNo[3] := 0;
+
+        if LevelNo[3] = MaxLevels then begin
+          SetAppliedEntryToAdjust(true);
+          LevelExceeded := true;
+          LevelNo[3] := 0;
+          exit;
+        end;
+
+        UpDateWindow(WindowAdjmtLevel,WindowItem,WindowAdjust,LevelNo[3],WindowEntry,0);
+
+        AppliedQty := ForwardCostToOutbndEntries(ItemLedgEntry,Recursion,AppliedEntryToAdjust,TempAvgCostAdjmtEntryPoint);
+
+        ForwardCostToInbndTransEntries("Entry No.",Recursion,TempAvgCostAdjmtEntryPoint);
+
+        ForwardCostToInbndEntries("Entry No.",TempAvgCostAdjmtEntryPoint);
+
+        if OutboundSalesEntryToAdjust(ItemLedgEntry) or
+           InboundTransferEntryToAdjust(ItemLedgEntry)
+        then
+          AppliedEntryToAdjust := true;
+
+        if not IsOutbndConsump and AppliedEntryToAdjust then
+          UpdateAppliedEntryToAdjustBuf("Entry No.",AppliedEntryToAdjust);
+
+        SetAppliedEntryToAdjust(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE ForwardAppliedCostRecursion@61(ItemLedgEntry@1000 : Record "Item Ledger Entry";VAR TempAvgCostAdjmtEntryPoint@1001 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    BEGIN
+      if not ItemLedgEntry."Applied Entry to Adjust" then begin
+        ForwardAppliedCost(ItemLedgEntry,true,TempAvgCostAdjmtEntryPoint);
+        if LevelNo[3] > 0 then
+          LevelNo[3] := LevelNo[3] - 1;
+      end;
+    END;
+
+    LOCAL PROCEDURE ForwardCostToOutbndEntries@27(ItemLedgEntry@1001 : Record "Item Ledger Entry";Recursion@1000 : Boolean;VAR AppliedEntryToAdjust@1004 : Boolean;VAR TempAvgCostAdjmtEntryPoint@1002 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point") AppliedQty : Decimal;
+    VAR
+      ItemApplnEntry@1003 : Record "Item Application Entry";
+      InboundCompletelyInvoiced@1005 : Boolean;
+    BEGIN
+      AppliedQty := 0;
+      with ItemApplnEntry do
+        if AppliedOutbndEntryExists(ItemLedgEntry."Entry No.",true,ItemLedgEntry.Open) then
+          repeat
+            if not AdjustAppliedOutbndEntries("Outbound Item Entry No.",Recursion,TempAvgCostAdjmtEntryPoint,InboundCompletelyInvoiced) then
+              AppliedEntryToAdjust := InboundCompletelyInvoiced or ItemLedgEntry.Open or not ItemLedgEntry."Completely Invoiced";
+            AppliedQty += Quantity;
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AdjustAppliedOutbndEntries@2(OutbndItemLedgEntryNo@1000 : Integer;Recursion@1031 : Boolean;VAR TempAvgCostAdjmtEntryPoint@1007 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point";VAR InboundCompletelyInvoiced@1009 : Boolean) : Boolean;
+    VAR
+      OutbndItemLedgEntry@1001 : Record "Item Ledger Entry";
+      OutbndValueEntry@1003 : Record "Value Entry";
+      OutbndCostElementBuf@1002 : TEMPORARY Record "Cost Element Buffer";
+      OldCostElementBuf@1004 : TEMPORARY Record "Cost Element Buffer";
+      AdjustedCostElementBuf@1005 : TEMPORARY Record "Cost Element Buffer";
+      ItemApplnEntry@1006 : Record "Item Application Entry";
+      StandardCostMirroring@1008 : Boolean;
+    BEGIN
+      OutbndItemLedgEntry.GET(OutbndItemLedgEntryNo);
+      if Item."Costing Method" = Item."Costing Method"::Standard then
+        StandardCostMirroring := UseStandardCostMirroring(OutbndItemLedgEntry);
+      with OutbndValueEntry do begin
+        CalcOutbndCost(OutbndCostElementBuf,AdjustedCostElementBuf,OutbndItemLedgEntry,Recursion);
+
+        // Adjust shipment
+        SETCURRENTKEY("Item Ledger Entry No.","Document No.","Document Line No.");
+        SETRANGE("Item Ledger Entry No.",OutbndItemLedgEntryNo);
+        FINDSET;
+        repeat
+          if not (Adjustment or ExpCostIsCompletelyInvoiced(OutbndItemLedgEntry,OutbndValueEntry)) and
+             Inventoriable
+          then begin
+            SETRANGE("Document No.","Document No.");
+            SETRANGE("Document Line No.","Document Line No.");
+            CalcOutbndDocOldCost(
+              OldCostElementBuf,OutbndValueEntry,
+              OutbndItemLedgEntry.IsExactCostReversingPurchase or OutbndItemLedgEntry.IsExactCostReversingOutput);
+
+            CalcCostPerUnit(OutbndValueEntry,OutbndCostElementBuf,OutbndItemLedgEntry.Quantity);
+
+            if not "Expected Cost" then begin
+              OldCostElementBuf.Retrieve(0,0);
+              "Invoiced Quantity" := OldCostElementBuf."Invoiced Quantity";
+              "Valued Quantity" := OldCostElementBuf."Invoiced Quantity";
+            end;
+
+            CalcOutbndDocNewCost(
+              AdjustedCostElementBuf,OutbndCostElementBuf,
+              OutbndValueEntry,OutbndItemLedgEntry.Quantity);
+
+            if "Expected Cost" then begin
+              OldCostElementBuf.Retrieve(OldCostElementBuf.Type::Total,OldCostElementBuf."Variance Type"::" ");
+              AdjustedCostElementBuf."Actual Cost" := AdjustedCostElementBuf."Actual Cost" - OldCostElementBuf."Expected Cost";
+              AdjustedCostElementBuf."Actual Cost (ACY)" :=
+                AdjustedCostElementBuf."Actual Cost (ACY)" - OldCostElementBuf."Expected Cost (ACY)";
+            end else begin
+              OldCostElementBuf.Retrieve("Entry Type"::"Direct Cost",0);
+              AdjustedCostElementBuf."Actual Cost" := AdjustedCostElementBuf."Actual Cost" - OldCostElementBuf."Actual Cost";
+              AdjustedCostElementBuf."Actual Cost (ACY)" :=
+                AdjustedCostElementBuf."Actual Cost (ACY)" - OldCostElementBuf."Actual Cost (ACY)";
+            end;
+
+            if StandardCostMirroring and not "Expected Cost" then
+              CreateCostAdjmtBuf(
+                OutbndValueEntry,AdjustedCostElementBuf,OutbndItemLedgEntry."Posting Date",
+                "Entry Type"::Variance,TempAvgCostAdjmtEntryPoint)
+            else
+              CreateCostAdjmtBuf(
+                OutbndValueEntry,AdjustedCostElementBuf,OutbndItemLedgEntry."Posting Date",
+                "Entry Type",TempAvgCostAdjmtEntryPoint);
+
+            if not "Expected Cost" then begin
+              CreateIndirectCostAdjmt(
+                OldCostElementBuf,AdjustedCostElementBuf,OutbndValueEntry,"Entry Type"::"Indirect Cost",TempAvgCostAdjmtEntryPoint);
+              CreateIndirectCostAdjmt(
+                OldCostElementBuf,AdjustedCostElementBuf,OutbndValueEntry,"Entry Type"::Variance,TempAvgCostAdjmtEntryPoint);
+            end;
+            FINDLAST;
+            SETRANGE("Document No.");
+            SETRANGE("Document Line No.");
+          end;
+        until NEXT = 0;
+
+        // Update transfers, consumptions
+        if IsUpdateCompletelyInvoiced(
+             OutbndItemLedgEntry,OutbndCostElementBuf."Inbound Completely Invoiced")
+        then
+          OutbndItemLedgEntry.SetCompletelyInvoiced;
+
+        ForwardAppliedCostRecursion(OutbndItemLedgEntry,TempAvgCostAdjmtEntryPoint);
+
+        ItemApplnEntry.SetInboundToUpdated(OutbndItemLedgEntry);
+
+        InboundCompletelyInvoiced := OutbndCostElementBuf."Inbound Completely Invoiced";
+        exit(OutbndItemLedgEntry."Completely Invoiced");
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcCostPerUnit@41(VAR OutbndValueEntry@1001 : Record "Value Entry";OutbndCostElementBuf@1000 : Record "Cost Element Buffer";ItemLedgEntryQty@1002 : Decimal);
+    BEGIN
+      with OutbndCostElementBuf do begin
+        if (OutbndValueEntry."Cost per Unit" = 0) and ("Remaining Quantity" <> 0) then
+          OutbndValueEntry."Cost per Unit" := "Actual Cost" / (ItemLedgEntryQty - "Remaining Quantity");
+        if (OutbndValueEntry."Cost per Unit (ACY)" = 0) and ("Remaining Quantity" <> 0) then
+          OutbndValueEntry."Cost per Unit (ACY)" := "Actual Cost (ACY)" / (ItemLedgEntryQty - "Remaining Quantity");
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcOutbndCost@47(VAR OutbndCostElementBuf@1000 : Record "Cost Element Buffer";VAR AdjustedCostElementBuf@1007 : Record "Cost Element Buffer";OutbndItemLedgEntry@1004 : Record "Item Ledger Entry";Recursion@1003 : Boolean);
+    VAR
+      OutbndItemApplnEntry@1002 : Record "Item Application Entry";
+    BEGIN
+      AdjustedCostElementBuf.DELETEALL;
+      with OutbndCostElementBuf do begin
+        "Remaining Quantity" := OutbndItemLedgEntry.Quantity;
+        "Inbound Completely Invoiced" := true;
+
+        OutbndItemApplnEntry.SETCURRENTKEY("Item Ledger Entry No.");
+        OutbndItemApplnEntry.SETRANGE("Item Ledger Entry No.",OutbndItemLedgEntry."Entry No.");
+        OutbndItemApplnEntry.FINDSET;
+        repeat
+          if not
+             CalcInbndEntryAdjustedCost(
+               AdjustedCostElementBuf,
+               OutbndItemApplnEntry,OutbndItemLedgEntry."Entry No.",
+               OutbndItemApplnEntry."Inbound Item Entry No.",
+               OutbndItemLedgEntry.IsExactCostReversingPurchase or OutbndItemLedgEntry.IsExactCostReversingOutput,
+               Recursion)
+          then
+            "Inbound Completely Invoiced" := false;
+
+          AdjustedCostElementBuf.Retrieve(Type::"Direct Cost","Variance Type"::" ");
+          "Actual Cost" := "Actual Cost" + AdjustedCostElementBuf."Actual Cost";
+          "Actual Cost (ACY)" := "Actual Cost (ACY)" + AdjustedCostElementBuf."Actual Cost (ACY)";
+          "Remaining Quantity" := "Remaining Quantity" - OutbndItemApplnEntry.Quantity;
+        until OutbndItemApplnEntry.NEXT = 0;
+
+        if "Inbound Completely Invoiced" then
+          "Inbound Completely Invoiced" := "Remaining Quantity" = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcOutbndDocNewCost@46(VAR NewCostElementBuf@1007 : Record "Cost Element Buffer";OutbndCostElementBuf@1000 : Record "Cost Element Buffer";OutbndValueEntry@1005 : Record "Value Entry";ItemLedgEntryQty@1006 : Decimal);
+    VAR
+      ShareOfTotalCost@1001 : Decimal;
+    BEGIN
+      ShareOfTotalCost := OutbndValueEntry."Valued Quantity" / ItemLedgEntryQty;
+      with OutbndCostElementBuf do begin
+        NewCostElementBuf.Retrieve(Type::"Direct Cost",0);
+        "Actual Cost" := "Actual Cost" + OutbndValueEntry."Cost per Unit" * "Remaining Quantity";
+        "Actual Cost (ACY)" := "Actual Cost (ACY)" + OutbndValueEntry."Cost per Unit (ACY)" * "Remaining Quantity";
+
+        RoundCost(
+          NewCostElementBuf."Actual Cost",NewCostElementBuf."Rounding Residual",
+          "Actual Cost",ShareOfTotalCost,GLSetup."Amount Rounding Precision");
+        RoundCost(
+          NewCostElementBuf."Actual Cost (ACY)",NewCostElementBuf."Rounding Residual (ACY)",
+          "Actual Cost (ACY)",ShareOfTotalCost,Currency."Amount Rounding Precision");
+
+        if not NewCostElementBuf.INSERT then
+          NewCostElementBuf.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateCostAdjmtBuf@92(OutbndValueEntry@1000 : Record "Value Entry";CostElementBuf@1001 : Record "Cost Element Buffer";ItemLedgEntryPostingDate@1003 : Date;EntryType@1004 : Option;VAR TempAvgCostAdjmtEntryPoint@1002 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point") : Boolean;
+    BEGIN
+      with CostElementBuf do
+        if UpdateAdjmtBuf(
+             OutbndValueEntry,"Actual Cost","Actual Cost (ACY)",ItemLedgEntryPostingDate,EntryType,
+             TempAvgCostAdjmtEntryPoint)
+        then begin
+          UpdateAvgCostAdjmtEntryPoint(OutbndValueEntry,TempAvgCostAdjmtEntryPoint);
+          exit(true);
+        end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE CreateIndirectCostAdjmt@40(VAR CostElementBuf@1005 : Record "Cost Element Buffer";VAR AdjustedCostElementBuf@1004 : Record "Cost Element Buffer";OutbndValueEntry@1000 : Record "Value Entry";EntryType@1001 : Option;VAR TempAvgCostAdjmtEntryPoint@1003 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      ItemJnlLine@1008 : Record "Item Journal Line";
+      OrigValueEntry@1002 : Record "Value Entry";
+      NewAdjustedCost@1006 : Decimal;
+      NewAdjustedCostACY@1007 : Decimal;
+    BEGIN
+      with CostElementBuf do begin
+        Retrieve(EntryType,0);
+        AdjustedCostElementBuf.Retrieve(EntryType,0);
+        NewAdjustedCost := AdjustedCostElementBuf."Actual Cost" - "Actual Cost";
+        NewAdjustedCostACY := AdjustedCostElementBuf."Actual Cost (ACY)" - "Actual Cost (ACY)";
+      end;
+
+      if HasNewCost(NewAdjustedCost,NewAdjustedCostACY) then begin
+        GetOrigValueEntry(OrigValueEntry,OutbndValueEntry,EntryType);
+        InitAdjmtJnlLine(
+          ItemJnlLine,OrigValueEntry,OrigValueEntry."Entry Type",OrigValueEntry."Variance Type");
+        PostItemJnlLine(ItemJnlLine,OrigValueEntry,NewAdjustedCost,NewAdjustedCostACY);
+        UpdateAvgCostAdjmtEntryPoint(OrigValueEntry,TempAvgCostAdjmtEntryPoint);
+      end;
+    END;
+
+    LOCAL PROCEDURE ForwardCostToInbndTransEntries@39(ItemLedgEntryNo@1001 : Integer;Recursion@1000 : Boolean;VAR TempAvgCostAdjmtEntryPoint@1003 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      ItemApplnEntry@1002 : Record "Item Application Entry";
+    BEGIN
+      with ItemApplnEntry do
+        if AppliedInbndTransEntryExists(ItemLedgEntryNo,true) then
+          repeat
+            AdjustAppliedInbndTransEntries(ItemApplnEntry,Recursion,TempAvgCostAdjmtEntryPoint);
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AdjustAppliedInbndTransEntries@13(TransItemApplnEntry@1000 : Record "Item Application Entry";Recursion@1014 : Boolean;VAR TempAvgCostAdjmtEntryPoint@1004 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      TransValueEntry@1002 : Record "Value Entry";
+      TransItemLedgEntry@1003 : Record "Item Ledger Entry";
+      CostElementBuf@1001 : TEMPORARY Record "Cost Element Buffer";
+      AdjustedCostElementBuf@1006 : TEMPORARY Record "Cost Element Buffer";
+      EntryAdjusted@1007 : Boolean;
+    BEGIN
+      with TransItemApplnEntry do begin
+        TransItemLedgEntry.GET("Item Ledger Entry No.");
+        if not TransItemLedgEntry."Completely Invoiced" then
+          AdjustNotInvdRevaluation(TransItemLedgEntry,TransItemApplnEntry,TempAvgCostAdjmtEntryPoint);
+
+        CalcTransEntryOldCost(CostElementBuf,TransValueEntry,"Item Ledger Entry No.");
+
+        if CalcInbndEntryAdjustedCost(
+             AdjustedCostElementBuf,
+             TransItemApplnEntry,TransItemLedgEntry."Entry No.",
+             "Transferred-from Entry No.",
+             false,Recursion)
+        then
+          if not TransItemLedgEntry."Completely Invoiced" then begin
+            TransItemLedgEntry.SetCompletelyInvoiced;
+            EntryAdjusted := true;
+          end;
+
+        if UpdateAdjmtBuf(
+             TransValueEntry,
+             AdjustedCostElementBuf."Actual Cost" - CostElementBuf."Actual Cost",
+             AdjustedCostElementBuf."Actual Cost (ACY)" - CostElementBuf."Actual Cost (ACY)",
+             TransItemLedgEntry."Posting Date",
+             TransValueEntry."Entry Type",
+             TempAvgCostAdjmtEntryPoint)
+        then
+          EntryAdjusted := true;
+
+        if EntryAdjusted then begin
+          UpdateAvgCostAdjmtEntryPoint(TransValueEntry,TempAvgCostAdjmtEntryPoint);
+          ForwardAppliedCostRecursion(TransItemLedgEntry,TempAvgCostAdjmtEntryPoint);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcTransEntryOldCost@56(VAR CostElementBuf@1001 : Record "Cost Element Buffer";VAR TransValueEntry@1000 : Record "Value Entry";ItemLedgEntryNo@1002 : Integer);
+    VAR
+      TransValueEntry2@1003 : Record "Value Entry";
+    BEGIN
+      CLEAR(CostElementBuf);
+      with CostElementBuf do begin
+        TransValueEntry2 := TransValueEntry;
+        TransValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+        TransValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgEntryNo);
+        TransValueEntry.SETRANGE("Entry Type",TransValueEntry."Entry Type"::"Direct Cost");
+        TransValueEntry.FIND('+');
+        repeat
+          if TransValueEntry."Item Charge No." = '' then begin
+            if TempInvtAdjmtBuf.GET(TransValueEntry."Entry No.") then
+              TransValueEntry.AddCost(TempInvtAdjmtBuf);
+            "Actual Cost" := "Actual Cost" + TransValueEntry."Cost Amount (Actual)";
+            "Actual Cost (ACY)" := "Actual Cost (ACY)" + TransValueEntry."Cost Amount (Actual) (ACY)";
+            TransValueEntry2 := TransValueEntry;
+          end;
+        until TransValueEntry.NEXT(-1) = 0;
+        TransValueEntry := TransValueEntry2;
+      end;
+    END;
+
+    LOCAL PROCEDURE ForwardCostToInbndEntries@48(ItemLedgEntryNo@1001 : Integer;VAR TempAvgCostAdjmtEntryPoint@1000 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      ItemApplnEntry@1002 : Record "Item Application Entry";
+    BEGIN
+      with ItemApplnEntry do
+        if AppliedInbndEntryExists(ItemLedgEntryNo,true) then
+          repeat
+            AdjustAppliedInbndEntries(ItemApplnEntry,TempAvgCostAdjmtEntryPoint);
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AdjustAppliedInbndEntries@9(VAR InbndItemApplnEntry@1000 : Record "Item Application Entry";VAR TempAvgCostAdjmtEntryPoint@1001 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      OutbndItemLedgEntry@1003 : Record "Item Ledger Entry";
+      InbndValueEntry@1004 : Record "Value Entry";
+      InbndItemLedgEntry@1005 : Record "Item Ledger Entry";
+      DocCostElementBuf@1006 : TEMPORARY Record "Cost Element Buffer";
+      OldCostElementBuf@1013 : TEMPORARY Record "Cost Element Buffer";
+      EntryAdjusted@1009 : Boolean;
+    BEGIN
+      with InbndItemApplnEntry do begin
+        OutbndItemLedgEntry.GET("Outbound Item Entry No.");
+        CalcItemApplnEntryOldCost(OldCostElementBuf,OutbndItemLedgEntry,Quantity);
+
+        InbndItemLedgEntry.GET("Item Ledger Entry No.");
+        InbndValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Document No.");
+        InbndValueEntry.SETRANGE("Item Ledger Entry No.","Item Ledger Entry No.");
+        InbndValueEntry.FINDSET;
+        repeat
+          if (InbndValueEntry."Entry Type" = InbndValueEntry."Entry Type"::"Direct Cost") and
+             (InbndValueEntry."Item Charge No." = '') and
+             not ExpCostIsCompletelyInvoiced(InbndItemLedgEntry,InbndValueEntry)
+          then begin
+            InbndValueEntry.SETRANGE("Document No.",InbndValueEntry."Document No.");
+            InbndValueEntry.SETRANGE("Document Line No.",InbndValueEntry."Document Line No.");
+            CalcInbndDocOldCost(InbndValueEntry,DocCostElementBuf);
+
+            if not InbndValueEntry."Expected Cost" then begin
+              DocCostElementBuf.Retrieve(0,0);
+              InbndValueEntry."Valued Quantity" := DocCostElementBuf."Invoiced Quantity";
+              InbndValueEntry."Invoiced Quantity" := DocCostElementBuf."Invoiced Quantity";
+            end;
+
+            CalcInbndDocNewCost(
+              DocCostElementBuf,OldCostElementBuf,InbndValueEntry."Expected Cost",
+              InbndValueEntry."Valued Quantity" / InbndItemLedgEntry.Quantity);
+
+            if CreateCostAdjmtBuf(
+                 InbndValueEntry,DocCostElementBuf,InbndItemLedgEntry."Posting Date",InbndValueEntry."Entry Type",
+                 TempAvgCostAdjmtEntryPoint)
+            then
+              EntryAdjusted := true;
+
+            InbndValueEntry.FINDLAST;
+            InbndValueEntry.SETRANGE("Document No.");
+            InbndValueEntry.SETRANGE("Document Line No.");
+          end;
+        until InbndValueEntry.NEXT = 0;
+
+        // Update transfers, consumptions
+        if IsUpdateCompletelyInvoiced(
+             InbndItemLedgEntry,OutbndItemLedgEntry."Completely Invoiced")
+        then begin
+          InbndItemLedgEntry.SetCompletelyInvoiced;
+          EntryAdjusted := true;
+        end;
+
+        if EntryAdjusted then begin
+          UpdateAvgCostAdjmtEntryPoint(InbndValueEntry,TempAvgCostAdjmtEntryPoint);
+          ForwardAppliedCostRecursion(InbndItemLedgEntry,TempAvgCostAdjmtEntryPoint);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcItemApplnEntryOldCost@53(VAR OldCostElementBuf@1005 : Record "Cost Element Buffer";OutbndItemLedgEntry@1000 : Record "Item Ledger Entry";ItemApplnEntryQty@1004 : Decimal);
+    VAR
+      OutbndValueEntry@1003 : Record "Value Entry";
+      ShareOfExpectedCost@1001 : Decimal;
+    BEGIN
+      ShareOfExpectedCost :=
+        (OutbndItemLedgEntry.Quantity - OutbndItemLedgEntry."Invoiced Quantity") / OutbndItemLedgEntry.Quantity;
+
+      CLEAR(OldCostElementBuf);
+      with OldCostElementBuf do begin
+        OutbndValueEntry.SETCURRENTKEY("Item Ledger Entry No.");
+        OutbndValueEntry.SETRANGE("Item Ledger Entry No.",OutbndItemLedgEntry."Entry No.");
+        OutbndValueEntry.FINDSET;
+        repeat
+          if TempInvtAdjmtBuf.GET(OutbndValueEntry."Entry No.") then
+            OutbndValueEntry.AddCost(TempInvtAdjmtBuf);
+          if OutbndValueEntry."Expected Cost" then begin
+            "Actual Cost" := "Actual Cost" + OutbndValueEntry."Cost Amount (Expected)" * ShareOfExpectedCost;
+            "Actual Cost (ACY)" := "Actual Cost (ACY)" + OutbndValueEntry."Cost Amount (Expected) (ACY)" * ShareOfExpectedCost;
+          end else begin
+            "Actual Cost" := "Actual Cost" + OutbndValueEntry."Cost Amount (Actual)";
+            "Actual Cost (ACY)" := "Actual Cost (ACY)" + OutbndValueEntry."Cost Amount (Actual) (ACY)";
+          end;
+        until OutbndValueEntry.NEXT = 0;
+
+        RoundActualCost(
+          ItemApplnEntryQty / OutbndItemLedgEntry.Quantity,
+          GLSetup."Amount Rounding Precision",Currency."Amount Rounding Precision");
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcInbndDocOldCost@63(InbndValueEntry@1000 : Record "Value Entry";VAR CostElementBuf@1001 : Record "Cost Element Buffer");
+    BEGIN
+      CostElementBuf.DELETEALL;
+
+      InbndValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Document No.");
+      InbndValueEntry.SETRANGE("Item Ledger Entry No.",InbndValueEntry."Item Ledger Entry No.");
+      InbndValueEntry.SETRANGE("Document No.",InbndValueEntry."Document No.");
+      InbndValueEntry.SETRANGE("Document Line No.",InbndValueEntry."Document Line No.");
+      with CostElementBuf do
+        repeat
+          if (InbndValueEntry."Entry Type" = InbndValueEntry."Entry Type"::"Direct Cost") and
+             (InbndValueEntry."Item Charge No." = '')
+          then begin
+            if TempInvtAdjmtBuf.GET(InbndValueEntry."Entry No.") then
+              InbndValueEntry.AddCost(TempInvtAdjmtBuf);
+            if InbndValueEntry."Expected Cost" then
+              AddExpectedCost(0,0,InbndValueEntry."Cost Amount (Expected)",InbndValueEntry."Cost Amount (Expected) (ACY)")
+            else begin
+              AddActualCost(0,0,InbndValueEntry."Cost Amount (Actual)",InbndValueEntry."Cost Amount (Actual) (ACY)");
+              if InbndValueEntry."Invoiced Quantity" <> 0 then begin
+                "Invoiced Quantity" := "Invoiced Quantity" + InbndValueEntry."Invoiced Quantity";
+                if not MODIFY then
+                  INSERT;
+              end;
+            end;
+          end;
+        until InbndValueEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CalcInbndDocNewCost@51(VAR NewCostElementBuf@1005 : Record "Cost Element Buffer";OldCostElementBuf@1000 : Record "Cost Element Buffer";Expected@1008 : Boolean;ShareOfTotalCost@1001 : Decimal);
+    BEGIN
+      OldCostElementBuf.RoundActualCost(
+        ShareOfTotalCost,GLSetup."Amount Rounding Precision",Currency."Amount Rounding Precision");
+
+      with NewCostElementBuf do
+        if Expected then begin
+          "Actual Cost" := OldCostElementBuf."Actual Cost" - "Expected Cost";
+          "Actual Cost (ACY)" := OldCostElementBuf."Actual Cost (ACY)" - "Expected Cost (ACY)";
+        end else begin
+          "Actual Cost" := OldCostElementBuf."Actual Cost" - "Actual Cost";
+          "Actual Cost (ACY)" := OldCostElementBuf."Actual Cost (ACY)" - "Actual Cost (ACY)";
+        end;
+    END;
+
+    LOCAL PROCEDURE IsUpdateCompletelyInvoiced@66(ItemLedgEntry@1000 : Record "Item Ledger Entry";CompletelyInvoiced@1001 : Boolean) : Boolean;
+    BEGIN
+      with ItemLedgEntry do
+        exit(
+          ("Entry Type" in ["Entry Type"::Transfer,"Entry Type"::Consumption]) and
+          not "Completely Invoiced" and
+          CompletelyInvoiced);
+    END;
+
+    LOCAL PROCEDURE CalcInbndEntryAdjustedCost@3(VAR AdjustedCostElementBuf@1014 : Record "Cost Element Buffer";ItemApplnEntry@1000 : Record "Item Application Entry";OutbndItemLedgEntryNo@1002 : Integer;InbndItemLedgEntryNo@1001 : Integer;ExactCostReversing@1012 : Boolean;Recursion@1013 : Boolean) : Boolean;
+    VAR
+      InbndValueEntry@1007 : Record "Value Entry";
+      InbndItemLedgEntry@1008 : Record "Item Ledger Entry";
+      QtyNotInvoiced@1009 : Decimal;
+      ShareOfTotalCost@1003 : Decimal;
+    BEGIN
+      AdjustedCostElementBuf.DELETEALL;
+      with InbndValueEntry do begin
+        InbndItemLedgEntry.GET(InbndItemLedgEntryNo);
+        SETCURRENTKEY("Item Ledger Entry No.");
+        SETRANGE("Item Ledger Entry No.",InbndItemLedgEntryNo);
+        QtyNotInvoiced := InbndItemLedgEntry.Quantity - InbndItemLedgEntry."Invoiced Quantity";
+
+        FINDSET;
+        repeat
+          if IncludedInCostCalculation(InbndValueEntry,OutbndItemLedgEntryNo) and
+             not ExpCostIsCompletelyInvoiced(InbndItemLedgEntry,InbndValueEntry)
+          then begin
+            if TempInvtAdjmtBuf.GET("Entry No.") then
+              AddCost(TempInvtAdjmtBuf);
+            case true of
+              IsInterimRevaluation(InbndValueEntry):
+                begin
+                  ShareOfTotalCost := InbndItemLedgEntry.Quantity / "Valued Quantity";
+                  AdjustedCostElementBuf.AddActualCost(
+                    AdjustedCostElementBuf.Type::"Direct Cost",AdjustedCostElementBuf."Variance Type"::" ",
+                    ("Cost Amount (Expected)" + "Cost Amount (Actual)") * ShareOfTotalCost,
+                    ("Cost Amount (Expected) (ACY)" + "Cost Amount (Actual) (ACY)") * ShareOfTotalCost);
+                end;
+              "Expected Cost":
+                begin
+                  ShareOfTotalCost := QtyNotInvoiced / "Valued Quantity";
+                  AdjustedCostElementBuf.AddActualCost(
+                    AdjustedCostElementBuf.Type::"Direct Cost",AdjustedCostElementBuf."Variance Type"::" ",
+                    "Cost Amount (Expected)" * ShareOfTotalCost,
+                    "Cost Amount (Expected) (ACY)" * ShareOfTotalCost);
+                end;
+              "Partial Revaluation":
+                begin
+                  ShareOfTotalCost := InbndItemLedgEntry.Quantity / "Valued Quantity";
+                  AdjustedCostElementBuf.AddActualCost(
+                    AdjustedCostElementBuf.Type::"Direct Cost",AdjustedCostElementBuf."Variance Type"::" ",
+                    "Cost Amount (Actual)" * ShareOfTotalCost,
+                    "Cost Amount (Actual) (ACY)" * ShareOfTotalCost);
+                end;
+              ("Entry Type" <= "Entry Type"::Revaluation) or not ExactCostReversing:
+                AdjustedCostElementBuf.AddActualCost(
+                  AdjustedCostElementBuf.Type::"Direct Cost",AdjustedCostElementBuf."Variance Type"::" ",
+                  "Cost Amount (Actual)","Cost Amount (Actual) (ACY)");
+              "Entry Type" = "Entry Type"::"Indirect Cost":
+                AdjustedCostElementBuf.AddActualCost(
+                  AdjustedCostElementBuf.Type::"Indirect Cost",AdjustedCostElementBuf."Variance Type"::" ",
+                  "Cost Amount (Actual)","Cost Amount (Actual) (ACY)");
+              else
+                AdjustedCostElementBuf.AddActualCost(
+                  AdjustedCostElementBuf.Type::Variance,AdjustedCostElementBuf."Variance Type"::" ",
+                  "Cost Amount (Actual)","Cost Amount (Actual) (ACY)");
+            end;
+          end;
+        until NEXT = 0;
+
+        CalcNewAdjustedCost(AdjustedCostElementBuf,ItemApplnEntry.Quantity / InbndItemLedgEntry.Quantity);
+
+        if AdjustAppliedCostEntry(ItemApplnEntry,InbndItemLedgEntryNo,Recursion) then
+          RndgResidualBuf.AddAdjustedCost(
+            ItemApplnEntry."Inbound Item Entry No.",
+            AdjustedCostElementBuf."Actual Cost",AdjustedCostElementBuf."Actual Cost (ACY)",
+            ItemApplnEntry."Output Completely Invd. Date" <> 0D);
+      end;
+      exit(InbndItemLedgEntry."Completely Invoiced");
+    END;
+
+    LOCAL PROCEDURE CalcNewAdjustedCost@81(VAR AdjustedCostElementBuf@1003 : Record "Cost Element Buffer";ShareOfTotalCost@1000 : Decimal);
+    BEGIN
+      with AdjustedCostElementBuf do begin
+        if FINDSET then
+          repeat
+            RoundActualCost(ShareOfTotalCost,GLSetup."Amount Rounding Precision",Currency."Amount Rounding Precision");
+            MODIFY;
+          until NEXT = 0;
+
+        CALCSUMS("Actual Cost","Actual Cost (ACY)");
+        AddActualCost(Type::Total,"Variance Type"::" ","Actual Cost","Actual Cost (ACY)");
+      end;
+    END;
+
+    LOCAL PROCEDURE AdjustAppliedCostEntry@98(ItemApplnEntry@1002 : Record "Item Application Entry";ItemLedgEntryNo@1001 : Integer;Recursion@1000 : Boolean) : Boolean;
+    BEGIN
+      with ItemApplnEntry do
+        exit(
+          ("Transferred-from Entry No." <> ItemLedgEntryNo) and
+          ("Inbound Item Entry No." = RndgResidualBuf."Item Ledger Entry No.") and
+          not Recursion);
+    END;
+
+    LOCAL PROCEDURE IncludedInCostCalculation@26(InbndValueEntry@1000 : Record "Value Entry";OutbndItemLedgEntryNo@1001 : Integer) : Boolean;
+    VAR
+      OutbndValueEntry@1002 : Record "Value Entry";
+    BEGIN
+      with InbndValueEntry do begin
+        if "Entry Type" = "Entry Type"::Revaluation then begin
+          if "Applies-to Entry" <> 0 then begin
+            GET("Applies-to Entry");
+            exit(IncludedInCostCalculation(InbndValueEntry,OutbndItemLedgEntryNo));
+          end;
+          if "Partial Revaluation" then begin
+            OutbndValueEntry.SETCURRENTKEY("Item Ledger Entry No.");
+            OutbndValueEntry.SETRANGE("Item Ledger Entry No.",OutbndItemLedgEntryNo);
+            OutbndValueEntry.SETFILTER("Item Ledger Entry Quantity",'<>0');
+            OutbndValueEntry.FINDFIRST;
+            exit(
+              (OutbndValueEntry."Entry No." > "Entry No.") or
+              (OutbndValueEntry.GetValuationDate > "Valuation Date") or
+              (OutbndValueEntry."Entry No." = 0));
+          end;
+        end;
+        exit("Entry Type" <> "Entry Type"::Rounding);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcOutbndDocOldCost@20(VAR CostElementBuf@1007 : Record "Cost Element Buffer";OutbndValueEntry@1000 : Record "Value Entry";ExactCostReversing@1001 : Boolean);
+    VAR
+      ValueEntry@1008 : Record "Value Entry";
+    BEGIN
+      CostElementBuf.DELETEALL;
+      with ValueEntry do begin
+        SETCURRENTKEY("Item Ledger Entry No.","Document No.","Document Line No.");
+        SETRANGE("Item Ledger Entry No.",OutbndValueEntry."Item Ledger Entry No.");
+        SETRANGE("Document No.",OutbndValueEntry."Document No.");
+        SETRANGE("Document Line No.",OutbndValueEntry."Document Line No.");
+        FINDSET;
+        repeat
+          if TempInvtAdjmtBuf.GET("Entry No.") then
+            AddCost(TempInvtAdjmtBuf);
+          CostElementBuf.AddExpectedCost(
+            CostElementBuf.Type::Total,0,"Cost Amount (Expected)","Cost Amount (Expected) (ACY)");
+          if not "Expected Cost" then
+            case true of
+              ("Entry Type" <= "Entry Type"::Revaluation) or not ExactCostReversing:
+                begin
+                  CostElementBuf.AddActualCost(
+                    CostElementBuf.Type::"Direct Cost",CostElementBuf."Variance Type"::" ",
+                    "Cost Amount (Actual)","Cost Amount (Actual) (ACY)");
+                  if "Invoiced Quantity" <> 0 then begin
+                    CostElementBuf."Invoiced Quantity" := CostElementBuf."Invoiced Quantity" + "Invoiced Quantity";
+                    if not CostElementBuf.MODIFY then
+                      CostElementBuf.INSERT;
+                  end;
+                end;
+              "Entry Type" = "Entry Type"::"Indirect Cost":
+                CostElementBuf.AddActualCost(
+                  CostElementBuf.Type::"Indirect Cost",CostElementBuf."Variance Type"::" ",
+                  "Cost Amount (Actual)","Cost Amount (Actual) (ACY)");
+              else
+                CostElementBuf.AddActualCost(
+                  CostElementBuf.Type::Variance,CostElementBuf."Variance Type"::" ",
+                  "Cost Amount (Actual)","Cost Amount (Actual) (ACY)");
+            end;
+        until NEXT = 0;
+
+        CostElementBuf.CALCSUMS("Actual Cost","Actual Cost (ACY)");
+        CostElementBuf.AddActualCost(
+          CostElementBuf.Type::Total,0,CostElementBuf."Actual Cost",CostElementBuf."Actual Cost (ACY)");
+      end;
+    END;
+
+    LOCAL PROCEDURE EliminateRndgResidual@15(InbndItemLedgEntry@1000 : Record "Item Ledger Entry";AppliedQty@1005 : Decimal);
+    VAR
+      ItemJnlLine@1001 : Record "Item Journal Line";
+      ValueEntry@1002 : Record "Value Entry";
+      RndgCost@1003 : Decimal;
+      RndgCostACY@1004 : Decimal;
+    BEGIN
+      if IsRndgAllowed(InbndItemLedgEntry,AppliedQty) then
+        with InbndItemLedgEntry do begin
+          TempInvtAdjmtBuf.CalcItemLedgEntryCost("Entry No.",false);
+          ValueEntry.CalcItemLedgEntryCost("Entry No.",false);
+          ValueEntry.AddCost(TempInvtAdjmtBuf);
+
+          RndgResidualBuf.SETRANGE("Item Ledger Entry No.","Entry No.");
+          RndgResidualBuf.SETRANGE("Completely Invoiced",false);
+          if RndgResidualBuf.ISEMPTY then begin
+            RndgResidualBuf.SETRANGE("Completely Invoiced");
+            RndgResidualBuf.CALCSUMS("Adjusted Cost","Adjusted Cost (ACY)");
+            RndgCost := -(ValueEntry."Cost Amount (Actual)" + RndgResidualBuf."Adjusted Cost");
+            RndgCostACY := -(ValueEntry."Cost Amount (Actual) (ACY)" + RndgResidualBuf."Adjusted Cost (ACY)");
+
+            if HasNewCost(RndgCost,RndgCostACY) then begin
+              ValueEntry.RESET;
+              ValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+              ValueEntry.SETRANGE("Item Ledger Entry No.","Entry No.");
+              ValueEntry.SETRANGE("Entry Type",ValueEntry."Entry Type"::"Direct Cost");
+              ValueEntry.SETRANGE("Item Charge No.",'');
+              ValueEntry.SETRANGE(Adjustment,false);
+              ValueEntry.FINDLAST;
+              InitRndgResidualItemJnlLine(ItemJnlLine,ValueEntry);
+              PostItemJnlLine(ItemJnlLine,ValueEntry,RndgCost,RndgCostACY);
+            end;
+          end;
+        end;
+
+      RndgResidualBuf.RESET;
+      RndgResidualBuf.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE IsRndgAllowed@10(ItemLedgEntry@1000 : Record "Item Ledger Entry";AppliedQty@1001 : Decimal) : Boolean;
+    BEGIN
+      exit(
+        not ItemLedgEntry.Open and
+        ItemLedgEntry."Completely Invoiced" and
+        ItemLedgEntry.Positive and
+        (AppliedQty = -ItemLedgEntry.Quantity) and
+        not LevelExceeded);
+    END;
+
+    LOCAL PROCEDURE InitRndgResidualItemJnlLine@6(VAR ItemJnlLine@1004 : Record "Item Journal Line";OrigValueEntry@1000 : Record "Value Entry");
+    BEGIN
+      with OrigValueEntry do begin
+        ItemJnlLine.INIT;
+        ItemJnlLine."Value Entry Type" := ItemJnlLine."Value Entry Type"::Rounding;
+        ItemJnlLine."Quantity (Base)" := 1;
+        ItemJnlLine."Invoiced Qty. (Base)" := 1;
+        ItemJnlLine."Source No." := "Source No.";
+      end;
+    END;
+
+    LOCAL PROCEDURE AdjustItemAvgCost@8(VAR TempAvgCostAdjmtEntryPointToUpd@1006 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      TempOutbndValueEntry@1002 : TEMPORARY Record "Value Entry";
+      TempExcludedValueEntry@1003 : TEMPORARY Record "Value Entry";
+      TempAvgCostAdjmtEntryPoint@1000 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point";
+      AvgCostAdjmtEntryPoint@1001 : Record "Avg. Cost Adjmt. Entry Point";
+      RemainingOutbnd@1004 : Integer;
+      Restart@1005 : Boolean;
+    BEGIN
+      if not IsAvgCostItem then
+        exit;
+
+      UpDateWindow(WindowAdjmtLevel,WindowItem,Text008,WindowFWLevel,WindowEntry,0);
+
+      TempFixApplBuffer.RESET;
+      TempFixApplBuffer.DELETEALL;
+      DeleteAvgBuffers(TempOutbndValueEntry,TempExcludedValueEntry);
+
+      with AvgCostAdjmtEntryPoint do
+        while AvgCostAdjmtEntryPointExist(TempAvgCostAdjmtEntryPoint) do
+          repeat
+            Restart := false;
+            AvgCostAdjmtEntryPoint := TempAvgCostAdjmtEntryPoint;
+
+            if (ConsumpAdjmtInPeriodWithOutput <> 0D) and
+               (ConsumpAdjmtInPeriodWithOutput <= "Valuation Date")
+            then
+              exit;
+
+            SetAvgCostAjmtFilter(TempAvgCostAdjmtEntryPoint);
+            CopyAdjmtEntryPointToBuf(TempAvgCostAdjmtEntryPoint,TempAvgCostAdjmtEntryPointToUpd);
+            TempAvgCostAdjmtEntryPoint.DELETEALL;
+            TempAvgCostAdjmtEntryPoint.RESET;
+
+            SetAvgCostAjmtFilter(AvgCostAdjmtEntryPoint);
+            MODIFYALL("Cost Is Adjusted",true);
+            RESET;
+
+            while not Restart and AvgValueEntriesToAdjustExist(
+                    TempOutbndValueEntry,TempExcludedValueEntry,AvgCostAdjmtEntryPoint)
+            do begin
+              RemainingOutbnd := TempOutbndValueEntry.COUNT;
+              TempOutbndValueEntry.SETCURRENTKEY("Item Ledger Entry No.");
+              TempOutbndValueEntry.FIND('-');
+
+              repeat
+                UpDateWindow(WindowAdjmtLevel,WindowItem,WindowAdjust,WindowFWLevel,WindowEntry,RemainingOutbnd);
+                RemainingOutbnd -= 1;
+                AdjustOutbndAvgEntry(TempOutbndValueEntry,TempExcludedValueEntry,TempAvgCostAdjmtEntryPointToUpd);
+                UpdateConsumpAvgEntry(TempOutbndValueEntry);
+              until TempOutbndValueEntry.NEXT = 0;
+
+              SetAvgCostAjmtFilter(AvgCostAdjmtEntryPoint);
+              Restart := FINDFIRST and not "Cost Is Adjusted";
+              "Valuation Date" := GetNextDate("Valuation Date");
+            end;
+          until (TempAvgCostAdjmtEntryPoint.NEXT = 0) or Restart;
+    END;
+
+    LOCAL PROCEDURE AvgCostAdjmtEntryPointExist@80(VAR ToAvgCostAdjmtEntryPoint@1000 : Record "Avg. Cost Adjmt. Entry Point") : Boolean;
+    VAR
+      AvgCostAdjmtEntryPoint@1001 : Record "Avg. Cost Adjmt. Entry Point";
+    BEGIN
+      AvgCostAdjmtEntryPoint.SETCURRENTKEY("Item No.","Cost Is Adjusted","Valuation Date");
+      AvgCostAdjmtEntryPoint.SETRANGE("Item No.",Item."No.");
+      AvgCostAdjmtEntryPoint.SETRANGE("Cost Is Adjusted",false);
+
+      CopyAvgCostAdjmtToAvgCostAdjmt(AvgCostAdjmtEntryPoint,ToAvgCostAdjmtEntryPoint);
+      ToAvgCostAdjmtEntryPoint.SETCURRENTKEY("Item No.","Cost Is Adjusted","Valuation Date");
+      exit(ToAvgCostAdjmtEntryPoint.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE AvgValueEntriesToAdjustExist@79(VAR OutbndValueEntry@1003 : Record "Value Entry";VAR ExcludedValueEntry@1000 : Record "Value Entry";VAR AvgCostAdjmtEntryPoint@1001 : Record "Avg. Cost Adjmt. Entry Point") : Boolean;
+    VAR
+      ValueEntry@1002 : Record "Value Entry";
+      CalendarPeriod@1004 : Record Date;
+      FiscalYearAccPeriod@1005 : Record "Accounting Period";
+      FindNextRange@1006 : Boolean;
+    BEGIN
+      with ValueEntry do begin
+        FindNextRange := false;
+        ResetAvgBuffers(OutbndValueEntry,ExcludedValueEntry);
+
+        CalendarPeriod."Period Start" := AvgCostAdjmtEntryPoint."Valuation Date";
+        AvgCostAdjmtEntryPoint.GetValuationPeriod(CalendarPeriod);
+
+        SETCURRENTKEY("Item No.","Valuation Date","Location Code","Variant Code");
+        SETRANGE("Item No.",AvgCostAdjmtEntryPoint."Item No.");
+        if AvgCostAdjmtEntryPoint.AvgCostCalcTypeIsChanged(CalendarPeriod."Period Start") then begin
+          AvgCostAdjmtEntryPoint.GetAvgCostCalcTypeIsChgPeriod(FiscalYearAccPeriod,CalendarPeriod."Period Start");
+          SETRANGE("Valuation Date",CalendarPeriod."Period Start",CALCDATE('<-1D>',FiscalYearAccPeriod."Starting Date"));
+        end else
+          SETRANGE("Valuation Date",CalendarPeriod."Period Start",DMY2DATE(31,12,9999));
+
+        IsAvgCostCalcTypeItem := AvgCostAdjmtEntryPoint.IsAvgCostCalcTypeItem(CalendarPeriod."Period End");
+        if not IsAvgCostCalcTypeItem then begin
+          SETRANGE("Location Code",AvgCostAdjmtEntryPoint."Location Code");
+          SETRANGE("Variant Code",AvgCostAdjmtEntryPoint."Variant Code");
+        end;
+
+        if FINDFIRST then begin
+          FindNextRange := true;
+
+          if "Valuation Date" > CalendarPeriod."Period End" then begin
+            AvgCostAdjmtEntryPoint."Valuation Date" := "Valuation Date";
+            CalendarPeriod."Period Start" := "Valuation Date";
+            AvgCostAdjmtEntryPoint.GetValuationPeriod(CalendarPeriod);
+          end;
+
+          if not (AvgCostAdjmtEntryPoint.ValuationExists(ValueEntry) and
+                  AvgCostAdjmtEntryPoint.PrevValuationAdjusted(ValueEntry)) or
+             ((ConsumpAdjmtInPeriodWithOutput <> 0D) and
+              (ConsumpAdjmtInPeriodWithOutput <= AvgCostAdjmtEntryPoint."Valuation Date"))
+          then begin
+            AvgCostAdjmtEntryPoint.UpdateValuationDate(ValueEntry);
+            exit(false);
+          end;
+
+          SETRANGE("Valuation Date",CalendarPeriod."Period Start",CalendarPeriod."Period End");
+          IsAvgCostCalcTypeItem := AvgCostAdjmtEntryPoint.IsAvgCostCalcTypeItem(CalendarPeriod."Period End");
+          if not IsAvgCostCalcTypeItem then begin
+            SETRANGE("Location Code",AvgCostAdjmtEntryPoint."Location Code");
+            SETRANGE("Variant Code",AvgCostAdjmtEntryPoint."Variant Code");
+          end;
+
+          OutbndValueEntry.COPY(ValueEntry);
+          if not OutbndValueEntry.ISEMPTY then begin
+            OutbndValueEntry.SETCURRENTKEY("Item Ledger Entry No.");
+            exit(true);
+          end;
+
+          DeleteAvgBuffers(OutbndValueEntry,ExcludedValueEntry);
+          FINDSET;
+          repeat
+            if "Partial Revaluation" then begin
+              RevaluationPoint.Number := "Entry No.";
+              if RevaluationPoint.INSERT then ;
+              FillFixApplBuffer("Item Ledger Entry No.");
+            end;
+
+            if "Valued By Average Cost" and not Adjustment and ("Valued Quantity" < 0) then begin
+              OutbndValueEntry := ValueEntry;
+              OutbndValueEntry.INSERT;
+              FindNextRange := false;
+            end;
+
+            if not Adjustment then
+              if IsAvgCostException(IsAvgCostCalcTypeItem) then begin
+                AvgCostExceptionBuf.Number := "Entry No.";
+                if AvgCostExceptionBuf.INSERT then;
+                AvgCostExceptionBuf.Number += 1;
+                if AvgCostExceptionBuf.INSERT then;
+              end;
+
+            ExcludedValueEntry := ValueEntry;
+            ExcludedValueEntry.INSERT;
+          until NEXT = 0;
+          FetchOpenItemEntriesToExclude(AvgCostAdjmtEntryPoint,ExcludedValueEntry,TempOpenItemLedgEntry,CalendarPeriod);
+        end;
+
+        if FindNextRange then begin
+          AvgCostAdjmtEntryPoint."Valuation Date" := GetNextDate(AvgCostAdjmtEntryPoint."Valuation Date");
+          AvgValueEntriesToAdjustExist(OutbndValueEntry,ExcludedValueEntry,AvgCostAdjmtEntryPoint);
+        end;
+
+        exit(not OutbndValueEntry.ISEMPTY and not ISEMPTY);
+      end;
+    END;
+
+    LOCAL PROCEDURE GetNextDate@74(CurrentDate@1000 : Date) : Date;
+    BEGIN
+      if CurrentDate = 0D then
+        exit(00020101D);
+      exit(CALCDATE('<+1D>',CurrentDate));
+    END;
+
+    LOCAL PROCEDURE AdjustOutbndAvgEntry@11(VAR OutbndValueEntry@1000 : Record "Value Entry";VAR ExcludedValueEntry@1002 : Record "Value Entry";VAR TempAvgCostAdjmtEntryPoint@1003 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      OutbndItemLedgEntry@1007 : Record "Item Ledger Entry";
+      OldCostElementBuf@1016 : TEMPORARY Record "Cost Element Buffer";
+      NewCostElementBuf@1001 : TEMPORARY Record "Cost Element Buffer";
+      EntryAdjusted@1009 : Boolean;
+    BEGIN
+      OutbndItemLedgEntry.GET(OutbndValueEntry."Item Ledger Entry No.");
+      if OutbndItemLedgEntry."Applies-to Entry" <> 0 then
+        exit;
+      if ExpCostIsCompletelyInvoiced(OutbndItemLedgEntry,OutbndValueEntry) then
+        exit;
+
+      with NewCostElementBuf do begin
+        UpDateWindow(
+          WindowAdjmtLevel,WindowItem,WindowAdjust,WindowFWLevel,OutbndValueEntry."Item Ledger Entry No.",WindowOutbndEntry);
+
+        EntryAdjusted := OutbndItemLedgEntry.SetAvgTransCompletelyInvoiced;
+
+        if CalcAvgCost(OutbndValueEntry,NewCostElementBuf,ExcludedValueEntry) then begin
+          CalcOutbndDocOldCost(OldCostElementBuf,OutbndValueEntry,false);
+          if OutbndValueEntry."Expected Cost" then begin
+            "Actual Cost" := "Actual Cost" - OldCostElementBuf."Expected Cost";
+            "Actual Cost (ACY)" := "Actual Cost (ACY)" - OldCostElementBuf."Expected Cost (ACY)";
+          end else begin
+            "Actual Cost" := "Actual Cost" - OldCostElementBuf."Actual Cost";
+            "Actual Cost (ACY)" := "Actual Cost (ACY)" - OldCostElementBuf."Actual Cost (ACY)";
+          end;
+          if UpdateAdjmtBuf(
+               OutbndValueEntry,"Actual Cost","Actual Cost (ACY)",OutbndItemLedgEntry."Posting Date",
+               OutbndValueEntry."Entry Type",TempAvgCostAdjmtEntryPoint)
+          then
+            EntryAdjusted := true;
+        end;
+
+        if EntryAdjusted then begin
+          if OutbndItemLedgEntry."Entry Type" = OutbndItemLedgEntry."Entry Type"::Consumption then
+            OutbndItemLedgEntry.SetAppliedEntryToAdjust(false);
+
+          ForwardAvgCostToInbndEntries(OutbndItemLedgEntry."Entry No.",TempAvgCostAdjmtEntryPoint);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE ExpCostIsCompletelyInvoiced@71(ItemLedgEntry@1002 : Record "Item Ledger Entry";ValueEntry@1000 : Record "Value Entry") : Boolean;
+    BEGIN
+      with ItemLedgEntry do
+        exit(ValueEntry."Expected Cost" and (Quantity = "Invoiced Quantity"));
+    END;
+
+    LOCAL PROCEDURE CalcAvgCost@5(OutbndValueEntry@1000 : Record "Value Entry";VAR CostElementBuf@1001 : Record "Cost Element Buffer";VAR ExcludedValueEntry@1002 : Record "Value Entry") : Boolean;
+    VAR
+      ValueEntry@1009 : Record "Value Entry";
+    BEGIN
+      with ValueEntry do begin
+        if OutbndValueEntry."Entry No." >= AvgCostBuf."Last Valid Value Entry No" then begin
+          SumCostsTillValuationDate(OutbndValueEntry);
+          TempInvtAdjmtBuf.SumCostsTillValuationDate(OutbndValueEntry);
+          CostElementBuf."Remaining Quantity" := "Item Ledger Entry Quantity";
+          CostElementBuf."Actual Cost" :=
+            "Cost Amount (Actual)" + "Cost Amount (Expected)" +
+            TempInvtAdjmtBuf."Cost Amount (Actual)" + TempInvtAdjmtBuf."Cost Amount (Expected)";
+          CostElementBuf."Actual Cost (ACY)" :=
+            "Cost Amount (Actual) (ACY)" + "Cost Amount (Expected) (ACY)" +
+            TempInvtAdjmtBuf."Cost Amount (Actual) (ACY)" + TempInvtAdjmtBuf."Cost Amount (Expected) (ACY)";
+
+          ExcludeAvgCostOnValuationDate(CostElementBuf,OutbndValueEntry,ExcludedValueEntry);
+          AvgCostBuf.UpdateAvgCostBuffer(
+            CostElementBuf,GetLastValidValueEntry(OutbndValueEntry."Entry No."));
+        end else
+          CostElementBuf.UpdateCostElementBuffer(AvgCostBuf);
+
+        if CostElementBuf."Remaining Quantity" > 0 then begin
+          CostElementBuf.RoundActualCost(
+            OutbndValueEntry."Valued Quantity" / CostElementBuf."Remaining Quantity",
+            GLSetup."Amount Rounding Precision",Currency."Amount Rounding Precision");
+
+          AvgCostBuf.DeductOutbndValueEntryFromBuf(OutbndValueEntry,CostElementBuf,IsAvgCostCalcTypeItem);
+        end;
+
+        exit(CostElementBuf."Remaining Quantity" > 0);
+      end;
+    END;
+
+    LOCAL PROCEDURE ExcludeAvgCostOnValuationDate@68(VAR CostElementBuf@1000 : Record "Cost Element Buffer";OutbndValueEntry@1001 : Record "Value Entry";VAR ExcludedValueEntry@1003 : Record "Value Entry");
+    VAR
+      OutbndItemLedgEntry@1005 : Record "Item Ledger Entry";
+      ItemApplnEntry@1002 : Record "Item Application Entry";
+      ItemLedgEntryInChain@1004 : TEMPORARY Record "Item Ledger Entry";
+      FirstValueEntry@1011 : Record "Value Entry";
+      AvgCostAdjmtEntryPoint@1013 : Record "Avg. Cost Adjmt. Entry Point";
+      ExcludeILE@1008 : Boolean;
+      ExcludeEntry@1006 : Boolean;
+      FixedApplication@1007 : Boolean;
+      PreviousILENo@1009 : Integer;
+      RevalFixedApplnQty@1010 : Decimal;
+      ExclusionFactor@1012 : Decimal;
+    BEGIN
+      with ExcludedValueEntry do begin
+        SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+        OutbndItemLedgEntry.GET(OutbndValueEntry."Item Ledger Entry No.");
+        ItemApplnEntry.GetVisitedEntries(OutbndItemLedgEntry,ItemLedgEntryInChain,true);
+
+        ItemLedgEntryInChain.RESET;
+        ItemLedgEntryInChain.SETCURRENTKEY("Item No.",Positive,"Location Code","Variant Code");
+        ItemLedgEntryInChain.SETRANGE("Item No.","Item No.");
+        ItemLedgEntryInChain.SETRANGE(Positive,true);
+        if not AvgCostAdjmtEntryPoint.IsAvgCostCalcTypeItem("Valuation Date") then begin
+          ItemLedgEntryInChain.SETRANGE("Location Code","Location Code");
+          ItemLedgEntryInChain.SETRANGE("Variant Code","Variant Code");
+        end;
+
+        if FINDSET then
+          repeat
+            // Execute this block for the first Value Entry for each ILE
+            if PreviousILENo <> "Item Ledger Entry No." then begin
+              // Calculate whether a Value Entry should be excluded from average cost calculation based on ILE information
+              // All fixed application entries (except revaluation) are included in the buffer because the inbound and outbound entries cancel each other
+              FixedApplication := false;
+              ExcludeILE := IsExcludeILEFromAvgCostCalc(ExcludedValueEntry,OutbndValueEntry,ItemLedgEntryInChain,FixedApplication);
+              PreviousILENo := "Item Ledger Entry No.";
+              if ("Entry Type" = "Entry Type"::"Direct Cost") and ("Item Charge No." = '') then
+                FirstValueEntry := ExcludedValueEntry
+              else begin
+                FirstValueEntry.SETRANGE("Item Ledger Entry No.","Item Ledger Entry No.");
+                FirstValueEntry.SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+                FirstValueEntry.SETRANGE("Item Charge No.",'');
+                FirstValueEntry.FINDFIRST;
+              end;
+            end;
+
+            ExcludeEntry := ExcludeILE;
+
+            if FixedApplication then begin
+              // If a revaluation entry should normally be excluded, but has a partial fixed application to an outbound, then the fixed applied portion should still be included in the buffer
+              if "Entry Type" = "Entry Type"::Revaluation then begin
+                if IsExcludeFromAvgCostForRevalPoint(ExcludedValueEntry,OutbndValueEntry) then begin
+                  RevalFixedApplnQty := CalcRevalFixedApplnQty(ExcludedValueEntry);
+                  if RevalFixedApplnQty <> "Valued Quantity" then begin
+                    ExcludeEntry := true;
+                    ExclusionFactor := ("Valued Quantity" - RevalFixedApplnQty) / "Valued Quantity";
+                    "Cost Amount (Actual)" := RoundAmt(ExclusionFactor * "Cost Amount (Actual)",GLSetup."Amount Rounding Precision");
+                    "Cost Amount (Expected)" :=
+                      RoundAmt(ExclusionFactor * "Cost Amount (Expected)",GLSetup."Amount Rounding Precision");
+                    "Cost Amount (Actual) (ACY)" :=
+                      RoundAmt(ExclusionFactor * "Cost Amount (Actual) (ACY)",Currency."Amount Rounding Precision");
+                    "Cost Amount (Expected) (ACY)" :=
+                      RoundAmt(ExclusionFactor * "Cost Amount (Expected) (ACY)",Currency."Amount Rounding Precision");
+                  end;
+                end;
+              end
+            end else
+              // For non-fixed applied entries
+              // For each value entry, perform additional check if there has been a revaluation in the period
+              if not ExcludeEntry then
+                // For non-revaluation entries, exclusion decision is based on the date of the first posted Direct Cost entry for the ILE to ensure all cost modifiers except revaluation
+                // are included or excluded based on the original item posting date
+                if "Entry Type" = "Entry Type"::Revaluation then
+                  ExcludeEntry := IsExcludeFromAvgCostForRevalPoint(ExcludedValueEntry,OutbndValueEntry)
+                else
+                  ExcludeEntry := IsExcludeFromAvgCostForRevalPoint(FirstValueEntry,OutbndValueEntry);
+
+            if ExcludeEntry then begin
+              CostElementBuf.ExcludeEntryFromAvgCostCalc(ExcludedValueEntry);
+              if TempInvtAdjmtBuf.GET("Entry No.") then
+                CostElementBuf.ExcludeBufFromAvgCostCalc(TempInvtAdjmtBuf);
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE IsExcludeILEFromAvgCostCalc@36(ValueEntry@1000 : Record "Value Entry";OutbndValueEntry@1001 : Record "Value Entry";VAR ItemLedgEntryInChain@1003 : Record "Item Ledger Entry";VAR FixedApplication@1004 : Boolean) : Boolean;
+    VAR
+      ItemLedgEntry@1002 : Record "Item Ledger Entry";
+    BEGIN
+      with ValueEntry do begin
+        if TempOpenItemLedgEntry.GET("Item Ledger Entry No.") then
+          exit(true);
+
+        // fixed application is taken out
+        if TempFixApplBuffer.GET("Item Ledger Entry No.") then begin
+          FixedApplication := true;
+          exit(false);
+        end;
+
+        if "Item Ledger Entry No." = OutbndValueEntry."Item Ledger Entry No." then
+          exit(true);
+
+        ItemLedgEntry.GET("Item Ledger Entry No.");
+
+        if ItemLedgEntryInChain.GET("Item Ledger Entry No.") then
+          exit(true);
+
+        if not "Valued By Average Cost" then
+          exit(false);
+
+        if not ItemLedgEntryInChain.ISEMPTY then
+          exit(true);
+
+        if not ItemLedgEntry.Positive then
+          exit("Item Ledger Entry No." > OutbndValueEntry."Item Ledger Entry No.");
+
+        exit(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE IsExcludeFromAvgCostForRevalPoint@43(VAR RevaluationCheckValueEntry@1000 : Record "Value Entry";VAR OutbndValueEntry@1002 : Record "Value Entry") : Boolean;
+    BEGIN
+      RevaluationPoint.SETRANGE(Number,RevaluationCheckValueEntry."Entry No.",OutbndValueEntry."Entry No.");
+      if not RevaluationPoint.ISEMPTY then
+        exit(not IncludedInCostCalculation(RevaluationCheckValueEntry,OutbndValueEntry."Item Ledger Entry No."));
+
+      RevaluationPoint.SETRANGE(Number,OutbndValueEntry."Entry No.",RevaluationCheckValueEntry."Entry No.");
+      if not RevaluationPoint.ISEMPTY then
+        exit(true);
+    END;
+
+    LOCAL PROCEDURE CalcRevalFixedApplnQty@44(RevaluationValueEntry@1000 : Record "Value Entry") : Decimal;
+    VAR
+      ItemApplicationEntry@1001 : Record "Item Application Entry";
+      FixedApplQty@1002 : Decimal;
+    BEGIN
+      ItemApplicationEntry.SETRANGE("Inbound Item Entry No.",RevaluationValueEntry."Item Ledger Entry No.");
+      ItemApplicationEntry.SETFILTER("Outbound Item Entry No.",'<>%1',0);
+      if ItemApplicationEntry.FINDSET then
+        repeat
+          if IncludedInCostCalculation(RevaluationValueEntry,ItemApplicationEntry."Outbound Item Entry No.") and
+             TempFixApplBuffer.GET(ItemApplicationEntry."Outbound Item Entry No.")
+          then
+            FixedApplQty -= ItemApplicationEntry.Quantity;
+        until ItemApplicationEntry.NEXT = 0;
+
+      exit(FixedApplQty);
+    END;
+
+    LOCAL PROCEDURE UpdateAvgCostAdjmtEntryPoint@7(ValueEntry@1000 : Record "Value Entry";VAR TempAvgCostAdjmtEntryPoint@1002 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      AvgCostAdjmtEntryPoint@1001 : Record "Avg. Cost Adjmt. Entry Point";
+    BEGIN
+      AvgCostAdjmtEntryPoint.UpdateValuationDate(ValueEntry);
+      InsertEntryPointToUpdate(TempAvgCostAdjmtEntryPoint,ValueEntry."Item No.",ValueEntry."Variant Code",ValueEntry."Location Code");
+    END;
+
+    LOCAL PROCEDURE UpdateConsumpAvgEntry@21(ValueEntry@1000 : Record "Value Entry");
+    VAR
+      ItemLedgEntry@1003 : Record "Item Ledger Entry";
+      ConsumpItemLedgEntry@1004 : Record "Item Ledger Entry";
+      AvgCostAdjmtPoint@1001 : Record "Avg. Cost Adjmt. Entry Point";
+    BEGIN
+      // Determine if average costed consumption is completely invoiced
+      with ValueEntry do begin
+        if "Item Ledger Entry Type" <> "Item Ledger Entry Type"::Consumption then
+          exit;
+
+        ConsumpItemLedgEntry.GET("Item Ledger Entry No.");
+        if not ConsumpItemLedgEntry."Completely Invoiced" then
+          if not IsDeletedItem then begin
+            ItemLedgEntry.SETCURRENTKEY("Item No.","Entry Type","Variant Code","Drop Shipment","Location Code","Posting Date");
+            ItemLedgEntry.SETRANGE("Item No.","Item No.");
+            if not AvgCostAdjmtPoint.IsAvgCostCalcTypeItem("Valuation Date") then begin
+              ItemLedgEntry.SETRANGE("Variant Code","Variant Code");
+              ItemLedgEntry.SETRANGE("Location Code","Location Code");
+            end;
+            ItemLedgEntry.SETRANGE("Posting Date",0D,"Valuation Date");
+            ItemLedgEntry.CALCSUMS("Invoiced Quantity");
+            if ItemLedgEntry."Invoiced Quantity" >= 0 then begin
+              ConsumpItemLedgEntry.SetCompletelyInvoiced;
+              ConsumpItemLedgEntry.SetAppliedEntryToAdjust(false);
+            end;
+          end else begin
+            ConsumpItemLedgEntry.SetCompletelyInvoiced;
+            ConsumpItemLedgEntry.SetAppliedEntryToAdjust(false);
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE ForwardAvgCostToInbndEntries@83(ItemLedgEntryNo@1001 : Integer;VAR TempAvgCostAdjmtEntryPoint@1000 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      ItemApplnEntry@1002 : Record "Item Application Entry";
+    BEGIN
+      with ItemApplnEntry do begin
+        if AppliedInbndEntryExists(ItemLedgEntryNo,true) then
+          repeat
+            LevelNo[3] := 0;
+            AdjustAppliedInbndEntries(ItemApplnEntry,TempAvgCostAdjmtEntryPoint);
+            if LevelExceeded then begin
+              LevelExceeded := false;
+
+              UpDateWindow(WindowAdjmtLevel,WindowItem,WindowAdjust,LevelNo[3],WindowEntry,WindowOutbndEntry);
+              AdjustItemAppliedCost(TempAvgCostAdjmtEntryPoint);
+              UpDateWindow(WindowAdjmtLevel,WindowItem,Text008,WindowFWLevel,WindowEntry,WindowOutbndEntry);
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE WIPToAdjustExist@65(VAR ToInventoryAdjmtEntryOrder@1000 : Record "Inventory Adjmt. Entry (Order)") : Boolean;
+    VAR
+      InventoryAdjmtEntryOrder@1001 : Record "Inventory Adjmt. Entry (Order)";
+    BEGIN
+      with InventoryAdjmtEntryOrder do begin
+        RESET;
+        SETCURRENTKEY("Cost is Adjusted","Allow Online Adjustment");
+        SETRANGE("Cost is Adjusted",false);
+        SETRANGE("Order Type","Order Type"::Production);
+        SETRANGE("Is Finished",true);
+        if IsOnlineAdjmt then
+          SETRANGE("Allow Online Adjustment",true);
+
+        CopyOrderAdmtEntryToOrderAdjmt(InventoryAdjmtEntryOrder,ToInventoryAdjmtEntryOrder);
+        exit(ToInventoryAdjmtEntryOrder.FINDFIRST);
+      end;
+    END;
+
+    LOCAL PROCEDURE MakeWIPAdjmt@62(VAR SourceInvtAdjmtEntryOrder@1000 : Record "Inventory Adjmt. Entry (Order)");
+    VAR
+      InvtAdjmtEntryOrder@1003 : Record "Inventory Adjmt. Entry (Order)";
+      CalcInventoryAdjmtOrder@1002 : Codeunit "Calc. Inventory Adjmt. - Order";
+      DoNotSkipItems@1001 : Boolean;
+    BEGIN
+      DoNotSkipItems := FilterItem.GETFILTERS = '';
+      with SourceInvtAdjmtEntryOrder do
+        if FINDSET then
+          repeat
+            if true in [DoNotSkipItems,ItemInFilteredSetExists("Item No.",FilterItem)] then begin
+              GetItem("Item No.");
+              UpDateWindow(WindowAdjmtLevel,"Item No.",Text009,0,0,0);
+
+              InvtAdjmtEntryOrder := SourceInvtAdjmtEntryOrder;
+              CalcInventoryAdjmtOrder.Calculate(SourceInvtAdjmtEntryOrder,TempInvtAdjmtBuf);
+              PostOutputAdjmtBuf;
+
+              if not "Completely Invoiced" then begin
+                InvtAdjmtEntryOrder.GetUnitCostsFromItem;
+                InvtAdjmtEntryOrder."Completely Invoiced" := true;
+              end;
+              InvtAdjmtEntryOrder."Cost is Adjusted" := true;
+              InvtAdjmtEntryOrder."Allow Online Adjustment" := true;
+              InvtAdjmtEntryOrder.MODIFY;
+            end;
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ItemInFilteredSetExists@67(ItemNo@1000 : Code[20];VAR FilteredItem@1001 : Record Item) : Boolean;
+    VAR
+      TempItem@1002 : TEMPORARY Record Item;
+      Item@1003 : Record Item;
+    BEGIN
+      with TempItem do begin
+        if not Item.GET(ItemNo) then
+          exit(false);
+        COPYFILTERS(FilteredItem);
+        TempItem := Item;
+        INSERT;
+        exit(not ISEMPTY);
+      end;
+    END;
+
+    LOCAL PROCEDURE PostOutputAdjmtBuf@19();
+    BEGIN
+      with TempInvtAdjmtBuf do begin
+        RESET;
+        if FINDSET then
+          repeat
+            PostOutput(TempInvtAdjmtBuf);
+          until NEXT = 0;
+        DELETEALL;
+      end;
+    END;
+
+    LOCAL PROCEDURE PostOutput@28(InvtAdjmtBuf@1003 : Record "Inventory Adjustment Buffer");
+    VAR
+      ItemJnlLine@1005 : Record "Item Journal Line";
+      OrigItemLedgEntry@1001 : Record "Item Ledger Entry";
+      OrigValueEntry@1000 : Record "Value Entry";
+    BEGIN
+      OrigValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+      OrigValueEntry.SETRANGE("Item Ledger Entry No.",TempInvtAdjmtBuf."Item Ledger Entry No.");
+      OrigValueEntry.FINDFIRST;
+
+      with OrigValueEntry do begin
+        ItemJnlLine.INIT;
+        ItemJnlLine."Value Entry Type" := InvtAdjmtBuf."Entry Type";
+        ItemJnlLine."Variance Type" := InvtAdjmtBuf."Variance Type";
+        ItemJnlLine."Invoiced Quantity" := "Item Ledger Entry Quantity";
+        ItemJnlLine."Invoiced Qty. (Base)" := "Item Ledger Entry Quantity";
+        ItemJnlLine."Qty. per Unit of Measure" := 1;
+        ItemJnlLine."Source Type" := "Source Type";
+        ItemJnlLine."Source No." := "Source No.";
+        ItemJnlLine.Description := Description;
+        ItemJnlLine.Adjustment := "Order Type" = "Order Type"::Assembly;
+        OrigItemLedgEntry.GET("Item Ledger Entry No.");
+        ItemJnlLine.Adjustment := ("Order Type" = "Order Type"::Assembly) and (OrigItemLedgEntry."Invoiced Quantity" <> 0);
+
+        PostItemJnlLine(ItemJnlLine,OrigValueEntry,InvtAdjmtBuf."Cost Amount (Actual)",InvtAdjmtBuf."Cost Amount (Actual) (ACY)");
+
+        OrigItemLedgEntry.GET("Item Ledger Entry No.");
+        if not OrigItemLedgEntry."Completely Invoiced" then
+          OrigItemLedgEntry.SetCompletelyInvoiced;
+      end;
+    END;
+
+    LOCAL PROCEDURE AssemblyToAdjustExists@89(VAR ToInventoryAdjmtEntryOrder@1000 : Record "Inventory Adjmt. Entry (Order)") : Boolean;
+    VAR
+      InventoryAdjmtEntryOrder@1001 : Record "Inventory Adjmt. Entry (Order)";
+    BEGIN
+      with InventoryAdjmtEntryOrder do begin
+        RESET;
+        SETCURRENTKEY("Cost is Adjusted","Allow Online Adjustment");
+        SETRANGE("Cost is Adjusted",false);
+        SETRANGE("Order Type","Order Type"::Assembly);
+        if IsOnlineAdjmt then
+          SETRANGE("Allow Online Adjustment",true);
+
+        CopyOrderAdmtEntryToOrderAdjmt(InventoryAdjmtEntryOrder,ToInventoryAdjmtEntryOrder);
+        exit(ToInventoryAdjmtEntryOrder.FINDFIRST);
+      end;
+    END;
+
+    LOCAL PROCEDURE MakeAssemblyAdjmt@77(VAR SourceInvtAdjmtEntryOrder@1000 : Record "Inventory Adjmt. Entry (Order)");
+    VAR
+      InvtAdjmtEntryOrder@1003 : Record "Inventory Adjmt. Entry (Order)";
+      CalcInventoryAdjmtOrder@1002 : Codeunit "Calc. Inventory Adjmt. - Order";
+      DoNotSkipItems@1001 : Boolean;
+    BEGIN
+      DoNotSkipItems := FilterItem.GETFILTERS = '';
+      with SourceInvtAdjmtEntryOrder do
+        if FINDSET then
+          repeat
+            if true in [DoNotSkipItems,ItemInFilteredSetExists("Item No.",FilterItem)] then begin
+              GetItem("Item No.");
+              UpDateWindow(WindowAdjmtLevel,"Item No.",Text010,0,0,0);
+
+              InvtAdjmtEntryOrder := SourceInvtAdjmtEntryOrder;
+              CalcInventoryAdjmtOrder.Calculate(SourceInvtAdjmtEntryOrder,TempInvtAdjmtBuf);
+              PostOutputAdjmtBuf;
+
+              if not "Completely Invoiced" then begin
+                InvtAdjmtEntryOrder.GetCostsFromItem(1);
+                InvtAdjmtEntryOrder."Completely Invoiced" := true;
+              end;
+              InvtAdjmtEntryOrder."Allow Online Adjustment" := true;
+              InvtAdjmtEntryOrder."Cost is Adjusted" := true;
+              InvtAdjmtEntryOrder.MODIFY;
+            end;
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateAdjmtBuf@18(OrigValueEntry@1000 : Record "Value Entry";NewAdjustedCost@1001 : Decimal;NewAdjustedCostACY@1002 : Decimal;ItemLedgEntryPostingDate@1005 : Date;EntryType@1007 : Option;VAR TempAvgCostAdjmtEntryPoint@1006 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point") : Boolean;
+    VAR
+      ItemLedgEntry@1004 : Record "Item Ledger Entry";
+      ItemApplnEntry@1003 : Record "Item Application Entry";
+      SourceOrigValueEntry@1008 : Record "Value Entry";
+    BEGIN
+      if not HasNewCost(NewAdjustedCost,NewAdjustedCostACY) then
+        exit(false);
+
+      InsertEntryPointToUpdate(
+        TempAvgCostAdjmtEntryPoint,OrigValueEntry."Item No.",OrigValueEntry."Variant Code",OrigValueEntry."Location Code");
+
+      if OrigValueEntry."Valued By Average Cost" then begin
+        AvgCostRndgBuf.UpdRoundingCheck(
+          OrigValueEntry."Item Ledger Entry No.",NewAdjustedCost,NewAdjustedCostACY,
+          GLSetup."Amount Rounding Precision",Currency."Amount Rounding Precision");
+        if AvgCostRndgBuf."No. of Hits" > 42 then
+          exit(false);
+      end;
+
+      UpdateValuationPeriodHasOutput(OrigValueEntry);
+
+      TempInvtAdjmtBuf.AddActualCostBuf(OrigValueEntry,NewAdjustedCost,NewAdjustedCostACY,ItemLedgEntryPostingDate);
+
+      if EntryType = OrigValueEntry."Entry Type"::Variance then begin
+        GetOrigValueEntry(SourceOrigValueEntry,OrigValueEntry,EntryType);
+        TempInvtAdjmtBuf."Entry Type" := EntryType;
+        TempInvtAdjmtBuf."Variance Type" := SourceOrigValueEntry."Variance Type";
+        TempInvtAdjmtBuf.MODIFY;
+      end;
+
+      if not OrigValueEntry."Expected Cost" and
+         (OrigValueEntry."Entry Type" = OrigValueEntry."Entry Type"::"Direct Cost")
+      then begin
+        CalcExpectedCostToBalance(OrigValueEntry,NewAdjustedCost,NewAdjustedCostACY);
+        if HasNewCost(NewAdjustedCost,NewAdjustedCostACY) then
+          TempInvtAdjmtBuf.AddBalanceExpectedCostBuf(OrigValueEntry,NewAdjustedCost,NewAdjustedCostACY);
+      end;
+
+      if OrigValueEntry."Item Ledger Entry Quantity" >= 0 then begin
+        ItemLedgEntry.GET(OrigValueEntry."Item Ledger Entry No.");
+        ItemApplnEntry.SetOutboundsNotUpdated(ItemLedgEntry);
+      end;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CalcExpectedCostToBalance@22(OrigValueEntry@1003 : Record "Value Entry";VAR ExpectedCost@1001 : Decimal;VAR ExpectedCostACY@1002 : Decimal);
+    VAR
+      ItemLedgEntry@1004 : Record "Item Ledger Entry";
+      ShareOfTotalCost@1005 : Decimal;
+    BEGIN
+      ExpectedCost := 0;
+      ExpectedCostACY := 0;
+      ItemLedgEntry.GET(OrigValueEntry."Item Ledger Entry No.");
+
+      with TempInvtAdjmtBuf do begin
+        RESET;
+        SETCURRENTKEY("Item Ledger Entry No.");
+        SETRANGE("Item Ledger Entry No.",OrigValueEntry."Item Ledger Entry No.");
+        if FINDFIRST and "Expected Cost" then begin
+          CALCSUMS("Cost Amount (Expected)","Cost Amount (Expected) (ACY)");
+
+          if ItemLedgEntry.Quantity = ItemLedgEntry."Invoiced Quantity" then begin
+            ExpectedCost := -"Cost Amount (Expected)";
+            ExpectedCostACY := -"Cost Amount (Expected) (ACY)";
+          end else begin
+            ShareOfTotalCost := OrigValueEntry."Invoiced Quantity" / ItemLedgEntry.Quantity;
+            ExpectedCost :=
+              -RoundAmt("Cost Amount (Expected)" * ShareOfTotalCost,GLSetup."Amount Rounding Precision");
+            ExpectedCostACY :=
+              -RoundAmt("Cost Amount (Expected) (ACY)" * ShareOfTotalCost,Currency."Amount Rounding Precision");
+          end;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE PostAdjmtBuf@17();
+    VAR
+      ItemJnlLine@1001 : Record "Item Journal Line";
+      OrigValueEntry@1000 : Record "Value Entry";
+    BEGIN
+      with TempInvtAdjmtBuf do begin
+        RESET;
+        if FINDSET then begin
+          repeat
+            OrigValueEntry.GET("Entry No.");
+            if OrigValueEntry."Expected Cost" then begin
+              if HasNewCost("Cost Amount (Expected)","Cost Amount (Expected) (ACY)") then begin
+                InitAdjmtJnlLine(ItemJnlLine,OrigValueEntry,"Entry Type","Variance Type");
+                PostItemJnlLine(ItemJnlLine,OrigValueEntry,"Cost Amount (Expected)","Cost Amount (Expected) (ACY)");
+              end;
+            end else
+              if HasNewCost("Cost Amount (Actual)","Cost Amount (Actual) (ACY)") then begin
+                InitAdjmtJnlLine(ItemJnlLine,OrigValueEntry,"Entry Type","Variance Type");
+                PostItemJnlLine(ItemJnlLine,OrigValueEntry,"Cost Amount (Actual)","Cost Amount (Actual) (ACY)");
+              end;
+          until NEXT = 0;
+          DELETEALL;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE InitAdjmtJnlLine@33(VAR ItemJnlLine@1003 : Record "Item Journal Line";OrigValueEntry@1000 : Record "Value Entry";EntryType@1001 : Option;VarianceType@1002 : Option);
+    BEGIN
+      with OrigValueEntry do begin
+        ItemJnlLine."Value Entry Type" := EntryType;
+        ItemJnlLine."Partial Revaluation" := "Partial Revaluation";
+        ItemJnlLine.Description := Description;
+        ItemJnlLine."Source Posting Group" := "Source Posting Group";
+        ItemJnlLine."Source No." := "Source No.";
+        ItemJnlLine."Salespers./Purch. Code" := "Salespers./Purch. Code";
+        ItemJnlLine."Source Type" := "Source Type";
+        ItemJnlLine."Reason Code" := "Reason Code";
+        ItemJnlLine."Drop Shipment" := "Drop Shipment";
+        ItemJnlLine."Document Date" := "Document Date";
+        ItemJnlLine."External Document No." := "External Document No.";
+        ItemJnlLine."Quantity (Base)" := "Valued Quantity";
+        ItemJnlLine."Invoiced Qty. (Base)" := "Invoiced Quantity";
+        if "Item Ledger Entry Type" = "Item Ledger Entry Type"::Output then
+          ItemJnlLine."Output Quantity (Base)" := ItemJnlLine."Quantity (Base)";
+        ItemJnlLine."Item Charge No." := "Item Charge No.";
+        ItemJnlLine."Variance Type" := VarianceType;
+        ItemJnlLine.Adjustment := true;
+        ItemJnlLine."Applies-to Value Entry" := "Entry No.";
+        ItemJnlLine."Return Reason Code" := "Return Reason Code";
+      end;
+    END;
+
+    LOCAL PROCEDURE PostItemJnlLine@35(ItemJnlLine@1001 : Record "Item Journal Line";OrigValueEntry@1000 : Record "Value Entry";NewAdjustedCost@1004 : Decimal;NewAdjustedCostACY@1005 : Decimal);
+    VAR
+      InvtPeriod@1006 : Record "Inventory Period";
+    BEGIN
+      with OrigValueEntry do begin
+        ItemJnlLine."Item No." := "Item No.";
+        ItemJnlLine."Location Code" := "Location Code";
+        ItemJnlLine."Variant Code" := "Variant Code";
+
+        if GLSetup.IsPostingAllowed("Posting Date") and InvtPeriod.IsValidDate("Posting Date") then
+          ItemJnlLine."Posting Date" := "Posting Date"
+        else
+          ItemJnlLine."Posting Date" := PostingDateForClosedPeriod;
+
+        ItemJnlLine."Entry Type" := "Item Ledger Entry Type";
+        ItemJnlLine."Document No." := "Document No.";
+        ItemJnlLine."Document Type" := "Document Type";
+        ItemJnlLine."Document Line No." := "Document Line No.";
+        ItemJnlLine."Source Currency Code" := GLSetup."Additional Reporting Currency";
+        ItemJnlLine."Source Code" := SourceCodeSetup."Adjust Cost";
+        ItemJnlLine."Inventory Posting Group" := "Inventory Posting Group";
+        ItemJnlLine."Gen. Bus. Posting Group" := "Gen. Bus. Posting Group";
+        ItemJnlLine."Gen. Prod. Posting Group" := "Gen. Prod. Posting Group";
+        ItemJnlLine."Order Type" := "Order Type";
+        ItemJnlLine."Order No." := "Order No.";
+        ItemJnlLine."Order Line No." := "Order Line No.";
+        ItemJnlLine."Job No." := "Job No.";
+        ItemJnlLine."Job Task No." := "Job Task No.";
+        ItemJnlLine.Type := Type;
+        if ItemJnlLine."Value Entry Type" = ItemJnlLine."Value Entry Type"::"Direct Cost" then
+          ItemJnlLine."Item Shpt. Entry No." := "Item Ledger Entry No."
+        else
+          ItemJnlLine."Applies-to Entry" := "Item Ledger Entry No.";
+        ItemJnlLine.Amount := NewAdjustedCost;
+        ItemJnlLine."Amount (ACY)" := NewAdjustedCostACY;
+
+        if ItemJnlLine."Quantity (Base)" <> 0 then begin
+          ItemJnlLine."Unit Cost" :=
+            RoundAmt(NewAdjustedCost / ItemJnlLine."Quantity (Base)",GLSetup."Unit-Amount Rounding Precision");
+          ItemJnlLine."Unit Cost (ACY)" :=
+            RoundAmt(NewAdjustedCostACY / ItemJnlLine."Quantity (Base)",Currency."Unit-Amount Rounding Precision");
+        end;
+
+        ItemJnlLine."Shortcut Dimension 1 Code" := "Global Dimension 1 Code";
+        ItemJnlLine."Shortcut Dimension 2 Code" := "Global Dimension 2 Code";
+        ItemJnlLine."Dimension Set ID" := "Dimension Set ID";
+
+        if not SkipUpdateJobItemCost and ("Job No." <> '') then
+          CopyJobToAdjustmentBuf("Job No.");
+
+        ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE RoundCost@76(VAR Cost@1000 : Decimal;VAR RndgResidual@1001 : Decimal;TotalCost@1002 : Decimal;ShareOfTotalCost@1003 : Decimal;AmtRndgPrec@1004 : Decimal);
+    VAR
+      UnroundedCost@1005 : Decimal;
+    BEGIN
+      UnroundedCost := TotalCost * ShareOfTotalCost + RndgResidual;
+      Cost := RoundAmt(UnroundedCost,AmtRndgPrec);
+      RndgResidual := UnroundedCost - Cost;
+    END;
+
+    LOCAL PROCEDURE RoundAmt@72(Amt@1001 : Decimal;AmtRndgPrec@1000 : Decimal) : Decimal;
+    BEGIN
+      if Amt = 0 then
+        exit(0);
+      exit(ROUND(Amt,AmtRndgPrec))
+    END;
+
+    LOCAL PROCEDURE GetOrigValueEntry@73(VAR OrigValueEntry@1001 : Record "Value Entry";ValueEntry@1000 : Record "Value Entry";ValueEntryType@1004 : Option);
+    VAR
+      Found@1002 : Boolean;
+      IsLastEntry@1003 : Boolean;
+    BEGIN
+      with OrigValueEntry do begin
+        SETCURRENTKEY("Item Ledger Entry No.","Document No.");
+        SETRANGE("Item Ledger Entry No.",ValueEntry."Item Ledger Entry No.");
+        SETRANGE("Document No.",ValueEntry."Document No.");
+
+        if FINDSET then
+          repeat
+            if ("Expected Cost" = ValueEntry."Expected Cost") and
+               ("Entry Type" = ValueEntryType)
+            then begin
+              Found := true;
+              "Valued Quantity" := ValueEntry."Valued Quantity";
+              "Invoiced Quantity" := ValueEntry."Invoiced Quantity";
+            end else
+              IsLastEntry := NEXT = 0;
+          until Found or IsLastEntry;
+
+        if not Found then begin
+          OrigValueEntry := ValueEntry;
+          "Entry Type" := ValueEntryType;
+          if ValueEntryType = "Entry Type"::Variance then
+            "Variance Type" := GetOrigVarianceType(ValueEntry);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetOrigVarianceType@60(ValueEntry@1000 : Record "Value Entry") : Integer;
+    BEGIN
+      with ValueEntry do begin
+        if "Item Ledger Entry Type" in
+           ["Item Ledger Entry Type"::Output,"Item Ledger Entry Type"::"Assembly Output"]
+        then
+          exit("Variance Type"::Material);
+
+        exit("Variance Type"::Purchase);
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateAppliedEntryToAdjustBuf@58(ItemLedgEntryNo@1000 : Integer;AppliedEntryToAdjust@1001 : Boolean);
+    BEGIN
+      if AppliedEntryToAdjust then
+        if not AppliedEntryToAdjustBuf.GET(ItemLedgEntryNo) then begin
+          AppliedEntryToAdjustBuf.Number := ItemLedgEntryNo;
+          AppliedEntryToAdjustBuf.INSERT;
+        end;
+    END;
+
+    LOCAL PROCEDURE SetAppliedEntryToAdjustFromBuf@38();
+    VAR
+      ItemLedgEntry@1000 : Record "Item Ledger Entry";
+    BEGIN
+      with AppliedEntryToAdjustBuf do
+        if FINDSET then begin
+          repeat
+            ItemLedgEntry.GET(Number);
+            ItemLedgEntry.SetAppliedEntryToAdjust(true);
+          until NEXT = 0;
+          DELETEALL;
+        end;
+    END;
+
+    LOCAL PROCEDURE UpdateItemUnitCost@42(VAR TempAvgCostAdjmtEntryPoint@1001 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      AvgCostAdjmtPoint@1000 : Record "Avg. Cost Adjmt. Entry Point";
+      FilterSKU@1002 : Boolean;
+    BEGIN
+      with Item do begin
+        if IsDeletedItem then
+          exit;
+
+        LOCKTABLE;
+        GET("No.");
+        if not LevelExceeded then begin
+          "Allow Online Adjustment" := true;
+          AvgCostAdjmtPoint.SETRANGE("Item No.","No.");
+          AvgCostAdjmtPoint.SETRANGE("Cost Is Adjusted",false);
+          if "Costing Method" <> "Costing Method"::Average then begin
+            if AvgCostAdjmtPoint.FINDFIRST then
+              AvgCostAdjmtPoint.MODIFYALL("Cost Is Adjusted",true);
+          end;
+          "Cost is Adjusted" := AvgCostAdjmtPoint.ISEMPTY;
+        end;
+
+        if "Costing Method" <> "Costing Method"::Standard then begin
+          if TempAvgCostAdjmtEntryPoint.FINDSET then
+            repeat
+              FilterSKU := (TempAvgCostAdjmtEntryPoint."Location Code" <> '') and (TempAvgCostAdjmtEntryPoint."Variant Code" <> '');
+              ItemCostMgt.UpdateUnitCost(
+                Item,TempAvgCostAdjmtEntryPoint."Location Code",TempAvgCostAdjmtEntryPoint."Variant Code",0,0,true,FilterSKU,false,0);
+            until TempAvgCostAdjmtEntryPoint.NEXT = 0
+          else
+            ItemCostMgt.UpdateUnitCost(Item,'','',0,0,true,false,false,0);
+        end else
+          MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetItem@14(ItemNo@1001 : Code[20]);
+    BEGIN
+      IsDeletedItem := ItemNo = '';
+      if (Item."No." <> ItemNo) or IsDeletedItem then
+        if not IsDeletedItem then
+          Item.GET(ItemNo)
+        else begin
+          CLEAR(Item);
+          Item.INIT;
+        end;
+    END;
+
+    LOCAL PROCEDURE InsertDeletedItem@45(VAR Item@1000 : Record Item);
+    BEGIN
+      CLEAR(Item);
+      Item.INIT;
+      Item."Cost is Adjusted" := false;
+      Item."Costing Method" := Item."Costing Method"::FIFO;
+      Item.INSERT;
+    END;
+
+    LOCAL PROCEDURE IsAvgCostItem@50() : Boolean;
+    BEGIN
+      exit(Item."Costing Method" = Item."Costing Method"::Average);
+    END;
+
+    LOCAL PROCEDURE HasNewCost@54(NewCost@1000 : Decimal;NewCostACY@1001 : Decimal) : Boolean;
+    BEGIN
+      exit((NewCost <> 0) or (NewCostACY <> 0));
+    END;
+
+    LOCAL PROCEDURE OpenWindow@59();
+    BEGIN
+      Window.OPEN(
+        Text000 +
+        '#1########################\\' +
+        Text001 +
+        Text003 +
+        Text004 +
+        Text005 +
+        Text006);
+      WindowIsOpen := true;
+    END;
+
+    LOCAL PROCEDURE UpDateWindow@31(NewWindowAdjmtLevel@1004 : Integer;NewWindowItem@1003 : Code[20];NewWindowAdjust@1001 : Text[20];NewWindowFWLevel@1000 : Integer;NewWindowEntry@1002 : Integer;NewWindowOutbndEntry@1005 : Integer);
+    BEGIN
+      WindowAdjmtLevel := NewWindowAdjmtLevel;
+      WindowItem := NewWindowItem;
+      WindowAdjust := NewWindowAdjust;
+      WindowFWLevel := NewWindowFWLevel;
+      WindowEntry := NewWindowEntry;
+      WindowOutbndEntry := NewWindowOutbndEntry;
+
+      if IsTimeForUpdate then begin
+        if not WindowIsOpen then
+          OpenWindow;
+        Window.UPDATE(1,STRSUBSTNO(Text002,TempInvtAdjmtBuf.FIELDCAPTION("Item No."),WindowItem));
+        Window.UPDATE(2,WindowAdjmtLevel);
+        Window.UPDATE(3,WindowAdjust);
+        Window.UPDATE(4,WindowFWLevel);
+        Window.UPDATE(5,WindowEntry);
+        Window.UPDATE(6,WindowOutbndEntry);
+      end;
+    END;
+
+    LOCAL PROCEDURE IsTimeForUpdate@69() : Boolean;
+    BEGIN
+      if TIME - WindowUpdateTime >= 1000 then begin
+        WindowUpdateTime := TIME;
+        exit(true);
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE CopyItemToItem@57(VAR FromItem@1001 : Record Item;VAR ToItem@1000 : Record Item);
+    BEGIN
+      with ToItem do begin
+        RESET;
+        DELETEALL;
+        if FromItem.FINDSET then
+          repeat
+            ToItem := FromItem;
+            INSERT;
+          until FromItem.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyILEToILE@49(VAR FromItemLedgEntry@1000 : Record "Item Ledger Entry";VAR ToItemLedgEntry@1001 : Record "Item Ledger Entry");
+    BEGIN
+      with ToItemLedgEntry do begin
+        RESET;
+        DELETEALL;
+        if FromItemLedgEntry.FINDSET then
+          repeat
+            ToItemLedgEntry := FromItemLedgEntry;
+            INSERT;
+          until FromItemLedgEntry.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyAvgCostAdjmtToAvgCostAdjmt@75(VAR FromAvgCostAdjmtEntryPoint@1000 : Record "Avg. Cost Adjmt. Entry Point";VAR ToAvgCostAdjmtEntryPoint@1001 : Record "Avg. Cost Adjmt. Entry Point");
+    BEGIN
+      with ToAvgCostAdjmtEntryPoint do begin
+        RESET;
+        DELETEALL;
+        if FromAvgCostAdjmtEntryPoint.FINDSET then
+          repeat
+            ToAvgCostAdjmtEntryPoint := FromAvgCostAdjmtEntryPoint;
+            INSERT;
+          until FromAvgCostAdjmtEntryPoint.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyOrderAdmtEntryToOrderAdjmt@120(VAR FromInventoryAdjmtEntryOrder@1000 : Record "Inventory Adjmt. Entry (Order)";VAR ToInventoryAdjmtEntryOrder@1001 : Record "Inventory Adjmt. Entry (Order)");
+    BEGIN
+      with ToInventoryAdjmtEntryOrder do begin
+        RESET;
+        DELETEALL;
+        if FromInventoryAdjmtEntryOrder.FINDSET then
+          repeat
+            ToInventoryAdjmtEntryOrder := FromInventoryAdjmtEntryOrder;
+            INSERT;
+          until FromInventoryAdjmtEntryOrder.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE AdjustNotInvdRevaluation@100(TransItemLedgEntry@1000 : Record "Item Ledger Entry";TransItemApplnEntry@1001 : Record "Item Application Entry";VAR TempAvgCostAdjmtEntryPoint@1006 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      TransValueEntry@1002 : Record "Value Entry";
+      OrigItemLedgEntry@1003 : Record "Item Ledger Entry";
+      CostElementBuf@1004 : Record "Cost Element Buffer";
+      AdjustedCostElementBuf@1005 : Record "Cost Element Buffer";
+    BEGIN
+      with TransValueEntry do
+        if NotInvdRevaluationExists(TransItemLedgEntry."Entry No.") then begin
+          GetOrigPosItemLedgEntryNo(TransItemApplnEntry);
+          OrigItemLedgEntry.GET(TransItemApplnEntry."Item Ledger Entry No.");
+          repeat
+            CalcTransEntryNewRevAmt(OrigItemLedgEntry,TransValueEntry,AdjustedCostElementBuf);
+            CalcTransEntryOldRevAmt(TransValueEntry,CostElementBuf);
+
+            UpdateAdjmtBuf(
+              TransValueEntry,
+              AdjustedCostElementBuf."Actual Cost" - CostElementBuf."Actual Cost",
+              AdjustedCostElementBuf."Actual Cost (ACY)" - CostElementBuf."Actual Cost (ACY)",
+              TransItemLedgEntry."Posting Date",
+              "Entry Type",
+              TempAvgCostAdjmtEntryPoint);
+          until NEXT = 0;
+        end;
+    END;
+
+    LOCAL PROCEDURE GetOrigPosItemLedgEntryNo@101(VAR ItemApplnEntry@1000 : Record "Item Application Entry");
+    BEGIN
+      with ItemApplnEntry do begin
+        SETCURRENTKEY("Inbound Item Entry No.","Item Ledger Entry No.");
+        SETRANGE("Item Ledger Entry No.","Transferred-from Entry No.");
+        SETRANGE("Inbound Item Entry No.","Transferred-from Entry No.");
+        FINDFIRST;
+        if "Transferred-from Entry No." <> 0 then
+          GetOrigPosItemLedgEntryNo(ItemApplnEntry);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcTransEntryNewRevAmt@102(ItemLedgEntry@1000 : Record "Item Ledger Entry";TransValueEntry@1001 : Record "Value Entry";VAR AdjustedCostElementBuf@1002 : Record "Cost Element Buffer");
+    VAR
+      ValueEntry@1003 : Record "Value Entry";
+      InvdQty@1004 : Decimal;
+      OrigInvdQty@1005 : Decimal;
+      ShareOfRevExpAmt@1006 : Decimal;
+      OrigShareOfRevExpAmt@1007 : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+        SETRANGE("Item Ledger Entry No.",ItemLedgEntry."Entry No.");
+        SETRANGE("Entry Type","Entry Type"::"Direct Cost");
+        SETRANGE("Item Charge No.",'');
+        if FINDSET then
+          repeat
+            InvdQty := InvdQty + "Invoiced Quantity";
+            if "Entry No." < TransValueEntry."Entry No." then
+              OrigInvdQty := OrigInvdQty + "Invoiced Quantity";
+          until NEXT = 0;
+        ShareOfRevExpAmt := (ItemLedgEntry.Quantity - InvdQty) / ItemLedgEntry.Quantity;
+        OrigShareOfRevExpAmt := (ItemLedgEntry.Quantity - OrigInvdQty) / ItemLedgEntry.Quantity;
+      end;
+
+      if TempInvtAdjmtBuf.GET(TransValueEntry."Entry No.") then
+        TransValueEntry.AddCost(TempInvtAdjmtBuf);
+      AdjustedCostElementBuf."Actual Cost" := ROUND(
+          (ShareOfRevExpAmt - OrigShareOfRevExpAmt) * TransValueEntry."Cost Amount (Actual)",GLSetup."Amount Rounding Precision");
+      AdjustedCostElementBuf."Actual Cost (ACY)" := ROUND(
+          (ShareOfRevExpAmt - OrigShareOfRevExpAmt) *
+          TransValueEntry."Cost Amount (Actual) (ACY)",Currency."Amount Rounding Precision");
+    END;
+
+    LOCAL PROCEDURE CalcTransEntryOldRevAmt@103(TransValueEntry@1000 : Record "Value Entry";VAR CostElementBuf@1001 : Record "Cost Element Buffer");
+    BEGIN
+      CLEAR(CostElementBuf);
+      with CostElementBuf do begin
+        TransValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+        TransValueEntry.SETRANGE("Item Ledger Entry No.",TransValueEntry."Item Ledger Entry No.");
+        TransValueEntry.SETRANGE("Entry Type",TransValueEntry."Entry Type"::Revaluation);
+        TransValueEntry.SETRANGE("Applies-to Entry",TransValueEntry."Entry No.");
+        if TransValueEntry.FINDSET then
+          repeat
+            if TempInvtAdjmtBuf.GET(TransValueEntry."Entry No.") then
+              TransValueEntry.AddCost(TempInvtAdjmtBuf);
+            "Actual Cost" := "Actual Cost" + TransValueEntry."Cost Amount (Actual)";
+            "Actual Cost (ACY)" := "Actual Cost (ACY)" + TransValueEntry."Cost Amount (Actual) (ACY)";
+          until TransValueEntry.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE IsInterimRevaluation@104(InbndValueEntry@1000 : Record "Value Entry") : Boolean;
+    BEGIN
+      with InbndValueEntry do
+        exit(
+          ("Entry Type" = "Entry Type"::Revaluation) and (("Cost Amount (Expected)" <> 0) or ("Cost Amount (Expected) (ACY)" <> 0)));
+    END;
+
+    LOCAL PROCEDURE OutboundSalesEntryToAdjust@5888(ItemLedgEntry@5890 : Record "Item Ledger Entry") : Boolean;
+    VAR
+      ItemApplnEntry@5892 : Record "Item Application Entry";
+      InbndItemLedgEntry@5893 : Record "Item Ledger Entry";
+    BEGIN
+      if not ItemLedgEntry.IsOutbndSale then
+        exit(false);
+
+      with ItemApplnEntry do begin
+        RESET;
+        SETCURRENTKEY(
+          "Outbound Item Entry No.","Item Ledger Entry No.","Cost Application","Transferred-from Entry No.");
+        SETRANGE("Outbound Item Entry No.",ItemLedgEntry."Entry No.");
+        SETFILTER("Item Ledger Entry No.",'<>%1',ItemLedgEntry."Entry No.");
+        SETRANGE("Transferred-from Entry No.",0);
+        if FINDSET then
+          repeat
+            if InbndItemLedgEntry.GET("Inbound Item Entry No.") then
+              if not InbndItemLedgEntry."Completely Invoiced" then
+                exit(true);
+          until NEXT = 0;
+      end;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE InboundTransferEntryToAdjust@78(ItemLedgEntry@1000 : Record "Item Ledger Entry") : Boolean;
+    VAR
+      ItemApplnEntry@1001 : Record "Item Application Entry";
+    BEGIN
+      if (ItemLedgEntry."Entry Type" <> ItemLedgEntry."Entry Type"::Transfer) or not ItemLedgEntry.Positive or
+         ItemLedgEntry."Completely Invoiced"
+      then
+        exit(false);
+
+      with ItemApplnEntry do begin
+        SETRANGE("Inbound Item Entry No.",ItemLedgEntry."Entry No.");
+        SETFILTER("Item Ledger Entry No.",'<>%1',ItemLedgEntry."Entry No.");
+        SETRANGE("Transferred-from Entry No.",0);
+        exit(not ISEMPTY);
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetJobUpdateProperties@70(SkipJobUpdate@1000 : Boolean);
+    BEGIN
+      SkipUpdateJobItemCost := SkipJobUpdate;
+    END;
+
+    LOCAL PROCEDURE GetLastValidValueEntry@52(ValueEntryNo@1000 : Integer) : Integer;
+    VAR
+      Integer@1002 : Record Integer;
+    BEGIN
+      with AvgCostExceptionBuf do begin
+        SETFILTER(Number,'>%1',ValueEntryNo);
+        if not FINDFIRST then begin
+          Integer.FINDLAST;
+          SETRANGE(Number);
+          exit(Integer.Number);
+        end;
+        exit(Number);
+      end;
+    END;
+
+    LOCAL PROCEDURE FillFixApplBuffer@23(ItemLedgerEntryNo@1000 : Integer);
+    VAR
+      ItemApplnEntry@1001 : Record "Item Application Entry";
+    BEGIN
+      with TempFixApplBuffer do
+        if not GET(ItemLedgerEntryNo) then
+          if ItemApplnEntry.AppliedOutbndEntryExists(ItemLedgerEntryNo,true,false) then begin
+            Number := ItemLedgerEntryNo;
+            INSERT;
+            repeat
+              // buffer is filled with couple of entries which are applied and contains revaluation
+              Number := ItemApplnEntry."Item Ledger Entry No.";
+              INSERT;
+            until ItemApplnEntry.NEXT = 0;
+          end;
+    END;
+
+    LOCAL PROCEDURE UpdateJobItemCost@82();
+    VAR
+      JobsSetup@1001 : Record "Jobs Setup";
+      Job@1002 : Record Job;
+      UpdateJobItemCost@1000 : Report "Update Job Item Cost";
+    BEGIN
+      if JobsSetup.FIND then
+        if JobsSetup."Automatic Update Job Item Cost" then begin
+          if TempJobToAdjustBuf.FINDSET then
+            repeat
+              Job.SETRANGE("No.",TempJobToAdjustBuf."No.");
+              CLEAR(UpdateJobItemCost);
+              UpdateJobItemCost.SETTABLEVIEW(Job);
+              UpdateJobItemCost.USEREQUESTPAGE := false;
+              UpdateJobItemCost.SetProperties(true);
+              UpdateJobItemCost.RUNMODAL;
+            until TempJobToAdjustBuf.NEXT = 0;
+        end;
+    END;
+
+    LOCAL PROCEDURE FetchOpenItemEntriesToExclude@32(AvgCostAdjmtEntryPoint@1003 : Record "Avg. Cost Adjmt. Entry Point";VAR ExcludedValueEntry@1002 : Record "Value Entry";VAR OpenEntries@1001 : TEMPORARY Record Integer;CalendarPeriod@1006 : Record Date);
+    VAR
+      OpenItemLedgEntry@1005 : Record "Item Ledger Entry";
+      TempItemLedgEntryInChain@1004 : TEMPORARY Record "Item Ledger Entry";
+      ItemApplnEntry@1007 : Record "Item Application Entry";
+    BEGIN
+      OpenEntries.RESET;
+      OpenEntries.DELETEALL;
+
+      with OpenItemLedgEntry do begin
+        if OpenOutbndItemLedgEntriesExist(OpenItemLedgEntry,AvgCostAdjmtEntryPoint,CalendarPeriod) then
+          repeat
+            CopyOpenItemLedgEntryToBuf(OpenEntries,ExcludedValueEntry,"Entry No.",CalendarPeriod."Period Start");
+            ItemApplnEntry.GetVisitedEntries(OpenItemLedgEntry,TempItemLedgEntryInChain,false);
+            if TempItemLedgEntryInChain.FINDSET then
+              repeat
+                CopyOpenItemLedgEntryToBuf(
+                  OpenEntries,ExcludedValueEntry,TempItemLedgEntryInChain."Entry No.",CalendarPeriod."Period Start");
+              until TempItemLedgEntryInChain.NEXT = 0;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE OpenOutbndItemLedgEntriesExist@25(VAR OpenItemLedgEntry@1000 : Record "Item Ledger Entry";AvgCostAdjmtEntryPoint@1001 : Record "Avg. Cost Adjmt. Entry Point";CalendarPeriod@1002 : Record Date) : Boolean;
+    BEGIN
+      with OpenItemLedgEntry do begin
+        SETCURRENTKEY("Item No.",Open,"Variant Code",Positive);
+        SETRANGE("Item No.",AvgCostAdjmtEntryPoint."Item No.");
+        SETRANGE(Open,true);
+        SETRANGE(Positive,false);
+        if not AvgCostAdjmtEntryPoint.IsAvgCostCalcTypeItem(CalendarPeriod."Period End") then begin
+          SETRANGE("Location Code",AvgCostAdjmtEntryPoint."Location Code");
+          SETRANGE("Variant Code",AvgCostAdjmtEntryPoint."Variant Code");
+        end;
+        exit(FINDSET);
+      end;
+    END;
+
+    LOCAL PROCEDURE ResetAvgBuffers@88(VAR OutbndValueEntry@1001 : Record "Value Entry";VAR ExcludedValueEntry@1000 : Record "Value Entry");
+    BEGIN
+      OutbndValueEntry.RESET;
+      ExcludedValueEntry.RESET;
+      AvgCostExceptionBuf.RESET;
+      RevaluationPoint.RESET;
+      AvgCostBuf.INIT;
+    END;
+
+    LOCAL PROCEDURE DeleteAvgBuffers@90(VAR OutbndValueEntry@1001 : Record "Value Entry";VAR ExcludedValueEntry@1000 : Record "Value Entry");
+    BEGIN
+      ResetAvgBuffers(OutbndValueEntry,ExcludedValueEntry);
+      OutbndValueEntry.DELETEALL;
+      ExcludedValueEntry.DELETEALL;
+      AvgCostExceptionBuf.DELETEALL;
+      RevaluationPoint.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE CopyAdjmtEntryPointToBuf@24(VAR AvgCostAdjmtEntryPoint@1000 : Record "Avg. Cost Adjmt. Entry Point";VAR TempAvgCostAdjmtEntryPoint@1001 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point");
+    BEGIN
+      with AvgCostAdjmtEntryPoint do
+        if FINDSET then
+          repeat
+            InsertEntryPointToUpdate(TempAvgCostAdjmtEntryPoint,"Item No.","Variant Code","Location Code");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertEntryPointToUpdate@55(VAR TempAvgCostAdjmtEntryPoint@1000 : TEMPORARY Record "Avg. Cost Adjmt. Entry Point";ItemNo@1001 : Code[20];VariantCode@1002 : Code[10];LocationCode@1003 : Code[10]);
+    BEGIN
+      with TempAvgCostAdjmtEntryPoint do begin
+        "Item No." := ItemNo;
+        "Variant Code" := VariantCode;
+        "Location Code" := LocationCode;
+        "Valuation Date" := 0D;
+        if INSERT then;
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateValuationPeriodHasOutput@87(ValueEntry@1000 : Record "Value Entry");
+    VAR
+      AvgCostAdjmtEntryPoint@1001 : Record "Avg. Cost Adjmt. Entry Point";
+      OutputValueEntry@1002 : Record "Value Entry";
+      CalendarPeriod@1003 : Record Date;
+    BEGIN
+      if ValueEntry."Item Ledger Entry Type" in
+         [ValueEntry."Item Ledger Entry Type"::Consumption,
+          ValueEntry."Item Ledger Entry Type"::"Assembly Consumption"]
+      then
+        if AvgCostAdjmtEntryPoint.ValuationExists(ValueEntry) then begin
+          if (ConsumpAdjmtInPeriodWithOutput <> 0D) and
+             (ConsumpAdjmtInPeriodWithOutput <= AvgCostAdjmtEntryPoint."Valuation Date")
+          then
+            exit;
+
+          CalendarPeriod."Period Start" := AvgCostAdjmtEntryPoint."Valuation Date";
+          AvgCostAdjmtEntryPoint.GetValuationPeriod(CalendarPeriod);
+
+          with OutputValueEntry do begin
+            SETCURRENTKEY("Item No.","Valuation Date");
+            SETRANGE("Item No.",ValueEntry."Item No.");
+            SETRANGE("Valuation Date",AvgCostAdjmtEntryPoint."Valuation Date",CalendarPeriod."Period End");
+
+            SETFILTER(
+              "Item Ledger Entry Type",'%1|%2',
+              "Item Ledger Entry Type"::Output,
+              "Item Ledger Entry Type"::"Assembly Output");
+            if FINDFIRST then
+              ConsumpAdjmtInPeriodWithOutput := AvgCostAdjmtEntryPoint."Valuation Date";
+          end;
+        end;
+    END;
+
+    LOCAL PROCEDURE CopyOpenItemLedgEntryToBuf@91(VAR OpenEntries@1001 : TEMPORARY Record Integer;VAR ExcludedValueEntry@1002 : Record "Value Entry";OpenItemLedgEntryNo@1000 : Integer;PeriodStart@1003 : Date);
+    BEGIN
+      if CollectOpenValueEntries(ExcludedValueEntry,OpenItemLedgEntryNo,PeriodStart) then begin
+        OpenEntries.Number := OpenItemLedgEntryNo;
+        if OpenEntries.INSERT then;
+      end;
+    END;
+
+    LOCAL PROCEDURE CollectOpenValueEntries@86(VAR ExcludedValueEntry@1002 : Record "Value Entry";ItemLedgerEntryNo@1001 : Integer;PeriodStart@1003 : Date) FoundEntries : Boolean;
+    VAR
+      OpenValueEntry@1000 : Record "Value Entry";
+    BEGIN
+      OpenValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntryNo);
+      OpenValueEntry.SETFILTER("Valuation Date",'<%1',PeriodStart);
+      FoundEntries := OpenValueEntry.FINDSET;
+      if FoundEntries then
+        repeat
+          ExcludedValueEntry := OpenValueEntry;
+          if ExcludedValueEntry.INSERT then;
+        until OpenValueEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyJobToAdjustmentBuf@94(JobNo@1000 : Code[20]);
+    BEGIN
+      TempJobToAdjustBuf."No." := JobNo;
+      if TempJobToAdjustBuf.INSERT then;
+    END;
+
+    LOCAL PROCEDURE UseStandardCostMirroring@112(ItemLedgEntry@1000 : Record "Item Ledger Entry") : Boolean;
+    VAR
+      ReturnShipmentLine@1002 : Record "Return Shipment Line";
+      EntryNo@1003 : Integer;
+    BEGIN
+      with ItemLedgEntry do begin
+        if ("Entry Type" <> "Entry Type"::Purchase) or
+           ("Document Type" <> "Document Type"::"Purchase Return Shipment")
+        then
+          exit(false);
+
+        EntryNo := "Entry No.";
+        RESET;
+        SETRANGE("Document Type","Document Type");
+        SETRANGE("Document No.","Document No.");
+        SETFILTER("Document Line No.",'<>%1',"Document Line No.");
+        SETRANGE("Item No.","Item No.");
+        SETRANGE(Correction,true);
+        if FINDSET then
+          repeat
+            ReturnShipmentLine.GET("Document No.","Document Line No.");
+            if ReturnShipmentLine."Appl.-to Item Entry" = EntryNo then
+              exit(true);
+          until NEXT = 0;
+      end;
+      exit(false);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

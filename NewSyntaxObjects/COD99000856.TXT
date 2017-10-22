@@ -1,0 +1,488 @@
+OBJECT Codeunit 99000856 Planning Transparency
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempInvProfileTrack@1000 : TEMPORARY Record "Inventory Profile Track Buffer";
+      TempPlanningWarning@1016 : TEMPORARY Record "Untracked Planning Element";
+      CurrReqLine@1013 : Record "Requisition Line";
+      CurrTemplateName@1002 : Code[10];
+      CurrWorksheetName@1001 : Code[10];
+      Text000@1003 : TextConst 'ENU=Undefined';
+      Text001@1004 : TextConst 'ENU=Production Forecast';
+      Text002@1005 : TextConst 'ENU=Blanket Order';
+      Text003@1006 : TextConst 'ENU=Safety Stock Quantity';
+      Text004@1007 : TextConst 'ENU=Reorder Point';
+      Text005@1008 : TextConst 'ENU=Maximum Inventory';
+      Text006@1009 : TextConst 'ENU=Reorder Quantity';
+      Text007@1014 : TextConst 'ENU=Maximum Order Quantity';
+      Text008@1010 : TextConst 'ENU=Minimum Order Quantity';
+      Text009@1011 : TextConst 'ENU=Order Multiple';
+      Text010@1012 : TextConst 'ENU=Dampener (% of Lot Size)';
+      Text011@1015 : TextConst 'ENU=Emergency Order';
+      SequenceNo@1017 : Integer;
+
+    [External]
+    PROCEDURE SetTemplAndWorksheet@2(TemplateName@1002 : Code[10];WorksheetName@1001 : Code[10]);
+    BEGIN
+      CurrTemplateName := TemplateName;
+      CurrWorksheetName := WorksheetName;
+    END;
+
+    [External]
+    PROCEDURE FindReason@4(VAR DemandInvProfile@1000 : Record "Inventory Profile") : Integer;
+    VAR
+      SurplusType@1001 : 'None,Forecast,BlanketOrder,SafetyStock,ReorderPoint,MaxInventory,FixedOrderQty,MaxOrder,MinOrder,OrderMultiple,DampenerQty,PlanningFlexibility,Undefined';
+    BEGIN
+      case DemandInvProfile."Source Type" of
+        0:
+          if DemandInvProfile."Order Relation" = DemandInvProfile."Order Relation"::"Safety Stock" then
+            SurplusType := SurplusType::SafetyStock
+          else
+            if DemandInvProfile."Order Relation" = DemandInvProfile."Order Relation"::"Reorder Point" then
+              SurplusType := SurplusType::ReorderPoint
+            else
+              SurplusType := SurplusType::Undefined;
+        DATABASE::"Sales Line":
+          if DemandInvProfile."Source Order Status" = 4 then
+            SurplusType := SurplusType::BlanketOrder;
+        DATABASE::"Production Forecast Entry":
+          SurplusType := SurplusType::Forecast;
+        else
+          SurplusType := SurplusType::None;
+      end;
+      exit(SurplusType);
+    END;
+
+    [External]
+    PROCEDURE LogSurplus@1(SupplyLineNo@1000 : Integer;DemandLineNo@1001 : Integer;SourceType@1004 : Integer;SourceID@1005 : Code[20];Qty@1002 : Decimal;Reason@1003 : 'Surplus,Forecast,BlanketOrder,SafetyStock,ReorderPoint,MaxInventory,FixedOrderQty,MaxOrder,MinOrder,OrderMultiple,DampenerQty,PlanningFlexibility,Undefined,EmergencyOrder');
+    VAR
+      Priority@1007 : Integer;
+    BEGIN
+      if (Qty = 0) or (SupplyLineNo = 0) then
+        exit;
+
+      case Reason of
+        Reason::BlanketOrder:
+          Priority := 1;
+        Reason::Forecast:
+          Priority := 1;
+        Reason::SafetyStock:
+          Priority := 1;
+        Reason::ReorderPoint:
+          Priority := 1;
+        Reason::EmergencyOrder:
+          Priority := 2;
+        Reason::MaxInventory:
+          Priority := 3;
+        Reason::FixedOrderQty:
+          Priority := 3;
+        Reason::MaxOrder:
+          Priority := 4;
+        Reason::MinOrder:
+          Priority := 5;
+        Reason::OrderMultiple:
+          Priority := 6;
+        Reason::DampenerQty:
+          Priority := 7;
+        else
+          Reason := Reason::Undefined;
+      end;
+
+      if Reason <> Reason::Undefined then begin
+        TempInvProfileTrack.INIT;
+        TempInvProfileTrack.Priority := Priority;
+        TempInvProfileTrack."Line No." := SupplyLineNo;
+        TempInvProfileTrack."Demand Line No." := DemandLineNo;
+        TempInvProfileTrack."Sequence No." := GetSequenceNo;
+        TempInvProfileTrack."Surplus Type" := Reason;
+        TempInvProfileTrack."Source Type" := SourceType;
+        TempInvProfileTrack."Source ID" := SourceID;
+        TempInvProfileTrack."Quantity Tracked" := Qty;
+        TempInvProfileTrack.INSERT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ModifyLogEntry@12(SupplyLineNo@1000 : Integer;DemandLineNo@1001 : Integer;SourceType@1004 : Integer;SourceID@1005 : Code[20];Qty@1002 : Decimal;Reason@1003 : 'Surplus,Forecast,BlanketOrder,SafetyStock,ReorderPoint,MaxInventory,FixedOrderQty,MaxOrder,MinOrder,OrderMultiple,DampenerQty,PlanningFlexibility,Undefined,EmergencyOrder');
+    BEGIN
+      if (Qty = 0) or (SupplyLineNo = 0) then
+        exit;
+
+      TempInvProfileTrack.SETRANGE("Line No.",SupplyLineNo);
+      TempInvProfileTrack.SETRANGE("Demand Line No.",DemandLineNo);
+      TempInvProfileTrack.SETRANGE("Surplus Type",Reason);
+      TempInvProfileTrack.SETRANGE("Source Type",SourceType);
+      TempInvProfileTrack.SETRANGE("Source ID",SourceID);
+      if TempInvProfileTrack.FINDLAST then begin
+        TempInvProfileTrack."Quantity Tracked" += Qty;
+        TempInvProfileTrack.MODIFY;
+      end;
+      TempInvProfileTrack.RESET;
+    END;
+
+    [External]
+    PROCEDURE CleanLog@6(SupplyLineNo@1000 : Integer);
+    BEGIN
+      TempInvProfileTrack.SETRANGE("Line No.",SupplyLineNo);
+      if not TempInvProfileTrack.ISEMPTY then
+        TempInvProfileTrack.DELETEALL;
+      TempInvProfileTrack.SETRANGE("Line No.");
+
+      TempPlanningWarning.SETRANGE("Worksheet Line No.",SupplyLineNo);
+      if not TempPlanningWarning.ISEMPTY then
+        TempPlanningWarning.DELETEALL;
+      TempPlanningWarning.SETRANGE("Worksheet Line No.");
+    END;
+
+    [External]
+    PROCEDURE PublishSurplus@3(VAR SupplyInvProfile@1002 : Record "Inventory Profile";VAR SKU@1006 : Record "Stockkeeping Unit";VAR ReqLine@1009 : Record "Requisition Line";VAR ReservEntry@1014 : Record "Reservation Entry");
+    VAR
+      PlanningElement@1003 : Record "Untracked Planning Element";
+      QtyTracked@1000 : Decimal;
+      QtyRemaining@1001 : Decimal;
+      QtyReorder@1004 : Decimal;
+      QtyMin@1005 : Decimal;
+      QtyRound@1010 : Decimal;
+      DampenerQty@1008 : Decimal;
+      OrderSizeParticipated@1011 : Boolean;
+    BEGIN
+      TempInvProfileTrack.SETRANGE("Line No.",SupplyInvProfile."Line No.");
+
+      QtyRemaining := SurplusQty(ReqLine,ReservEntry);
+      QtyTracked := SupplyInvProfile."Quantity (Base)" - QtyRemaining;
+      if (QtyRemaining > 0) or not TempPlanningWarning.ISEMPTY then
+        with TempInvProfileTrack do begin
+          PlanningElement."Worksheet Template Name" := CurrTemplateName;
+          PlanningElement."Worksheet Batch Name" := CurrWorksheetName;
+          PlanningElement."Worksheet Line No." := SupplyInvProfile."Planning Line No.";
+          if QtyRemaining <= 0 then
+            SETFILTER("Warning Level",'<>%1',0);
+          if FINDSET then
+            repeat
+              SETRANGE(Priority,Priority);
+              SETRANGE("Demand Line No.","Demand Line No.");
+              PlanningElement.INIT;
+              FINDLAST;
+              PlanningElement."Track Quantity From" := QtyRemaining;
+              PlanningElement."Warning Level" := "Warning Level";
+              case Priority of
+                1:
+                  begin  // Anticipated demand
+                    CALCSUMS("Quantity Tracked");
+                    if "Surplus Type" = "Surplus Type"::SafetyStock then begin
+                      PlanningElement."Parameter Value" := SKU."Safety Stock Quantity";
+                      "Source ID" := SKU."Item No.";
+                    end else
+                      if "Surplus Type" = "Surplus Type"::ReorderPoint then begin
+                        PlanningElement."Parameter Value" := SKU."Reorder Point";
+                        "Source ID" := SKU."Item No.";
+                        "Quantity Tracked" := 0;
+                      end;
+                    PlanningElement."Untracked Quantity" := "Quantity Tracked";
+                  end;
+                2:
+                  // Emergency Order
+                  PlanningElement."Untracked Quantity" := "Quantity Tracked";
+                3:
+                  begin  // Order size
+                    QtyReorder := "Quantity Tracked";
+                    if QtyTracked < QtyReorder then begin
+                      OrderSizeParticipated := true;
+                      PlanningElement."Untracked Quantity" := QtyReorder - QtyTracked;
+                      case "Surplus Type" of
+                        "Surplus Type"::ReorderPoint:
+                          PlanningElement."Parameter Value" := SKU."Reorder Point";
+                        "Surplus Type"::FixedOrderQty:
+                          PlanningElement."Parameter Value" := SKU."Reorder Quantity";
+                        "Surplus Type"::MaxInventory:
+                          PlanningElement."Parameter Value" := SKU."Maximum Inventory";
+                      end;
+                    end else
+                      OrderSizeParticipated := false
+                  end;
+                4:
+                  // Maximum Order
+                  if OrderSizeParticipated then begin
+                    PlanningElement."Untracked Quantity" := "Quantity Tracked";
+                    PlanningElement."Parameter Value" := SKU."Maximum Order Quantity";
+                  end;
+                5:
+                  begin  // Minimum Order
+                    QtyMin := "Quantity Tracked";
+                    if QtyTracked < QtyMin then
+                      PlanningElement."Untracked Quantity" := QtyMin - QtyTracked;
+                    PlanningElement."Parameter Value" := SKU."Minimum Order Quantity";
+                  end;
+                6:
+                  begin  // Rounding
+                    QtyRound := SKU."Order Multiple"
+                      - ROUND(SupplyInvProfile."Quantity (Base)",SKU."Order Multiple",'>')
+                      + SupplyInvProfile."Quantity (Base)";
+                    if QtyRound > "Quantity Tracked" then
+                      QtyRound := "Quantity Tracked";
+                    if QtyRound > QtyRemaining then
+                      QtyRound := QtyRemaining;
+                    PlanningElement."Untracked Quantity" := QtyRound;
+                    PlanningElement."Parameter Value" := SKU."Order Multiple";
+                  end;
+                7:
+                  begin  // Dampener
+                    DampenerQty := "Quantity Tracked";
+                    if DampenerQty < QtyRemaining then
+                      PlanningElement."Untracked Quantity" := DampenerQty
+                    else
+                      PlanningElement."Untracked Quantity" := QtyRemaining;
+                    PlanningElement."Parameter Value" := DampenerQty;
+                  end;
+              end;
+              if (PlanningElement."Untracked Quantity" <> 0) or
+                 ("Surplus Type" = "Surplus Type"::ReorderPoint) or
+                 ("Warning Level" > 0)
+              then begin
+                PlanningElement."Track Line No." += 1;
+                PlanningElement."Item No." := SupplyInvProfile."Item No.";
+                PlanningElement."Variant Code" := SupplyInvProfile."Variant Code";
+                PlanningElement."Location Code" := SupplyInvProfile."Location Code";
+                PlanningElement."Source Type" := "Source Type";
+                PlanningElement."Source ID" := "Source ID";
+                PlanningElement.Source := ShowSurplusReason("Surplus Type");
+                QtyTracked += PlanningElement."Untracked Quantity";
+                QtyRemaining -= PlanningElement."Untracked Quantity";
+                PlanningElement."Track Quantity To" := QtyRemaining;
+                TransferWarningSourceText(TempInvProfileTrack,PlanningElement);
+                PlanningElement.INSERT;
+              end;
+              SETRANGE(Priority);
+              SETRANGE("Demand Line No.");
+            until (NEXT = 0);
+
+          if QtyRemaining > 0 then begin // just in case that something by accident has not been captured
+            PlanningElement.INIT;
+            PlanningElement."Track Line No." += 1;
+            PlanningElement."Item No." := SupplyInvProfile."Item No.";
+            PlanningElement."Variant Code" := SupplyInvProfile."Variant Code";
+            PlanningElement."Location Code" := SupplyInvProfile."Location Code";
+            PlanningElement.Source := ShowSurplusReason("Surplus Type"::Undefined);
+            PlanningElement."Track Quantity From" := QtyRemaining;
+            PlanningElement."Untracked Quantity" := QtyRemaining;
+            QtyTracked += PlanningElement."Untracked Quantity";
+            QtyRemaining -= PlanningElement."Untracked Quantity";
+            PlanningElement."Track Quantity To" := QtyRemaining;
+            PlanningElement.INSERT;
+          end;
+        end;
+      TempInvProfileTrack.SETRANGE("Line No.");
+      TempInvProfileTrack.SETRANGE("Warning Level");
+      CleanLog(SupplyInvProfile."Line No.");
+    END;
+
+    LOCAL PROCEDURE SurplusQty@7(VAR ReqLine@1000 : Record "Requisition Line";VAR ReservEntry@1001 : Record "Reservation Entry") : Decimal;
+    VAR
+      CrntReservEntry@1006 : Record "Reservation Entry";
+      ReservEngineMgt@1003 : Codeunit "Reservation Engine Mgt.";
+      ReqLineReserve@1002 : Codeunit "Req. Line-Reserve";
+      QtyTracked1@1004 : Decimal;
+      QtyTracked2@1005 : Decimal;
+    BEGIN
+      CrntReservEntry.COPY(ReservEntry);
+      ReservEngineMgt.InitFilterAndSortingLookupFor(ReservEntry,false);
+      ReqLineReserve.FilterReservFor(ReservEntry,ReqLine);
+      with ReservEntry do begin
+        SETRANGE("Reservation Status","Reservation Status"::Surplus);
+        if FINDSET then
+          repeat
+            QtyTracked1 += "Quantity (Base)";
+          until NEXT = 0;
+        RESET;
+        if ReqLine."Action Message" > ReqLine."Action Message"::New then begin
+          case ReqLine."Ref. Order Type" of
+            ReqLine."Ref. Order Type"::Purchase:
+              begin
+                SETRANGE("Source ID",ReqLine."Ref. Order No.");
+                SETRANGE("Source Ref. No.",ReqLine."Ref. Line No.");
+                SETRANGE("Source Type",DATABASE::"Purchase Line");
+                SETRANGE("Source Subtype",1);
+              end;
+            ReqLine."Ref. Order Type"::"Prod. Order":
+              begin
+                SETRANGE("Source ID",ReqLine."Ref. Order No.");
+                SETRANGE("Source Type",DATABASE::"Prod. Order Line");
+                SETRANGE("Source Subtype",ReqLine."Ref. Order Status");
+                SETRANGE("Source Prod. Order Line",ReqLine."Ref. Line No.");
+              end;
+            ReqLine."Ref. Order Type"::Transfer:
+              begin
+                SETRANGE("Source ID",ReqLine."Ref. Order No.");
+                SETRANGE("Source Ref. No.",ReqLine."Ref. Line No.");
+                SETRANGE("Source Type",DATABASE::"Transfer Line");
+                SETRANGE("Source Subtype",1); // Inbound
+                SETRANGE("Source Prod. Order Line",0);
+              end;
+          end;
+          SETRANGE("Reservation Status","Reservation Status"::Surplus);
+          if FINDSET then
+            repeat
+              QtyTracked2 += "Quantity (Base)";
+            until NEXT = 0;
+          RESET;
+        end;
+      end;
+      ReservEntry.COPY(CrntReservEntry);
+      exit(QtyTracked1 + QtyTracked2);
+    END;
+
+    LOCAL PROCEDURE ShowSurplusReason@5(SurplusType@1000 : 'None,Forecast,BlanketOrder,SafetyStock,ReorderPoint,MaxInventory,FixedOrderQty,MaxOrder,MinOrder,OrderMultiple,DampenerQty,PlanningFlexibility,Undefined,EmergencyOrder') ReturnText : Text[50];
+    BEGIN
+      case SurplusType of
+        SurplusType::Forecast:
+          ReturnText := Text001;
+        SurplusType::BlanketOrder:
+          ReturnText := Text002;
+        SurplusType::SafetyStock:
+          ReturnText := Text003;
+        SurplusType::ReorderPoint:
+          ReturnText := Text004;
+        SurplusType::MaxInventory:
+          ReturnText := Text005;
+        SurplusType::FixedOrderQty:
+          ReturnText := Text006;
+        SurplusType::MaxOrder:
+          ReturnText := Text007;
+        SurplusType::MinOrder:
+          ReturnText := Text008;
+        SurplusType::OrderMultiple:
+          ReturnText := Text009;
+        SurplusType::DampenerQty:
+          ReturnText := Text010;
+        SurplusType::EmergencyOrder:
+          ReturnText := Text011;
+        else
+          ReturnText := Text000;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetCurrReqLine@8(VAR CurrentReqLine@1000 : Record "Requisition Line");
+    BEGIN
+      CurrReqLine := CurrentReqLine;
+    END;
+
+    [External]
+    PROCEDURE DrillDownUntrackedQty@20(CaptionText@1002 : Text[80]);
+    VAR
+      PlanningElement@1000 : Record "Untracked Planning Element";
+      SurplusTrackForm@1001 : Page "Untracked Planning Elements";
+    BEGIN
+      with CurrReqLine do begin
+        if not ("Planning Line Origin" <> "Planning Line Origin"::" ") then // IsPlanning
+          exit;
+
+        PlanningElement.SETRANGE("Worksheet Template Name","Worksheet Template Name");
+        PlanningElement.SETRANGE("Worksheet Batch Name","Journal Batch Name");
+        PlanningElement.SETRANGE("Worksheet Line No.","Line No.");
+
+        SurplusTrackForm.SETTABLEVIEW(PlanningElement);
+        SurplusTrackForm.SetCaption(CaptionText);
+        SurplusTrackForm.RUNMODAL;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ReqLineWarningLevel@40(ReqLine@1001 : Record "Requisition Line") WarningLevel : Integer;
+    VAR
+      PlanningElement@1000 : Record "Untracked Planning Element";
+    BEGIN
+      with ReqLine do begin
+        PlanningElement.SETRANGE("Worksheet Template Name","Worksheet Template Name");
+        PlanningElement.SETRANGE("Worksheet Batch Name","Journal Batch Name");
+        PlanningElement.SETRANGE("Worksheet Line No.","Line No.");
+        PlanningElement.SETFILTER("Warning Level",'>%1',0);
+        if PlanningElement.FINDSET then
+          repeat
+            if (PlanningElement."Warning Level" < WarningLevel) or (WarningLevel = 0) then
+              WarningLevel := PlanningElement."Warning Level";
+          until PlanningElement.NEXT = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE LogWarning@10(SupplyLineNo@1004 : Integer;ReqLine@1001 : Record "Requisition Line";WarningLevel@1002 : Option;Source@1003 : Text[200]) : Boolean;
+    VAR
+      PlanningElement@1000 : Record "Untracked Planning Element";
+    BEGIN
+      if SupplyLineNo = 0 then
+        with ReqLine do begin
+          PlanningElement.SETRANGE("Worksheet Template Name","Worksheet Template Name");
+          PlanningElement.SETRANGE("Worksheet Batch Name","Journal Batch Name");
+          PlanningElement.SETRANGE("Worksheet Line No.","Line No.");
+
+          if not PlanningElement.FINDLAST then begin
+            PlanningElement."Worksheet Template Name" := "Worksheet Template Name";
+            PlanningElement."Worksheet Batch Name" := "Journal Batch Name";
+            PlanningElement."Worksheet Line No." := "Line No.";
+          end;
+
+          PlanningElement.INIT;
+          PlanningElement."Track Line No." += 1;
+          PlanningElement.Source := Source;
+          PlanningElement."Warning Level" := WarningLevel;
+          PlanningElement.INSERT;
+        end
+      else
+        with TempInvProfileTrack do begin
+          INIT;
+          "Line No." := SupplyLineNo;
+          Priority := 10;
+          "Sequence No." := GetSequenceNo;
+          "Demand Line No." := 0;
+          "Surplus Type" := 0;
+          "Source Type" := 0;
+          "Source ID" := '';
+          "Quantity Tracked" := 0;
+          "Warning Level" := WarningLevel;
+          INSERT;
+          TempPlanningWarning.INIT;
+          TempPlanningWarning."Worksheet Template Name" := '';
+          TempPlanningWarning."Worksheet Batch Name" := '';
+          TempPlanningWarning."Worksheet Line No." := SupplyLineNo;
+          TempPlanningWarning."Track Line No." := "Sequence No.";
+          TempPlanningWarning.Source := Source;
+          TempPlanningWarning.INSERT;
+        end;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TransferWarningSourceText@11(FromInvProfileTrack@1000 : TEMPORARY Record "Inventory Profile Track Buffer";VAR ToPlanningElement@1001 : Record "Untracked Planning Element");
+    BEGIN
+      if FromInvProfileTrack."Warning Level" = 0 then
+        exit;
+      if TempPlanningWarning.GET('','',FromInvProfileTrack."Line No.",FromInvProfileTrack."Sequence No.") then begin
+        ToPlanningElement.Source := TempPlanningWarning.Source;
+        TempPlanningWarning.DELETE;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetSequenceNo@9() : Integer;
+    BEGIN
+      SequenceNo := SequenceNo + 1;
+      exit(SequenceNo);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

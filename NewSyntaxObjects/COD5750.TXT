@@ -1,0 +1,474 @@
+OBJECT Codeunit 5750 Whse.-Create Source Document
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+
+    [External]
+    PROCEDURE FromSalesLine2ShptLine@9(WhseShptHeader@1000 : Record "Warehouse Shipment Header";SalesLine@1001 : Record "Sales Line") : Boolean;
+    VAR
+      AsmHeader@1004 : Record "Assembly Header";
+      TotalOutstandingWhseShptQty@1005 : Decimal;
+      TotalOutstandingWhseShptQtyBase@1003 : Decimal;
+      ATOWhseShptLineQty@1006 : Decimal;
+      ATOWhseShptLineQtyBase@1002 : Decimal;
+    BEGIN
+      SalesLine.CALCFIELDS("Whse. Outstanding Qty.","ATO Whse. Outstanding Qty.",
+        "Whse. Outstanding Qty. (Base)","ATO Whse. Outstd. Qty. (Base)");
+      TotalOutstandingWhseShptQty := ABS(SalesLine."Outstanding Quantity") - SalesLine."Whse. Outstanding Qty.";
+      TotalOutstandingWhseShptQtyBase := ABS(SalesLine."Outstanding Qty. (Base)") - SalesLine."Whse. Outstanding Qty. (Base)";
+      if SalesLine.AsmToOrderExists(AsmHeader) then begin
+        ATOWhseShptLineQty := AsmHeader."Remaining Quantity" - SalesLine."ATO Whse. Outstanding Qty.";
+        ATOWhseShptLineQtyBase := AsmHeader."Remaining Quantity (Base)" - SalesLine."ATO Whse. Outstd. Qty. (Base)";
+        if ATOWhseShptLineQtyBase > 0 then begin
+          if not CreateShptLineFromSalesLine(WhseShptHeader,SalesLine,ATOWhseShptLineQty,ATOWhseShptLineQtyBase,true) then
+            exit(false);
+          TotalOutstandingWhseShptQty -= ATOWhseShptLineQty;
+          TotalOutstandingWhseShptQtyBase -= ATOWhseShptLineQtyBase;
+        end;
+      end;
+      if TotalOutstandingWhseShptQtyBase > 0 then
+        exit(CreateShptLineFromSalesLine(WhseShptHeader,SalesLine,TotalOutstandingWhseShptQty,TotalOutstandingWhseShptQtyBase,false));
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CreateShptLineFromSalesLine@11(WhseShptHeader@1000 : Record "Warehouse Shipment Header";SalesLine@1001 : Record "Sales Line";WhseShptLineQty@1004 : Decimal;WhseShptLineQtyBase@1006 : Decimal;AssembleToOrder@1005 : Boolean) : Boolean;
+    VAR
+      WhseShptLine@1002 : Record "Warehouse Shipment Line";
+      SalesHeader@1003 : Record "Sales Header";
+    BEGIN
+      SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+
+      with WhseShptLine do begin
+        InitNewLine(WhseShptHeader."No.");
+        SetSource(DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.");
+        SalesLine.TESTFIELD("Unit of Measure Code");
+        SetItemData(
+          SalesLine."No.",SalesLine.Description,SalesLine."Description 2",SalesLine."Location Code",
+          SalesLine."Variant Code",SalesLine."Unit of Measure Code",SalesLine."Qty. per Unit of Measure");
+        SetQtysOnShptLine(WhseShptLine,WhseShptLineQty,WhseShptLineQtyBase);
+        "Assemble to Order" := AssembleToOrder;
+        if SalesLine."Document Type" = SalesLine."Document Type"::Order then
+          "Due Date" := SalesLine."Planned Shipment Date";
+        if SalesLine."Document Type" = SalesLine."Document Type"::"Return Order" then
+          "Due Date" := WORKDATE;
+        if WhseShptHeader."Shipment Date" = 0D then
+          "Shipment Date" := SalesLine."Shipment Date"
+        else
+          "Shipment Date" := WhseShptHeader."Shipment Date";
+        "Destination Type" := "Destination Type"::Customer;
+        "Destination No." := SalesLine."Sell-to Customer No.";
+        "Shipping Advice" := SalesHeader."Shipping Advice";
+        if "Location Code" = WhseShptHeader."Location Code" then
+          "Bin Code" := WhseShptHeader."Bin Code";
+        if "Bin Code" = '' then
+          "Bin Code" := SalesLine."Bin Code";
+        UpdateShptLine(WhseShptLine,WhseShptHeader);
+        CreateShptLine(WhseShptLine);
+        OnAfterCreateShptLineFromSalesLine(WhseShptLine,WhseShptHeader,SalesLine);
+        exit(not HasErrorOccured);
+      end;
+    END;
+
+    [External]
+    PROCEDURE SalesLine2ReceiptLine@2(WhseReceiptHeader@1000 : Record "Warehouse Receipt Header";SalesLine@1001 : Record "Sales Line") : Boolean;
+    VAR
+      WhseReceiptLine@1002 : Record "Warehouse Receipt Line";
+    BEGIN
+      with WhseReceiptLine do begin
+        InitNewLine(WhseReceiptHeader."No.");
+        SetSource(DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.");
+        SalesLine.TESTFIELD("Unit of Measure Code");
+        SetItemData(
+          SalesLine."No.",SalesLine.Description,SalesLine."Description 2",SalesLine."Location Code",
+          SalesLine."Variant Code",SalesLine."Unit of Measure Code",SalesLine."Qty. per Unit of Measure");
+        case SalesLine."Document Type" of
+          SalesLine."Document Type"::Order:
+            begin
+              VALIDATE("Qty. Received",ABS(SalesLine."Quantity Shipped"));
+              "Due Date" := SalesLine."Planned Shipment Date";
+            end;
+          SalesLine."Document Type"::"Return Order":
+            begin
+              VALIDATE("Qty. Received",ABS(SalesLine."Return Qty. Received"));
+              "Due Date" := WORKDATE;
+            end;
+        end;
+        SetQtysOnRcptLine(WhseReceiptLine,ABS(SalesLine.Quantity),ABS(SalesLine."Quantity (Base)"));
+        "Starting Date" := SalesLine."Shipment Date";
+        if "Location Code" = WhseReceiptHeader."Location Code" then
+          "Bin Code" := WhseReceiptHeader."Bin Code";
+        if "Bin Code" = '' then
+          "Bin Code" := SalesLine."Bin Code";
+        UpdateReceiptLine(WhseReceiptLine,WhseReceiptHeader);
+        CreateReceiptLine(WhseReceiptLine);
+        OnAfterCreateRcptLineFromSalesLine(WhseReceiptLine,WhseReceiptHeader,SalesLine);
+        exit(not HasErrorOccured);
+      end;
+    END;
+
+    [External]
+    PROCEDURE FromServiceLine2ShptLine@6(WhseShptHeader@1000 : Record "Warehouse Shipment Header";ServiceLine@1001 : Record "Service Line") : Boolean;
+    VAR
+      WhseShptLine@1002 : Record "Warehouse Shipment Line";
+      ServiceHeader@1003 : Record "Service Header";
+    BEGIN
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+
+      with WhseShptLine do begin
+        InitNewLine(WhseShptHeader."No.");
+        SetSource(DATABASE::"Service Line",ServiceLine."Document Type",ServiceLine."Document No.",ServiceLine."Line No.");
+        ServiceLine.TESTFIELD("Unit of Measure Code");
+        SetItemData(
+          ServiceLine."No.",ServiceLine.Description,ServiceLine."Description 2",ServiceLine."Location Code",
+          ServiceLine."Variant Code",ServiceLine."Unit of Measure Code",ServiceLine."Qty. per Unit of Measure");
+        SetQtysOnShptLine(WhseShptLine,ABS(ServiceLine."Outstanding Quantity"),ABS(ServiceLine."Outstanding Qty. (Base)"));
+        if ServiceLine."Document Type" = ServiceLine."Document Type"::Order then
+          "Due Date" := ServiceLine.GetDueDate;
+        if WhseShptHeader."Shipment Date" = 0D then
+          "Shipment Date" := ServiceLine.GetShipmentDate
+        else
+          "Shipment Date" := WhseShptHeader."Shipment Date";
+        "Destination Type" := "Destination Type"::Customer;
+        "Destination No." := ServiceLine."Bill-to Customer No.";
+        "Shipping Advice" := ServiceHeader."Shipping Advice";
+        if "Location Code" = WhseShptHeader."Location Code" then
+          "Bin Code" := WhseShptHeader."Bin Code";
+        if "Bin Code" = '' then
+          "Bin Code" := ServiceLine."Bin Code";
+        UpdateShptLine(WhseShptLine,WhseShptHeader);
+        CreateShptLine(WhseShptLine);
+        OnAfterCreateShptLineFromServiceLine(WhseShptLine,WhseShptHeader,ServiceLine);
+        exit(not HasErrorOccured);
+      end;
+    END;
+
+    [External]
+    PROCEDURE FromPurchLine2ShptLine@12(WhseShptHeader@1000 : Record "Warehouse Shipment Header";PurchLine@1001 : Record "Purchase Line") : Boolean;
+    VAR
+      WhseShptLine@1002 : Record "Warehouse Shipment Line";
+    BEGIN
+      with WhseShptLine do begin
+        InitNewLine(WhseShptHeader."No.");
+        SetSource(DATABASE::"Purchase Line",PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.");
+        PurchLine.TESTFIELD("Unit of Measure Code");
+        SetItemData(
+          PurchLine."No.",PurchLine.Description,PurchLine."Description 2",PurchLine."Location Code",
+          PurchLine."Variant Code",PurchLine."Unit of Measure Code",PurchLine."Qty. per Unit of Measure");
+        SetQtysOnShptLine(WhseShptLine,ABS(PurchLine."Outstanding Quantity"),ABS(PurchLine."Outstanding Qty. (Base)"));
+        if PurchLine."Document Type" = PurchLine."Document Type"::Order then
+          "Due Date" := PurchLine."Expected Receipt Date";
+        if PurchLine."Document Type" = PurchLine."Document Type"::"Return Order" then
+          "Due Date" := WORKDATE;
+        if WhseShptHeader."Shipment Date" = 0D then
+          "Shipment Date" := PurchLine."Planned Receipt Date"
+        else
+          "Shipment Date" := WhseShptHeader."Shipment Date";
+        "Destination Type" := "Destination Type"::Vendor;
+        "Destination No." := PurchLine."Buy-from Vendor No.";
+        if "Location Code" = WhseShptHeader."Location Code" then
+          "Bin Code" := WhseShptHeader."Bin Code";
+        if "Bin Code" = '' then
+          "Bin Code" := PurchLine."Bin Code";
+        UpdateShptLine(WhseShptLine,WhseShptHeader);
+        CreateShptLine(WhseShptLine);
+        OnAfterCreateShptLineFromPurchLine(WhseShptLine,WhseShptHeader,PurchLine);
+        exit(not HasErrorOccured);
+      end;
+    END;
+
+    [External]
+    PROCEDURE PurchLine2ReceiptLine@4(WhseReceiptHeader@1000 : Record "Warehouse Receipt Header";PurchLine@1001 : Record "Purchase Line") : Boolean;
+    VAR
+      WhseReceiptLine@1002 : Record "Warehouse Receipt Line";
+    BEGIN
+      with WhseReceiptLine do begin
+        InitNewLine(WhseReceiptHeader."No.");
+        SetSource(DATABASE::"Purchase Line",PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.");
+        PurchLine.TESTFIELD("Unit of Measure Code");
+        SetItemData(
+          PurchLine."No.",PurchLine.Description,PurchLine."Description 2",PurchLine."Location Code",
+          PurchLine."Variant Code",PurchLine."Unit of Measure Code",PurchLine."Qty. per Unit of Measure");
+        case PurchLine."Document Type" of
+          PurchLine."Document Type"::Order:
+            begin
+              VALIDATE("Qty. Received",ABS(PurchLine."Quantity Received"));
+              "Due Date" := PurchLine."Expected Receipt Date";
+            end;
+          PurchLine."Document Type"::"Return Order":
+            begin
+              VALIDATE("Qty. Received",ABS(PurchLine."Return Qty. Shipped"));
+              "Due Date" := WORKDATE;
+            end;
+        end;
+        SetQtysOnRcptLine(WhseReceiptLine,ABS(PurchLine.Quantity),ABS(PurchLine."Quantity (Base)"));
+        "Starting Date" := PurchLine."Planned Receipt Date";
+        if "Location Code" = WhseReceiptHeader."Location Code" then
+          "Bin Code" := WhseReceiptHeader."Bin Code";
+        if "Bin Code" = '' then
+          "Bin Code" := PurchLine."Bin Code";
+        UpdateReceiptLine(WhseReceiptLine,WhseReceiptHeader);
+        CreateReceiptLine(WhseReceiptLine);
+        OnAfterCreateRcptLineFromPurchLine(WhseReceiptLine,WhseReceiptHeader,PurchLine);
+        exit(not HasErrorOccured);
+      end;
+    END;
+
+    [External]
+    PROCEDURE FromTransLine2ShptLine@13(WhseShptHeader@1000 : Record "Warehouse Shipment Header";TransLine@1001 : Record "Transfer Line") : Boolean;
+    VAR
+      WhseShptLine@1003 : Record "Warehouse Shipment Line";
+      TransHeader@1004 : Record "Transfer Header";
+    BEGIN
+      with WhseShptLine do begin
+        InitNewLine(WhseShptHeader."No.");
+        SetSource(DATABASE::"Transfer Line",0,TransLine."Document No.",TransLine."Line No.");
+        TransLine.TESTFIELD("Unit of Measure Code");
+        SetItemData(
+          TransLine."Item No.",TransLine.Description,TransLine."Description 2",TransLine."Transfer-from Code",
+          TransLine."Variant Code",TransLine."Unit of Measure Code",TransLine."Qty. per Unit of Measure");
+        SetQtysOnShptLine(WhseShptLine,TransLine."Outstanding Quantity",TransLine."Outstanding Qty. (Base)");
+        "Due Date" := TransLine."Shipment Date";
+        if WhseShptHeader."Shipment Date" = 0D then
+          "Shipment Date" := WORKDATE
+        else
+          "Shipment Date" := WhseShptHeader."Shipment Date";
+        "Destination Type" := "Destination Type"::Location;
+        "Destination No." := TransLine."Transfer-to Code";
+        if TransHeader.GET(TransLine."Document No.") then
+          "Shipping Advice" := TransHeader."Shipping Advice";
+        if "Location Code" = WhseShptHeader."Location Code" then
+          "Bin Code" := WhseShptHeader."Bin Code";
+        if "Bin Code" = '' then
+          "Bin Code" := TransLine."Transfer-from Bin Code";
+        UpdateShptLine(WhseShptLine,WhseShptHeader);
+        CreateShptLine(WhseShptLine);
+        OnAfterCreateShptLineFromTransLine(WhseShptLine,WhseShptHeader,TransLine);
+        exit(not HasErrorOccured);
+      end;
+    END;
+
+    [External]
+    PROCEDURE TransLine2ReceiptLine@5(WhseReceiptHeader@1000 : Record "Warehouse Receipt Header";TransLine@1001 : Record "Transfer Line") : Boolean;
+    VAR
+      WhseReceiptLine@1003 : Record "Warehouse Receipt Line";
+    BEGIN
+      with WhseReceiptLine do begin
+        InitNewLine(WhseReceiptHeader."No.");
+        SetSource(DATABASE::"Transfer Line",1,TransLine."Document No.",TransLine."Line No.");
+        TransLine.TESTFIELD("Unit of Measure Code");
+        SetItemData(
+          TransLine."Item No.",TransLine.Description,TransLine."Description 2",TransLine."Transfer-to Code",
+          TransLine."Variant Code",TransLine."Unit of Measure Code",TransLine."Qty. per Unit of Measure");
+        VALIDATE("Qty. Received",TransLine."Quantity Received");
+        SetQtysOnRcptLine(WhseReceiptLine,TransLine."Quantity Received" + TransLine."Qty. in Transit",
+          TransLine."Qty. Received (Base)" + TransLine."Qty. in Transit (Base)");
+        "Due Date" := TransLine."Receipt Date";
+        "Starting Date" := WORKDATE;
+        if "Location Code" = WhseReceiptHeader."Location Code" then
+          "Bin Code" := WhseReceiptHeader."Bin Code";
+        if "Bin Code" = '' then
+          "Bin Code" := TransLine."Transfer-To Bin Code";
+        UpdateReceiptLine(WhseReceiptLine,WhseReceiptHeader);
+        CreateReceiptLine(WhseReceiptLine);
+        OnAfterCreateRcptLineFromTransLine(WhseReceiptLine,WhseReceiptHeader,TransLine);
+        exit(not HasErrorOccured);
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateShptLine@3(VAR WhseShptLine@1001 : Record "Warehouse Shipment Line");
+    VAR
+      Item@1002 : Record Item;
+    BEGIN
+      with WhseShptLine do begin
+        Item."No." := "Item No.";
+        Item.ItemSKUGet(Item,"Location Code","Variant Code");
+        "Shelf No." := Item."Shelf No.";
+        INSERT;
+        CreateWhseItemTrackingLines;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetQtysOnShptLine@10(VAR WarehouseShipmentLine@1002 : Record "Warehouse Shipment Line";Qty@1000 : Decimal;QtyBase@1001 : Decimal);
+    VAR
+      Location@1003 : Record Location;
+    BEGIN
+      with WarehouseShipmentLine do begin
+        Quantity := Qty;
+        "Qty. (Base)" := QtyBase;
+        InitOutstandingQtys;
+        CheckSourceDocLineQty;
+        if Location.GET("Location Code") then
+          if Location."Directed Put-away and Pick" then
+            CheckBin(0,0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateReceiptLine@7(VAR WhseReceiptLine@1001 : Record "Warehouse Receipt Line");
+    VAR
+      Item@1002 : Record Item;
+    BEGIN
+      with WhseReceiptLine do begin
+        Item."No." := "Item No.";
+        Item.ItemSKUGet(Item,"Location Code","Variant Code");
+        "Shelf No." := Item."Shelf No.";
+        Status := GetLineStatus;
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetQtysOnRcptLine@21(VAR WarehouseReceiptLine@1002 : Record "Warehouse Receipt Line";Qty@1001 : Decimal;QtyBase@1000 : Decimal);
+    BEGIN
+      with WarehouseReceiptLine do begin
+        Quantity := Qty;
+        "Qty. (Base)" := QtyBase;
+        InitOutstandingQtys;
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateShptLine@1(VAR WhseShptLine@1001 : Record "Warehouse Shipment Line";WhseShptHeader@1000 : Record "Warehouse Shipment Header");
+    BEGIN
+      with WhseShptLine do begin
+        if WhseShptHeader."Zone Code" <> '' then
+          VALIDATE("Zone Code",WhseShptHeader."Zone Code");
+        if WhseShptHeader."Bin Code" <> '' then
+          VALIDATE("Bin Code",WhseShptHeader."Bin Code");
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateReceiptLine@8(VAR WhseReceiptLine@1001 : Record "Warehouse Receipt Line";WhseReceiptHeader@1000 : Record "Warehouse Receipt Header");
+    BEGIN
+      with WhseReceiptLine do begin
+        if WhseReceiptHeader."Zone Code" <> '' then
+          VALIDATE("Zone Code",WhseReceiptHeader."Zone Code");
+        if WhseReceiptHeader."Bin Code" <> '' then
+          VALIDATE("Bin Code",WhseReceiptHeader."Bin Code");
+        if WhseReceiptHeader."Cross-Dock Zone Code" <> '' then
+          VALIDATE("Cross-Dock Zone Code",WhseReceiptHeader."Cross-Dock Zone Code");
+        if WhseReceiptHeader."Cross-Dock Bin Code" <> '' then
+          VALIDATE("Cross-Dock Bin Code",WhseReceiptHeader."Cross-Dock Bin Code");
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckIfFromSalesLine2ShptLine@19(SalesLine@1001 : Record "Sales Line") : Boolean;
+    BEGIN
+      SalesLine.CALCFIELDS("Whse. Outstanding Qty. (Base)");
+      exit(ABS(SalesLine."Outstanding Qty. (Base)") > ABS(SalesLine."Whse. Outstanding Qty. (Base)"));
+    END;
+
+    [External]
+    PROCEDURE CheckIfFromServiceLine2ShptLin@20(ServiceLine@1000 : Record "Service Line") : Boolean;
+    BEGIN
+      ServiceLine.CALCFIELDS("Whse. Outstanding Qty. (Base)");
+      exit(
+        (ABS(ServiceLine."Outstanding Qty. (Base)") > ABS(ServiceLine."Whse. Outstanding Qty. (Base)")) and
+        (ServiceLine."Qty. to Consume (Base)" = 0));
+    END;
+
+    [External]
+    PROCEDURE CheckIfSalesLine2ReceiptLine@18(SalesLine@1001 : Record "Sales Line") : Boolean;
+    VAR
+      WhseReceiptLine@1002 : Record "Warehouse Receipt Line";
+    BEGIN
+      with WhseReceiptLine do begin
+        SetSourceFilter(DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",false);
+        CALCSUMS("Qty. Outstanding (Base)");
+        exit(ABS(SalesLine."Outstanding Qty. (Base)") > ABS("Qty. Outstanding (Base)"));
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckIfFromPurchLine2ShptLine@17(PurchLine@1001 : Record "Purchase Line") : Boolean;
+    VAR
+      WhseShptLine@1000 : Record "Warehouse Shipment Line";
+    BEGIN
+      with WhseShptLine do begin
+        SetSourceFilter(DATABASE::"Purchase Line",PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.",false);
+        CALCSUMS("Qty. Outstanding (Base)");
+        exit(ABS(PurchLine."Outstanding Qty. (Base)") > "Qty. Outstanding (Base)");
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckIfPurchLine2ReceiptLine@16(PurchLine@1001 : Record "Purchase Line") : Boolean;
+    BEGIN
+      PurchLine.CALCFIELDS("Whse. Outstanding Qty. (Base)");
+      exit(ABS(PurchLine."Outstanding Qty. (Base)") > ABS(PurchLine."Whse. Outstanding Qty. (Base)"));
+    END;
+
+    [External]
+    PROCEDURE CheckIfFromTransLine2ShptLine@15(TransLine@1001 : Record "Transfer Line") : Boolean;
+    VAR
+      Location@1005 : Record Location;
+    BEGIN
+      TransLine.CALCFIELDS("Whse Outbnd. Otsdg. Qty (Base)");
+      if Location.GetLocationSetup(TransLine."Transfer-from Code",Location) then
+        if Location."Use As In-Transit" then
+          exit(false);
+      exit(TransLine."Outstanding Qty. (Base)" > TransLine."Whse Outbnd. Otsdg. Qty (Base)");
+    END;
+
+    [External]
+    PROCEDURE CheckIfTransLine2ReceiptLine@14(TransLine@1001 : Record "Transfer Line") : Boolean;
+    VAR
+      Location@1005 : Record Location;
+    BEGIN
+      TransLine.CALCFIELDS("Whse. Inbnd. Otsdg. Qty (Base)");
+      if Location.GetLocationSetup(TransLine."Transfer-to Code",Location) then
+        if Location."Use As In-Transit" then
+          exit(false);
+      exit(TransLine."Qty. in Transit (Base)" > TransLine."Whse. Inbnd. Otsdg. Qty (Base)");
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateShptLineFromSalesLine@22(VAR WarehouseShipmentLine@1001 : Record "Warehouse Shipment Line";WarehouseShipmentHeader@1000 : Record "Warehouse Shipment Header";SalesLine@1002 : Record "Sales Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateRcptLineFromSalesLine@24(VAR WarehouseReceiptLine@1000 : Record "Warehouse Receipt Line";WarehouseReceiptHeader@1001 : Record "Warehouse Receipt Header";SalesLine@1002 : Record "Sales Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateShptLineFromServiceLine@25(VAR WarehouseShipmentLine@1001 : Record "Warehouse Shipment Line";WarehouseShipmentHeader@1000 : Record "Warehouse Shipment Header";ServiceLine@1002 : Record "Service Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateShptLineFromPurchLine@28(VAR WarehouseShipmentLine@1001 : Record "Warehouse Shipment Line";WarehouseShipmentHeader@1000 : Record "Warehouse Shipment Header";PurchaseLine@1002 : Record "Purchase Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateRcptLineFromPurchLine@27(VAR WarehouseReceiptLine@1000 : Record "Warehouse Receipt Line";WarehouseReceiptHeader@1001 : Record "Warehouse Receipt Header";PurchaseLine@1002 : Record "Purchase Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateShptLineFromTransLine@23(VAR WarehouseShipmentLine@1001 : Record "Warehouse Shipment Line";WarehouseShipmentHeader@1000 : Record "Warehouse Shipment Header";TransferLine@1002 : Record "Transfer Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateRcptLineFromTransLine@26(VAR WarehouseReceiptLine@1000 : Record "Warehouse Receipt Line";WarehouseReceiptHeader@1001 : Record "Warehouse Receipt Header";TransferLine@1002 : Record "Transfer Line");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

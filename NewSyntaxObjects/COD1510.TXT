@@ -1,0 +1,279 @@
+OBJECT Codeunit 1510 Notification Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Overdue Approval Entry"=i,
+                TableData "Notification Entry"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OverdueEntriesMsg@1047 : TextConst 'ENU=Overdue approval entries have been created.';
+      SalesTxt@1008 : TextConst 'ENU=Sales';
+      PurchaseTxt@1007 : TextConst 'ENU=Purchase';
+      ServiceTxt@1006 : TextConst 'ENU=Service';
+      SalesInvoiceTxt@1005 : TextConst 'ENU=Sales Invoice';
+      PurchaseInvoiceTxt@1004 : TextConst 'ENU=Purchase Invoice';
+      ServiceInvoiceTxt@1003 : TextConst 'ENU=Service Invoice';
+      SalesCreditMemoTxt@1002 : TextConst 'ENU=Sales Credit Memo';
+      PurchaseCreditMemoTxt@1001 : TextConst 'ENU=Purchase Credit Memo';
+      ServiceCreditMemoTxt@1000 : TextConst 'ENU=Service Credit Memo';
+      ActionNewRecordTxt@1015 : TextConst '@@@=E.g. Sales Invoice 10000 has been created.;ENU=has been created.';
+      ActionApproveTxt@1014 : TextConst '@@@=E.g. Sales Invoice 10000 requires your approval.;ENU=requires your approval.';
+      ActionApprovedTxt@1013 : TextConst '@@@=E.g. Sales Invoice 10000 has been approved.;ENU=has been approved.';
+      ActionApprovalCreatedTxt@1012 : TextConst '@@@=E.g. Sales Invoice 10000 approval request has been created.;ENU=approval request has been created.';
+      ActionApprovalCanceledTxt@1011 : TextConst '@@@=E.g. Sales Invoice 10000 approval request has been canceled.;ENU=approval request has been canceled.';
+      ActionApprovalRejectedTxt@1010 : TextConst '@@@=E.g. Sales Invoice 10000 approval request has been rejected.;ENU=approval has been rejected.';
+      ActionOverdueTxt@1009 : TextConst '@@@=E.g. Sales Invoice 10000 has a pending approval.;ENU=has a pending approval.';
+
+    [External]
+    PROCEDURE CreateOverdueNotifications@14(WorkflowStepArgument@1002 : Record "Workflow Step Argument");
+    VAR
+      UserSetup@1006 : Record "User Setup";
+      ApprovalEntry@1000 : Record "Approval Entry";
+      OverdueApprovalEntry@1001 : Record "Overdue Approval Entry";
+      NotificationEntry@1003 : Record "Notification Entry";
+    BEGIN
+      if UserSetup.FINDSET then
+        repeat
+          ApprovalEntry.RESET;
+          ApprovalEntry.SETRANGE("Approver ID",UserSetup."User ID");
+          ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Open);
+          ApprovalEntry.SETFILTER("Due Date",'<=%1',TODAY);
+          if ApprovalEntry.FINDSET then
+            repeat
+              InsertOverdueEntry(ApprovalEntry,OverdueApprovalEntry);
+              NotificationEntry.CreateNew(NotificationEntry.Type::Overdue,
+                UserSetup."User ID",OverdueApprovalEntry,WorkflowStepArgument."Link Target Page",
+                WorkflowStepArgument."Custom Link");
+            until ApprovalEntry.NEXT = 0;
+        until UserSetup.NEXT = 0;
+
+      MESSAGE(OverdueEntriesMsg);
+    END;
+
+    LOCAL PROCEDURE InsertOverdueEntry@13(ApprovalEntry@1000 : Record "Approval Entry";VAR OverdueApprovalEntry@1001 : Record "Overdue Approval Entry");
+    VAR
+      User@1002 : Record User;
+      UserSetup@1003 : Record "User Setup";
+    BEGIN
+      with OverdueApprovalEntry do begin
+        INIT;
+        "Approver ID" := ApprovalEntry."Approver ID";
+        User.SETRANGE("User Name",ApprovalEntry."Approver ID");
+        if User.FINDFIRST then begin
+          "Sent to Name" := COPYSTR(User."Full Name",1,MAXSTRLEN("Sent to Name"));
+          UserSetup.GET(User."User Name");
+        end;
+
+        "Table ID" := ApprovalEntry."Table ID";
+        "Document Type" := ApprovalEntry."Document Type";
+        "Document No." := ApprovalEntry."Document No.";
+        "Sent to ID" := ApprovalEntry."Approver ID";
+        "Sent Date" := TODAY;
+        "Sent Time" := TIME;
+        "E-Mail" := UserSetup."E-Mail";
+        "Sequence No." := ApprovalEntry."Sequence No.";
+        "Due Date" := ApprovalEntry."Due Date";
+        "Approval Code" := ApprovalEntry."Approval Code";
+        "Approval Type" := ApprovalEntry."Approval Type";
+        "Limit Type" := ApprovalEntry."Limit Type";
+        "Record ID to Approve" := ApprovalEntry."Record ID to Approve";
+        INSERT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CreateDefaultNotificationSetup@1(NotificationType@1000 : Option);
+    VAR
+      NotificationSetup@1001 : Record "Notification Setup";
+    BEGIN
+      if DefaultNotificationEntryExists(NotificationType) then
+        exit;
+
+      NotificationSetup.INIT;
+      NotificationSetup.VALIDATE("Notification Type",NotificationType);
+      NotificationSetup.VALIDATE("Notification Method",NotificationSetup."Notification Method"::Email);
+      NotificationSetup.INSERT(true);
+    END;
+
+    LOCAL PROCEDURE DefaultNotificationEntryExists@4(NotificationType@1000 : Option) : Boolean;
+    VAR
+      NotificationSetup@1001 : Record "Notification Setup";
+    BEGIN
+      NotificationSetup.SETRANGE("User ID",'');
+      NotificationSetup.SETRANGE("Notification Type",NotificationType);
+      exit(not NotificationSetup.ISEMPTY)
+    END;
+
+    [External]
+    PROCEDURE MoveNotificationEntryToSentNotificationEntries@11(VAR NotificationEntry@1000 : Record "Notification Entry";NotificationBody@1001 : Text;AggregatedNotifications@1002 : Boolean;NotificationMethod@1005 : Option);
+    VAR
+      SentNotificationEntry@1003 : Record "Sent Notification Entry";
+      InitialSentNotificationEntry@1006 : Record "Sent Notification Entry";
+    BEGIN
+      if AggregatedNotifications then begin
+        if NotificationEntry.FINDSET then begin
+          InitialSentNotificationEntry.NewRecord(NotificationEntry,NotificationBody,NotificationMethod);
+          while NotificationEntry.NEXT <> 0 do begin
+            SentNotificationEntry.NewRecord(NotificationEntry,NotificationBody,NotificationMethod);
+            SentNotificationEntry.VALIDATE("Aggregated with Entry",InitialSentNotificationEntry.ID);
+            SentNotificationEntry.MODIFY(true);
+          end;
+        end;
+        NotificationEntry.DELETEALL(true);
+      end else begin
+        SentNotificationEntry.NewRecord(NotificationEntry,NotificationBody,NotificationMethod);
+        NotificationEntry.DELETE(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetDocumentTypeAndNumber@3(VAR RecRef@1000 : RecordRef;VAR DocumentType@1001 : Text;VAR DocumentNo@1002 : Text);
+    VAR
+      FieldRef@1003 : FieldRef;
+    BEGIN
+      case RecRef.NUMBER of
+        DATABASE::"Incoming Document":
+          begin
+            DocumentType := RecRef.CAPTION;
+            FieldRef := RecRef.FIELD(2);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Sales Header":
+          begin
+            FieldRef := RecRef.FIELD(1);
+            DocumentType := SalesTxt + ' ' + FORMAT(FieldRef.VALUE);
+            FieldRef := RecRef.FIELD(3);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Purchase Header":
+          begin
+            FieldRef := RecRef.FIELD(1);
+            DocumentType := PurchaseTxt + ' ' + FORMAT(FieldRef.VALUE);
+            FieldRef := RecRef.FIELD(3);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Service Header":
+          begin
+            FieldRef := RecRef.FIELD(1);
+            DocumentType := ServiceTxt + ' ' + FORMAT(FieldRef.VALUE);
+            FieldRef := RecRef.FIELD(3);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Sales Invoice Header":
+          begin
+            DocumentType := SalesInvoiceTxt;
+            FieldRef := RecRef.FIELD(3);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Purch. Inv. Header":
+          begin
+            DocumentType := PurchaseInvoiceTxt;
+            FieldRef := RecRef.FIELD(3);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Service Invoice Header":
+          begin
+            DocumentType := ServiceInvoiceTxt;
+            FieldRef := RecRef.FIELD(3);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Sales Cr.Memo Header":
+          begin
+            DocumentType := SalesCreditMemoTxt;
+            FieldRef := RecRef.FIELD(3);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          begin
+            DocumentType := PurchaseCreditMemoTxt;
+            FieldRef := RecRef.FIELD(3);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Service Cr.Memo Header":
+          begin
+            DocumentType := ServiceCreditMemoTxt;
+            FieldRef := RecRef.FIELD(3);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Gen. Journal Line":
+          begin
+            DocumentType := RecRef.CAPTION;
+            FieldRef := RecRef.FIELD(1);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+            FieldRef := RecRef.FIELD(51);
+            DocumentNo += ',' + FORMAT(FieldRef.VALUE);
+            FieldRef := RecRef.FIELD(2);
+            DocumentNo += ',' + FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::"Gen. Journal Batch":
+          begin
+            DocumentType := RecRef.CAPTION;
+            FieldRef := RecRef.FIELD(1);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+            FieldRef := RecRef.FIELD(2);
+            DocumentNo += ',' + FORMAT(FieldRef.VALUE);
+          end;
+        DATABASE::Customer,
+        DATABASE::Vendor,
+        DATABASE::Item:
+          begin
+            DocumentType := RecRef.CAPTION;
+            FieldRef := RecRef.FIELD(1);
+            DocumentNo := FORMAT(FieldRef.VALUE);
+          end;
+        else begin
+          DocumentType := RecRef.CAPTION;
+          FieldRef := RecRef.FIELD(3);
+          DocumentNo := FORMAT(FieldRef.VALUE);
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetActionTextFor@7(VAR NotificationEntry@1000 : Record "Notification Entry") : Text;
+    VAR
+      ApprovalEntry@1001 : Record "Approval Entry";
+      DataTypeManagement@1002 : Codeunit "Data Type Management";
+      RecRef@1003 : RecordRef;
+    BEGIN
+      case NotificationEntry.Type of
+        NotificationEntry.Type::"New Record":
+          exit(ActionNewRecordTxt);
+        NotificationEntry.Type::Approval:
+          begin
+            DataTypeManagement.GetRecordRef(NotificationEntry."Triggered By Record",RecRef);
+            RecRef.SETTABLE(ApprovalEntry);
+            case ApprovalEntry.Status of
+              ApprovalEntry.Status::Open:
+                exit(ActionApproveTxt);
+              ApprovalEntry.Status::Canceled:
+                exit(ActionApprovalCanceledTxt);
+              ApprovalEntry.Status::Rejected:
+                exit(ActionApprovalRejectedTxt);
+              ApprovalEntry.Status::Created:
+                exit(ActionApprovalCreatedTxt);
+              ApprovalEntry.Status::Approved:
+                exit(ActionApprovedTxt);
+            end;
+          end;
+        NotificationEntry.Type::Overdue:
+          exit(ActionOverdueTxt);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

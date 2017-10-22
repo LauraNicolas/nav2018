@@ -1,0 +1,260 @@
+OBJECT Report 7304 Get Outbound Source Documents
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Get Outbound Source Documents;
+    ProcessingOnly=true;
+    OnPreReport=BEGIN
+                  LineCreated := false;
+                END;
+
+    OnPostReport=BEGIN
+                   if not HideDialog then
+                     if not LineCreated then
+                       ERROR(Text000);
+
+                   Completed := true;
+                 END;
+
+  }
+  DATASET
+  {
+    { 6879;    ;DataItem;Whse. Pick Request  ;
+               DataItemTable="Whse. Pick Request";
+               DataItemTableView=SORTING("Document Type","Document Subtype","Document No.","Location Code") WHERE(Status=CONST(Released),"Completely Picked"=CONST(false));
+               ReqFilterFields="Document Type","Document No." }
+
+    { 5944;1   ;DataItem;Warehouse Shipment Header;
+               DataItemTable="Warehouse Shipment Header";
+               DataItemTableView=SORTING("No.");
+               OnPreDataItem=BEGIN
+                               if "Whse. Pick Request"."Document Type" <>
+                                  "Whse. Pick Request"."Document Type"::Shipment
+                               then
+                                 CurrReport.BREAK;
+                             END;
+
+               DataItemLink="No."=FIELD("Document No.") }
+
+    { 6896;2   ;DataItem;Warehouse Shipment Line;
+               DataItemTable="Warehouse Shipment Line";
+               DataItemTableView=SORTING("No.","Line No.");
+               OnPreDataItem=BEGIN
+                               SETFILTER("Qty. Outstanding",'>0');
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  ATOLink@1001 : Record "Assemble-to-Order Link";
+                                  ATOAsmLine@1002 : Record "Assembly Line";
+                                BEGIN
+                                  if not "Assemble to Order" then begin
+                                    CALCFIELDS("Pick Qty.","Pick Qty. (Base)");
+                                    if "Qty. (Base)" > "Qty. Picked (Base)" + "Pick Qty. (Base)" then begin
+                                      if "Destination Type" = "Destination Type"::Customer then begin
+                                        TESTFIELD("Destination No.");
+                                        Cust.GET("Destination No.");
+                                        Cust.CheckBlockedCustOnDocs(Cust,"Source Document",false,false);
+                                      end;
+
+                                      if WhsePickWkshCreate.FromWhseShptLine(PickWkshTemplate,PickWkshName,"Warehouse Shipment Line") then
+                                        LineCreated := true;
+                                    end;
+                                  end else
+                                    if ATOLink.AsmExistsForWhseShptLine("Warehouse Shipment Line") then begin
+                                      ATOAsmLine.SETRANGE("Document Type",ATOLink."Assembly Document Type");
+                                      ATOAsmLine.SETRANGE("Document No.",ATOLink."Assembly Document No.");
+                                      if ATOAsmLine.FINDSET then
+                                        repeat
+                                          ProcessAsmLineFromWhseShpt(ATOAsmLine,"Warehouse Shipment Line");
+                                        until ATOAsmLine.NEXT = 0;
+                                    end;
+                                END;
+
+               DataItemLink="No."=FIELD("No.") }
+
+    { 7564;1   ;DataItem;Whse. Internal Pick Header;
+               DataItemTable="Whse. Internal Pick Header";
+               DataItemTableView=SORTING("No.");
+               OnPreDataItem=BEGIN
+                               if "Whse. Pick Request"."Document Type" <> "Whse. Pick Request"."Document Type"::"Internal Pick" then
+                                 CurrReport.BREAK;
+                             END;
+
+               DataItemLink="No."=FIELD("Document No.") }
+
+    { 3581;2   ;DataItem;Whse. Internal Pick Line;
+               DataItemTable="Whse. Internal Pick Line";
+               DataItemTableView=SORTING("No.","Line No.");
+               OnPreDataItem=BEGIN
+                               SETFILTER("Qty. Outstanding",'>0');
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  CALCFIELDS("Pick Qty.","Pick Qty. (Base)");
+                                  if "Qty. (Base)" > "Qty. Picked (Base)" + "Pick Qty. (Base)" then begin
+                                    if WhsePickWkshCreate.FromWhseInternalPickLine(
+                                         PickWkshTemplate,PickWkshName,LocationCode,"Whse. Internal Pick Line")
+                                    then
+                                      LineCreated := true;
+                                  end;
+                                END;
+
+               DataItemLink="No."=FIELD("No.") }
+
+    { 4824;1   ;DataItem;Production Order    ;
+               DataItemTable="Production Order";
+               DataItemTableView=SORTING(Status,"No.") WHERE(Status=CONST(Released));
+               OnPreDataItem=BEGIN
+                               if "Whse. Pick Request"."Document Type" <> "Whse. Pick Request"."Document Type"::Production then
+                                 CurrReport.BREAK;
+                             END;
+
+               DataItemLink=Status=FIELD("Document Subtype"),"No."=FIELD("Document No.") }
+
+    { 7771;2   ;DataItem;Prod. Order Component;
+               DataItemTable="Prod. Order Component";
+               DataItemTableView=SORTING(Status,"Prod. Order No.","Prod. Order Line No.","Line No.") WHERE("Flushing Method"=FILTER(Manual|"Pick + Forward"|"Pick + Backward"),"Planning Level Code"=CONST(0));
+               OnPreDataItem=BEGIN
+                               SETRANGE("Location Code","Whse. Pick Request"."Location Code");
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  ToBinCode@1000 : Code[20];
+                                BEGIN
+                                  if ("Flushing Method" = "Flushing Method"::"Pick + Forward") and ("Routing Link Code" = '') then
+                                    CurrReport.SKIP;
+
+                                  GetLocation("Location Code");
+                                  ToBinCode := "Bin Code";
+
+                                  CALCFIELDS("Pick Qty.");
+                                  if "Expected Quantity" > "Qty. Picked" + "Pick Qty." then
+                                    if WhsePickWkshCreate.FromProdOrderCompLine(
+                                         PickWkshTemplate,PickWkshName,Location.Code,
+                                         ToBinCode,"Prod. Order Component")
+                                    then
+                                      LineCreated := true;
+                                END;
+
+               DataItemLink=Status=FIELD(Status),"Prod. Order No."=FIELD("No.") }
+
+    { 3252;1   ;DataItem;Assembly Header     ;
+               DataItemTable="Assembly Header";
+               DataItemTableView=SORTING("Document Type","No.") WHERE("Document Type"=CONST(Order));
+               OnPreDataItem=BEGIN
+                               if "Whse. Pick Request"."Document Type" <> "Whse. Pick Request"."Document Type"::Assembly then
+                                 CurrReport.BREAK;
+                             END;
+
+               DataItemLink="Document Type"=FIELD("Document Subtype"),"No."=FIELD("Document No.") }
+
+    { 6911;2   ;DataItem;Assembly Line       ;
+               DataItemTable="Assembly Line";
+               DataItemTableView=SORTING("Document Type","Document No.",Type,"Location Code") WHERE(Type=CONST(Item));
+               OnPreDataItem=BEGIN
+                               SETRANGE("Location Code","Whse. Pick Request"."Location Code");
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  ProcessAsmLineFromAsmLine("Assembly Line");
+                                END;
+
+               DataItemLink="Document Type"=FIELD("Document Type"),"Document No."=FIELD("No.") }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=There are no Warehouse Worksheet Lines created.';
+      Location@1002 : Record Location;
+      Cust@1005 : Record Customer;
+      WhsePickWkshCreate@1006 : Codeunit "Whse. Worksheet-Create";
+      PickWkshTemplate@1001 : Code[10];
+      PickWkshName@1003 : Code[10];
+      LocationCode@1004 : Code[10];
+      Completed@1010 : Boolean;
+      LineCreated@1012 : Boolean;
+      HideDialog@1013 : Boolean;
+
+    [External]
+    PROCEDURE SetHideDialog@6(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    [External]
+    PROCEDURE NotCancelled@4() : Boolean;
+    BEGIN
+      exit(Completed);
+    END;
+
+    [External]
+    PROCEDURE SetPickWkshName@2(PickWkshTemplate2@1002 : Code[10];PickWkshName2@1000 : Code[10];LocationCode2@1001 : Code[10]);
+    BEGIN
+      PickWkshTemplate := PickWkshTemplate2;
+      PickWkshName := PickWkshName2;
+      LocationCode := LocationCode2;
+    END;
+
+    LOCAL PROCEDURE GetLocation@1(LocationCode@1000 : Code[10]);
+    BEGIN
+      if LocationCode = '' then
+        CLEAR(Location)
+      else
+        if Location.Code <> LocationCode then
+          Location.GET(LocationCode);
+    END;
+
+    LOCAL PROCEDURE IsPickToBeMadeForAsmLine@10(AsmLine@1000 : Record "Assembly Line") : Boolean;
+    BEGIN
+      with AsmLine do begin
+        GetLocation("Location Code");
+
+        CALCFIELDS("Pick Qty.");
+        if Location."Require Shipment" then
+          exit(Quantity > "Qty. Picked" + "Pick Qty.");
+
+        exit("Quantity to Consume" > "Qty. Picked" + "Pick Qty.");
+      end;
+    END;
+
+    LOCAL PROCEDURE ProcessAsmLineFromAsmLine@7(AsmLine@1000 : Record "Assembly Line");
+    BEGIN
+      if IsPickToBeMadeForAsmLine(AsmLine) then
+        if WhsePickWkshCreate.FromAssemblyLine(PickWkshTemplate,PickWkshName,AsmLine) then
+          LineCreated := true;
+    END;
+
+    LOCAL PROCEDURE ProcessAsmLineFromWhseShpt@5(AsmLine@1000 : Record "Assembly Line";WhseShptLine@1002 : Record "Warehouse Shipment Line");
+    BEGIN
+      if IsPickToBeMadeForAsmLine(AsmLine) then
+        if WhsePickWkshCreate.FromAssemblyLineInATOWhseShpt(PickWkshTemplate,PickWkshName,AsmLine,WhseShptLine) then
+          LineCreated := true;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

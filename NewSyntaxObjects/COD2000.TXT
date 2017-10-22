@@ -1,0 +1,452 @@
+OBJECT Codeunit 2000 Time Series Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempTimeSeriesBuffer@1006 : TEMPORARY Record "Time Series Buffer";
+      TempTimeSeriesForecast@1013 : TEMPORARY Record "Time Series Forecast";
+      AzureMLConnector@1002 : Codeunit "Azure ML Connector";
+      ApiUri@1008 : Text;
+      ApiKey@1001 : Text;
+      NotInitializedErr@1009 : TextConst 'ENU=The connection has not been initialized. Initialize the connection before using the time series functionality.';
+      TimeOutSec@1019 : Integer;
+      TimeSeriesPeriodType@1022 : Option;
+      TimeSeriesForecastingStartDate@1018 : Date;
+      TimeSeriesObservationPeriods@1003 : Integer;
+      TimeSeriesFrequency@1000 : Integer;
+      TimeSeriesCalculationState@1010 : 'Uninitialized,Initialized,"Data Prepared",Done';
+      DataNotPreparedErr@1011 : TextConst 'ENU=The data was not prepared for forecasting. Prepare data before using the forecasting functionality.';
+      DataNotProcessedErr@1012 : TextConst 'ENU=The data for forecasting has not been processed yet. Results cannot be retrieved.';
+      ForecastingPeriodsErr@1023 : TextConst 'ENU=The number of forecasting periods must be greater than 0.';
+      MinimumHistoricalPeriods@1015 : Integer;
+      NotADateErr@1004 : TextConst 'ENU=PeriodFieldNo must point to a Date field.';
+      NotARecordErr@1005 : TextConst 'ENU=SourceRecord must point to Record or a RecordRef object.';
+      NegativeNumberOfPeriodsErr@1007 : TextConst 'ENU=NumberOfPeriods Must be strictly positive.';
+      MaximumHistoricalPeriods@1014 : Integer;
+      TimeSeriesModelOption@1016 : 'ARIMA,ETS,STL,"ETS+ARIMA","ETS+STL",ALL';
+
+    [External]
+    PROCEDURE Initialize@9(Uri@1000 : Text;Key@1001 : Text;TimeOutSeconds@1002 : Integer);
+    BEGIN
+      ApiUri := Uri;
+      ApiKey := Key;
+      TimeOutSec := TimeOutSeconds;
+
+      AzureMLConnector.Initialize(ApiKey,ApiUri,TimeOutSec);
+      MinimumHistoricalPeriods := 5;
+      MaximumHistoricalPeriods := 24;
+      TimeSeriesCalculationState := TimeSeriesCalculationState::Initialized;
+    END;
+
+    [Internal]
+    PROCEDURE SetMessageHandler@19(MessageHandler@1000 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpMessageHandler");
+    BEGIN
+      AzureMLConnector.SetMessageHandler(MessageHandler);
+    END;
+
+    [External]
+    PROCEDURE PrepareData@3(RecordVariant@1000 : Variant;GroupIDFieldNo@1007 : Integer;DateFieldNo@1002 : Integer;ValueFieldNo@1001 : Integer;PeriodType@1003 : Option;ForecastingStartDate@1006 : Date;ObservationPeriods@1008 : Integer);
+    BEGIN
+      if TimeSeriesCalculationState < TimeSeriesCalculationState::Initialized then
+        ERROR(NotInitializedErr);
+
+      TempTimeSeriesBuffer.RESET;
+      TempTimeSeriesBuffer.DELETEALL;
+
+      TimeSeriesPeriodType := PeriodType;
+      TimeSeriesForecastingStartDate := ForecastingStartDate;
+      TimeSeriesObservationPeriods := ObservationPeriods;
+      TimeSeriesFrequency := GetFrequency(PeriodType);
+
+      FillTimeSeriesBuffer(RecordVariant,GroupIDFieldNo,ValueFieldNo,DateFieldNo);
+
+      TimeSeriesCalculationState := TimeSeriesCalculationState::"Data Prepared";
+    END;
+
+    [External]
+    PROCEDURE SetPreparedData@6(VAR TempTimeSeriesBufferIn@1000 : TEMPORARY Record "Time Series Buffer";PeriodType@1003 : Option;ForecastingStartDate@1002 : Date;ObservationPeriods@1001 : Integer);
+    BEGIN
+      if TimeSeriesCalculationState < TimeSeriesCalculationState::Initialized then
+        ERROR(NotInitializedErr);
+
+      TempTimeSeriesBuffer.COPY(TempTimeSeriesBufferIn,true);
+
+      TimeSeriesPeriodType := PeriodType;
+      TimeSeriesForecastingStartDate := ForecastingStartDate;
+      TimeSeriesObservationPeriods := ObservationPeriods;
+      TimeSeriesFrequency := GetFrequency(PeriodType);
+
+      TimeSeriesCalculationState := TimeSeriesCalculationState::"Data Prepared";
+    END;
+
+    [External]
+    PROCEDURE GetPreparedData@5(VAR TempTimeSeriesBufferOut@1000 : TEMPORARY Record "Time Series Buffer");
+    BEGIN
+      if TimeSeriesCalculationState < TimeSeriesCalculationState::"Data Prepared" then
+        ERROR(DataNotPreparedErr);
+
+      TempTimeSeriesBufferOut.COPY(TempTimeSeriesBuffer,true);
+    END;
+
+    [External]
+    PROCEDURE Forecast@116(ForecastingPeriods@1000 : Integer;ConfidenceLevel@1002 : Integer;TimeSeriesModel@1001 : Option);
+    BEGIN
+      if ConfidenceLevel = 0 then
+        ConfidenceLevel := 80;
+      if ForecastingPeriods < 1 then
+        ERROR(ForecastingPeriodsErr);
+
+      if TimeSeriesCalculationState < TimeSeriesCalculationState::"Data Prepared" then
+        ERROR(DataNotPreparedErr);
+
+      TempTimeSeriesForecast.RESET;
+      TempTimeSeriesForecast.DELETEALL;
+
+      if TempTimeSeriesBuffer.ISEMPTY then begin
+        TimeSeriesCalculationState := TimeSeriesCalculationState::Done;
+        exit;
+      end;
+
+      CreateTimeSeriesInput;
+      CreateTimeSeriesParameters(ForecastingPeriods,ConfidenceLevel,TimeSeriesModel);
+
+      if not AzureMLConnector.SendToAzureML then
+        ERROR(GETLASTERRORTEXT);
+
+      LoadTimeSeriesForecast;
+      TimeSeriesCalculationState := TimeSeriesCalculationState::Done;
+    END;
+
+    [External]
+    PROCEDURE GetForecast@4(VAR TempTimeSeriesForecastOut@1000 : TEMPORARY Record "Time Series Forecast");
+    BEGIN
+      if TimeSeriesCalculationState < TimeSeriesCalculationState::Done then
+        ERROR(DataNotProcessedErr);
+
+      TempTimeSeriesForecastOut.COPY(TempTimeSeriesForecast,true);
+    END;
+
+    [External]
+    PROCEDURE GetState@12(VAR State@1000 : 'Uninitialized,Initialized,"Data Prepared",Done');
+    BEGIN
+      State := TimeSeriesCalculationState;
+    END;
+
+    LOCAL PROCEDURE GetFrequency@10(PeriodType@1000 : Option) : Integer;
+    VAR
+      Date@1001 : Record Date;
+    BEGIN
+      case PeriodType of
+        Date."Period Type"::Date:
+          exit(365);
+        Date."Period Type"::Week:
+          exit(52);
+        Date."Period Type"::Month:
+          exit(12);
+        Date."Period Type"::Quarter:
+          exit(4);
+        Date."Period Type"::Year:
+          exit(1);
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetOutput@16(LineNo@1000 : Integer;ColumnNo@1001 : Integer) : Text;
+    VAR
+      OutputValue@1002 : Text;
+    BEGIN
+      AzureMLConnector.GetOutput(LineNo,ColumnNo,OutputValue);
+      exit(OutputValue);
+    END;
+
+    [External]
+    PROCEDURE GetOutputLength@24() : Integer;
+    VAR
+      Length@1000 : Integer;
+    BEGIN
+      AzureMLConnector.GetOutputLength(Length);
+      exit(Length);
+    END;
+
+    [External]
+    PROCEDURE GetInput@35(LineNo@1000 : Integer;ColumnNo@1001 : Integer) : Text;
+    VAR
+      InputValue@1002 : Text;
+    BEGIN
+      AzureMLConnector.GetInput(LineNo,ColumnNo,InputValue);
+      exit(InputValue);
+    END;
+
+    [External]
+    PROCEDURE GetInputLength@39() : Integer;
+    VAR
+      Length@1000 : Integer;
+    BEGIN
+      AzureMLConnector.GetInputLength(Length);
+      exit(Length);
+    END;
+
+    [External]
+    PROCEDURE GetParameter@14(Name@1000 : Text) : Text;
+    VAR
+      ParameterValue@1001 : Text;
+    BEGIN
+      AzureMLConnector.GetParameter(Name,ParameterValue);
+      exit(ParameterValue);
+    END;
+
+    LOCAL PROCEDURE FillTimeSeriesBuffer@8(RecordVariant@1005 : Variant;GroupIDFieldNo@1010 : Integer;ValueFieldNo@1007 : Integer;DateFieldNo@1006 : Integer);
+    VAR
+      TempTimeSeriesBufferDistinct@1000 : TEMPORARY Record "Time Series Buffer";
+      DataTypeManagement@1004 : Codeunit "Data Type Management";
+      PeriodFormManagement@1013 : Codeunit PeriodFormManagement;
+      RecRef@1012 : RecordRef;
+      GroupIDFieldRef@1011 : FieldRef;
+      ValueFieldRef@1003 : FieldRef;
+      DateFieldRef@1002 : FieldRef;
+      CurrentPeriod@1014 : Integer;
+      PeriodStartDate@1015 : Date;
+      PeriodEndDate@1016 : Date;
+      Value@1001 : Decimal;
+    BEGIN
+      DataTypeManagement.GetRecordRef(RecordVariant,RecRef);
+
+      if RecRef.ISEMPTY then
+        exit;
+
+      GroupIDFieldRef := RecRef.FIELD(GroupIDFieldNo);
+      DateFieldRef := RecRef.FIELD(DateFieldNo);
+      ValueFieldRef := RecRef.FIELD(ValueFieldNo);
+
+      GetDistinctRecords(RecRef,GroupIDFieldNo,TempTimeSeriesBufferDistinct);
+
+      if TempTimeSeriesBufferDistinct.FINDSET then
+        repeat
+          GroupIDFieldRef.SETRANGE(TempTimeSeriesBufferDistinct."Group ID");
+          for CurrentPeriod := -TimeSeriesObservationPeriods to -1 do begin
+            PeriodStartDate :=
+              PeriodFormManagement.MoveDateByPeriod(TimeSeriesForecastingStartDate,TimeSeriesPeriodType,CurrentPeriod);
+            PeriodEndDate :=
+              PeriodFormManagement.MoveDateByPeriodToEndOfPeriod(TimeSeriesForecastingStartDate,TimeSeriesPeriodType,CurrentPeriod);
+            DateFieldRef.SETRANGE(PeriodStartDate,PeriodEndDate);
+            if FORMAT(ValueFieldRef.CLASS) = 'Normal' then
+              Value := CalculateValueNormal(ValueFieldRef)
+            else
+              Value := CalculateValueFlowField(RecRef,ValueFieldRef);
+            TempTimeSeriesBuffer.INIT;
+            TempTimeSeriesBuffer."Group ID" := GroupIDFieldRef.GETFILTER;
+            TempTimeSeriesBuffer."Period No." := TimeSeriesObservationPeriods + CurrentPeriod + 1;
+            TempTimeSeriesBuffer."Period Start Date" := PeriodStartDate;
+            TempTimeSeriesBuffer.Value := Value;
+            TempTimeSeriesBuffer.INSERT;
+          end;
+        until TempTimeSeriesBufferDistinct.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CalculateValueNormal@22(VAR ValueFieldRef@1001 : FieldRef) Value : Decimal;
+    BEGIN
+      if FORMAT(ValueFieldRef.CLASS) <> 'Normal' then
+        exit(0);
+
+      ValueFieldRef.CALCSUM;
+      Value := ValueFieldRef.VALUE;
+    END;
+
+    LOCAL PROCEDURE CalculateValueFlowField@18(VAR RecRef@1000 : RecordRef;VAR ValueFieldRef@1001 : FieldRef) Value : Decimal;
+    VAR
+      CurrentValue@1002 : Decimal;
+    BEGIN
+      if FORMAT(ValueFieldRef.CLASS) <> 'FlowField' then
+        exit(0);
+
+      if RecRef.FINDSET then
+        repeat
+          ValueFieldRef.CALCFIELD;
+          CurrentValue := ValueFieldRef.VALUE;
+          Value += CurrentValue;
+        until RecRef.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateTimeSeriesInput@7();
+    BEGIN
+      AzureMLConnector.AddInputColumnName('GranularityAttribute');
+      AzureMLConnector.AddInputColumnName('DateKey');
+      AzureMLConnector.AddInputColumnName('TransactionQty');
+
+      if TempTimeSeriesBuffer.FINDSET then
+        repeat
+          AzureMLConnector.AddInputRow;
+          AzureMLConnector.AddInputValue(FORMAT(TempTimeSeriesBuffer."Group ID"));
+          AzureMLConnector.AddInputValue(FORMAT(TempTimeSeriesBuffer."Period No."));
+          AzureMLConnector.AddInputValue(FORMAT(TempTimeSeriesBuffer.Value,0,9));
+        until TempTimeSeriesBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateTimeSeriesParameters@11(ForecastingPeriods@1000 : Integer;ConfidenceLevel@1002 : Integer;TimeSeriesModel@1001 : Option);
+    BEGIN
+      AzureMLConnector.AddParameter('horizon',FORMAT(ForecastingPeriods));
+      AzureMLConnector.AddParameter('seasonality',FORMAT(TimeSeriesFrequency));
+      AzureMLConnector.AddParameter('forecast_start_datekey',FORMAT(TimeSeriesObservationPeriods + 1));
+      TimeSeriesModelOption := TimeSeriesModel;
+      AzureMLConnector.AddParameter('time_series_model',FORMAT(TimeSeriesModelOption));
+      AzureMLConnector.AddParameter('confidence_level',FORMAT(ConfidenceLevel));
+    END;
+
+    LOCAL PROCEDURE LoadTimeSeriesForecast@2();
+    VAR
+      TypeHelper@1005 : Codeunit "Type Helper";
+      PeriodFormManagement@1000 : Codeunit PeriodFormManagement;
+      Value@1004 : Variant;
+      LineNo@1003 : Integer;
+      GroupID@1007 : Code[50];
+      PeriodNo@1002 : Integer;
+    BEGIN
+      for LineNo := 1 to GetOutputLength do begin
+        TempTimeSeriesForecast.INIT;
+
+        EVALUATE(GroupID,GetOutput(LineNo,1));
+        TempTimeSeriesForecast."Group ID" := GroupID;
+
+        EVALUATE(PeriodNo,GetOutput(LineNo,2));
+        TempTimeSeriesForecast."Period No." := PeriodNo;
+        TempTimeSeriesForecast."Period Start Date" :=
+          PeriodFormManagement.MoveDateByPeriod(
+            TimeSeriesForecastingStartDate,TimeSeriesPeriodType,PeriodNo - TimeSeriesObservationPeriods - 1);
+        Value := TempTimeSeriesForecast.Value;
+        TypeHelper.Evaluate(Value,GetOutput(LineNo,3),'','');
+        TempTimeSeriesForecast.Value := Value;
+
+        Value := TempTimeSeriesForecast.Delta;
+        TypeHelper.Evaluate(Value,GetOutput(LineNo,4),'','');
+        TempTimeSeriesForecast.Delta := Value;
+        if TempTimeSeriesForecast.Value <> 0 then
+          TempTimeSeriesForecast."Delta %" := ABS(TempTimeSeriesForecast.Delta / TempTimeSeriesForecast.Value) * 100;
+
+        TempTimeSeriesForecast.INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetDistinctRecords@13(RecRef@1000 : RecordRef;FieldNo@1002 : Integer;VAR TempTimeSeriesBufferDistinct@1001 : TEMPORARY Record "Time Series Buffer");
+    VAR
+      FieldRef@1003 : FieldRef;
+      OptionValue@1004 : Integer;
+    BEGIN
+      FieldRef := RecRef.FIELD(FieldNo);
+
+      if RecRef.FINDSET then
+        repeat
+          TempTimeSeriesBufferDistinct.INIT;
+          if FORMAT(FieldRef.TYPE) = 'Option' then begin
+            OptionValue := FieldRef.VALUE;
+            TempTimeSeriesBufferDistinct."Group ID" := FORMAT(OptionValue);
+          end else
+            TempTimeSeriesBufferDistinct."Group ID" := FieldRef.VALUE;
+          if not TempTimeSeriesBufferDistinct.INSERT then;
+        until RecRef.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE SetMinimumHistoricalPeriods@23(NumberOfPeriods@1000 : Integer);
+    BEGIN
+      if not (NumberOfPeriods > 0) then
+        ERROR(NegativeNumberOfPeriodsErr);
+      MinimumHistoricalPeriods := NumberOfPeriods;
+    END;
+
+    [External]
+    PROCEDURE SetMaximumHistoricalPeriods@15(NumberOfPeriods@1000 : Integer);
+    BEGIN
+      if not (NumberOfPeriods > 0) then
+        ERROR(NegativeNumberOfPeriodsErr);
+      MaximumHistoricalPeriods := NumberOfPeriods;
+    END;
+
+    [External]
+    PROCEDURE HasMinimumHistoricalData@21(VAR NumberOfPeriodsWithHistory@1002 : Integer;SourceRecord@1001 : Variant;PeriodFieldNo@1003 : Integer;PeriodType@1004 : 'Day,Week,Month,Quarter,Year';ForecastStartDate@1000 : Date) : Boolean;
+    VAR
+      DataTypeManagement@1008 : Codeunit "Data Type Management";
+      PeriodFieldRef@1005 : FieldRef;
+      HistoryStartDate@1006 : Variant;
+      SourceRecordRef@1007 : RecordRef;
+      HistoryEndDate@1009 : Date;
+    BEGIN
+      // SourceRecord Should already contain all the necessary filters
+      // and should be sorted by the desired date field
+      if SourceRecord.ISRECORD then
+        DataTypeManagement.GetRecordRef(SourceRecord,SourceRecordRef)
+      else
+        if SourceRecord.ISRECORDREF then
+          SourceRecordRef := SourceRecord
+        else
+          ERROR(NotARecordErr);
+
+      if not SourceRecordRef.FINDFIRST then
+        exit(false);
+
+      // last date of transaction history that will be used for forecast
+      HistoryEndDate := CALCDATE('<-1D>',ForecastStartDate);
+
+      PeriodFieldRef := SourceRecordRef.FIELD(PeriodFieldNo);
+      PeriodFieldRef.SETFILTER('%1..',CalculateMaxStartDate(HistoryEndDate,PeriodType));
+      if SourceRecordRef.FINDSET then;
+      PeriodFieldRef := SourceRecordRef.FIELD(PeriodFieldNo);
+      HistoryStartDate := PeriodFieldRef.VALUE;
+      if not HistoryStartDate.ISDATE then
+        ERROR(NotADateErr);
+      NumberOfPeriodsWithHistory :=
+        CalculatePeriodsWithHistory(HistoryStartDate,HistoryEndDate,PeriodType);
+      if NumberOfPeriodsWithHistory < MinimumHistoricalPeriods then
+        exit(false);
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CalculatePeriodsWithHistory@20(HistoryStartDate@1001 : Date;HistoryEndDate@1004 : Date;PeriodType@1002 : Option) NumberOfPeriodsWithHistory : Integer;
+    VAR
+      PeriodFormManagement@1000 : Codeunit PeriodFormManagement;
+    BEGIN
+      while HistoryStartDate <= HistoryEndDate do begin
+        NumberOfPeriodsWithHistory += 1;
+        HistoryStartDate := PeriodFormManagement.MoveDateByPeriod(HistoryStartDate,PeriodType,1);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalculateMaxStartDate@26(HistoryEndDate@1001 : Date;PeriodType@1000 : 'Day,Week,Month,Quarter,Year') : Date;
+    BEGIN
+      case PeriodType of
+        PeriodType::Day:
+          exit(CALCDATE(STRSUBSTNO('<-%1D>',FORMAT(MaximumHistoricalPeriods - 1)),HistoryEndDate));
+        PeriodType::Week:
+          exit(CALCDATE(STRSUBSTNO('<-%1W+1D>',FORMAT(MaximumHistoricalPeriods)),HistoryEndDate));
+        PeriodType::Month:
+          exit(CALCDATE(STRSUBSTNO('<-%1M+1D>',FORMAT(MaximumHistoricalPeriods)),HistoryEndDate));
+        PeriodType::Quarter:
+          exit(CALCDATE(STRSUBSTNO('<-%1Q+1D>',FORMAT(MaximumHistoricalPeriods)),HistoryEndDate));
+        PeriodType::Year:
+          exit(CALCDATE(STRSUBSTNO('<-%1Y+1D>',FORMAT(MaximumHistoricalPeriods)),HistoryEndDate));
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetTimeSeriesModelOption@27(TimeSeriesModel@1000 : Text) : Integer;
+    BEGIN
+      EVALUATE(TimeSeriesModelOption,TimeSeriesModel);
+      exit(TimeSeriesModelOption);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

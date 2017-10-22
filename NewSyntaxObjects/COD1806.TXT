@@ -1,0 +1,814 @@
+OBJECT Codeunit 1806 Excel Data Migrator
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PackageCodeTxt@1000 : TextConst 'ENU=GB.ENU.EXCEL';
+      PackageNameTxt@1001 : TextConst 'ENU=Excel Data Migration';
+      ConfigPackageManagement@1002 : Codeunit "Config. Package Management";
+      ConfigExcelExchange@1003 : Codeunit "Config. Excel Exchange";
+      DataMigratorDescriptionTxt@1004 : TextConst 'ENU=Import from Excel';
+      Instruction1Txt@1008 : TextConst 'ENU=1) Download the Excel template.';
+      Instruction2Txt@1005 : TextConst 'ENU=2) Fill in the template with your data.';
+      Instruction3Txt@1021 : TextConst 'ENU=3) Choose Next to upload your data file.';
+      ImportingMsg@1007 : TextConst 'ENU=Importing Data...';
+      ApplyingMsg@1006 : TextConst 'ENU=Applying Data...';
+      ImportFromExcelTxt@1009 : TextConst 'ENU=Import from Excel';
+      ExcelFileExtensionTok@1010 : TextConst 'ENU=*.xlsx';
+      ExcelValidationErr@1013 : TextConst '@@@=%1 - product name;ENU=The file that you imported is corrupted. It contains columns that cannot be mapped to %1.';
+      OpenAdvancedQst@1011 : TextConst 'ENU=The advanced setup experience requires you to specify how database tables are configured. We recommend that you only access the advanced setup if you are familiar with RapidStart Services.\\Do you want to continue?';
+      ExcelFileNameTok@1012 : TextConst '@@@="%1 = String generated from current datetime to make sure file names are unique ";ENU=DataImport_Dynamics365%1.xlsx';
+      SettingsMissingQst@1014 : TextConst 'ENU=You have not specified import settings for this data source.\\Are you sure you want to continue?';
+      TransactionExistsMsg@1020 : TextConst 'ENU=Transactions have already been entered. In order to use the wizard, you will need to create a new company to migrate your data.';
+      TransactionforGLExistsMsg@1019 : TextConst 'ENU=Transactions have already been entered for "G/L Account". In order to use the wizard, unmark "G/L Account".';
+      TransactionforCustExistsMsg@1018 : TextConst 'ENU=Transactions have already been entered for "Customer". In order to use the wizard, unmark "Customer".';
+      TransactionforVendExistsMsg@1017 : TextConst 'ENU=Transactions have already been entered for "Vendor". In order to use the wizard, unmark "Vendor".';
+      TransactionforItemExistsMsg@1016 : TextConst 'ENU=Transactions have already been entered for "Item". In order to use the wizard, unmark "Item".';
+      SavedJrnlLinesFoundMsg@1015 : TextConst 'ENU=Saved journal lines are found. In order to use the wizard, you will need to delete the journal lines before you migrate your data.';
+
+    [Internal]
+    PROCEDURE ImportExcelData@2() : Boolean;
+    VAR
+      FileManagement@1000 : Codeunit "File Management";
+      ServerFile@1005 : Text[250];
+    BEGIN
+      OnUploadFile(ServerFile);
+      if ServerFile = '' then
+        ServerFile := COPYSTR(FileManagement.UploadFile(ImportFromExcelTxt,ExcelFileExtensionTok),
+            1,MAXSTRLEN(ServerFile));
+
+      if ServerFile <> '' then begin
+        ImportExcelDataByFileName(ServerFile);
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    [Internal]
+    PROCEDURE ImportExcelDataByFileName@56(FileName@1000 : Text[250]);
+    VAR
+      FileManagement@1002 : Codeunit "File Management";
+      Window@1001 : Dialog;
+    BEGIN
+      Window.OPEN(ImportingMsg);
+
+      FileManagement.ValidateFileExtension(FileName,ExcelFileExtensionTok);
+      CreatePackageMetadata(false);
+      ValidateTemplateAndImportData(FileName);
+
+      Window.CLOSE;
+    END;
+
+    [Internal]
+    PROCEDURE ExportExcelTemplate@4() : Boolean;
+    VAR
+      FileName@1001 : Text;
+      HideDialog@1002 : Boolean;
+    BEGIN
+      OnDownloadTemplate(HideDialog);
+      exit(ExportExcelTemplateByFileName(FileName,HideDialog));
+    END;
+
+    [Internal]
+    PROCEDURE ExportExcelTemplateByFileName@35(VAR FileName@1000 : Text;HideDialog@1001 : Boolean) : Boolean;
+    VAR
+      ConfigPackageTable@1002 : Record "Config. Package Table";
+    BEGIN
+      if FileName = '' then
+        FileName :=
+          STRSUBSTNO(ExcelFileNameTok,FORMAT(CURRENTDATETIME,0,'<Day,2>_<Month,2>_<Year4>_<Hours24>_<Minutes,2>_<Seconds,2>'));
+
+      CreatePackageMetadata(true);
+      ConfigPackageTable.SETRANGE("Package Code",PackageCodeTxt);
+      ConfigExcelExchange.SetHideDialog(HideDialog);
+      exit(ConfigExcelExchange.ExportExcel(FileName,ConfigPackageTable,false,true));
+    END;
+
+    [External]
+    PROCEDURE GetPackageCode@5() : Code[20];
+    BEGIN
+      exit(PackageCodeTxt);
+    END;
+
+    [Internal]
+    PROCEDURE CreatePackageMetadata@12(InsertConfigPackageFields@1004 : Boolean);
+    VAR
+      ConfigPackage@1000 : Record "Config. Package";
+      ConfigPackageManagement@1009 : Codeunit "Config. Package Management";
+      ApplicationManagement@1010 : Codeunit ApplicationManagement;
+    BEGIN
+      ConfigPackage.SETRANGE(Code,PackageCodeTxt);
+      ConfigPackage.DELETEALL(true);
+
+      ConfigPackageManagement.InsertPackage(ConfigPackage,PackageCodeTxt,PackageNameTxt,false);
+      ConfigPackage."Language ID" := ApplicationManagement.ApplicationLanguage;
+      ConfigPackage."Product Version" := ApplicationManagement.ApplicationVersion;
+      ConfigPackage.MODIFY;
+
+      InsertPackageTables;
+
+      if InsertConfigPackageFields then
+        InsertPackageFields
+    END;
+
+    LOCAL PROCEDURE InsertPackageTables@32();
+    VAR
+      ConfigPackageField@1001 : Record "Config. Package Field";
+      DataMigrationSetup@1005 : Record "Data Migration Setup";
+    BEGIN
+      if not DataMigrationSetup.GET then begin
+        DataMigrationSetup.INIT;
+        DataMigrationSetup.INSERT;
+      end;
+
+      InsertPackageTableCustomer(DataMigrationSetup);
+      InsertPackageTableVendor(DataMigrationSetup);
+      InsertPackageTableItem(DataMigrationSetup);
+      InsertPackageTableAccount(DataMigrationSetup);
+
+      ConfigPackageField.SETRANGE("Package Code",PackageCodeTxt);
+      ConfigPackageField.MODIFYALL("Include Field",false);
+    END;
+
+    LOCAL PROCEDURE InsertPackageFields@197();
+    BEGIN
+      InsertPackageFieldsCustomer;
+      InsertPackageFieldsVendor;
+      InsertPackageFieldsItem;
+      InsertPackageFieldsAccount;
+    END;
+
+    LOCAL PROCEDURE InsertPackageTableCustomer@17(VAR DataMigrationSetup@1002 : Record "Data Migration Setup");
+    VAR
+      ConfigPackageTable@1001 : Record "Config. Package Table";
+      ConfigTableProcessingRule@1000 : Record "Config. Table Processing Rule";
+    BEGIN
+      ConfigPackageManagement.InsertPackageTable(ConfigPackageTable,PackageCodeTxt,DATABASE::Customer);
+      ConfigPackageTable."Data Template" := DataMigrationSetup."Default Customer Template";
+      ConfigPackageTable.MODIFY;
+      ConfigPackageManagement.InsertProcessingRuleCustom(
+        ConfigTableProcessingRule,ConfigPackageTable,100000,CODEUNIT::"Excel Post Processor");
+    END;
+
+    LOCAL PROCEDURE InsertPackageFieldsCustomer@191();
+    VAR
+      ConfigPackageField@1001 : Record "Config. Package Field";
+    BEGIN
+      ConfigPackageField.SETRANGE("Package Code",PackageCodeTxt);
+      ConfigPackageField.SETRANGE("Table ID",DATABASE::Customer);
+      ConfigPackageField.DELETEALL(true);
+
+      InsertPackageField(DATABASE::Customer,1,1);     // No.
+      InsertPackageField(DATABASE::Customer,2,2);     // Name
+      InsertPackageField(DATABASE::Customer,3,3);     // Search Name
+      InsertPackageField(DATABASE::Customer,5,4);     // Address
+      InsertPackageField(DATABASE::Customer,7,5);     // City
+      InsertPackageField(DATABASE::Customer,92,6);    // County
+      InsertPackageField(DATABASE::Customer,91,7);    // Post Code
+      InsertPackageField(DATABASE::Customer,35,8);    // Country/Region Code
+      InsertPackageField(DATABASE::Customer,8,9);     // Contact
+      InsertPackageField(DATABASE::Customer,9,10);    // Phone No.
+      InsertPackageField(DATABASE::Customer,102,11);  // E-Mail
+      InsertPackageField(DATABASE::Customer,20,12);   // Credit Limit (LCY)
+      InsertPackageField(DATABASE::Customer,21,13);   // Customer Posting Group
+      InsertPackageField(DATABASE::Customer,27,14);   // Payment Terms Code
+      InsertPackageField(DATABASE::Customer,88,15);   // Gen. Bus. Posting Group
+    END;
+
+    LOCAL PROCEDURE InsertPackageTableVendor@16(VAR DataMigrationSetup@1003 : Record "Data Migration Setup");
+    VAR
+      ConfigPackageTable@1001 : Record "Config. Package Table";
+      ConfigTableProcessingRule@1000 : Record "Config. Table Processing Rule";
+    BEGIN
+      ConfigPackageManagement.InsertPackageTable(ConfigPackageTable,PackageCodeTxt,DATABASE::Vendor);
+      ConfigPackageTable."Data Template" := DataMigrationSetup."Default Vendor Template";
+      ConfigPackageTable.MODIFY;
+      ConfigPackageManagement.InsertProcessingRuleCustom(
+        ConfigTableProcessingRule,ConfigPackageTable,100000,CODEUNIT::"Excel Post Processor");
+    END;
+
+    LOCAL PROCEDURE InsertPackageFieldsVendor@192();
+    VAR
+      ConfigPackageField@1001 : Record "Config. Package Field";
+    BEGIN
+      ConfigPackageField.SETRANGE("Package Code",PackageCodeTxt);
+      ConfigPackageField.SETRANGE("Table ID",DATABASE::Vendor);
+      ConfigPackageField.DELETEALL(true);
+
+      InsertPackageField(DATABASE::Vendor,1,1);     // No.
+      InsertPackageField(DATABASE::Vendor,2,2);     // Name
+      InsertPackageField(DATABASE::Vendor,3,3);     // Search Name
+      InsertPackageField(DATABASE::Vendor,5,4);     // Address
+      InsertPackageField(DATABASE::Vendor,7,5);     // City
+      InsertPackageField(DATABASE::Vendor,92,6);    // County
+      InsertPackageField(DATABASE::Vendor,91,7);    // Post Code
+      InsertPackageField(DATABASE::Vendor,35,8);    // Country/Region Code
+      InsertPackageField(DATABASE::Vendor,8,9);     // Contact
+      InsertPackageField(DATABASE::Vendor,9,10);    // Phone No.
+      InsertPackageField(DATABASE::Vendor,102,11);  // E-Mail
+      InsertPackageField(DATABASE::Vendor,21,12);   // Vendor Posting Group
+      InsertPackageField(DATABASE::Vendor,27,13);   // Payment Terms Code
+      InsertPackageField(DATABASE::Vendor,88,14);   // Gen. Bus. Posting Group
+    END;
+
+    LOCAL PROCEDURE InsertPackageTableItem@18(VAR DataMigrationSetup@1003 : Record "Data Migration Setup");
+    VAR
+      ConfigPackageTable@1001 : Record "Config. Package Table";
+      ConfigPackageField@1000 : Record "Config. Package Field";
+      ConfigTableProcessingRule@1004 : Record "Config. Table Processing Rule";
+      Item@1002 : Record Item;
+    BEGIN
+      ConfigPackageManagement.InsertPackageTable(ConfigPackageTable,PackageCodeTxt,DATABASE::Item);
+      ConfigPackageManagement.InsertPackageField(ConfigPackageField,PackageCodeTxt,DATABASE::Item,
+        Item.FIELDNO(Inventory),Item.FIELDNAME(Inventory),Item.FIELDCAPTION(Inventory),
+        true,true,false,false);
+      ConfigPackageTable."Data Template" := DataMigrationSetup."Default Item Template";
+      ConfigPackageTable.MODIFY;
+      ConfigPackageManagement.InsertProcessingRuleCustom(
+        ConfigTableProcessingRule,ConfigPackageTable,100000,CODEUNIT::"Excel Post Processor")
+    END;
+
+    LOCAL PROCEDURE InsertPackageFieldsItem@193();
+    VAR
+      ConfigPackageField@1001 : Record "Config. Package Field";
+    BEGIN
+      ConfigPackageField.SETRANGE("Package Code",PackageCodeTxt);
+      ConfigPackageField.SETRANGE("Table ID",DATABASE::Item);
+      ConfigPackageField.DELETEALL(true);
+
+      InsertPackageField(DATABASE::Item,1,1);     // No.
+      InsertPackageField(DATABASE::Item,3,2);     // Description
+      InsertPackageField(DATABASE::Item,4,3);     // Search Description
+      InsertPackageField(DATABASE::Item,8,4);     // Base Unit of Measure
+      InsertPackageField(DATABASE::Item,18,5);    // Unit Price
+      InsertPackageField(DATABASE::Item,20,6);    // Profit %
+      InsertPackageField(DATABASE::Item,22,7);    // Unit Cost
+      InsertPackageField(DATABASE::Item,24,8);    // Standard Cost
+      InsertPackageField(DATABASE::Item,68,9);    // Inventory
+      InsertPackageField(DATABASE::Item,35,10);   // Maximum Inventory
+      InsertPackageField(DATABASE::Item,121,11);  // Prevent Negative Inventory
+      InsertPackageField(DATABASE::Item,34,12);   // Reorder Point
+      InsertPackageField(DATABASE::Item,36,13);   // Reorder Quantity
+      InsertPackageField(DATABASE::Item,38,14);   // Unit List Price
+      InsertPackageField(DATABASE::Item,41,15);   // Gross Weight
+      InsertPackageField(DATABASE::Item,42,16);   // Net Weight
+      InsertPackageField(DATABASE::Item,5411,17); // Minimum Order Quantity
+      InsertPackageField(DATABASE::Item,5412,18); // Maximum Order Quantity
+      InsertPackageField(DATABASE::Item,5413,19); // Safety Stock Quantity
+    END;
+
+    LOCAL PROCEDURE InsertPackageField@33(TableNo@1000 : Integer;FieldNo@1001 : Integer;ProcessingOrderNo@1002 : Integer);
+    VAR
+      ConfigPackageField@1004 : Record "Config. Package Field";
+      RecordRef@1003 : RecordRef;
+      FieldRef@1005 : FieldRef;
+    BEGIN
+      RecordRef.OPEN(TableNo);
+      FieldRef := RecordRef.FIELD(FieldNo);
+
+      ConfigPackageManagement.InsertPackageField(ConfigPackageField,PackageCodeTxt,TableNo,
+        FieldRef.NUMBER,FieldRef.NAME,FieldRef.CAPTION,true,true,false,false);
+      ConfigPackageField.VALIDATE("Processing Order",ProcessingOrderNo);
+      ConfigPackageField.MODIFY(true);
+    END;
+
+    LOCAL PROCEDURE GetCodeunitNumber@8() : Integer;
+    BEGIN
+      exit(CODEUNIT::"Excel Data Migrator");
+    END;
+
+    LOCAL PROCEDURE ValidateTemplateAndImportData@29(FileName@1000 : Text);
+    VAR
+      TempExcelBuffer@1001 : TEMPORARY Record "Excel Buffer";
+      ConfigPackage@1002 : Record "Config. Package";
+      ConfigPackageTable@1003 : Record "Config. Package Table";
+      ConfigPackageRecord@1005 : Record "Config. Package Record";
+      ConfigPackageField@1004 : Record "Config. Package Field";
+      ColumnHeaderRow@1006 : Integer;
+      ColumnCount@1007 : Integer;
+      RecordNo@1008 : Integer;
+      FieldID@1009 : ARRAY [250] OF Integer;
+      I@1010 : Integer;
+    BEGIN
+      ConfigPackage.GET(PackageCodeTxt);
+      ConfigPackageTable.SETRANGE("Package Code",ConfigPackage.Code);
+
+      ColumnHeaderRow := 3; // Data is stored in the Excel sheets starting from row 3
+
+      if ConfigPackageTable.FINDSET then
+        repeat
+          ConfigPackageField.RESET;
+
+          // Check if Excel file contains data sheets with the supported master tables (Customer, Vendor, Item)
+          if IsTableInExcel(TempExcelBuffer,FileName,ConfigPackageTable) then begin
+            TempExcelBuffer.ReadSheet;
+            // Jump to the Columns' header row
+            TempExcelBuffer.SETFILTER("Row No.",'%1..',ColumnHeaderRow);
+
+            ConfigPackageField.SETRANGE("Package Code",PackageCodeTxt);
+            ConfigPackageField.SETRANGE("Table ID",ConfigPackageTable."Table ID");
+
+            ColumnCount := 0;
+
+            if TempExcelBuffer.FINDSET then
+              repeat
+                if TempExcelBuffer."Row No." = ColumnHeaderRow then begin // Columns' header row
+                  ConfigPackageField.SETRANGE("Field Caption",TempExcelBuffer."Cell Value as Text");
+
+                  // Column can be mapped to a field, data will be imported to NAV
+                  if ConfigPackageField.FINDFIRST then begin
+                    FieldID[TempExcelBuffer."Column No."] := ConfigPackageField."Field ID";
+                    ConfigPackageField."Include Field" := true;
+                    ConfigPackageField.MODIFY;
+                    ColumnCount += 1;
+                  end else // Error is thrown when the template is corrupted (i.e., there are columns in Excel file that cannot be mapped to NAV)
+                    ERROR(ExcelValidationErr,PRODUCTNAME.SHORT);
+                end else begin // Read data row by row
+                  // A record is created with every new row
+                  ConfigPackageManagement.InitPackageRecord(ConfigPackageRecord,PackageCodeTxt,
+                    ConfigPackageTable."Table ID");
+                  RecordNo := ConfigPackageRecord."No.";
+                  if ConfigPackageTable."Table ID" = 15 then begin
+                    for I := 1 to ColumnCount do
+                      if TempExcelBuffer.GET(TempExcelBuffer."Row No.",I) then // Mapping for Account fields
+                        InsertAccountsFieldData(ConfigPackageTable."Table ID",RecordNo,FieldID[I],TempExcelBuffer."Cell Value as Text")
+                  end else begin
+                    for I := 1 to ColumnCount do
+                      if TempExcelBuffer.GET(TempExcelBuffer."Row No.",I) then
+                        // Fields are populated in the record created
+                        InsertFieldData(
+                          ConfigPackageTable."Table ID",RecordNo,FieldID[I],TempExcelBuffer."Cell Value as Text")
+                      else
+                        InsertFieldData(
+                          ConfigPackageTable."Table ID",RecordNo,FieldID[I],'');
+                  end;
+
+                  // Go to next line
+                  TempExcelBuffer.SETFILTER("Row No.",'%1..',TempExcelBuffer."Row No." + 1);
+                end;
+              until TempExcelBuffer.NEXT = 0;
+
+            TempExcelBuffer.RESET;
+            TempExcelBuffer.DELETEALL;
+            TempExcelBuffer.CloseBook;
+          end else begin
+            // Table is removed from the configuration package because it doen't exist in the Excel file
+            TempExcelBuffer.QuitExcel;
+            ConfigPackageTable.DELETE(true);
+          end;
+        until ConfigPackageTable.NEXT = 0;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE IsTableInExcel@40(VAR TempExcelBuffer@1004 : TEMPORARY Record "Excel Buffer";FileName@1003 : Text;ConfigPackageTable@1001 : Record "Config. Package Table");
+    BEGIN
+      ConfigPackageTable.CALCFIELDS("Table Name","Table Caption");
+
+      if not TryOpenExcel(TempExcelBuffer,FileName,ConfigPackageTable."Table Name") then
+        TryOpenExcel(TempExcelBuffer,FileName,ConfigPackageTable."Table Caption");
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryOpenExcel@34(VAR TempExcelBuffer@1004 : TEMPORARY Record "Excel Buffer";FileName@1003 : Text;SheetName@1000 : Text[250]);
+    BEGIN
+      TempExcelBuffer.OpenBook(FileName,SheetName);
+    END;
+
+    LOCAL PROCEDURE InsertFieldData@69(TableNo@1000 : Integer;RecordNo@1001 : Integer;FieldNo@1002 : Integer;Value@1003 : Text[250]);
+    VAR
+      ConfigPackageData@1004 : Record "Config. Package Data";
+    BEGIN
+      ConfigPackageManagement.InsertPackageData(ConfigPackageData,PackageCodeTxt,
+        TableNo,RecordNo,FieldNo,Value,false);
+    END;
+
+    LOCAL PROCEDURE CreateDataMigrationEntites@24(VAR DataMigrationEntity@1002 : Record "Data Migration Entity");
+    VAR
+      ConfigPackage@1001 : Record "Config. Package";
+      ConfigPackageTable@1000 : Record "Config. Package Table";
+    BEGIN
+      ConfigPackage.GET(PackageCodeTxt);
+      ConfigPackageTable.SETRANGE("Package Code",ConfigPackage.Code);
+      DataMigrationEntity.DELETEALL;
+
+      with ConfigPackageTable do
+        if FINDSET then
+          repeat
+            CALCFIELDS("No. of Package Records");
+            DataMigrationEntity.InsertRecord("Table ID","No. of Package Records");
+          until NEXT = 0;
+    END;
+
+    [EventSubscriber(Table,1800,OnRegisterDataMigrator)]
+    LOCAL PROCEDURE RegisterExcelDataMigrator@3(VAR Sender@1000 : Record "Data Migrator Registration");
+    BEGIN
+      Sender.RegisterDataMigrator(GetCodeunitNumber,DataMigratorDescriptionTxt);
+    END;
+
+    [EventSubscriber(Table,1800,OnHasSettings)]
+    LOCAL PROCEDURE HasSettings@15(VAR Sender@1000 : Record "Data Migrator Registration";VAR HasSettings@1001 : Boolean);
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      HasSettings := true;
+    END;
+
+    [EventSubscriber(Table,1800,OnOpenSettings)]
+    LOCAL PROCEDURE OpenSettings@11(VAR Sender@1000 : Record "Data Migrator Registration";VAR Handled@1001 : Boolean);
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      PAGE.RUNMODAL(PAGE::"Data Migration Settings");
+      Handled := true;
+    END;
+
+    [EventSubscriber(Table,1800,OnValidateSettings)]
+    LOCAL PROCEDURE ValidateSettings@26(VAR Sender@1000 : Record "Data Migrator Registration");
+    VAR
+      DataMigrationSetup@1002 : Record "Data Migration Setup";
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      DataMigrationSetup.GET;
+      if (DataMigrationSetup."Default Customer Template" = '') and
+         (DataMigrationSetup."Default Vendor Template" = '') and
+         (DataMigrationSetup."Default Item Template" = '')
+      then
+        if not CONFIRM(SettingsMissingQst,true) then
+          ERROR('');
+    END;
+
+    [EventSubscriber(Table,1800,OnHasTemplate)]
+    LOCAL PROCEDURE HasTemplate@13(VAR Sender@1000 : Record "Data Migrator Registration";VAR HasTemplate@1001 : Boolean);
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      HasTemplate := true;
+    END;
+
+    [EventSubscriber(Table,1800,OnGetInstructions)]
+    LOCAL PROCEDURE GetInstructions@9(VAR Sender@1000 : Record "Data Migrator Registration";VAR Instructions@1001 : Text;VAR Handled@1002 : Boolean);
+    VAR
+      CRLF@1003 : Text[2];
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      CRLF := '';
+      CRLF[1] := 13;
+      CRLF[2] := 10;
+
+      Instructions := Instruction1Txt + CRLF + Instruction2Txt + CRLF + Instruction3Txt;
+
+      Handled := true;
+    END;
+
+    [EventSubscriber(Table,1800,OnDownloadTemplate)]
+    LOCAL PROCEDURE DownloadTemplate@1(VAR Sender@1000 : Record "Data Migrator Registration";VAR Handled@1001 : Boolean);
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      if ExportExcelTemplate then begin
+        Handled := true;
+        exit;
+      end;
+    END;
+
+    [EventSubscriber(Table,1800,OnDataImport)]
+    LOCAL PROCEDURE ImportData@6(VAR Sender@1000 : Record "Data Migrator Registration";VAR Handled@1001 : Boolean);
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      if ImportExcelData then begin
+        Handled := true;
+        exit;
+      end;
+
+      Handled := false;
+    END;
+
+    [EventSubscriber(Table,1800,OnSelectDataToApply)]
+    LOCAL PROCEDURE SelectDataToApply@10(VAR Sender@1000 : Record "Data Migrator Registration";VAR DataMigrationEntity@1001 : Record "Data Migration Entity";VAR Handled@1002 : Boolean);
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      CreateDataMigrationEntites(DataMigrationEntity);
+
+      Handled := true;
+    END;
+
+    [EventSubscriber(Table,1800,OnHasAdvancedApply)]
+    LOCAL PROCEDURE HasAdvancedApply@20(VAR Sender@1000 : Record "Data Migrator Registration";VAR HasAdvancedApply@1001 : Boolean);
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      HasAdvancedApply := false;
+    END;
+
+    [EventSubscriber(Table,1800,OnOpenAdvancedApply)]
+    LOCAL PROCEDURE OpenAdvancedApply@19(VAR Sender@1000 : Record "Data Migrator Registration";VAR DataMigrationEntity@1001 : Record "Data Migration Entity";VAR Handled@1003 : Boolean);
+    VAR
+      ConfigPackage@1002 : Record "Config. Package";
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      if not CONFIRM(OpenAdvancedQst,true) then
+        exit;
+
+      ConfigPackage.GET(PackageCodeTxt);
+      PAGE.RUNMODAL(PAGE::"Config. Package Card",ConfigPackage);
+
+      CreateDataMigrationEntites(DataMigrationEntity);
+      Handled := true;
+    END;
+
+    [EventSubscriber(Table,1800,OnApplySelectedData)]
+    LOCAL PROCEDURE ApplySelectedData@7(VAR Sender@1000 : Record "Data Migrator Registration";VAR DataMigrationEntity@1001 : Record "Data Migration Entity";VAR Handled@1003 : Boolean);
+    VAR
+      ConfigPackage@1006 : Record "Config. Package";
+      ConfigPackageTable@1005 : Record "Config. Package Table";
+      ConfigPackageManagement@1002 : Codeunit "Config. Package Management";
+      Window@1004 : Dialog;
+      ErrorNo@1007 : Integer;
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      if DataMigrationEntity.FINDSET then
+        repeat
+          if not DataMigrationEntity.Selected then begin
+            ConfigPackageTable.GET(PackageCodeTxt,DataMigrationEntity."Table ID");
+            ConfigPackageTable.DELETE(true);
+          end else begin
+            ErrorNo := 0;
+            CheckBegBalTransactions(DataMigrationEntity."Table ID",ErrorNo);
+            if ErrorNo > 0 then begin
+              DisplayErrorMessage(ErrorNo);
+              exit;
+            end;
+          end;
+        until DataMigrationEntity.NEXT = 0;
+
+      ConfigPackage.GET(PackageCodeTxt);
+      ConfigPackageTable.SETRANGE("Package Code",ConfigPackage.Code);
+      Window.OPEN(ApplyingMsg);
+      RemoveDemoData(ConfigPackageTable);// Remove the demo data before importing Accounts(if any)
+      ConfigPackageManagement.ApplyPackage(ConfigPackage,ConfigPackageTable,true);
+      Window.CLOSE;
+      Handled := true;
+    END;
+
+    [EventSubscriber(Table,1800,OnHasErrors)]
+    LOCAL PROCEDURE HasErrors@22(VAR Sender@1000 : Record "Data Migrator Registration";VAR HasErrors@1001 : Boolean);
+    VAR
+      ConfigPackage@1002 : Record "Config. Package";
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      ConfigPackage.GET(PackageCodeTxt);
+      ConfigPackage.CALCFIELDS("No. of Errors");
+      HasErrors := ConfigPackage."No. of Errors" <> 0;
+    END;
+
+    [EventSubscriber(Table,1800,OnShowErrors)]
+    LOCAL PROCEDURE ShowErrors@21(VAR Sender@1000 : Record "Data Migrator Registration";VAR Handled@1001 : Boolean);
+    VAR
+      ConfigPackageError@1002 : Record "Config. Package Error";
+    BEGIN
+      if Sender."No." <> GetCodeunitNumber then
+        exit;
+
+      ConfigPackageError.SETRANGE("Package Code",PackageCodeTxt);
+      PAGE.RUNMODAL(PAGE::"Config. Package Errors",ConfigPackageError);
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnUploadFile@23(VAR ServerFileName@1000 : Text);
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnDownloadTemplate@31(VAR HideDialog@1000 : Boolean);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE CheckBegBalTransactions@27(TableID@1001 : Integer;VAR ErrorNo@1002 : Integer);
+    VAR
+      GLEntry@1007 : Record "G/L Entry";
+      ItemLedgerEntry@1008 : Record "Item Ledger Entry";
+      GenJournalLine@1003 : Record "Gen. Journal Line";
+      ItemJournalLine@1004 : Record "Item Journal Line";
+      CustLedgerEntry@1005 : Record "Cust. Ledger Entry";
+      VendLedgerEntry@1006 : Record "Vendor Ledger Entry";
+    BEGIN
+      if ErrorNo = 0 then
+        if TableID = 15 then begin
+          GLEntry.RESET;
+          GenJournalLine.RESET;
+          if GLEntry.FINDFIRST then
+            ErrorNo := 2// Already Beginning balance exists and G/L Accounts is selected
+          else
+            if GenJournalLine.FINDFIRST then
+              ErrorNo := 6;// Saved General Journal line exists.
+        end else begin
+          if TableID = 18 then begin // Customer
+            CustLedgerEntry.RESET;
+            GenJournalLine.RESET;
+            if CustLedgerEntry.FINDFIRST then
+              ErrorNo := 3// Already Customer is imported or transactions exists.
+            else
+              if GenJournalLine.FINDFIRST then
+                ErrorNo := 6;// Saved General Journal line exists.
+          end else
+            if TableID = 23 then begin // Vendor
+              VendLedgerEntry.RESET;
+              GenJournalLine.RESET;
+              if VendLedgerEntry.FINDFIRST then
+                ErrorNo := 4// Already Vendor is imported or transactions exists.
+              else
+                if GenJournalLine.FINDFIRST then
+                  ErrorNo := 6;// Saved General Journal line exists.
+            end else
+              if TableID = 27 then begin // Item
+                ItemLedgerEntry.RESET;
+                ItemJournalLine.RESET;
+                if ItemLedgerEntry.FINDFIRST then
+                  ErrorNo := 5// Already Item is imported or transactions exists.
+                else
+                  if ItemJournalLine.FINDFIRST then
+                    ErrorNo := 6;// Saved Item Journal line exists.
+              end
+        end;
+    END;
+
+    LOCAL PROCEDURE DisplayErrorMessage@30(ErrorNo@1001 : Integer);
+    BEGIN
+      case ErrorNo of
+        1:
+          MESSAGE(TransactionExistsMsg);
+        2:
+          MESSAGE(TransactionforGLExistsMsg);
+        3:
+          MESSAGE(TransactionforCustExistsMsg);
+        4:
+          MESSAGE(TransactionforVendExistsMsg);
+        5:
+          MESSAGE(TransactionforItemExistsMsg);
+        6:
+          MESSAGE(SavedJrnlLinesFoundMsg);
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertPackageTableAccount@14(VAR DataMigrationSetup@1002 : Record "Data Migration Setup");
+    VAR
+      ConfigPackageTable@1001 : Record "Config. Package Table";
+      ConfigTableProcessingRule@1000 : Record "Config. Table Processing Rule";
+    BEGIN
+      ConfigPackageManagement.InsertPackageTable(ConfigPackageTable,PackageCodeTxt,DATABASE::"G/L Account");
+      ConfigPackageTable."Data Template" := DataMigrationSetup."Default Account Template";
+      ConfigPackageTable.MODIFY;
+      ConfigPackageManagement.InsertProcessingRuleCustom(
+        ConfigTableProcessingRule,ConfigPackageTable,100000,CODEUNIT::"Excel Post Processor");
+    END;
+
+    LOCAL PROCEDURE InsertPackageFieldsAccount@28();
+    VAR
+      ConfigPackageField@1001 : Record "Config. Package Field";
+    BEGIN
+      ConfigPackageField.SETRANGE("Package Code",PackageCodeTxt);
+      ConfigPackageField.SETRANGE("Table ID",DATABASE::"G/L Account");
+      ConfigPackageField.DELETEALL(true);
+
+      InsertPackageField(DATABASE::"G/L Account",1,1);     // No.
+      InsertPackageField(DATABASE::"G/L Account",2,2);     // Name
+      InsertPackageField(DATABASE::"G/L Account",3,3);     // Search Name
+      InsertPackageField(DATABASE::"G/L Account",4,4);     // Account Type
+      InsertPackageField(DATABASE::"G/L Account",8,5);     // Account Category
+      InsertPackageField(DATABASE::"G/L Account",9,6);     // Income/Balance
+      InsertPackageField(DATABASE::"G/L Account",10,7);    // Debit/Credit
+      InsertPackageField(DATABASE::"G/L Account",13,8);    // Blocked
+      InsertPackageField(DATABASE::"G/L Account",43,9);   // Gen. Posting Type
+      InsertPackageField(DATABASE::"G/L Account",44,10);   // Gen. Bus. Posting Group
+      InsertPackageField(DATABASE::"G/L Account",45,11);   // Gen. Prod. Posting Group
+      InsertPackageField(DATABASE::"G/L Account",80,12);   // Account Subcategory Entry No.
+    END;
+
+    LOCAL PROCEDURE RemoveDemoData@25(VAR ConfigPackageTable@1002 : Record "Config. Package Table");
+    VAR
+      ConfigPackageData@1001 : Record "Config. Package Data";
+      ConfigPackageRecord@1000 : Record "Config. Package Record";
+    BEGIN
+      if ConfigPackageTable.GET(PackageCodeTxt,DATABASE::"G/L Account") then begin
+        ConfigPackageRecord.SETRANGE("Package Code",ConfigPackageTable."Package Code");
+        ConfigPackageRecord.SETRANGE("Table ID",ConfigPackageTable."Table ID");
+        if ConfigPackageRecord.FINDFIRST then begin
+          ConfigPackageData.SETRANGE("Package Code",ConfigPackageRecord."Package Code");
+          ConfigPackageData.SETRANGE("Table ID",ConfigPackageRecord."Table ID");
+          if ConfigPackageData.FINDFIRST then
+            CODEUNIT.RUN(CODEUNIT::"Data Migration Del G/L Account");
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertAccountsFieldData@36(TableNo@1000 : Integer;RecordNo@1001 : Integer;FieldNo@1002 : Integer;Value@1003 : Text[250]);
+    VAR
+      GLAccount@1005 : Record "G/L Account";
+    BEGIN
+      if FieldNo = 4 then begin
+        if Value = '0' then
+          InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Type"::Posting))
+        else
+          if Value = '1' then
+            InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Type"::Heading))
+          else
+            if Value = '2' then
+              InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Type"::Total))
+            else
+              if Value = '3' then
+                InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Type"::"Begin-Total"))
+              else
+                if Value = '4' then
+                  InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Type"::"End-Total"))
+      end else
+        if FieldNo = 8 then begin
+          if Value = '0' then
+            InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Category"::" "))
+          else
+            if Value = '1' then
+              InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Category"::Assets))
+            else
+              if Value = '2' then
+                InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Category"::Liabilities))
+              else
+                if Value = '3' then
+                  InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Category"::Equity))
+                else
+                  if Value = '4' then
+                    InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Category"::Income))
+                  else
+                    if Value = '5' then
+                      InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Category"::"Cost of Goods Sold"))
+                    else
+                      if Value = '6' then
+                        InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Account Category"::Expense))
+        end else
+          if FieldNo = 9 then begin
+            if Value = '0' then
+              InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Income/Balance"::"Income Statement"))
+            else
+              if Value = '1' then
+                InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Income/Balance"::"Balance Sheet"))
+          end else
+            if FieldNo = 10 then begin
+              if Value = '0' then
+                InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Debit/Credit"::Both))
+              else
+                if Value = '1' then
+                  InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Debit/Credit"::Debit))
+                else
+                  if Value = '2' then
+                    InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Debit/Credit"::Credit))
+            end else
+              if FieldNo = 43 then begin
+                if Value = '0' then
+                  InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Gen. Posting Type"::" "))
+                else
+                  if Value = '1' then
+                    InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Gen. Posting Type"::Purchase))
+                  else
+                    if Value = '2' then
+                      InsertFieldData(TableNo,RecordNo,FieldNo,FORMAT(GLAccount."Gen. Posting Type"::Sale))
+              end else
+                InsertFieldData(TableNo,RecordNo,FieldNo,Value)
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

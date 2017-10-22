@@ -1,0 +1,207 @@
+OBJECT Codeunit 63 Sales-Explode BOM
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Sales Line";
+    OnRun=BEGIN
+            TESTFIELD(Type,Type::Item);
+            TESTFIELD("Quantity Shipped",0);
+            TESTFIELD("Return Qty. Received",0);
+
+            CALCFIELDS("Reserved Qty. (Base)");
+            TESTFIELD("Reserved Qty. (Base)",0);
+            ReservMgt.SetSalesLine(Rec);
+            ReservMgt.SetItemTrackingHandling(1);
+            ReservMgt.DeleteReservEntries(true,0);
+
+            if "Purch. Order Line No." <> 0 then
+              ERROR(
+                Text000,
+                "Purchase Order No.");
+            if "Job Contract Entry No." <> 0 then begin
+              TESTFIELD("Job No.",'');
+              TESTFIELD("Job Contract Entry No.",0);
+            end;
+            SalesHeader.GET("Document Type","Document No.");
+            SalesHeader.TESTFIELD(Status,SalesHeader.Status::Open);
+            FromBOMComp.SETRANGE("Parent Item No.","No.");
+            NoOfBOMComp := FromBOMComp.COUNT;
+            if NoOfBOMComp = 0 then
+              ERROR(
+                Text001,
+                "No.");
+
+            Selection := STRMENU(Text004,2);
+            if Selection = 0 then
+              exit;
+
+            if "Document Type" in ["Document Type"::Order,"Document Type"::Invoice] then begin
+              ToSalesLine := Rec;
+              FromBOMComp.SETRANGE(Type,FromBOMComp.Type::Item);
+              FromBOMComp.SETFILTER("No.",'<>%1','');
+              if FromBOMComp.FINDSET then
+                repeat
+                  FromBOMComp.TESTFIELD(Type,FromBOMComp.Type::Item);
+                  Item.GET(FromBOMComp."No.");
+                  ToSalesLine."Line No." := 0;
+                  ToSalesLine."No." := FromBOMComp."No.";
+                  ToSalesLine."Variant Code" := FromBOMComp."Variant Code";
+                  ToSalesLine."Unit of Measure Code" := FromBOMComp."Unit of Measure Code";
+                  ToSalesLine."Qty. per Unit of Measure" := UOMMgt.GetQtyPerUnitOfMeasure(Item,FromBOMComp."Unit of Measure Code");
+                  ToSalesLine."Outstanding Quantity" := ROUND("Quantity (Base)" * FromBOMComp."Quantity per",0.00001);
+                  if ToSalesLine."Outstanding Quantity" > 0 then
+                    if ItemCheckAvail.SalesLineCheck(ToSalesLine) then
+                      ItemCheckAvail.RaiseUpdateInterruptedError;
+                until FromBOMComp.NEXT = 0;
+            end;
+
+            if "BOM Item No." = '' then
+              BOMItemNo := "No."
+            else
+              BOMItemNo := "BOM Item No.";
+
+            ToSalesLine := Rec;
+            ToSalesLine.INIT;
+            ToSalesLine.Description := Description;
+            ToSalesLine."Description 2" := "Description 2";
+            ToSalesLine."BOM Item No." := BOMItemNo;
+            ToSalesLine.MODIFY;
+
+            if TransferExtendedText.SalesCheckIfAnyExtText(ToSalesLine,false) then
+              TransferExtendedText.InsertSalesExtText(ToSalesLine);
+
+            ExplodeBOMCompLines(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=The BOM cannot be exploded on the sales lines because it is associated with purchase order %1.';
+      Text001@1001 : TextConst 'ENU=Item %1 is not a BOM.';
+      Text003@1002 : TextConst 'ENU=There is not enough space to explode the BOM.';
+      Text004@1003 : TextConst 'ENU=&Copy dimensions from BOM,&Retrieve dimensions from components';
+      ToSalesLine@1004 : Record "Sales Line";
+      FromBOMComp@1005 : Record "BOM Component";
+      SalesHeader@1006 : Record "Sales Header";
+      ItemTranslation@1007 : Record "Item Translation";
+      Item@1008 : Record Item;
+      ItemCheckAvail@1009 : Codeunit "Item-Check Avail.";
+      UOMMgt@1010 : Codeunit "Unit of Measure Management";
+      TransferExtendedText@1015 : Codeunit "Transfer Extended Text";
+      ReservMgt@1017 : Codeunit "Reservation Management";
+      BOMItemNo@1011 : Code[20];
+      LineSpacing@1012 : Integer;
+      NextLineNo@1013 : Integer;
+      NoOfBOMComp@1014 : Integer;
+      Selection@1016 : Integer;
+
+    LOCAL PROCEDURE ExplodeBOMCompLines@1(SalesLine@1000 : Record "Sales Line");
+    VAR
+      PreviousSalesLine@1003 : Record "Sales Line";
+      InsertLinesBetween@1001 : Boolean;
+    BEGIN
+      with SalesLine do begin
+        ToSalesLine.RESET;
+        ToSalesLine.SETRANGE("Document Type","Document Type");
+        ToSalesLine.SETRANGE("Document No.","Document No.");
+        ToSalesLine := SalesLine;
+        NextLineNo := "Line No.";
+        InsertLinesBetween := false;
+        if ToSalesLine.FIND('>') then
+          if ToSalesLine."Attached to Line No." = "Line No." then begin
+            ToSalesLine.SETRANGE("Attached to Line No.","Line No.");
+            ToSalesLine.FINDLAST;
+            ToSalesLine.SETRANGE("Attached to Line No.");
+            NextLineNo := ToSalesLine."Line No.";
+            InsertLinesBetween := ToSalesLine.FIND('>');
+          end else
+            InsertLinesBetween := true;
+        if InsertLinesBetween then
+          LineSpacing := (ToSalesLine."Line No." - NextLineNo) div (1 + NoOfBOMComp)
+        else
+          LineSpacing := 10000;
+        if LineSpacing = 0 then
+          ERROR(Text003);
+
+        FromBOMComp.RESET;
+        FromBOMComp.SETRANGE("Parent Item No.","No.");
+        FromBOMComp.FINDSET;
+        repeat
+          ToSalesLine.INIT;
+          NextLineNo := NextLineNo + LineSpacing;
+          ToSalesLine."Line No." := NextLineNo;
+          case FromBOMComp.Type of
+            FromBOMComp.Type::" ":
+              ToSalesLine.Type := ToSalesLine.Type::" ";
+            FromBOMComp.Type::Item:
+              ToSalesLine.Type := ToSalesLine.Type::Item;
+            FromBOMComp.Type::Resource:
+              ToSalesLine.Type := ToSalesLine.Type::Resource;
+          end;
+          if ToSalesLine.Type <> ToSalesLine.Type::" " then begin
+            FromBOMComp.TESTFIELD("No.");
+            ToSalesLine.VALIDATE("No.",FromBOMComp."No.");
+            if SalesHeader."Location Code" <> "Location Code" then
+              ToSalesLine.VALIDATE("Location Code","Location Code");
+            if FromBOMComp."Variant Code" <> '' then
+              ToSalesLine.VALIDATE("Variant Code",FromBOMComp."Variant Code");
+            if ToSalesLine.Type = ToSalesLine.Type::Item then begin
+              ToSalesLine."Drop Shipment" := "Drop Shipment";
+              Item.GET(FromBOMComp."No.");
+              ToSalesLine.VALIDATE("Unit of Measure Code",FromBOMComp."Unit of Measure Code");
+              ToSalesLine."Qty. per Unit of Measure" := UOMMgt.GetQtyPerUnitOfMeasure(Item,ToSalesLine."Unit of Measure Code");
+              ToSalesLine.VALIDATE(Quantity,
+                ROUND(
+                  "Quantity (Base)" * FromBOMComp."Quantity per" *
+                  UOMMgt.GetQtyPerUnitOfMeasure(Item,ToSalesLine."Unit of Measure Code") /
+                  ToSalesLine."Qty. per Unit of Measure",
+                  0.00001));
+            end else
+              ToSalesLine.VALIDATE(Quantity,"Quantity (Base)" * FromBOMComp."Quantity per");
+
+            if SalesHeader."Shipment Date" <> "Shipment Date" then
+              ToSalesLine.VALIDATE("Shipment Date","Shipment Date");
+          end;
+          if SalesHeader."Language Code" = '' then
+            ToSalesLine.Description := FromBOMComp.Description
+          else
+            if not ItemTranslation.GET(FromBOMComp."No.",FromBOMComp."Variant Code",SalesHeader."Language Code") then
+              ToSalesLine.Description := FromBOMComp.Description;
+
+          ToSalesLine."BOM Item No." := BOMItemNo;
+          ToSalesLine.INSERT;
+
+          if (ToSalesLine.Type = ToSalesLine.Type::Item) and (ToSalesLine.Reserve = ToSalesLine.Reserve::Always) then
+            ToSalesLine.AutoReserve;
+
+          if Selection = 1 then begin
+            ToSalesLine."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+            ToSalesLine."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+            ToSalesLine."Dimension Set ID" := "Dimension Set ID";
+            ToSalesLine.MODIFY;
+          end;
+
+          if PreviousSalesLine."Document No." <> '' then
+            if TransferExtendedText.SalesCheckIfAnyExtText(PreviousSalesLine,false) then
+              TransferExtendedText.InsertSalesExtText(PreviousSalesLine);
+
+          PreviousSalesLine := ToSalesLine;
+        until FromBOMComp.NEXT = 0;
+
+        if TransferExtendedText.SalesCheckIfAnyExtText(ToSalesLine,false) then
+          TransferExtendedText.InsertSalesExtText(ToSalesLine);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

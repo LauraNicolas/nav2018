@@ -1,0 +1,259 @@
+OBJECT Report 699 Calculate Plan - Req. Wksh.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Calculate Plan - Req. Wksh.;
+    ProcessingOnly=true;
+    OnPreReport=VAR
+                  ProductionForecastEntry@1000 : Record "Production Forecast Entry";
+                BEGIN
+                  Counter := 0;
+                  if FromDate = 0D then
+                    ERROR(Text002);
+                  if ToDate = 0D then
+                    ERROR(Text003);
+                  PeriodLength := ToDate - FromDate + 1;
+                  if PeriodLength <= 0 then
+                    ERROR(Text004);
+
+                  if (Item.GETFILTER("Variant Filter") <> '') and
+                     (MfgSetup."Current Production Forecast" <> '')
+                  then begin
+                    ProductionForecastEntry.SETRANGE("Production Forecast Name",MfgSetup."Current Production Forecast");
+                    Item.COPYFILTER("No.",ProductionForecastEntry."Item No.");
+                    if MfgSetup."Use Forecast on Locations" then
+                      Item.COPYFILTER("Location Filter",ProductionForecastEntry."Location Code");
+                    if not ProductionForecastEntry.ISEMPTY then
+                      ERROR(Text005);
+                  end;
+
+                  ReqLine.SETRANGE("Worksheet Template Name",CurrTemplateName);
+                  ReqLine.SETRANGE("Journal Batch Name",CurrWorksheetName);
+
+                  Window.OPEN(
+                    Text006 +
+                    Text007);
+                END;
+
+  }
+  DATASET
+  {
+    { 8129;    ;DataItem;Item                ;
+               DataItemTable=Item;
+               DataItemTableView=SORTING("Low-Level Code") WHERE(Type=CONST(Inventory));
+               OnPreDataItem=BEGIN
+                               SKU.SETCURRENTKEY("Item No.");
+                               COPYFILTER("Variant Filter",SKU."Variant Code");
+                               COPYFILTER("Location Filter",SKU."Location Code");
+
+                               COPYFILTER("Variant Filter",PlanningAssignment."Variant Code");
+                               COPYFILTER("Location Filter",PlanningAssignment."Location Code");
+                               PlanningAssignment.SETRANGE(Inactive,false);
+                               PlanningAssignment.SETRANGE("Net Change Planning",true);
+
+                               ReqLineExtern.SETCURRENTKEY(Type,"No.","Variant Code","Location Code");
+                               COPYFILTER("Variant Filter",ReqLineExtern."Variant Code");
+                               COPYFILTER("Location Filter",ReqLineExtern."Location Code");
+
+                               PurchReqLine.SETCURRENTKEY(
+                                 Type,"No.","Variant Code","Location Code","Sales Order No.","Planning Line Origin","Due Date");
+                               PurchReqLine.SETRANGE(Type,PurchReqLine.Type::Item);
+                               COPYFILTER("Variant Filter",PurchReqLine."Variant Code");
+                               COPYFILTER("Location Filter",PurchReqLine."Location Code");
+                               PurchReqLine.SETFILTER("Worksheet Template Name",ReqWkshTemplateFilter);
+                               PurchReqLine.SETFILTER("Journal Batch Name",ReqWkshFilter);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  if Counter mod 5 = 0 then
+                                    Window.UPDATE(1,"No.");
+                                  Counter := Counter + 1;
+
+                                  if SkipPlanningForItemOnReqWksh(Item) then
+                                    CurrReport.SKIP;
+
+                                  PlanningAssignment.SETRANGE("Item No.","No.");
+
+                                  ReqLine.LOCKTABLE;
+                                  ActionMessageEntry.LOCKTABLE;
+
+                                  PurchReqLine.SETRANGE("No.","No.");
+                                  PurchReqLine.MODIFYALL("Accept Action Message",false);
+                                  PurchReqLine.DELETEALL(true);
+
+                                  ReqLineExtern.SETRANGE(Type,ReqLine.Type::Item);
+                                  ReqLineExtern.SETRANGE("No.","No.");
+                                  if ReqLineExtern.FIND('-') then
+                                    repeat
+                                      ReqLineExtern.DELETE(true);
+                                    until ReqLineExtern.NEXT = 0;
+
+                                  InvtProfileOffsetting.SetParm(UseForecast,ExcludeForecastBefore,CurrWorksheetType);
+                                  InvtProfileOffsetting.CalculatePlanFromWorksheet(
+                                    Item,
+                                    MfgSetup,
+                                    CurrTemplateName,
+                                    CurrWorksheetName,
+                                    FromDate,
+                                    ToDate,
+                                    true,
+                                    RespectPlanningParm);
+
+                                  if PlanningAssignment.FIND('-') then
+                                    repeat
+                                      if PlanningAssignment."Latest Date" <= ToDate then begin
+                                        PlanningAssignment.Inactive := true;
+                                        PlanningAssignment.MODIFY;
+                                      end;
+                                    until PlanningAssignment.NEXT = 0;
+
+                                  COMMIT;
+                                END;
+
+               ReqFilterFields="No.","Search Description","Location Filter" }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=true;
+      OnOpenPage=BEGIN
+                   MfgSetup.GET;
+                   UseForecast := MfgSetup."Current Production Forecast";
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  Name=Container1900000001;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  Name=Options;
+                  CaptionML=ENU=Options }
+
+      { 1   ;2   ;Field     ;
+                  Name=StartingDate;
+                  CaptionML=ENU=Starting Date;
+                  ToolTipML=ENU=Specifies the date to use for new orders. This date is used to evaluate the inventory.;
+                  ApplicationArea=#Planning;
+                  SourceExpr=FromDate }
+
+      { 3   ;2   ;Field     ;
+                  Name=EndingDate;
+                  CaptionML=ENU=Ending Date;
+                  ToolTipML=ENU=Specifies the date where the planning period ends. Demand is not included beyond this date.;
+                  ApplicationArea=#Planning;
+                  SourceExpr=ToDate }
+
+      { 6   ;2   ;Field     ;
+                  Name=Use Forecast;
+                  CaptionML=ENU=Use Forecast;
+                  ToolTipML=ENU=Specifies a forecast that should be included as demand when running the planning batch job.;
+                  ApplicationArea=#Planning;
+                  SourceExpr=UseForecast;
+                  TableRelation="Production Forecast Name".Name }
+
+      { 7   ;2   ;Field     ;
+                  Name=Exclude Forecast Before;
+                  CaptionML=ENU=Exclude Forecast Before;
+                  ToolTipML=ENU=Specifies how much of the selected forecast to include, by entering a date before which forecast demand is not included.;
+                  ApplicationArea=#Planning;
+                  SourceExpr=ExcludeForecastBefore }
+
+      { 4   ;2   ;Field     ;
+                  Name=RespectPlanningParm;
+                  CaptionML=ENU=Respect Planning Parameters for Supply Triggered by Safety Stock;
+                  ToolTipML=ENU=Specifies that planning lines triggered by safety stock will respect the following planning parameters: Reorder Point, Reorder Quantity, Reorder Point, and Maximum Inventory in addition to all order modifiers. If you do not select this check box, planning lines triggered by safety stock will only cover the exact demand quantity.;
+                  ApplicationArea=#Planning;
+                  SourceExpr=RespectPlanningParm }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text002@1000 : TextConst 'ENU=Enter a starting date.';
+      Text003@1001 : TextConst 'ENU=Enter an ending date.';
+      Text004@1002 : TextConst 'ENU=The ending date must not be before the order date.';
+      Text005@1003 : TextConst 'ENU=You must not use a variant filter when calculating MPS from a forecast.';
+      Text006@1004 : TextConst 'ENU=Calculating the plan...\\';
+      Text007@1005 : TextConst 'ENU=Item No.  #1##################';
+      ReqLine@1006 : Record "Requisition Line";
+      ActionMessageEntry@1007 : Record "Action Message Entry";
+      ReqLineExtern@1008 : Record "Requisition Line";
+      PurchReqLine@1009 : Record "Requisition Line";
+      SKU@1010 : Record "Stockkeeping Unit";
+      PlanningAssignment@1012 : Record "Planning Assignment";
+      MfgSetup@1018 : Record "Manufacturing Setup";
+      InvtProfileOffsetting@1020 : Codeunit "Inventory Profile Offsetting";
+      Window@1015 : Dialog;
+      CurrWorksheetType@1022 : 'Requisition,Planning';
+      PeriodLength@1024 : Integer;
+      CurrTemplateName@1025 : Code[10];
+      CurrWorksheetName@1026 : Code[10];
+      FromDate@1027 : Date;
+      ToDate@1028 : Date;
+      ReqWkshTemplateFilter@1030 : Code[50];
+      ReqWkshFilter@1031 : Code[50];
+      Counter@1032 : Integer;
+      UseForecast@1014 : Code[10];
+      ExcludeForecastBefore@1013 : Date;
+      RespectPlanningParm@1011 : Boolean;
+
+    PROCEDURE SetTemplAndWorksheet@2(TemplateName@1000 : Code[10];WorksheetName@1001 : Code[10]);
+    BEGIN
+      CurrTemplateName := TemplateName;
+      CurrWorksheetName := WorksheetName;
+    END;
+
+    PROCEDURE InitializeRequest@1(StartDate@1000 : Date;EndDate@1001 : Date);
+    BEGIN
+      FromDate := StartDate;
+      ToDate := EndDate;
+    END;
+
+    LOCAL PROCEDURE SkipPlanningForItemOnReqWksh@3(Item@1000 : Record Item) : Boolean;
+    BEGIN
+      with Item do
+        if (CurrWorksheetType = CurrWorksheetType::Requisition) and
+           ("Replenishment System" = "Replenishment System"::Purchase) and
+           ("Reordering Policy" <> "Reordering Policy"::" ")
+        then
+          exit(false);
+
+      with SKU do begin
+        SETRANGE("Item No.",Item."No.");
+        if FIND('-') then
+          repeat
+            if (CurrWorksheetType = CurrWorksheetType::Requisition) and
+               ("Replenishment System" in ["Replenishment System"::Purchase,
+                                           "Replenishment System"::Transfer]) and
+               ("Reordering Policy" <> "Reordering Policy"::" ")
+            then
+              exit(false);
+          until NEXT = 0;
+      end;
+
+      exit(true);
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

@@ -1,0 +1,277 @@
+OBJECT Codeunit 5605 Calculate Disposal
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "FA Ledger Entry"=r,
+                TableData "Maintenance Ledger Entry"=r;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      FA@1000 : Record "Fixed Asset";
+      DeprBook@1001 : Record "Depreciation Book";
+      FADeprBook@1002 : Record "FA Depreciation Book";
+      DepreciationCalc@1003 : Codeunit "Depreciation Calculation";
+
+    [External]
+    PROCEDURE CalcGainLoss@2(FANo@1000 : Code[20];DeprBookCode@1001 : Code[10];VAR EntryAmounts@1002 : ARRAY [14] OF Decimal);
+    VAR
+      EntryAmounts2@1003 : ARRAY [4] OF Decimal;
+      GainLoss@1004 : Decimal;
+      I@1005 : Integer;
+    BEGIN
+      CLEARALL;
+      CLEAR(EntryAmounts);
+      DeprBook.GET(DeprBookCode);
+      FA.GET(FANo);
+      DepreciationCalc.CalcEntryAmounts(FANo,DeprBookCode,0D,0D,EntryAmounts2);
+      for I := 1 to 4 do
+        EntryAmounts[I + 4] := -EntryAmounts2[I];
+      with FADeprBook do begin
+        GET(FANo,DeprBookCode);
+        CALCFIELDS(
+          "Book Value","Proceeds on Disposal","Acquisition Cost","Salvage Value",Depreciation);
+        EntryAmounts[3] := -"Acquisition Cost";
+        EntryAmounts[4] := -Depreciation;
+        EntryAmounts[9] := -"Salvage Value";
+
+        if DeprBook."Disposal Calculation Method" = DeprBook."Disposal Calculation Method"::Gross then
+          EntryAmounts[10] := "Book Value";
+        GainLoss := "Book Value" + "Proceeds on Disposal";
+      end;
+      for I := 0 to 3 do
+        if not DepreciationCalc.GetPartOfCalculation(1,I,DeprBookCode) then begin
+          // 5..8 are disposal. 11..14 are bal. disposal
+          GainLoss := GainLoss + EntryAmounts[I + 5];
+          if DeprBook."Disposal Calculation Method" = DeprBook."Disposal Calculation Method"::Net then
+            EntryAmounts[I + 11] := -EntryAmounts[I + 5];
+        end;
+      if GainLoss <= 0 then
+        EntryAmounts[1] := GainLoss
+      else
+        EntryAmounts[2] := GainLoss;
+    END;
+
+    [External]
+    PROCEDURE CalcSecondGainLoss@7(FANo@1000 : Code[20];DeprBookCode@1001 : Code[10];LastDisposalPrice@1002 : Decimal;VAR EntryAmounts@1003 : ARRAY [14] OF Decimal);
+    VAR
+      NewGainLoss@1004 : Decimal;
+    BEGIN
+      CLEARALL;
+      CLEAR(EntryAmounts);
+      with FADeprBook do begin
+        GET(FANo,DeprBookCode);
+        CALCFIELDS("Gain/Loss");
+        NewGainLoss := LastDisposalPrice + "Gain/Loss";
+        if IdenticalSign(NewGainLoss,"Gain/Loss") then begin
+          if "Gain/Loss" <= 0 then
+            EntryAmounts[1] := LastDisposalPrice
+          else
+            EntryAmounts[2] := LastDisposalPrice
+        end else
+          if "Gain/Loss" <= 0 then begin
+            EntryAmounts[1] := -"Gain/Loss";
+            EntryAmounts[2] := NewGainLoss;
+          end else begin
+            EntryAmounts[2] := -"Gain/Loss";
+            EntryAmounts[1] := NewGainLoss;
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CalcReverseAmounts@6(FANo@1000 : Code[20];DeprBookCode@1001 : Code[10];VAR EntryAmounts@1002 : ARRAY [4] OF Decimal);
+    VAR
+      FAPostingTypeSetup@1003 : Record "FA Posting Type Setup";
+      FADeprBook@1004 : Record "FA Depreciation Book";
+      BookValueAmounts@1005 : ARRAY [4] OF Decimal;
+      i@1006 : Integer;
+    BEGIN
+      CLEAR(EntryAmounts);
+      FADeprBook.GET(FANo,DeprBookCode);
+      DepreciationCalc.CalcEntryAmounts(FANo,DeprBookCode,0D,0D,BookValueAmounts);
+      for i := 1 to 4 do begin
+        FAPostingTypeSetup.GET(DeprBookCode,i - 1);
+        if FAPostingTypeSetup."Part of Book Value" and
+           FAPostingTypeSetup."Reverse before Disposal"
+        then begin
+          if i = 1 then begin
+            FADeprBook.CALCFIELDS("Write-Down");
+            EntryAmounts[i] := -FADeprBook."Write-Down";
+          end;
+          if i = 2 then begin
+            FADeprBook.CALCFIELDS(Appreciation);
+            EntryAmounts[i] := -FADeprBook.Appreciation;
+          end;
+          if i = 3 then begin
+            FADeprBook.CALCFIELDS("Custom 1");
+            EntryAmounts[i] := -FADeprBook."Custom 1";
+          end;
+          if i = 4 then begin
+            FADeprBook.CALCFIELDS("Custom 2");
+            EntryAmounts[i] := -FADeprBook."Custom 2";
+          end;
+          if EntryAmounts[i] + BookValueAmounts[i] <> 0 then
+            FAPostingTypeSetup.TESTFIELD("Reverse before Disposal",false);
+        end;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE GetDisposalType@4(FANo@1000 : Code[20];DeprBookCode@1001 : Code[10];ErrorNo@1002 : Integer;VAR DisposalType@1003 : 'FirstDisposal,SecondDisposal,ErrorDisposal,LastErrorDisposal';VAR DisposalMethod@1004 : '" ",Net,Gross';VAR MaxDisposalNo@1005 : Integer;VAR SalesEntryNo@1006 : Integer);
+    VAR
+      FALedgEntry@1007 : Record "FA Ledger Entry";
+      DeprBook@1008 : Record "Depreciation Book";
+    BEGIN
+      CLEARALL;
+      MaxDisposalNo := 0;
+      SalesEntryNo := 0;
+      DisposalType := DisposalType::FirstDisposal;
+      with FALedgEntry do begin
+        DepreciationCalc.SetFAFilter(FALedgEntry,FANo,DeprBookCode,true);
+        SETRANGE("FA Posting Type","FA Posting Type"::"Proceeds on Disposal");
+        if FIND('-') then begin
+          repeat
+            DisposalMethod := "Disposal Calculation Method";
+            if "Disposal Entry No." > MaxDisposalNo then begin
+              MaxDisposalNo := "Disposal Entry No.";
+              SalesEntryNo := "Entry No.";
+            end;
+          until NEXT = 0;
+          if ErrorNo = 0 then begin
+            DeprBook.GET(DeprBookCode);
+            DeprBook.TESTFIELD("Allow Correction of Disposal");
+            DisposalType := DisposalType::SecondDisposal;
+          end else begin
+            if MaxDisposalNo = 1 then
+              DisposalType := DisposalType::LastErrorDisposal
+            else
+              DisposalType := DisposalType::ErrorDisposal;
+          end;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetErrorDisposal@11(FANo@1000 : Code[20];DeprBookCode@1001 : Code[10];OnlyGainLoss@1002 : Boolean;MaxDisposalNo@1006 : Integer;VAR EntryAmounts@1003 : ARRAY [14] OF Decimal;VAR EntryNumbers@1004 : ARRAY [14] OF Integer);
+    VAR
+      FALedgEntry@1005 : Record "FA Ledger Entry";
+      i@1007 : Integer;
+    BEGIN
+      CLEARALL;
+      CLEAR(EntryNumbers);
+      with FALedgEntry do begin
+        DepreciationCalc.SetFAFilter(FALedgEntry,FANo,DeprBookCode,true);
+        SETRANGE("FA Posting Type","FA Posting Type"::"Gain/Loss");
+        if FIND('-') then
+          repeat
+            if "Disposal Entry No." = MaxDisposalNo then begin
+              if "Result on Disposal" = "Result on Disposal"::Gain then begin
+                EntryAmounts[1] := -Amount;
+                EntryNumbers[1] := "Entry No.";
+              end;
+              if "Result on Disposal" = "Result on Disposal"::Loss then begin
+                EntryAmounts[2] := -Amount;
+                EntryNumbers[2] := "Entry No.";
+              end;
+            end;
+          until NEXT = 0;
+        if not OnlyGainLoss then
+          for i := 3 to 14 do begin
+            SETRANGE("FA Posting Category",SetFAPostingCategory(i));
+            SETRANGE("FA Posting Type",SetFAPostingType(i));
+            if FIND('-') then begin
+              EntryNumbers[i] := "Entry No.";
+              EntryAmounts[i] := -Amount;
+            end;
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE IdenticalSign@1(A@1000 : Decimal;B@1001 : Decimal) : Boolean;
+    BEGIN
+      exit(((A <= 0) and (B <= 0)) or ((A >= 0) and (B >= 0)) );
+    END;
+
+    [External]
+    PROCEDURE SetFAPostingType@5(i@1000 : Integer) : Integer;
+    VAR
+      FALedgEntry@1001 : Record "FA Ledger Entry";
+    BEGIN
+      with FALedgEntry do begin
+        case i of
+          1,2:
+            "FA Posting Type" := "FA Posting Type"::"Gain/Loss";
+          3:
+            "FA Posting Type" := "FA Posting Type"::"Acquisition Cost";
+          4:
+            "FA Posting Type" := "FA Posting Type"::Depreciation;
+          5,11:
+            "FA Posting Type" := "FA Posting Type"::"Write-Down";
+          6,12:
+            "FA Posting Type" := "FA Posting Type"::Appreciation;
+          7,13:
+            "FA Posting Type" := "FA Posting Type"::"Custom 1";
+          8,14:
+            "FA Posting Type" := "FA Posting Type"::"Custom 2";
+          9:
+            "FA Posting Type" := "FA Posting Type"::"Salvage Value";
+          10:
+            "FA Posting Type" := "FA Posting Type"::"Book Value on Disposal";
+        end;
+        exit("FA Posting Type");
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetFAPostingCategory@3(i@1000 : Integer) : Integer;
+    VAR
+      FALedgEntry@1001 : Record "FA Ledger Entry";
+    BEGIN
+      with FALedgEntry do begin
+        case i of
+          1..2:
+            "FA Posting Category" := "FA Posting Category"::" ";
+          3..10:
+            "FA Posting Category" := "FA Posting Category"::Disposal;
+          11..14:
+            "FA Posting Category" := "FA Posting Category"::"Bal. Disposal";
+        end;
+        exit("FA Posting Category");
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetReverseType@8(i@1000 : Integer) : Integer;
+    VAR
+      FALedgEntry@1001 : Record "FA Ledger Entry";
+    BEGIN
+      with FALedgEntry do begin
+        case i of
+          1:
+            "FA Posting Type" := "FA Posting Type"::"Write-Down";
+          2:
+            "FA Posting Type" := "FA Posting Type"::Appreciation;
+          3:
+            "FA Posting Type" := "FA Posting Type"::"Custom 1";
+          4:
+            "FA Posting Type" := "FA Posting Type"::"Custom 2";
+        end;
+        exit("FA Posting Type");
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -2,9 +2,9 @@ OBJECT Page 5475 Sales Invoice Entity
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -13,6 +13,10 @@ OBJECT Page 5475 Sales Invoice Entity
     SourceTable=Table5475;
     DelayedInsert=Yes;
     PageType=API;
+    OnOpenPage=BEGIN
+                 SetPermissionFilters;
+               END;
+
     OnAfterGetRecord=VAR
                        SalesInvoiceAggregator@1001 : Codeunit 5477;
                      BEGIN
@@ -27,12 +31,15 @@ OBJECT Page 5475 Sales Invoice Entity
     OnInsertRecord=VAR
                      SalesInvoiceAggregator@1002 : Codeunit 5477;
                    BEGIN
+                     CheckCustomerSpecified;
                      ProcessBillingPostalAddress;
 
                      SalesInvoiceAggregator.PropagateOnInsert(Rec,TempFieldBuffer);
-                     SetCalculatedFields;
+                     SetDates;
 
-                     SalesInvoiceAggregator.RedistributeInvoiceDiscounts(Rec);
+                     UpdateDiscount;
+
+                     SetCalculatedFields;
 
                      EXIT(FALSE);
                    END;
@@ -46,10 +53,9 @@ OBJECT Page 5475 Sales Invoice Entity
                      ProcessBillingPostalAddress;
 
                      SalesInvoiceAggregator.PropagateOnModify(Rec,TempFieldBuffer);
+                     UpdateDiscount;
 
                      SetCalculatedFields;
-
-                     SalesInvoiceAggregator.RedistributeInvoiceDiscounts(Rec);
 
                      EXIT(FALSE);
                    END;
@@ -95,6 +101,17 @@ OBJECT Page 5475 Sales Invoice Entity
                            END;
                             }
 
+    { 23  ;2   ;Field     ;
+                Name=externalDocumentNumber;
+                CaptionML=[@@@={Locked};
+                           ENU=externalDocumentNumber];
+                ApplicationArea=#All;
+                SourceExpr="External Document No.";
+                OnValidate=BEGIN
+                             RegisterFieldSet(FIELDNO("External Document No."));
+                           END;
+                            }
+
     { 17  ;2   ;Field     ;
                 Name=invoiceDate;
                 CaptionML=[@@@={Locked};
@@ -102,18 +119,23 @@ OBJECT Page 5475 Sales Invoice Entity
                 ApplicationArea=#All;
                 SourceExpr="Document Date";
                 OnValidate=BEGIN
+                             DocumentDateVar := "Document Date";
+                             DocumentDateSet := TRUE;
+
                              RegisterFieldSet(FIELDNO("Document Date"));
-                             WORKDATE("Document Date"); // TODO: replicate page logic and set other dates appropriately
                            END;
                             }
 
-    { 23  ;2   ;Field     ;
+    { 31  ;2   ;Field     ;
                 Name=dueDate;
                 CaptionML=[@@@={Locked};
                            ENU=dueDate];
                 ApplicationArea=#All;
                 SourceExpr="Due Date";
                 OnValidate=BEGIN
+                             DueDateVar := "Due Date";
+                             DueDateSet := TRUE;
+
                              RegisterFieldSet(FIELDNO("Due Date"));
                            END;
                             }
@@ -162,7 +184,7 @@ OBJECT Page 5475 Sales Invoice Entity
                              IF "Contact Graph Id" = '' THEN
                                ERROR(ContactIdHasToHaveValueErr);
 
-                             IF NOT GraphIntContact.FindCustomerFromGraphContact("Contact Graph Id",Customer,Contact) THEN
+                             IF NOT GraphIntContact.FindOrCreateCustomerFromGraphContactSafe("Contact Graph Id",Customer,Contact) THEN
                                EXIT;
 
                              UpdateCustomerFromGraphContactId(Customer);
@@ -184,8 +206,11 @@ OBJECT Page 5475 Sales Invoice Entity
                 ApplicationArea=#All;
                 SourceExpr="Sell-to Customer No.";
                 OnValidate=BEGIN
-                             IF Customer."No." <> '' THEN
+                             IF Customer."No." <> '' THEN BEGIN
+                               IF Customer."No." <> "Sell-to Customer No." THEN
+                                 ERROR(CustomerValuesDontMatchErr);
                                EXIT;
+                             END;
 
                              IF NOT Customer.GET("Sell-to Customer No.") THEN
                                ERROR(CouldNotFindCustomerErr);
@@ -217,6 +242,28 @@ OBJECT Page 5475 Sales Invoice Entity
 
                 ODataEDMType=POSTALADDRESS }
 
+    { 27  ;2   ;Field     ;
+                Name=currencyId;
+                CaptionML=[@@@={Locked};
+                           ENU=CurrencyId];
+                ApplicationArea=#All;
+                SourceExpr="Currency Id";
+                OnValidate=BEGIN
+                             IF "Currency Id" = BlankGUID THEN
+                               "Currency Code" := ''
+                             ELSE BEGIN
+                               Currency.SETRANGE(Id,"Currency Id");
+                               IF NOT Currency.FINDFIRST THEN
+                                 ERROR(CurrencyIdDoesNotMatchACurrencyErr);
+
+                               "Currency Code" := Currency.Code;
+                             END;
+
+                             RegisterFieldSet(FIELDNO("Currency Id"));
+                             RegisterFieldSet(FIELDNO("Currency Code"));
+                           END;
+                            }
+
     { 22  ;2   ;Field     ;
                 Name=currencyCode;
                 CaptionML=[@@@={Locked};
@@ -227,6 +274,23 @@ OBJECT Page 5475 Sales Invoice Entity
                              "Currency Code" :=
                                GraphMgtGeneralTools.TranslateCurrencyCodeToNAVCurrencyCode(
                                  LCYCurrencyCode,COPYSTR(CurrencyCodeTxt,1,MAXSTRLEN(LCYCurrencyCode)));
+
+                             IF Currency.Code <> '' THEN BEGIN
+                               IF Currency.Code <> "Currency Code" THEN
+                                 ERROR(CurrencyValuesDontMatchErr);
+                               EXIT;
+                             END;
+
+                             IF "Currency Code" = '' THEN
+                               "Currency Id" := BlankGUID
+                             ELSE BEGIN
+                               IF NOT Currency.GET("Currency Code") THEN
+                                 ERROR(CurrencyCodeDoesNotMatchACurrencyErr);
+
+                               "Currency Id" := Currency.Id;
+                             END;
+
+                             RegisterFieldSet(FIELDNO("Currency Id"));
                              RegisterFieldSet(FIELDNO("Currency Code"));
                            END;
                             }
@@ -247,14 +311,74 @@ OBJECT Page 5475 Sales Invoice Entity
                 SourceExpr="Order No.";
                 Editable=False }
 
-    { 5   ;2   ;Field     ;
+    { 30  ;2   ;Field     ;
+                Name=paymentTermsId;
+                CaptionML=[@@@={Locked};
+                           ENU=PaymentTermsId];
+                ApplicationArea=#All;
+                SourceExpr="Payment Terms Id";
+                OnValidate=BEGIN
+                             IF "Payment Terms Id" = BlankGUID THEN
+                               "Payment Terms Code" := ''
+                             ELSE BEGIN
+                               PaymentTerms.SETRANGE(Id,"Payment Terms Id");
+                               IF NOT PaymentTerms.FINDFIRST THEN
+                                 ERROR(PaymentTermsIdDoesNotMatchAPaymentTermsErr);
+
+                               "Payment Terms Code" := PaymentTerms.Code;
+                             END;
+
+                             RegisterFieldSet(FIELDNO("Payment Terms Id"));
+                             RegisterFieldSet(FIELDNO("Payment Terms Code"));
+                           END;
+                            }
+
+    { 29  ;2   ;Field     ;
                 Name=paymentTerms;
                 CaptionML=[@@@={Locked};
                            ENU=paymentTerms];
                 ApplicationArea=#All;
                 SourceExpr="Payment Terms Code";
                 OnValidate=BEGIN
+                             IF PaymentTerms.Code <> '' THEN BEGIN
+                               IF PaymentTerms.Code <> "Payment Terms Code" THEN
+                                 ERROR(PaymentTermsValuesDontMatchErr);
+                               EXIT;
+                             END;
+
+                             IF "Payment Terms Code" = '' THEN
+                               "Payment Terms Id" := BlankGUID
+                             ELSE BEGIN
+                               IF NOT PaymentTerms.GET("Payment Terms Code") THEN
+                                 ERROR(PaymentTermsCodeDoesNotMatchAPaymentTermsErr);
+
+                               "Payment Terms Id" := PaymentTerms.Id;
+                             END;
+
+                             RegisterFieldSet(FIELDNO("Payment Terms Id"));
                              RegisterFieldSet(FIELDNO("Payment Terms Code"));
+                           END;
+                            }
+
+    { 5   ;2   ;Field     ;
+                Name=shipmentMethodId;
+                CaptionML=[@@@={Locked};
+                           ENU=ShipmentMethodId];
+                ApplicationArea=#All;
+                SourceExpr="Shipment Method Id";
+                OnValidate=BEGIN
+                             IF "Shipment Method Id" = BlankGUID THEN
+                               "Shipment Method Code" := ''
+                             ELSE BEGIN
+                               ShipmentMethod.SETRANGE(Id,"Shipment Method Id");
+                               IF NOT ShipmentMethod.FINDFIRST THEN
+                                 ERROR(ShipmentMethodIdDoesNotMatchAShipmentMethodErr);
+
+                               "Shipment Method Code" := ShipmentMethod.Code;
+                             END;
+
+                             RegisterFieldSet(FIELDNO("Shipment Method Id"));
+                             RegisterFieldSet(FIELDNO("Shipment Method Code"));
                            END;
                             }
 
@@ -265,6 +389,22 @@ OBJECT Page 5475 Sales Invoice Entity
                 ApplicationArea=#All;
                 SourceExpr="Shipment Method Code";
                 OnValidate=BEGIN
+                             IF ShipmentMethod.Code <> '' THEN BEGIN
+                               IF ShipmentMethod.Code <> "Shipment Method Code" THEN
+                                 ERROR(ShipmentMethodValuesDontMatchErr);
+                               EXIT;
+                             END;
+
+                             IF "Shipment Method Code" = '' THEN
+                               "Shipment Method Id" := BlankGUID
+                             ELSE BEGIN
+                               IF NOT ShipmentMethod.GET("Shipment Method Code") THEN
+                                 ERROR(ShipmentMethodCodeDoesNotMatchAShipmentMethodErr);
+
+                               "Shipment Method Id" := ShipmentMethod.Id;
+                             END;
+
+                             RegisterFieldSet(FIELDNO("Shipment Method Id"));
                              RegisterFieldSet(FIELDNO("Shipment Method Code"));
                            END;
                             }
@@ -309,6 +449,8 @@ OBJECT Page 5475 Sales Invoice Entity
                 SourceExpr="Invoice Discount Amount";
                 OnValidate=BEGIN
                              RegisterFieldSet(FIELDNO("Invoice Discount Amount"));
+                             InvoiceDiscountAmount := "Invoice Discount Amount";
+                             DiscountAmountSet := TRUE;
                            END;
                             }
 
@@ -317,7 +459,8 @@ OBJECT Page 5475 Sales Invoice Entity
                 CaptionML=[@@@={Locked};
                            ENU=discountAppliedBeforeTax];
                 ApplicationArea=#All;
-                SourceExpr="Discount Applied Before Tax" }
+                SourceExpr="Discount Applied Before Tax";
+                Editable=FALSE }
 
     { 9   ;2   ;Field     ;
                 Name=totalAmountExcludingTax;
@@ -376,13 +519,36 @@ OBJECT Page 5475 Sales Invoice Entity
       CannotChangeIDErr@1004 : TextConst '@@@={Locked};ENU=The id cannot be changed.';
       TempFieldBuffer@1001 : TEMPORARY Record 8450;
       Customer@1003 : Record 18;
+      Currency@1014 : Record 4;
+      PaymentTerms@1016 : Record 3;
+      ShipmentMethod@1017 : Record 10;
       GraphMgtGeneralTools@1009 : Codeunit 5465;
       LCYCurrencyCode@1008 : Code[10];
       CurrencyCodeTxt@1006 : Text;
       BillingPostalAddressJSONText@1002 : Text;
       BillingPostalAddressSet@1000 : Boolean;
+      CustomerNotProvidedErr@1010 : TextConst '@@@={Locked};ENU=A customerNumber or a customerId must be provided.';
+      CustomerValuesDontMatchErr@1024 : TextConst '@@@={Locked};ENU=The customer values do not match to a specific Customer.';
       CouldNotFindCustomerErr@1005 : TextConst '@@@={Locked};ENU=The customer cannot be found.';
-      ContactIdHasToHaveValueErr@1007 : TextConst 'ENU=Contact Id must have a value set.';
+      ContactIdHasToHaveValueErr@1007 : TextConst '@@@={Locked};ENU=Contact Id must have a value set.';
+      CurrencyValuesDontMatchErr@1013 : TextConst '@@@={Locked};ENU=The currency values do not match to a specific Currency.';
+      CurrencyIdDoesNotMatchACurrencyErr@1012 : TextConst '@@@={Locked};ENU=The "currencyId" does not match to a Currency.';
+      CurrencyCodeDoesNotMatchACurrencyErr@1011 : TextConst '@@@={Locked};ENU=The "currencyCode" does not match to a Currency.';
+      BlankGUID@1015 : GUID;
+      PaymentTermsValuesDontMatchErr@1023 : TextConst '@@@={Locked};ENU=The payment terms values do not match to a specific Payment Terms.';
+      PaymentTermsIdDoesNotMatchAPaymentTermsErr@1022 : TextConst '@@@={Locked};ENU=The "paymentTermsId" does not match to a Payment Terms.';
+      PaymentTermsCodeDoesNotMatchAPaymentTermsErr@1021 : TextConst '@@@={Locked};ENU=The "paymentTermsCode" does not match to a Payment Terms.';
+      ShipmentMethodValuesDontMatchErr@1020 : TextConst '@@@={Locked};ENU=The shipment method values do not match to a specific Shipment Method.';
+      ShipmentMethodIdDoesNotMatchAShipmentMethodErr@1019 : TextConst '@@@={Locked};ENU=The "shipmentMethodId" does not match to a Shipment Method.';
+      ShipmentMethodCodeDoesNotMatchAShipmentMethodErr@1018 : TextConst '@@@={Locked};ENU=The "shipmentMethodCode" does not match to a Shipment Method.';
+      DiscountAmountSet@1025 : Boolean;
+      InvoiceDiscountAmount@1026 : Decimal;
+      DocumentDateSet@1030 : Boolean;
+      DocumentDateVar@1029 : Date;
+      DueDateSet@1028 : Boolean;
+      DueDateVar@1027 : Date;
+      DraftInvoiceActionErr@1031 : TextConst '@@@={Locked};ENU=The action can be applied to a draft invoice only.';
+      CannotFindInvoiceErr@1032 : TextConst '@@@={Locked};ENU=The invoice cannot be found.';
 
     LOCAL PROCEDURE SetCalculatedFields@6();
     VAR
@@ -395,6 +561,8 @@ OBJECT Page 5475 Sales Invoice Entity
     LOCAL PROCEDURE ClearCalculatedFields@10();
     BEGIN
       CLEAR(BillingPostalAddressJSONText);
+      CLEAR(InvoiceDiscountAmount);
+      CLEAR(DiscountAmountSet);
       TempFieldBuffer.DELETEALL;
     END;
 
@@ -411,6 +579,14 @@ OBJECT Page 5475 Sales Invoice Entity
       TempFieldBuffer."Table ID" := DATABASE::"Sales Invoice Entity Aggregate";
       TempFieldBuffer."Field ID" := FieldNo;
       TempFieldBuffer.INSERT;
+    END;
+
+    LOCAL PROCEDURE CheckCustomerSpecified@1();
+    BEGIN
+      IF ("Sell-to Customer No." = '') AND
+         ("Customer Id" = BlankGUID)
+      THEN
+        ERROR(CustomerNotProvidedErr);
     END;
 
     LOCAL PROCEDURE ProcessBillingPostalAddress@5();
@@ -459,6 +635,118 @@ OBJECT Page 5475 Sales Invoice Entity
         RegisterFieldSet(FIELDNO("Customer Id"));
         RegisterFieldSet(FIELDNO("Sell-to Customer No."));
       END;
+    END;
+
+    LOCAL PROCEDURE SetPermissionFilters@4();
+    VAR
+      SalesHeader@1001 : Record 36;
+      SalesInvoiceHeader@1000 : Record 112;
+      FilterText@1002 : Text;
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Invoice);
+      IF NOT SalesHeader.READPERMISSION THEN
+        FilterText :=
+          STRSUBSTNO('<>%1&<>%2',Status::Draft,Status::"In Review");
+
+      IF NOT SalesInvoiceHeader.READPERMISSION THEN BEGIN
+        IF FilterText <> '' THEN
+          FilterText += '&';
+        FilterText +=
+          STRSUBSTNO(
+            '<>%1&<>%2&<>%3&<>%4',Status::Canceled,Status::Corrective,
+            Status::Open,Status::Paid);
+      END;
+
+      IF FilterText <> '' THEN BEGIN
+        FILTERGROUP(2);
+        SETFILTER(Status,FilterText);
+        FILTERGROUP(0);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateDiscount@3();
+    VAR
+      SalesHeader@1002 : Record 36;
+      SalesInvoiceAggregator@1001 : Codeunit 5477;
+      SalesCalcDiscountByType@1000 : Codeunit 56;
+    BEGIN
+      IF Posted THEN
+        EXIT;
+
+      IF NOT DiscountAmountSet THEN BEGIN
+        SalesInvoiceAggregator.RedistributeInvoiceDiscounts(Rec);
+        EXIT;
+      END;
+
+      SalesHeader.GET("Document Type"::Invoice,"No.");
+      SalesCalcDiscountByType.ApplyInvDiscBasedOnAmt(InvoiceDiscountAmount,SalesHeader);
+    END;
+
+    LOCAL PROCEDURE SetDates@8();
+    VAR
+      SalesInvoiceAggregator@1000 : Codeunit 5477;
+    BEGIN
+      IF NOT (DueDateSet OR DocumentDateSet) THEN
+        EXIT;
+
+      TempFieldBuffer.RESET;
+      TempFieldBuffer.DELETEALL;
+
+      IF DocumentDateSet THEN BEGIN
+        "Document Date" := DocumentDateVar;
+        RegisterFieldSet(FIELDNO("Document Date"));
+      END;
+
+      IF DueDateSet THEN BEGIN
+        "Due Date" := DueDateVar;
+        RegisterFieldSet(FIELDNO("Due Date"));
+      END;
+
+      SalesInvoiceAggregator.PropagateOnModify(Rec,TempFieldBuffer);
+      FIND;
+    END;
+
+    LOCAL PROCEDURE GetDraftInvoice@36(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+      IF Posted THEN
+        ERROR(DraftInvoiceActionErr);
+
+      SalesHeader.SETRANGE(Id,Id);
+      IF NOT SalesHeader.FINDFIRST THEN
+        ERROR(CannotFindInvoiceErr);
+    END;
+
+    LOCAL PROCEDURE PostInvoice@20(VAR SalesHeader@1001 : Record 36;VAR SalesInvoiceHeader@1000 : Record 112);
+    VAR
+      LinesInstructionMgt@1005 : Codeunit 1320;
+      PreAssignedNo@1006 : Code[20];
+    BEGIN
+      LinesInstructionMgt.SalesCheckAllLinesHaveQuantityAssigned(SalesHeader);
+      PreAssignedNo := SalesHeader."No.";
+      SalesHeader.SendToPosting(CODEUNIT::"Sales-Post");
+      SalesInvoiceHeader.SETCURRENTKEY("Pre-Assigned No.");
+      SalesInvoiceHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      SalesInvoiceHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SetActionResponse@47(VAR ActionContext@1004 : DotNet "'Microsoft.Dynamics.Nav.Ncl, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Runtime.WebServiceActionContext";InvoiceId@1000 : GUID);
+    VAR
+      ODataActionManagement@1003 : Codeunit 6711;
+    BEGIN
+      ODataActionManagement.AddKey(FIELDNO(Id),InvoiceId);
+      ODataActionManagement.SetDeleteResponseLocation(ActionContext,PAGE::"Sales Invoice Entity");
+    END;
+
+    [ServiceEnabled]
+    [External]
+    PROCEDURE Post@18(VAR ActionContext@1000 : DotNet "'Microsoft.Dynamics.Nav.Ncl, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Runtime.WebServiceActionContext");
+    VAR
+      SalesHeader@1001 : Record 36;
+      SalesInvoiceHeader@1002 : Record 112;
+    BEGIN
+      GetDraftInvoice(SalesHeader);
+      PostInvoice(SalesHeader,SalesInvoiceHeader);
+      SetActionResponse(ActionContext,SalesInvoiceHeader.Id);
     END;
 
     BEGIN

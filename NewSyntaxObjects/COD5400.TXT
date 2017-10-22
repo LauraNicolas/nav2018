@@ -1,0 +1,176 @@
+OBJECT Codeunit 5400 Available Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+
+    [External]
+    PROCEDURE ExpectedQtyOnHand@7(VAR Item@1000 : Record Item;CalcAvailable@1002 : Boolean;ExtraNetNeed@1003 : Decimal;VAR Available@1004 : Decimal;PlannedOrderReceiptDate@1005 : Date) : Decimal;
+    VAR
+      CopyOfItem@1006 : Record Item;
+    BEGIN
+      CopyOfItem.COPY(Item);
+
+      Available := 0;
+      if CalcAvailable then
+        Available := CalcAvailableQty(Item,true,PlannedOrderReceiptDate) - ExtraNetNeed;
+      Item.COPY(CopyOfItem);
+      exit(CalcAvailableQty(Item,false,0D) - ExtraNetNeed);
+    END;
+
+    LOCAL PROCEDURE CalcAvailableQty@3(VAR Item@1000 : Record Item;CalcAvailable@1003 : Boolean;PlannedOrderReceiptDate@1001 : Date) : Decimal;
+    VAR
+      CopyOfItem@1004 : Record Item;
+      JobPlanningLine@1002 : Record "Job Planning Line";
+    BEGIN
+      CopyOfItem.COPY(Item);
+      with CopyOfItem do begin
+        SETRANGE("Date Filter",0D,GETRANGEMAX("Date Filter"));
+        CALCFIELDS(
+          "Qty. on Purch. Order",
+          "Scheduled Receipt (Qty.)",
+          "Trans. Ord. Receipt (Qty.)",
+          "Planned Order Receipt (Qty.)",
+          "Qty. on Sales Return");
+
+        if GETFILTER("Location Filter") <> '' then
+          CALCFIELDS("Qty. in Transit");
+
+        if CalcAvailable then
+          SETRANGE("Date Filter",0D,PlannedOrderReceiptDate);
+        CALCFIELDS(
+          "Qty. on Sales Order",
+          "Scheduled Need (Qty.)",
+          "Trans. Ord. Shipment (Qty.)",
+          "Qty. on Service Order",
+          "Qty. on Assembly Order",
+          "Qty. on Purch. Return");
+
+        if JobPlanningLine.READPERMISSION then
+          CALCFIELDS("Qty. on Job Order");
+
+        exit(
+          Inventory +
+          "Qty. on Purch. Order" -
+          "Qty. on Sales Order" -
+          "Scheduled Need (Qty.)" +
+          "Planned Order Receipt (Qty.)" +
+          "Scheduled Receipt (Qty.)" -
+          "Trans. Ord. Shipment (Qty.)" +
+          "Qty. in Transit" +
+          "Trans. Ord. Receipt (Qty.)" -
+          "Qty. on Service Order" -
+          "Qty. on Job Order" -
+          "Qty. on Purch. Return" +
+          "Qty. on Assembly Order" +
+          "Qty. on Sales Return");
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetItemReorderQty@5(Item@1001 : Record Item;QtyAvailable@1003 : Decimal) ReorderQty@1000 : Decimal;
+    BEGIN
+      if Item."Reordering Policy" = Item."Reordering Policy"::" " then
+        if Item."Maximum Inventory" <= 0 then begin
+          if QtyAvailable > 0 then
+            QtyAvailable := 0;
+          if Item."Reorder Quantity" > 0 then
+            ReorderQty :=
+              ROUND((Item."Reorder Point" - QtyAvailable) / Item."Reorder Quantity",1,'>') *
+              Item."Reorder Quantity"
+          else
+            ReorderQty := Item."Reorder Point" - QtyAvailable;
+        end
+        else
+          if (Item."Reorder Point" > Item."Maximum Inventory") or
+             ((QtyAvailable + Item."Reorder Quantity") > Item."Maximum Inventory")
+          then
+            ReorderQty := 0
+          else
+            if Item."Reorder Quantity" > 0 then
+              ReorderQty :=
+                ROUND((Item."Maximum Inventory" - QtyAvailable) / Item."Reorder Quantity",1,'<') *
+                Item."Reorder Quantity"
+            else
+              ReorderQty := Item."Maximum Inventory" - QtyAvailable
+      else begin
+        if Item."Reorder Point" > Item."Safety Stock Quantity" then begin
+          if QtyAvailable > 0 then
+            QtyAvailable := 0;
+          ReorderQty := Item."Reorder Point" - QtyAvailable
+        end else
+          ReorderQty := -QtyAvailable;
+
+        if ReorderQty <= 0 then
+          exit(0);
+
+        ReorderQty := CalcReorderQty(Item,ReorderQty,QtyAvailable);
+        ReorderQty += AdjustReorderQty(ReorderQty,Item);
+      end;
+    END;
+
+    LOCAL PROCEDURE AdjustReorderQty@1(OrderQty@1000 : Decimal;Item@1001 : Record Item) : Decimal;
+    VAR
+      DeltaQty@1002 : Decimal;
+      Rounding@1003 : Decimal;
+    BEGIN
+      // Copy of AdjustReorderQty in COD 99000854 - Inventory Profile Offsetting
+      // excluding logging surplus & MinQty check
+      if OrderQty <= 0 then
+        exit(0);
+
+      if (Item."Maximum Order Quantity" < OrderQty) and
+         (Item."Maximum Order Quantity" <> 0)
+         // AND  (SKU."Maximum Order Quantity" > MinQty)
+      then begin
+        DeltaQty := Item."Maximum Order Quantity" - OrderQty;
+      end else
+        DeltaQty := 0;
+      if Item."Minimum Order Quantity" > (OrderQty + DeltaQty) then
+        DeltaQty := Item."Minimum Order Quantity" - OrderQty;
+
+      if Item."Order Multiple" <> 0 then begin
+        Rounding := ROUND(OrderQty + DeltaQty,Item."Order Multiple",'>') - (OrderQty + DeltaQty);
+        DeltaQty += Rounding;
+      end;
+      exit(DeltaQty);
+    END;
+
+    LOCAL PROCEDURE CalcReorderQty@2(Item@1000 : Record Item;NeededQty@1001 : Decimal;ProjectedInventory@1002 : Decimal) QtyToOrder : Decimal;
+    BEGIN
+      // Copy of CalcReorderQty in COD 99000854 - Inventory Profile Offsetting
+      // excluding logging surplus, resiliency errors and comments
+      case Item."Reordering Policy" of
+        Item."Reordering Policy"::"Maximum Qty.":
+          begin
+            if Item."Maximum Inventory" < Item."Reorder Point" then
+              QtyToOrder := Item."Reorder Point" - ProjectedInventory
+            else
+              QtyToOrder := Item."Maximum Inventory" - ProjectedInventory;
+          end;
+        Item."Reordering Policy"::"Fixed Reorder Qty.":
+          begin
+            Item.TESTFIELD("Reorder Quantity"); // Assertion
+            QtyToOrder := Item."Reorder Quantity";
+          end;
+        else
+          QtyToOrder := NeededQty;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

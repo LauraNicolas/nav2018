@@ -1,0 +1,559 @@
+OBJECT Codeunit 5631 FA Jnl.-Check Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Gen. Journal Line";
+    OnRun=BEGIN
+            TESTFIELD("Job No.",'');
+            TESTFIELD("FA Posting Type");
+            TESTFIELD("Depreciation Book Code");
+            if "Duplicate in Depreciation Book" = "Depreciation Book Code" then
+              FIELDERROR(
+                "Duplicate in Depreciation Book",
+                STRSUBSTNO(Text000,FIELDCAPTION("Depreciation Book Code")));
+            if "Account Type" = "Bal. Account Type" then
+              ERROR(
+                Text001,
+                FIELDCAPTION("Account Type"),FIELDCAPTION("Bal. Account Type"),"Account Type");
+            if "Account No." <> '' then
+              if "Account Type" = "Account Type"::"Fixed Asset" then begin
+                if "FA Posting Type" in
+                   ["FA Posting Type"::"Acquisition Cost",
+                    "FA Posting Type"::Disposal,
+                    "FA Posting Type"::Maintenance]
+                then begin
+                  if ("Gen. Bus. Posting Group" <> '') or ("Gen. Prod. Posting Group" <> '') or
+                     ("VAT Bus. Posting Group" <> '') or ("VAT Prod. Posting Group" <> '')
+                  then
+                    TESTFIELD("Gen. Posting Type");
+                  if ("Gen. Posting Type" <> "Gen. Posting Type"::" ") and
+                     ("VAT Posting" = "VAT Posting"::"Automatic VAT Entry")
+                  then begin
+                    if "VAT Amount" + "VAT Base Amount" <> Amount then
+                      ERROR(
+                        Text016,FIELDCAPTION("VAT Amount"),FIELDCAPTION("VAT Base Amount"),
+                        FIELDCAPTION(Amount));
+                    if "Currency Code" <> '' then
+                      if "VAT Amount (LCY)" + "VAT Base Amount (LCY)" <> "Amount (LCY)" then
+                        ERROR(
+                          Text016,FIELDCAPTION("VAT Amount (LCY)"),
+                          FIELDCAPTION("VAT Base Amount (LCY)"),FIELDCAPTION("Amount (LCY)"));
+                  end;
+                end else begin
+                  TESTFIELD("Gen. Posting Type",0);
+                  TESTFIELD("Gen. Bus. Posting Group",'');
+                  TESTFIELD("Gen. Prod. Posting Group",'');
+                  TESTFIELD("VAT Bus. Posting Group",'');
+                  TESTFIELD("VAT Prod. Posting Group",'');
+                end;
+                FANo := "Account No.";
+              end;
+            if "Bal. Account No." <> '' then
+              if "Bal. Account Type" = "Bal. Account Type"::"Fixed Asset" then begin
+                if "FA Posting Type" in
+                   ["FA Posting Type"::"Acquisition Cost",
+                    "FA Posting Type"::Disposal,
+                    "FA Posting Type"::Maintenance]
+                then begin
+                  if ("Bal. Gen. Bus. Posting Group" <> '') or ("Bal. Gen. Prod. Posting Group" <> '') or
+                     ("Bal. VAT Bus. Posting Group" <> '') or ("Bal. VAT Prod. Posting Group" <> '')
+                  then
+                    TESTFIELD("Bal. Gen. Posting Type");
+                  if ("Bal. Gen. Posting Type" <> "Bal. Gen. Posting Type"::" ") and
+                     ("VAT Posting" = "VAT Posting"::"Automatic VAT Entry")
+                  then begin
+                    if "Bal. VAT Amount" + "Bal. VAT Base Amount" <> -Amount then
+                      ERROR(
+                        Text017,FIELDCAPTION("Bal. VAT Amount"),FIELDCAPTION("Bal. VAT Base Amount"),
+                        FIELDCAPTION(Amount));
+                    if "Currency Code" <> '' then
+                      if "Bal. VAT Amount (LCY)" + "Bal. VAT Base Amount (LCY)" <> -"Amount (LCY)" then
+                        ERROR(
+                          Text017,FIELDCAPTION("Bal. VAT Amount (LCY)"),
+                          FIELDCAPTION("Bal. VAT Base Amount (LCY)"),FIELDCAPTION("Amount (LCY)"));
+                  end;
+                end else begin
+                  TESTFIELD("Bal. Gen. Posting Type",0);
+                  TESTFIELD("Bal. Gen. Bus. Posting Group",'');
+                  TESTFIELD("Bal. Gen. Prod. Posting Group",'');
+                  TESTFIELD("Bal. VAT Bus. Posting Group",'');
+                  TESTFIELD("Bal. VAT Prod. Posting Group",'');
+                end;
+                FANo := "Bal. Account No.";
+              end;
+
+            if "Recurring Method" > "Recurring Method"::"V  Variable" then begin
+              GenJnlline2."Account Type" := GenJnlline2."Account Type"::"Fixed Asset";
+              FIELDERROR(
+                "Recurring Method",
+                STRSUBSTNO(Text002,
+                  "Recurring Method",
+                  FIELDCAPTION("Account Type"),
+                  FIELDCAPTION("Bal. Account Type"),
+                  GenJnlline2."Account Type"));
+            end;
+            DeprBookCode := "Depreciation Book Code";
+            if "FA Posting Date" = 0D then
+              "FA Posting Date" := "Posting Date";
+            FAPostingDate := "FA Posting Date";
+            PostingDate := "Posting Date";
+            FAPostingType := "FA Posting Type" - 1;
+            GenJnlPosting := true;
+            GenJnlLine := Rec;
+            CheckJnlLine;
+            CheckFADepAcrossFiscalYear;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=is not different than %1';
+      Text001@1001 : TextConst 'ENU=%1 and %2 must not both be %3.';
+      Text002@1002 : TextConst 'ENU=must not be %1 when %2 or %3 are %4';
+      Text003@1003 : TextConst 'ENU=can only be a closing date for G/L entries';
+      Text004@1004 : TextConst 'ENU=is not within your range of allowed posting dates';
+      Text005@1005 : TextConst 'ENU=must be identical to %1';
+      Text006@1006 : TextConst 'ENU=must not be a %1';
+      Text007@1007 : TextConst 'ENU=%1 must be posted in the general journal';
+      Text008@1008 : TextConst 'ENU=%1 must be posted in the FA journal';
+      Text009@1009 : TextConst 'ENU="must not be specified when %1 = %2 in %3"';
+      Text010@1010 : TextConst 'ENU=must not be specified when %1 is specified';
+      Text011@1011 : TextConst 'ENU="must not be specified together with %1 = %2"';
+      Text012@1012 : TextConst 'ENU=must not be specified when %1 is a %2';
+      Text013@1013 : TextConst 'ENU=is a %1';
+      Text014@1014 : TextConst 'ENU=The combination of dimensions used in %1 %2, %3, %4 is blocked. %5';
+      Text015@1015 : TextConst 'ENU=A dimension used in %1 %2, %3, %4 has caused an error. %5';
+      UserSetup@1016 : Record "User Setup";
+      FASetup@1017 : Record "FA Setup";
+      FA@1018 : Record "Fixed Asset";
+      FADeprBook@1019 : Record "FA Depreciation Book";
+      DeprBook@1020 : Record "Depreciation Book";
+      GenJnlLine@1021 : Record "Gen. Journal Line";
+      GenJnlline2@1022 : Record "Gen. Journal Line";
+      FAJnlLine@1023 : Record "FA Journal Line";
+      DimMgt@1024 : Codeunit DimensionManagement;
+      AllowPostingFrom@1025 : Date;
+      AllowPostingTo@1026 : Date;
+      GenJnlPosting@1027 : Boolean;
+      FANo@1028 : Code[20];
+      DeprBookCode@1029 : Code[10];
+      PostingDate@1030 : Date;
+      FAPostingDate@1031 : Date;
+      FAPostingType@1032 : '"Acquisition Cost",Depreciation,"Write-Down",Appreciation,"Custom 1","Custom 2",Disposal,Maintenance,"Salvage Value"';
+      FieldErrorText@1033 : Text[250];
+      Text016@1034 : TextConst 'ENU=%1 + %2 must be %3.';
+      Text017@1035 : TextConst 'ENU=%1 + %2 must be -%3.';
+      Text018@1036 : TextConst 'ENU=You cannot dispose Main Asset %1 until Components are disposed.';
+      Text019Err@1037 : TextConst 'ENU=You cannot post depreciation, because the calculation is across different fiscal year periods, which is not supported.';
+
+    [External]
+    PROCEDURE CheckFAJnlLine@2(VAR FAJnlLine2@1000 : Record "FA Journal Line");
+    VAR
+      TableID@1002 : ARRAY [10] OF Integer;
+      No@1003 : ARRAY [10] OF Code[20];
+    BEGIN
+      with FAJnlLine2 do begin
+        if "FA No." = '' then
+          exit;
+        TESTFIELD("FA Posting Date");
+        TESTFIELD("Depreciation Book Code");
+        TESTFIELD("Document No.");
+        if "Duplicate in Depreciation Book" = "Depreciation Book Code" then
+          FIELDERROR("Duplicate in Depreciation Book",
+            STRSUBSTNO(Text000,FIELDCAPTION("Depreciation Book Code")));
+        FANo := "FA No.";
+        PostingDate := "Posting Date";
+        FAPostingDate := "FA Posting Date";
+        if PostingDate = 0D then
+          PostingDate := FAPostingDate;
+        DeprBookCode := "Depreciation Book Code";
+        FAPostingType := "FA Posting Type";
+        if not DimMgt.CheckDimIDComb("Dimension Set ID") then
+          ERROR(
+            Text014,
+            TABLECAPTION,"Journal Template Name","Journal Batch Name","Line No.",
+            DimMgt.GetDimCombErr);
+
+        TableID[1] := DATABASE::"Fixed Asset";
+        No[1] := "FA No.";
+        if not DimMgt.CheckDimValuePosting(TableID,No,"Dimension Set ID") then
+          if "Line No." <> 0 then
+            ERROR(
+              Text015,
+              TABLECAPTION,"Journal Template Name","Journal Batch Name","Line No.",
+              DimMgt.GetDimValuePostingErr)
+          else
+            ERROR(DimMgt.GetDimValuePostingErr);
+      end;
+      GenJnlPosting := false;
+      FAJnlLine := FAJnlLine2;
+      CheckJnlLine;
+    END;
+
+    LOCAL PROCEDURE CheckJnlLine@4();
+    BEGIN
+      FA.GET(FANo);
+      FASetup.GET;
+      DeprBook.GET(DeprBookCode);
+      FADeprBook.GET(FANo,DeprBookCode);
+      CheckFAPostingDate;
+      CheckFAIntegration;
+      CheckConsistency;
+      CheckErrorNo;
+      CheckMainAsset;
+    END;
+
+    LOCAL PROCEDURE CheckFAPostingDate@7();
+    BEGIN
+      if FAPostingDate <> NORMALDATE(FAPostingDate) then
+        if GenJnlPosting then
+          GenJnlLine.FIELDERROR("FA Posting Date",Text003)
+        else
+          FAJnlLine.FIELDERROR("FA Posting Date",Text003);
+
+      if (FAPostingDate < 00020101D) or
+         (FAPostingDate > 99981231D)
+      then
+        if GenJnlPosting then
+          GenJnlLine.FIELDERROR("FA Posting Date",Text004)
+        else
+          FAJnlLine.FIELDERROR("FA Posting Date",Text004);
+
+      if (AllowPostingFrom = 0D) and (AllowPostingTo = 0D) then begin
+        if USERID <> '' then
+          if UserSetup.GET(USERID) then begin
+            AllowPostingFrom := UserSetup."Allow FA Posting From";
+            AllowPostingTo := UserSetup."Allow FA Posting To";
+          end;
+        if (AllowPostingFrom = 0D) and (AllowPostingTo = 0D) then begin
+          FASetup.GET;
+          AllowPostingFrom := FASetup."Allow FA Posting From";
+          AllowPostingTo := FASetup."Allow FA Posting To";
+        end;
+        if AllowPostingTo = 0D then
+          AllowPostingTo := 99981231D;
+      end;
+      if (FAPostingDate < AllowPostingFrom) or
+         (FAPostingDate > AllowPostingTo)
+      then
+        if GenJnlPosting then
+          GenJnlLine.FIELDERROR("FA Posting Date",Text004)
+        else
+          FAJnlLine.FIELDERROR("FA Posting Date",Text004);
+
+      if DeprBook."Use Same FA+G/L Posting Dates" and (PostingDate <> FAPostingDate) then begin
+        if GenJnlPosting then
+          GenJnlLine.FIELDERROR(
+            "FA Posting Date",STRSUBSTNO(Text005,
+              GenJnlLine.FIELDCAPTION("Posting Date")));
+
+        FAJnlLine.FIELDERROR(
+          "Posting Date",STRSUBSTNO(Text005,
+            FAJnlLine.FIELDCAPTION("FA Posting Date")))
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckFAIntegration@5();
+    VAR
+      GLIntegration@1000 : Boolean;
+    BEGIN
+      if GenJnlPosting and FA."Budgeted Asset" then
+        GenJnlLine.FIELDERROR("Account No.",STRSUBSTNO(Text006,FA.FIELDCAPTION("Budgeted Asset")));
+      if FA."Budgeted Asset" then
+        exit;
+      case FAPostingType of
+        FAPostingType::"Acquisition Cost":
+          GLIntegration := DeprBook."G/L Integration - Acq. Cost";
+        FAPostingType::Depreciation:
+          GLIntegration := DeprBook."G/L Integration - Depreciation";
+        FAPostingType::"Write-Down":
+          GLIntegration := DeprBook."G/L Integration - Write-Down";
+        FAPostingType::Appreciation:
+          GLIntegration := DeprBook."G/L Integration - Appreciation";
+        FAPostingType::"Custom 1":
+          GLIntegration := DeprBook."G/L Integration - Custom 1";
+        FAPostingType::"Custom 2":
+          GLIntegration := DeprBook."G/L Integration - Custom 2";
+        FAPostingType::Disposal:
+          GLIntegration := DeprBook."G/L Integration - Disposal";
+        FAPostingType::Maintenance:
+          GLIntegration := DeprBook."G/L Integration - Maintenance";
+        FAPostingType::"Salvage Value":
+          GLIntegration := false;
+      end;
+      if GLIntegration and not GenJnlPosting then
+        FAJnlLine.FIELDERROR(
+          "FA Posting Type",
+          STRSUBSTNO(Text007,FAJnlLine."FA Posting Type"));
+      if not GLIntegration and GenJnlPosting then
+        GenJnlLine.FIELDERROR(
+          "FA Posting Type",
+          STRSUBSTNO(Text008,GenJnlLine."FA Posting Type"));
+
+      GLIntegration := DeprBook."G/L Integration - Depreciation";
+      if GenJnlPosting then
+        with GenJnlLine do begin
+          if "Depr. until FA Posting Date" and not GLIntegration then
+            FIELDERROR(
+              "Depr. until FA Posting Date",STRSUBSTNO(Text009,
+                DeprBook.FIELDCAPTION("G/L Integration - Depreciation"),false,DeprBook.TABLECAPTION));
+          if "Depr. Acquisition Cost" and not GLIntegration then
+            FIELDERROR(
+              "Depr. Acquisition Cost",STRSUBSTNO(Text009,
+                DeprBook.FIELDCAPTION("G/L Integration - Depreciation"),false,DeprBook.TABLECAPTION));
+        end;
+      if not GenJnlPosting then
+        with FAJnlLine do begin
+          if "Depr. until FA Posting Date" and GLIntegration then
+            FIELDERROR(
+              "Depr. until FA Posting Date",STRSUBSTNO(Text009,
+                DeprBook.FIELDCAPTION("G/L Integration - Depreciation"),true,DeprBook.TABLECAPTION));
+          if "Depr. Acquisition Cost" and GLIntegration then
+            FIELDERROR(
+              "Depr. Acquisition Cost",STRSUBSTNO(Text009,
+                DeprBook.FIELDCAPTION("G/L Integration - Depreciation"),true,DeprBook.TABLECAPTION));
+        end;
+    END;
+
+    LOCAL PROCEDURE CheckErrorNo@8();
+    BEGIN
+      if GenJnlPosting and (GenJnlLine."FA Error Entry No." > 0) then
+        with GenJnlLine do begin
+          FieldErrorText :=
+            STRSUBSTNO(Text010,
+              FIELDCAPTION("FA Error Entry No."));
+          case true of
+            "Depr. until FA Posting Date":
+              FIELDERROR("Depr. until FA Posting Date",FieldErrorText);
+            "Depr. Acquisition Cost":
+              FIELDERROR("Depr. Acquisition Cost",FieldErrorText);
+            "Duplicate in Depreciation Book" <> '':
+              FIELDERROR("Duplicate in Depreciation Book",FieldErrorText);
+            "Use Duplication List":
+              FIELDERROR("Use Duplication List",FieldErrorText);
+            "Salvage Value" <> 0:
+              FIELDERROR("Salvage Value",FieldErrorText);
+            "Insurance No." <> '':
+              FIELDERROR("Insurance No.",FieldErrorText);
+            "Budgeted FA No." <> '':
+              FIELDERROR("Budgeted FA No.",FieldErrorText);
+            "Recurring Method" > 0:
+              FIELDERROR("Recurring Method",FieldErrorText);
+          end;
+        end;
+      if not GenJnlPosting and (FAJnlLine."FA Error Entry No." > 0) then
+        with FAJnlLine do begin
+          FieldErrorText :=
+            STRSUBSTNO(Text010,
+              FIELDCAPTION("FA Error Entry No."));
+          case true of
+            "Depr. until FA Posting Date":
+              FIELDERROR("Depr. until FA Posting Date",FieldErrorText);
+            "Depr. Acquisition Cost":
+              FIELDERROR("Depr. Acquisition Cost",FieldErrorText);
+            "Duplicate in Depreciation Book" <> '':
+              FIELDERROR("Duplicate in Depreciation Book",FieldErrorText);
+            "Use Duplication List":
+              FIELDERROR("Use Duplication List",FieldErrorText);
+            "Salvage Value" <> 0:
+              FIELDERROR("Salvage Value",FieldErrorText);
+            "Insurance No." <> '':
+              FIELDERROR("Insurance No.",FieldErrorText);
+            "Budgeted FA No." <> '':
+              FIELDERROR("Budgeted FA No.",FieldErrorText);
+            "Recurring Method" > 0:
+              FIELDERROR("Recurring Method",FieldErrorText);
+          end;
+        end;
+    END;
+
+    LOCAL PROCEDURE CheckConsistency@9();
+    BEGIN
+      if GenJnlPosting then
+        with GenJnlLine do begin
+          if "Journal Template Name" = '' then
+            Quantity := 0;
+          FieldErrorText :=
+            STRSUBSTNO(Text011,
+              FIELDCAPTION("FA Posting Type"),"FA Posting Type");
+          if ("FA Error Entry No." > 0) and ("FA Posting Type" = "FA Posting Type"::Maintenance) then
+            FIELDERROR("FA Error Entry No.",FieldErrorText);
+          if "FA Posting Type" <> "FA Posting Type"::"Acquisition Cost" then
+            case true of
+              "Depr. Acquisition Cost":
+                FIELDERROR("Depr. Acquisition Cost",FieldErrorText);
+              "Salvage Value" <> 0:
+                FIELDERROR("Salvage Value",FieldErrorText);
+              "Insurance No." <> '':
+                FIELDERROR("Insurance No.",FieldErrorText);
+              Quantity <> 0:
+                if "FA Posting Type" <> "FA Posting Type"::Maintenance then
+                  FIELDERROR(Quantity,FieldErrorText);
+            end;
+          if ("FA Posting Type" <> "FA Posting Type"::Maintenance) and
+             ("Maintenance Code" <> '')
+          then
+            FIELDERROR("Maintenance Code",FieldErrorText);
+          if "FA Posting Type" = "FA Posting Type"::Maintenance then begin
+            if "Depr. until FA Posting Date" then
+              FIELDERROR("Depr. until FA Posting Date",FieldErrorText);
+          end;
+
+          if ("FA Posting Type" <> "FA Posting Type"::Depreciation) and
+             ("FA Posting Type" <> "FA Posting Type"::"Custom 1") and
+             ("No. of Depreciation Days" <> 0)
+          then
+            FIELDERROR("No. of Depreciation Days",FieldErrorText);
+
+          if "FA Posting Type" = "FA Posting Type"::Disposal then begin
+            if "FA Reclassification Entry" then
+              FIELDERROR("FA Reclassification Entry",FieldErrorText);
+            if  "Budgeted FA No." <> '' then
+              FIELDERROR("Budgeted FA No.",FieldErrorText);
+          end;
+
+          FieldErrorText := STRSUBSTNO(Text012,
+              FIELDCAPTION("Account No."),FA.FIELDCAPTION("Budgeted Asset"));
+
+          if FA."Budgeted Asset" and ("Budgeted FA No." <> '') then
+            FIELDERROR("Budgeted FA No.",FieldErrorText);
+
+          if ("FA Posting Type" = "FA Posting Type"::"Acquisition Cost") and
+             ("Insurance No." <> '') and
+             (DeprBook.Code <> FASetup."Insurance Depr. Book")
+          then
+            TESTFIELD("Insurance No.",'');
+
+          if FA."Budgeted Asset" then
+            FIELDERROR("Account No.",STRSUBSTNO(Text013,FA.FIELDCAPTION("Budgeted Asset")));
+        end;
+
+      if not GenJnlPosting then
+        with FAJnlLine do begin
+          FieldErrorText :=
+            STRSUBSTNO(Text011,
+              FIELDCAPTION("FA Posting Type"),"FA Posting Type");
+
+          if ("FA Error Entry No." > 0) and ("FA Posting Type" = "FA Posting Type"::Maintenance) then
+            FIELDERROR("FA Error Entry No.",FieldErrorText);
+
+          if "FA Posting Type" <> "FA Posting Type"::"Acquisition Cost" then
+            case true of
+              "Depr. Acquisition Cost":
+                FIELDERROR("Depr. Acquisition Cost",FieldErrorText);
+              "Salvage Value" <> 0:
+                FIELDERROR("Salvage Value",FieldErrorText);
+              Quantity <> 0:
+                if "FA Posting Type" <> "FA Posting Type"::Maintenance then
+                  FIELDERROR(Quantity,FieldErrorText);
+              "Insurance No." <> '':
+                FIELDERROR("Insurance No.",FieldErrorText);
+            end;
+          if ("FA Posting Type" = "FA Posting Type"::Maintenance) and
+             "Depr. until FA Posting Date"
+          then
+            FIELDERROR("Depr. until FA Posting Date",FieldErrorText);
+          if ("FA Posting Type" <> "FA Posting Type"::Maintenance) and
+             ("Maintenance Code" <> '')
+          then
+            FIELDERROR("Maintenance Code",FieldErrorText);
+
+          if ("FA Posting Type" <> "FA Posting Type"::Depreciation) and
+             ("FA Posting Type" <> "FA Posting Type"::"Custom 1") and
+             ("No. of Depreciation Days" <> 0)
+          then
+            FIELDERROR("No. of Depreciation Days",FieldErrorText);
+
+          if "FA Posting Type" = "FA Posting Type"::Disposal then begin
+            if "FA Reclassification Entry" then
+              FIELDERROR("FA Reclassification Entry",FieldErrorText);
+            if  "Budgeted FA No." <> '' then
+              FIELDERROR("Budgeted FA No.",FieldErrorText);
+          end;
+
+          FieldErrorText := STRSUBSTNO(Text012,
+              FIELDCAPTION("FA No."),FA.FIELDCAPTION("Budgeted Asset"));
+
+          if FA."Budgeted Asset" and ("Budgeted FA No." <> '') then
+            FIELDERROR("Budgeted FA No.",FieldErrorText);
+
+          if ("FA Posting Type" = "FA Posting Type"::"Acquisition Cost") and
+             ("Insurance No." <> '') and
+             (DeprBook.Code <> FASetup."Insurance Depr. Book")
+          then
+            TESTFIELD("Insurance No.",'');
+        end;
+    END;
+
+    LOCAL PROCEDURE CheckMainAsset@1();
+    VAR
+      MainAssetComponent@1000 : Record "Main Asset Component";
+      ComponentFADeprBook@1001 : Record "FA Depreciation Book";
+    BEGIN
+      if GenJnlLine."FA Posting Type" <> GenJnlLine."FA Posting Type"::Disposal then
+        exit;
+      if FA."Main Asset/Component" <> FA."Main Asset/Component"::"Main Asset" then
+        exit;
+
+      with MainAssetComponent do begin
+        RESET;
+        SETRANGE("Main Asset No.",FA."No.");
+        if FINDSET then
+          repeat
+            if ComponentFADeprBook.GET("FA No.",DeprBookCode) then
+              if ComponentFADeprBook."Disposal Date" = 0D then
+                ERROR(Text018,FA."No.");
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckFADepAcrossFiscalYear@1000();
+    VAR
+      AccPeriod@1000 : Record "Accounting Period";
+      DepreciationCalculation@1003 : Codeunit "Depreciation Calculation";
+      EndingDate@1004 : Date;
+      StartingDate@1002 : Date;
+    BEGIN
+      if (GenJnlLine."FA Posting Type" = GenJnlLine."FA Posting Type"::Depreciation) and
+         (GenJnlLine."No. of Depreciation Days" <> 0) and
+         (FADeprBook."Depreciation Method" = FADeprBook."Depreciation Method"::"Declining-Balance 1")
+      then begin
+        EndingDate := DepreciationCalculation.ToMorrow(GenJnlLine."FA Posting Date",DeprBook."Fiscal Year 365 Days");
+        if DeprBook."Fiscal Year 365 Days" then
+          StartingDate := CALCDATE(STRSUBSTNO('<-%1D>',GenJnlLine."No. of Depreciation Days"),EndingDate)
+        else begin
+          StartingDate := CALCDATE(STRSUBSTNO('<-%1M>',GenJnlLine."No. of Depreciation Days" div 30),EndingDate);
+          StartingDate := CALCDATE(STRSUBSTNO('<-%1D>',GenJnlLine."No. of Depreciation Days" mod 30),StartingDate);
+        end;
+        AccPeriod.SETFILTER("Starting Date",'>%1&<=%2',FindFiscalYear(StartingDate),GenJnlLine."FA Posting Date");
+        AccPeriod.SETRANGE("New Fiscal Year",true);
+        if not AccPeriod.ISEMPTY then
+          ERROR(Text019Err);
+      end;
+    END;
+
+    LOCAL PROCEDURE FindFiscalYear@10(BalanceDate@1000 : Date) : Date;
+    VAR
+      AccountingPeriod@1001 : Record "Accounting Period";
+    BEGIN
+      AccountingPeriod.SETRANGE("New Fiscal Year",true);
+      AccountingPeriod.SETRANGE("Starting Date",0D,BalanceDate);
+      if AccountingPeriod.FINDLAST then
+        exit(AccountingPeriod."Starting Date");
+      AccountingPeriod.RESET;
+      if AccountingPeriod.FINDFIRST then
+        exit(AccountingPeriod."Starting Date");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

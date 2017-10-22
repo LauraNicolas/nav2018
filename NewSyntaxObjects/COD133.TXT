@@ -1,0 +1,293 @@
+OBJECT Codeunit 133 Send Incoming Document to OCR
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Incoming Document";
+    OnRun=BEGIN
+            SendDocToOCR(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OCRWhenApprovalIsCompleteErr@1000 : TextConst 'ENU=The document can only be sent to the OCR service when the approval process is complete.';
+      NoOcrAttachmentErr@1001 : TextConst 'ENU=There is no attachment of type PDF or Image.';
+      NoAttachmentMarkedForOcrErr@1002 : TextConst 'ENU=You must select an attachment for use for OCR.';
+      ShowMessages@1003 : Boolean;
+      CannotRemoveFromJobQueueTxt@1004 : TextConst 'ENU=The document cannot be removed from queue since it is already sent.';
+      CannotSendDocumentTxt@1005 : TextConst '@@@=%1 Status of the document for example: New, Released, Posted, Created, Rejected...;ENU=The document cannot be sent to the OCR service because its status is %1.';
+      CannotScheduleDocumentTxt@1007 : TextConst '@@@=%1 Status of the document for example: New, Released, Posted, Created, Rejected...;ENU=The document cannot be scheduled for sending to the OCR service because its status is %1.';
+      RemovedFromJobQueueTxt@1006 : TextConst 'ENU=The document was successfully removed from Job Queue.';
+      DocumentHasBeenScheduledTxt@1008 : TextConst 'ENU=The document has been scheduled for sending to the OCR service.';
+      DoYouWantToSetupOCRQst@1009 : TextConst 'ENU=The OCR service is not enabled.\\Do you want to open the OCR Service Setup window?';
+      OCRServiceNotEnabledErr@1010 : TextConst 'ENU=The OCR service is not enabled.';
+
+    [Internal]
+    PROCEDURE SendToJobQueue@55(VAR IncomingDocument@1002 : Record "Incoming Document");
+    BEGIN
+      if not VerifySendToOCR(IncomingDocument,CannotScheduleDocumentTxt) then
+        exit;
+
+      IncomingDocument.TESTFIELD("OCR Status",IncomingDocument."OCR Status"::" ");
+      IncomingDocument."OCR Status" := IncomingDocument."OCR Status"::Ready;
+      IncomingDocument.MODIFY;
+
+      CODEUNIT.RUN(CODEUNIT::"Release Incoming Document",IncomingDocument);
+      ShowMessage(DocumentHasBeenScheduledTxt);
+      OnAfterIncomingDocReadyForOCR(IncomingDocument);
+    END;
+
+    [External]
+    PROCEDURE RemoveFromJobQueue@41(VAR IncomingDocument@1000 : Record "Incoming Document");
+    VAR
+      ReleaseIncomingDocument@1001 : Codeunit "Release Incoming Document";
+    BEGIN
+      with IncomingDocument do begin
+        if "OCR Status" <> "OCR Status"::Ready then begin
+          ShowMessage(CannotRemoveFromJobQueueTxt);
+          exit;
+        end;
+
+        "OCR Status" := "OCR Status"::" ";
+        ReleaseIncomingDocument.Reopen(IncomingDocument);
+        MODIFY;
+        ShowMessage(RemovedFromJobQueueTxt);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE SendDocToOCR@31(VAR IncomingDocument@1001 : Record "Incoming Document");
+    VAR
+      IncomingDocumentAttachment@1000 : Record "Incoming Document Attachment";
+      OCRServiceSetup@1002 : Record "OCR Service Setup";
+    BEGIN
+      OCRServiceSetup.GET;
+      if not OCRServiceSetup.Enabled then begin
+        if not CONFIRM(DoYouWantToSetupOCRQst) then
+          exit;
+        PAGE.RUNMODAL(PAGE::"OCR Service Setup",OCRServiceSetup);
+        if not OCRServiceSetup.Enabled then
+          ERROR(OCRServiceNotEnabledErr);
+      end;
+
+      if not VerifySendToOCR(IncomingDocument,CannotSendDocumentTxt) then
+        exit;
+
+      UpdateIncomingDocumentAttachmentForOCR(IncomingDocument);
+
+      case IncomingDocument."OCR Status" of
+        IncomingDocument."OCR Status"::" ":
+          IncomingDocument."OCR Status" := IncomingDocument."OCR Status"::Ready;
+        IncomingDocument."OCR Status"::Ready:
+          ;
+        else
+          exit;
+      end;
+
+      CODEUNIT.RUN(CODEUNIT::"Release Incoming Document",IncomingDocument);
+
+      IncomingDocument.LOCKTABLE;
+      IncomingDocument.FIND;
+      // Check OCR Status due to it could be changed by another user in the meantime
+      if IncomingDocument."OCR Status" = IncomingDocument."OCR Status"::Ready then begin
+        IncomingDocumentAttachment.SETRANGE("Incoming Document Entry No.",IncomingDocument."Entry No.");
+        IncomingDocumentAttachment.SETRANGE("Use for OCR",true);
+        if not IncomingDocumentAttachment.FINDFIRST then
+          ERROR(NoAttachmentMarkedForOcrErr);
+        IncomingDocumentAttachment.SendToOCR;
+        IncomingDocument."OCR Status" := IncomingDocument."OCR Status"::Sent;
+        IncomingDocument.MODIFY;
+      end;
+      COMMIT;
+      OnAfterIncomingDocSentToOCR(IncomingDocument);
+    END;
+
+    [External]
+    PROCEDURE ScheduleJobQueueReceive@12();
+    VAR
+      OCRServiceSetup@1002 : Record "OCR Service Setup";
+    BEGIN
+      OCRServiceSetup.ScheduleJobQueueReceive;
+    END;
+
+    [Internal]
+    PROCEDURE RetrieveDocFromOCR@37(VAR IncomingDocument@1002 : Record "Incoming Document");
+    VAR
+      IncomingDocumentAttachment@1001 : Record "Incoming Document Attachment";
+      OCRServiceMgt@1000 : Codeunit "OCR Service Mgt.";
+      OCRStatus@1003 : Integer;
+    BEGIN
+      with IncomingDocument do begin
+        if not ("OCR Status" in ["OCR Status"::Sent,"OCR Status"::"Awaiting Verification"]) then
+          TESTFIELD("OCR Status","OCR Status"::Sent);
+
+        CheckNotCreated;
+        LOCKTABLE;
+        FIND;
+        IncomingDocumentAttachment.SETRANGE("Incoming Document Entry No.","Entry No.");
+        IncomingDocumentAttachment.SETRANGE("Use for OCR",true);
+        if IncomingDocumentAttachment.FINDFIRST then begin
+          OCRStatus := OCRServiceMgt.GetDocumentForAttachment(IncomingDocumentAttachment);
+          if not (OCRStatus in ["OCR Status"::Success,"OCR Status"::Error,"OCR Status"::"Awaiting Verification"]) then
+            ERROR('');
+        end;
+
+        FIND;
+
+        case OCRStatus of
+          "OCR Status"::Success:
+            SetStatusToReceived(IncomingDocument);
+          "OCR Status"::"Awaiting Verification":
+            SetStatusToVerify(IncomingDocument);
+          "OCR Status"::Error:
+            SetStatusToFailed(IncomingDocument);
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetStatusToReceived@6(VAR IncomingDocument@1000 : Record "Incoming Document");
+    BEGIN
+      with IncomingDocument do begin
+        FIND;
+        if ("OCR Status" = "OCR Status"::Success) and "OCR Process Finished" then
+          exit;
+
+        "OCR Status" := "OCR Status"::Success;
+        "OCR Process Finished" := true;
+        MODIFY;
+        COMMIT;
+
+        OnAfterIncomingDocReceivedFromOCR(IncomingDocument);
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetStatusToFailed@8(VAR IncomingDocument@1000 : Record "Incoming Document");
+    BEGIN
+      with IncomingDocument do begin
+        FIND;
+        "OCR Status" := "OCR Status"::Error;
+        "OCR Process Finished" := true;
+        MODIFY;
+        COMMIT;
+
+        OnAfterIncomingDocReceivedFromOCR(IncomingDocument);
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetStatusToVerify@9(VAR IncomingDocument@1000 : Record "Incoming Document");
+    BEGIN
+      with IncomingDocument do begin
+        FIND;
+        "OCR Status" := "OCR Status"::"Awaiting Verification";
+        MODIFY;
+        COMMIT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE TrySendToOCR@10(VAR IncomingDocument@1000 : Record "Incoming Document") : Boolean;
+    BEGIN
+      exit(CODEUNIT.RUN(CODEUNIT::"Send Incoming Document to OCR",IncomingDocument));
+    END;
+
+    [External]
+    PROCEDURE TryRetrieveFromOCR@13(VAR IncomingDocument@1002 : Record "Incoming Document") : Boolean;
+    BEGIN
+      exit(CODEUNIT.RUN(CODEUNIT::"Retrieve Document From OCR",IncomingDocument));
+    END;
+
+    LOCAL PROCEDURE VerifySendToOCR@11(VAR IncomingDocument@1000 : Record "Incoming Document";ErrorMessage@1002 : Text) : Boolean;
+    VAR
+      ApprovalsMgmt@1001 : Codeunit "Approvals Mgmt.";
+    BEGIN
+      with IncomingDocument do begin
+        TESTFIELD(Posted,false);
+        CheckNotCreated;
+
+        if not (Status in [Status::New,Status::Released,Status::"Pending Approval"]) then begin
+          ShowMessage(STRSUBSTNO(ErrorMessage,FORMAT(Status)));
+          exit(false);
+        end;
+
+        if "OCR Status" in ["OCR Status"::Sent,"OCR Status"::Success,"OCR Status"::"Awaiting Verification"] then begin
+          ShowMessage(STRSUBSTNO(ErrorMessage,FORMAT("OCR Status")));
+          exit(false);
+        end;
+
+        OnCheckIncomingDocSetForOCRRestrictions;
+
+        if ApprovalsMgmt.IsIncomingDocApprovalsWorkflowEnabled(IncomingDocument) and (Status = Status::New) then
+          ERROR(OCRWhenApprovalIsCompleteErr);
+
+        UpdateIncomingDocumentAttachmentForOCR(IncomingDocument);
+      end;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE UpdateIncomingDocumentAttachmentForOCR@7(VAR IncomingDocument@1001 : Record "Incoming Document");
+    VAR
+      IncomingDocumentAttachment@1000 : Record "Incoming Document Attachment";
+    BEGIN
+      with IncomingDocument do begin
+        IncomingDocumentAttachment.SETRANGE("Incoming Document Entry No.","Entry No.");
+        IncomingDocumentAttachment.SETFILTER(Type,'%1|%2',IncomingDocumentAttachment.Type::PDF,IncomingDocumentAttachment.Type::Image);
+        if IncomingDocumentAttachment.ISEMPTY then
+          ERROR(NoOcrAttachmentErr);
+        TESTFIELD("OCR Service Doc. Template Code");
+        IncomingDocumentAttachment.SETRANGE("Use for OCR",true);
+        if IncomingDocumentAttachment.ISEMPTY then begin
+          IncomingDocumentAttachment.SETRANGE("Use for OCR");
+          IncomingDocumentAttachment.SETRANGE("Main Attachment",true);
+          IncomingDocumentAttachment.FINDFIRST;
+          IncomingDocumentAttachment."Use for OCR" := true;
+          IncomingDocumentAttachment.MODIFY;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetShowMessages@3(NewShowMessages@1000 : Boolean);
+    BEGIN
+      ShowMessages := NewShowMessages;
+    END;
+
+    LOCAL PROCEDURE ShowMessage@5(MessageText@1000 : Text);
+    BEGIN
+      if ShowMessages then
+        MESSAGE(MessageText);
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterIncomingDocReadyForOCR@4(VAR IncomingDocument@1000 : Record "Incoming Document");
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterIncomingDocSentToOCR@1(VAR IncomingDocument@1000 : Record "Incoming Document");
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterIncomingDocReceivedFromOCR@2(VAR IncomingDocument@1000 : Record "Incoming Document");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

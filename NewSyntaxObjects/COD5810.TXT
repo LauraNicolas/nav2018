@@ -1,0 +1,200 @@
+OBJECT Codeunit 5810 Change Average Cost Setting
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Inventory Setup";
+    OnRun=BEGIN
+            WindowUpdateDateTime := CURRENTDATETIME;
+            WindowIsOpen := false;
+
+            AvgCostAdjmtEntryPoint.LOCKTABLE;
+            LOCKTABLE;
+            AccPeriod.LOCKTABLE;
+
+            MODIFY;
+
+            AccPeriod.SETRANGE("New Fiscal Year",true);
+            AccPeriod.FIND('-');
+            if AccPeriod.Closed then begin
+              AccPeriod.SETRANGE(Closed,false);
+              AccPeriod.FIND('-');
+              StartingValuationDate := AccPeriod."Starting Date";
+            end;
+            repeat
+              AccPeriod."Average Cost Period" := "Average Cost Period";
+              AccPeriod."Average Cost Calc. Type" := "Average Cost Calc. Type";
+              AccPeriod.MODIFY;
+            until AccPeriod.NEXT = 0;
+
+            ProcessItemsFromDate(StartingValuationDate);
+
+            if WindowIsOpen then
+              Window.CLOSE;
+
+            COMMIT;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AccPeriod@1011 : Record "Accounting Period";
+      ValueEntry@1007 : Record "Value Entry";
+      Item@1006 : Record Item;
+      InvtSetup@1005 : Record "Inventory Setup";
+      AvgCostAdjmtEntryPoint@1012 : Record "Avg. Cost Adjmt. Entry Point";
+      Window@1004 : Dialog;
+      StartingValuationDate@1013 : Date;
+      WindowIsOpen@1003 : Boolean;
+      WindowNo@1002 : Text[20];
+      WindowPostingDate@1001 : Date;
+      WindowUpdateDateTime@1000 : DateTime;
+      Text000@1010 : TextConst 'ENU=Processing Item...\\';
+      Text001@1009 : TextConst 'ENU=Item No.       #1######\';
+      Text002@1008 : TextConst 'ENU=Valuation Date #2######';
+
+    [Internal]
+    PROCEDURE UpdateAvgCostFromAccPeriodChg@1(VAR AccPeriod@1004 : Record "Accounting Period";PrevAccPeriod@1008 : Record "Accounting Period";UpdateType@1000 : '" ",Insert,Modify,Delete,Rename');
+    VAR
+      AccPeriod2@1006 : Record "Accounting Period";
+      StartingValuationDate@1002 : Date;
+    BEGIN
+      if not InvtSetup.GET then
+        exit;
+
+      with AccPeriod do begin
+        if not ("New Fiscal Year" or PrevAccPeriod."New Fiscal Year" or
+                (InvtSetup."Average Cost Period" = InvtSetup."Average Cost Period"::"Accounting Period"))
+        then
+          exit;
+
+        StartingValuationDate := 0D;
+        AccPeriod2 := AccPeriod;
+        case UpdateType of
+          UpdateType::Insert:
+            INSERT;
+          UpdateType::Delete:
+            DELETE;
+          UpdateType::Modify:
+            MODIFY;
+          UpdateType::Rename:
+            begin
+              INSERT;
+              PrevAccPeriod.DELETE;
+              if (PrevAccPeriod."Starting Date" < "Starting Date") and
+                 (PrevAccPeriod."Starting Date" <> 0D)
+              then
+                AccPeriod2 := PrevAccPeriod;
+            end;
+        end;
+
+        if AccPeriod2.NEXT(-1) <> 0 then
+          StartingValuationDate := AccPeriod2."Starting Date";
+        ProcessItemsFromDate(StartingValuationDate);
+
+        case UpdateType of
+          UpdateType::Insert:
+            DELETE;
+          UpdateType::Delete:
+            INSERT;
+          UpdateType::Rename:
+            begin
+              DELETE;
+              PrevAccPeriod.INSERT;
+            end;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE ProcessItemsFromDate@3(StartingValuationDate@1000 : Date);
+    BEGIN
+      if Item.FIND('-') then
+        repeat
+          if Item."Costing Method" = Item."Costing Method"::Average then
+            ProcessItemAvgCostPoint(Item,StartingValuationDate);
+        until Item.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ProcessItemAvgCostPoint@6(VAR Item@1000 : Record Item;StartingValuationDate@1001 : Date);
+    BEGIN
+      InvtSetup.GET;
+      AvgCostAdjmtEntryPoint.RESET;
+      AvgCostAdjmtEntryPoint.SETRANGE("Item No.",Item."No.");
+      AvgCostAdjmtEntryPoint.SETFILTER("Valuation Date",'>=%1',StartingValuationDate);
+      AvgCostAdjmtEntryPoint.DELETEALL;
+
+      with ValueEntry do begin
+        RESET;
+        SETCURRENTKEY("Item No.","Valuation Date","Location Code","Variant Code");
+
+        SETRANGE("Item No.",Item."No.");
+        SETFILTER("Valuation Date",'>=%1',StartingValuationDate);
+        if FIND('-') then begin
+          repeat
+            UpDateWindow("Item No.","Valuation Date");
+
+            AvgCostAdjmtEntryPoint.UpdateValuationDate(ValueEntry);
+
+            SETRANGE("Valuation Date","Valuation Date");
+            if InvtSetup."Average Cost Calc. Type" =
+               InvtSetup."Average Cost Calc. Type"::"Item & Location & Variant"
+            then begin
+              SETRANGE("Location Code","Location Code");
+              SETRANGE("Variant Code","Variant Code");
+            end;
+            if FIND('+') then;
+            SETRANGE("Valuation Date");
+            SETRANGE("Location Code");
+            SETRANGE("Variant Code");
+          until NEXT = 0;
+          Item."Cost is Adjusted" := false;
+          Item.MODIFY;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE OpenWindow@59();
+    BEGIN
+      Window.OPEN(
+        Text000 +
+        Text001 +
+        Text002);
+      WindowIsOpen := true;
+      WindowUpdateDateTime := CURRENTDATETIME;
+    END;
+
+    LOCAL PROCEDURE UpDateWindow@56(NewWindowNo@1001 : Code[20];NewWindowPostingDate@1000 : Date);
+    BEGIN
+      WindowNo := NewWindowNo;
+      WindowPostingDate := NewWindowPostingDate;
+
+      if IsTimeForUpdate then begin
+        if not WindowIsOpen then
+          OpenWindow;
+        Window.UPDATE(1,WindowNo);
+        Window.UPDATE(2,WindowPostingDate);
+      end;
+    END;
+
+    LOCAL PROCEDURE IsTimeForUpdate@69() : Boolean;
+    BEGIN
+      if WindowUpdateDateTime = 0DT then
+        WindowUpdateDateTime := CURRENTDATETIME;
+      if CURRENTDATETIME - WindowUpdateDateTime >= 1000 then begin
+        WindowUpdateDateTime := CURRENTDATETIME;
+        exit(true);
+      end;
+      exit(false);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

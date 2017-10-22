@@ -1,0 +1,710 @@
+OBJECT Codeunit 6113 Item Data Migration Facade
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Data Migration Parameters";
+    OnRun=VAR
+            DataMigrationStatusFacade@1001 : Codeunit "Data Migration Status Facade";
+            ChartOfAccountsMigrated@1000 : Boolean;
+          BEGIN
+            FINDSET;
+            ChartOfAccountsMigrated := DataMigrationStatusFacade.HasMigratedChartOfAccounts(Rec);
+            repeat
+              OnMigrateItem("Staging Table RecId To Process");
+              OnMigrateItemTrackingCode("Staging Table RecId To Process");
+              OnMigrateCostingMethod("Staging Table RecId To Process"); // needs to be set after item tracking code because of onvalidate trigger check
+              OnMigrateItemUnitOfMeasure("Staging Table RecId To Process");
+              OnMigrateItemDiscountGroup("Staging Table RecId To Process");
+              OnMigrateItemSalesLineDiscount("Staging Table RecId To Process");
+              OnMigrateItemPrice("Staging Table RecId To Process");
+              OnMigrateItemTariffNo("Staging Table RecId To Process");
+              OnMigrateItemDimensions("Staging Table RecId To Process");
+
+              // migrate transactions for this item as long as it is an inventory item
+              if GlobalItem.Type = GlobalItem.Type::Inventory then begin
+                OnMigrateItemPostingGroups("Staging Table RecId To Process",ChartOfAccountsMigrated);
+                OnMigrateInventoryTransactions("Staging Table RecId To Process",ChartOfAccountsMigrated);
+                ItemJournalLineIsSet := false;
+              end;
+              ItemIsSet := false;
+            until NEXT = 0;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GlobalItem@1000 : Record Item;
+      GlobalItemJournalLine@1004 : Record "Item Journal Line";
+      DataMigrationFacadeHelper@1003 : Codeunit "Data Migration Facade Helper";
+      ItemIsSet@1001 : Boolean;
+      InternalItemNotSetErr@1002 : TextConst 'ENU=Internal item is not set. Create it first.';
+      ItemJournalLineIsSet@1005 : Boolean;
+      InternalItemJnlLIneNotSetErr@1006 : TextConst 'ENU=Internal item journal line is not set. Create it first.';
+
+    [External]
+    PROCEDURE CreateItemIfNeeded@24(ItemNoToSet@1001 : Code[20];ItemDescriptionToSet@1002 : Text[50];ItemDescription2ToSet@1003 : Text[50];ItemTypeToSet@1004 : 'Inventory,Service') : Boolean;
+    VAR
+      Item@1000 : Record Item;
+    BEGIN
+      if Item.GET(ItemNoToSet) then begin
+        GlobalItem := Item;
+        ItemIsSet := true;
+        exit;
+      end;
+
+      Item.INIT;
+
+      Item.VALIDATE("No.",ItemNoToSet);
+      Item.VALIDATE(Description,ItemDescriptionToSet);
+      Item.VALIDATE("Description 2",ItemDescription2ToSet);
+      Item.VALIDATE(Type,ItemTypeToSet);
+      Item.INSERT(true);
+
+      GlobalItem := Item;
+      ItemIsSet := true;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE CreateLocationIfNeeded@57(LocationCode@1001 : Code[10];LocationName@1002 : Text[50]) : Boolean;
+    VAR
+      Location@1000 : Record Location;
+    BEGIN
+      if Location.GET(LocationCode) then
+        exit;
+
+      Location.INIT;
+      Location.VALIDATE(Code,LocationCode);
+      Location.VALIDATE(Name,LocationName);
+      Location.INSERT(true);
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE DoesItemExist@52(ItemNo@1000 : Code[20]) : Boolean;
+    VAR
+      Item@1001 : Record Item;
+    BEGIN
+      exit(Item.GET(ItemNo));
+    END;
+
+    [External]
+    PROCEDURE SetGlobalItem@40(ItemNo@1000 : Code[20]) : Boolean;
+    BEGIN
+      ItemIsSet := GlobalItem.GET(ItemNo);
+      exit(ItemIsSet);
+    END;
+
+    [External]
+    PROCEDURE ModifyItem@37(RunTrigger@1000 : Boolean);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.MODIFY(RunTrigger);
+    END;
+
+    [External]
+    PROCEDURE CreateSalesLineDiscountIfNeeded@9(SalesTypeToSet@1001 : 'Customer,"Customer Disc. Group","All Customers",Campaign';SalesCodeToSet@1002 : Code[10];TypeToSet@1003 : 'Item,"Item Disc. Group"';CodeToSet@1004 : Code[10];LineDiscountPercentToSet@1005 : Decimal);
+    VAR
+      SalesLineDiscount@1000 : Record "Sales Line Discount";
+    BEGIN
+      SalesLineDiscount.SETRANGE("Sales Type",SalesTypeToSet);
+      SalesLineDiscount.SETRANGE("Sales Code",SalesCodeToSet);
+      SalesLineDiscount.SETRANGE(Type,TypeToSet);
+      SalesLineDiscount.SETRANGE(Code,CodeToSet);
+      SalesLineDiscount.SETRANGE("Line Discount %",LineDiscountPercentToSet);
+
+      if SalesLineDiscount.FINDFIRST then
+        exit;
+
+      SalesLineDiscount.INIT;
+      SalesLineDiscount.VALIDATE("Sales Type",SalesTypeToSet);
+      SalesLineDiscount.VALIDATE("Sales Code",SalesCodeToSet);
+      SalesLineDiscount.VALIDATE(Type,TypeToSet);
+      SalesLineDiscount.VALIDATE(Code,CodeToSet);
+      SalesLineDiscount.VALIDATE("Line Discount %",LineDiscountPercentToSet);
+      SalesLineDiscount.INSERT(true);
+    END;
+
+    [External]
+    PROCEDURE CreateCustDiscGroupIfNeeded@23(CustDiscGroupCodeToSet@1000 : Code[20];DescriptionToSet@1002 : Text[50]);
+    VAR
+      CustomerDiscountGroup@1001 : Record "Customer Discount Group";
+    BEGIN
+      if CustomerDiscountGroup.GET(CustDiscGroupCodeToSet) then
+        exit;
+
+      CustomerDiscountGroup.INIT;
+      CustomerDiscountGroup.VALIDATE(Code,CustDiscGroupCodeToSet);
+      CustomerDiscountGroup.VALIDATE(Description,DescriptionToSet);
+      CustomerDiscountGroup.INSERT(true);
+    END;
+
+    [External]
+    PROCEDURE CreateItemDiscGroupIfNeeded@27(DiscGroupCodeToSet@1001 : Code[20];DescriptionToSet@1002 : Text[50]);
+    VAR
+      ItemDiscountGroup@1000 : Record "Item Discount Group";
+    BEGIN
+      if ItemDiscountGroup.GET(DiscGroupCodeToSet) then
+        exit;
+
+      ItemDiscountGroup.INIT;
+      ItemDiscountGroup.VALIDATE(Code,DiscGroupCodeToSet);
+      ItemDiscountGroup.VALIDATE(Description,DescriptionToSet);
+      ItemDiscountGroup.INSERT(true);
+    END;
+
+    [External]
+    PROCEDURE CreateSalesPriceIfNeeded@10(SalesTypeToSet@1002 : 'Customer,"Customer Price Group","All Customers",Campaign';SalesCodeToSet@1001 : Code[20];ItemNoToSet@1003 : Code[20];UnitPriceToSet@1004 : Decimal;CurrencyCodeToSet@1005 : Code[10];StartingDateToSet@1006 : Date;UnitOfMeasureToSet@1008 : Code[10];MinimumQuantityToSet@1007 : Decimal;VariantCodeToSet@1009 : Code[10]);
+    VAR
+      SalesPrice@1000 : Record "Sales Price";
+    BEGIN
+      if SalesPrice.GET(ItemNoToSet,SalesTypeToSet,SalesCodeToSet,StartingDateToSet,CurrencyCodeToSet,
+           VariantCodeToSet,UnitOfMeasureToSet,MinimumQuantityToSet)
+      then
+        exit;
+      SalesPrice.INIT;
+
+      SalesPrice.VALIDATE("Sales Type",SalesTypeToSet);
+      SalesPrice.VALIDATE("Sales Code",SalesCodeToSet);
+      SalesPrice.VALIDATE("Item No.",ItemNoToSet);
+      SalesPrice.VALIDATE("Starting Date",StartingDateToSet);
+      SalesPrice.VALIDATE("Currency Code",DataMigrationFacadeHelper.FixIfLcyCode(CurrencyCodeToSet));
+      SalesPrice.VALIDATE("Variant Code",VariantCodeToSet);
+      SalesPrice.VALIDATE("Unit of Measure Code",UnitOfMeasureToSet);
+      SalesPrice.VALIDATE("Minimum Quantity",MinimumQuantityToSet);
+      SalesPrice.VALIDATE("Unit Price",UnitPriceToSet);
+
+      SalesPrice.INSERT(true);
+    END;
+
+    [External]
+    PROCEDURE CreateTariffNumberIfNeeded@16(NoToSet@1002 : Code[20];DescriptionToSet@1001 : Text[50];SupplementaryUnitToSet@1003 : Boolean);
+    VAR
+      TariffNumber@1000 : Record "Tariff Number";
+    BEGIN
+      if TariffNumber.GET(NoToSet) then
+        exit;
+
+      TariffNumber.INIT;
+      TariffNumber.VALIDATE("No.",NoToSet);
+      TariffNumber.VALIDATE(Description,DescriptionToSet);
+      TariffNumber.VALIDATE("Supplementary Units",SupplementaryUnitToSet);
+      TariffNumber.INSERT(true);
+    END;
+
+    [External]
+    PROCEDURE CreateUnitOfMeasureIfNeeded@19(CodeToSet@1002 : Code[10];DescriptionToSet@1001 : Text[10]);
+    VAR
+      UnitOfMeasure@1000 : Record "Unit of Measure";
+    BEGIN
+      if UnitOfMeasure.GET(CodeToSet) then
+        exit;
+
+      UnitOfMeasure.INIT;
+      UnitOfMeasure.VALIDATE(Code,CodeToSet);
+      UnitOfMeasure.VALIDATE(Description,DescriptionToSet);
+      UnitOfMeasure.INSERT(true);
+    END;
+
+    [External]
+    PROCEDURE CreateItemTrackingCodeIfNeeded@12(CodeToSet@1002 : Code[10];DescriptionToSet@1001 : Text[50];LotSpecificTrackingToSet@1003 : Boolean;SNSpecificTrackingToSet@1004 : Boolean);
+    VAR
+      ItemTrackingCode@1005 : Record "Item Tracking Code";
+    BEGIN
+      if ItemTrackingCode.GET(CodeToSet) then
+        exit;
+
+      ItemTrackingCode.INIT;
+      ItemTrackingCode.VALIDATE(Code,CodeToSet);
+      ItemTrackingCode.VALIDATE(Description,DescriptionToSet);
+      ItemTrackingCode.VALIDATE("Lot Specific Tracking",LotSpecificTrackingToSet);
+      ItemTrackingCode.VALIDATE("SN Specific Tracking",SNSpecificTrackingToSet);
+      ItemTrackingCode.INSERT(true);
+    END;
+
+    [External]
+    PROCEDURE CreateInventoryPostingSetupIfNeeded@45(InventoryPostingGroupCode@1000 : Code[20];InventoryPostingGroupDescription@1003 : Text[50];LocationCode@1004 : Code[10]);
+    VAR
+      InventoryPostingGroup@1001 : Record "Inventory Posting Group";
+      InventoryPostingSetup@1002 : Record "Inventory Posting Setup";
+    BEGIN
+      if not InventoryPostingGroup.GET(InventoryPostingGroupCode) then begin
+        InventoryPostingGroup.INIT;
+        InventoryPostingGroup.VALIDATE(Code,InventoryPostingGroupCode);
+        InventoryPostingGroup.VALIDATE(Description,InventoryPostingGroupDescription);
+        InventoryPostingGroup.INSERT(true);
+      end;
+
+      if not InventoryPostingSetup.GET(LocationCode,InventoryPostingGroupCode) then begin
+        InventoryPostingSetup.INIT;
+        InventoryPostingSetup.VALIDATE("Location Code",LocationCode);
+        InventoryPostingSetup.VALIDATE("Invt. Posting Group Code",InventoryPostingGroup.Code);
+        InventoryPostingSetup.INSERT(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CreateGeneralProductPostingSetupIfNeeded@49(GeneralProdPostingGroupCode@1000 : Code[20];GeneralProdPostingGroupDescription@1003 : Text[50];GeneralBusPostingGroupCode@1004 : Code[20]);
+    VAR
+      GenProductPostingGroup@1001 : Record "Gen. Product Posting Group";
+      GeneralPostingSetup@1002 : Record "General Posting Setup";
+    BEGIN
+      if not GenProductPostingGroup.GET(GeneralProdPostingGroupCode) then begin
+        GenProductPostingGroup.INIT;
+        GenProductPostingGroup.VALIDATE(Code,GeneralProdPostingGroupCode);
+        GenProductPostingGroup.VALIDATE(Description,GeneralProdPostingGroupDescription);
+        GenProductPostingGroup.INSERT(true);
+      end;
+
+      if not GeneralPostingSetup.GET(GeneralBusPostingGroupCode,GeneralProdPostingGroupCode) then begin
+        GeneralPostingSetup.INIT;
+        GeneralPostingSetup.VALIDATE("Gen. Bus. Posting Group",GeneralBusPostingGroupCode);
+        GeneralPostingSetup.VALIDATE("Gen. Prod. Posting Group",GenProductPostingGroup.Code);
+        GeneralPostingSetup.INSERT(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CreateItemJournalBatchIfNeeded@50(ItemJournalBatchCode@1000 : Code[10];NoSeriesCode@1003 : Code[20];PostingNoSeriesCode@1004 : Code[20]);
+    VAR
+      ItemJournalBatch@1002 : Record "Item Journal Batch";
+      TemplateName@1001 : Code[10];
+    BEGIN
+      TemplateName := CreateItemJournalTemplateIfNeeded(ItemJournalBatchCode);
+      ItemJournalBatch.SETRANGE("Journal Template Name",TemplateName);
+      ItemJournalBatch.SETRANGE(Name,ItemJournalBatchCode);
+      ItemJournalBatch.SETRANGE("No. Series",NoSeriesCode);
+      ItemJournalBatch.SETRANGE("Posting No. Series",PostingNoSeriesCode);
+      if not ItemJournalBatch.FINDFIRST then begin
+        ItemJournalBatch.INIT;
+        ItemJournalBatch.VALIDATE("Journal Template Name",TemplateName);
+        ItemJournalBatch.SetupNewBatch;
+        ItemJournalBatch.VALIDATE(Name,ItemJournalBatchCode);
+        ItemJournalBatch.VALIDATE(Description,ItemJournalBatchCode);
+        ItemJournalBatch."No. Series" := NoSeriesCode;
+        ItemJournalBatch."Posting No. Series" := PostingNoSeriesCode;
+        ItemJournalBatch.INSERT(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalTemplateIfNeeded@55(ItemJournalBatchCode@1001 : Code[10]) : Code[10];
+    VAR
+      ItemJournalTemplate@1000 : Record "Item Journal Template";
+    BEGIN
+      ItemJournalTemplate.SETRANGE(Type,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.SETRANGE(Recurring,false);
+      if not ItemJournalTemplate.FINDFIRST then begin
+        ItemJournalTemplate.INIT;
+        ItemJournalTemplate.VALIDATE(Name,ItemJournalBatchCode);
+        ItemJournalTemplate.VALIDATE(Type,ItemJournalTemplate.Type::Item);
+        ItemJournalTemplate.VALIDATE(Recurring,false);
+        ItemJournalTemplate.INSERT(true);
+      end;
+      exit(ItemJournalTemplate.Name);
+    END;
+
+    [External]
+    PROCEDURE CreateItemJournalLine@53(ItemJournalBatchCode@1006 : Code[10];DocumentNo@1004 : Code[20];Description@1003 : Text[50];PostingDate@1000 : Date;Qty@1001 : Decimal;Amount@1002 : Decimal;LocationCode@1012 : Code[10]);
+    VAR
+      ItemJournalLineCurrent@1008 : Record "Item Journal Line";
+      ItemJournalLine@1005 : Record "Item Journal Line";
+      ItemJournalBatch@1007 : Record "Item Journal Batch";
+      LineNum@1009 : Integer;
+    BEGIN
+      ItemJournalBatch.GET(CreateItemJournalTemplateIfNeeded(ItemJournalBatchCode),ItemJournalBatchCode);
+
+      ItemJournalLineCurrent.SETRANGE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLineCurrent.SETRANGE("Journal Batch Name",ItemJournalBatch.Name);
+      if ItemJournalLineCurrent.FINDLAST then
+        LineNum := ItemJournalLineCurrent."Line No." + 10000
+      else
+        LineNum := 10000;
+
+      ItemJournalLine.INIT;
+      ItemJournalLine.VALIDATE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.VALIDATE("Journal Batch Name",ItemJournalBatch.Name);
+      ItemJournalLine.VALIDATE("Line No.",LineNum);
+      ItemJournalLine.VALIDATE("Entry Type",ItemJournalLine."Entry Type"::"Positive Adjmt.");
+      ItemJournalLine.VALIDATE("Document No.",DocumentNo);
+      ItemJournalLine.VALIDATE("Item No.",GlobalItem."No.");
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.VALIDATE(Description,Description);
+      ItemJournalLine.VALIDATE("Document Date",PostingDate);
+      ItemJournalLine.VALIDATE("Posting Date",PostingDate);
+      ItemJournalLine.VALIDATE(Quantity,Qty);
+      ItemJournalLine.VALIDATE(Amount,Amount);
+      ItemJournalLine.INSERT(true);
+
+      GlobalItemJournalLine := ItemJournalLine;
+      ItemJournalLineIsSet := true;
+    END;
+
+    [External]
+    PROCEDURE SetItemJournalLineItemTracking@56(SerialNumber@1001 : Code[20];LotNumber@1000 : Code[20]);
+    BEGIN
+      if not ItemJournalLineIsSet then
+        ERROR(InternalItemJnlLIneNotSetErr);
+
+      if (SerialNumber <> '') or (LotNumber <> '') then
+        CreateItemTracking(GlobalItemJournalLine,SerialNumber,LotNumber);
+    END;
+
+    LOCAL PROCEDURE CreateItemTracking@54(ItemJournalLine@1001 : Record "Item Journal Line";SerialNumber@1003 : Code[20];LotNumber@1004 : Code[20]);
+    VAR
+      ReservationEntry@1002 : Record "Reservation Entry";
+      CreateReservEntry@1000 : Codeunit "Create Reserv. Entry";
+    BEGIN
+      CreateReservEntry.CreateReservEntryFor(
+        DATABASE::"Item Journal Line",
+        ItemJournalLine."Entry Type",
+        ItemJournalLine."Journal Template Name",
+        ItemJournalLine."Journal Batch Name",
+        0,
+        ItemJournalLine."Line No.",
+        ItemJournalLine."Qty. per Unit of Measure",
+        ABS(ItemJournalLine.Quantity),
+        ABS(ItemJournalLine."Quantity (Base)"),
+        SerialNumber,LotNumber);
+      CreateReservEntry.CreateEntry(
+        ItemJournalLine."Item No.",
+        ItemJournalLine."Variant Code",
+        ItemJournalLine."Location Code",
+        '',
+        0D,
+        0D,
+        0,
+        ReservationEntry."Reservation Status"::Prospect);
+    END;
+
+    [External]
+    PROCEDURE SetItemJournalLineDimension@60(DimensionCode@1001 : Code[20];DimensionDescription@1005 : Text[50];DimensionValueCode@1002 : Code[20];DimensionValueName@1006 : Text[50]);
+    VAR
+      DataMigrationFacadeHelper@1000 : Codeunit "Data Migration Facade Helper";
+    BEGIN
+      if not ItemJournalLineIsSet then
+        ERROR(InternalItemJnlLIneNotSetErr);
+
+      GlobalItemJournalLine.VALIDATE("Dimension Set ID",
+        DataMigrationFacadeHelper.CreateDimensionSetId(GlobalItemJournalLine."Dimension Set ID",
+          DimensionCode,DimensionDescription,
+          DimensionValueCode,DimensionValueName));
+      GlobalItemJournalLine.MODIFY(true);
+    END;
+
+    [External]
+    PROCEDURE CreateDefaultDimensionAndRequirementsIfNeeded@18(DimensionCode@1003 : Text[20];DimensionDescription@1004 : Text[50];DimensionValueCode@1005 : Code[20];DimensionValueName@1006 : Text[30]);
+    VAR
+      Dimension@1000 : Record Dimension;
+      DimensionValue@1001 : Record "Dimension Value";
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      DataMigrationFacadeHelper.GetOrCreateDimension(DimensionCode,DimensionDescription,Dimension);
+      DataMigrationFacadeHelper.GetOrCreateDimensionValue(Dimension.Code,DimensionValueCode,DimensionValueName,DimensionValue);
+      DataMigrationFacadeHelper.CreateOnlyDefaultDimensionIfNeeded(Dimension.Code,DimensionValue.Code,DATABASE::Item,GlobalItem."No.");
+    END;
+
+    [External]
+    PROCEDURE SetItemTrackingCode@13(TrackingCodeToSet@1002 : Code[10]);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Item Tracking Code",TrackingCodeToSet);
+    END;
+
+    [External]
+    PROCEDURE SetBaseUnitOfMeasure@31(BaseUnitOfMeasureToSet@1002 : Code[10]);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Base Unit of Measure",BaseUnitOfMeasureToSet);
+    END;
+
+    [External]
+    PROCEDURE SetItemDiscGroup@35(ItemDiscGroupToSet@1002 : Code[20]);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Item Disc. Group",ItemDiscGroupToSet);
+    END;
+
+    [External]
+    PROCEDURE SetTariffNo@36(TariffNoToSet@1002 : Code[20]);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Tariff No.",TariffNoToSet);
+    END;
+
+    [External]
+    PROCEDURE SetCostingMethod@47(CostingMethodToSet@1002 : 'FIFO,LIFO,Specific,Average,Standard');
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Costing Method",CostingMethodToSet);
+    END;
+
+    [External]
+    PROCEDURE SetUnitCost@14(UnitCostToSet@1002 : Decimal);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Unit Cost",UnitCostToSet);
+    END;
+
+    [External]
+    PROCEDURE SetStandardCost@34(StandardCostToSet@1000 : Decimal);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Standard Cost",StandardCostToSet);
+    END;
+
+    [External]
+    PROCEDURE SetVendorItemNo@33(VendorItemNoToSet@1002 : Text[20]);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Vendor Item No.",VendorItemNoToSet);
+    END;
+
+    [External]
+    PROCEDURE SetNetWeight@32(NetWeightToSet@1002 : Decimal);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Net Weight",NetWeightToSet);
+    END;
+
+    [External]
+    PROCEDURE SetUnitVolume@30(UnitVolumeToSet@1002 : Decimal);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Unit Volume",UnitVolumeToSet);
+    END;
+
+    [External]
+    PROCEDURE SetBlocked@29(BlockedToSet@1002 : Boolean);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE(Blocked,BlockedToSet);
+    END;
+
+    [External]
+    PROCEDURE SetStockoutWarning@28(IsStockoutWarning@1002 : Boolean);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      if IsStockoutWarning then
+        GlobalItem.VALIDATE("Stockout Warning",GlobalItem."Stockout Warning"::Yes)
+      else
+        GlobalItem.VALIDATE("Stockout Warning",GlobalItem."Stockout Warning"::No);
+    END;
+
+    [External]
+    PROCEDURE SetPreventNegativeInventory@26(IsPreventNegativeInventory@1002 : Boolean);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      if IsPreventNegativeInventory then
+        GlobalItem.VALIDATE("Prevent Negative Inventory",GlobalItem."Prevent Negative Inventory"::Yes)
+      else
+        GlobalItem.VALIDATE("Prevent Negative Inventory",GlobalItem."Prevent Negative Inventory"::No);
+    END;
+
+    [External]
+    PROCEDURE SetReorderQuantity@25(ReorderQuantityToSet@1002 : Decimal);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Reorder Quantity",ReorderQuantityToSet);
+    END;
+
+    [External]
+    PROCEDURE SetAlternativeItemNo@17(AlternativeItemNoToSet@1002 : Code[20]);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Alternative Item No.",AlternativeItemNoToSet);
+    END;
+
+    [External]
+    PROCEDURE SetVendorNo@15(VendorNoToSet@1002 : Code[20]) : Boolean;
+    VAR
+      Vendor@1000 : Record Vendor;
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      if not Vendor.GET(VendorNoToSet) then
+        exit;
+
+      GlobalItem.VALIDATE("Vendor No.",VendorNoToSet);
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE SetLastDateModified@42(LastDateModifiedToSet@1000 : Date);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Last Date Modified",LastDateModifiedToSet);
+    END;
+
+    [External]
+    PROCEDURE SetLastModifiedDateTime@41(LastModifiedDateTimeToSet@1000 : DateTime);
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      GlobalItem.VALIDATE("Last DateTime Modified",LastModifiedDateTimeToSet);
+    END;
+
+    [External]
+    PROCEDURE CreateCustomerPriceGroupIfNeeded@44(CodeToSet@1000 : Code[10];DescriptionToSet@1001 : Text[50];PriceIncludesVatToSet@1002 : Boolean) : Code[10];
+    BEGIN
+      exit(DataMigrationFacadeHelper.CreateCustomerPriceGroupIfNeeded(CodeToSet,DescriptionToSet,PriceIncludesVatToSet));
+    END;
+
+    [External]
+    PROCEDURE SetInventoryPostingSetupInventoryAccount@46(InventoryPostingGroupCode@1001 : Code[20];LocationCode@1000 : Code[10];InventoryAccountCode@1003 : Code[20]);
+    VAR
+      InventoryPostingSetup@1002 : Record "Inventory Posting Setup";
+    BEGIN
+      InventoryPostingSetup.GET(LocationCode,InventoryPostingGroupCode);
+      InventoryPostingSetup.VALIDATE("Inventory Account",InventoryAccountCode);
+      InventoryPostingSetup.MODIFY(true);
+    END;
+
+    [External]
+    PROCEDURE SetGeneralPostingSetupInventoryAdjmntAccount@51(GeneralProdPostingGroupCode@1001 : Code[20];GeneralBusPostingGroupCode@1000 : Code[10];InventoryAdjmntAccountCode@1003 : Code[20]);
+    VAR
+      GeneralPostingSetup@1002 : Record "General Posting Setup";
+    BEGIN
+      GeneralPostingSetup.GET(GeneralBusPostingGroupCode,GeneralProdPostingGroupCode);
+      GeneralPostingSetup.VALIDATE("Inventory Adjmt. Account",InventoryAdjmntAccountCode);
+      GeneralPostingSetup.MODIFY(true);
+    END;
+
+    [External]
+    PROCEDURE SetInventoryPostingGroup@39(InventoryPostingGroupCode@1002 : Code[20]) : Boolean;
+    VAR
+      InventoryPostingGroup@1000 : Record "Inventory Posting Group";
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      if not InventoryPostingGroup.GET(InventoryPostingGroupCode) then
+        exit;
+
+      GlobalItem.VALIDATE("Inventory Posting Group",InventoryPostingGroupCode);
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE SetGeneralProductPostingGroup@48(GenProductPostingGroupCode@1002 : Code[20]) : Boolean;
+    VAR
+      GenProductPostingGroup@1000 : Record "Gen. Product Posting Group";
+    BEGIN
+      if not ItemIsSet then
+        ERROR(InternalItemNotSetErr);
+
+      if not GenProductPostingGroup.GET(GenProductPostingGroupCode) then
+        exit;
+
+      GlobalItem.VALIDATE("Gen. Prod. Posting Group",GenProductPostingGroupCode);
+
+      exit(true);
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateItem@1(RecordIdToMigrate@1001 : RecordID);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateItemPrice@5(RecordIdToMigrate@1001 : RecordID);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateItemSalesLineDiscount@6(RecordIdToMigrate@1001 : RecordID);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateItemTrackingCode@2(RecordIdToMigrate@1001 : RecordID);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateCostingMethod@11(RecordIdToMigrate@1001 : RecordID);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateItemUnitOfMeasure@3(RecordIdToMigrate@1001 : RecordID);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateItemDiscountGroup@4(RecordIdToMigrate@1001 : RecordID);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateItemTariffNo@7(RecordIdToMigrate@1001 : RecordID);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateItemDimensions@8(RecordIdToMigrate@1001 : RecordID);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateItemPostingGroups@38(RecordIdToMigrate@1000 : RecordID;ChartOfAccountsMigrated@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnMigrateInventoryTransactions@43(RecordIdToMigrate@1000 : RecordID;ChartOfAccountsMigrated@1001 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -2,9 +2,9 @@ OBJECT Codeunit 1800 Assisted Company Setup
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -20,6 +20,9 @@ OBJECT Codeunit 1800 Assisted Company Setup
       CompanyIsBeingSetUpMsg@1001 : TextConst 'ENU=The Company is being set up. Please wait...';
       StandardTxt@1004 : TextConst '@@@=Must be similar to "Data Type" option in table 101900 Demonstration Data Setup;ENU=Standard';
       EvaluationTxt@1003 : TextConst '@@@=Must be similar to "Data Type" option in table 101900 Demonstration Data Setup;ENU=Evaluation';
+      ExtendedTxt@1005 : TextConst '@@@=Must be similar to "Data Type" option in table 101900 Demonstration Data Setup;ENU=Extended';
+      CreatingCompanyMsg@1007 : TextConst 'ENU=Creating company...';
+      NoPermissionsErr@1006 : TextConst 'ENU=You do not have permissions to create a new company. Contact your system administrator.';
 
     [External]
     PROCEDURE EnableAssistedCompanySetup@5(SetupCompanyName@1000 : Text[30];AssistedSetupEnabled@1002 : Boolean);
@@ -155,7 +158,6 @@ OBJECT Codeunit 1800 Assisted Company Setup
     BEGIN
       IF NOT AssistedCompanySetupStatus.GET(Name) THEN
         EXIT(FALSE);
-      JobQueueLogEntry.CHANGECOMPANY(Name);
       JobQueueLogEntry.SETRANGE(ID,AssistedCompanySetupStatus."Task ID");
       EXIT(JobQueueLogEntry.FINDLAST);
     END;
@@ -163,8 +165,10 @@ OBJECT Codeunit 1800 Assisted Company Setup
     LOCAL PROCEDURE GetCompanySetupStatus@25(Name@1000 : Text[30]) : Integer;
     VAR
       JobQueueLogEntry@1002 : Record 474;
-      SetupStatus@1001 : ' ,Completed,In Progress,Error';
+      SetupStatus@1001 : ' ,Completed,In Progress,Error,Missing Permission';
     BEGIN
+      IF NOT JobQueueLogEntry.CHANGECOMPANY(Name) THEN
+        EXIT(SetupStatus::"Missing Permission");
       IF FindJobQueueLogEntries(Name,JobQueueLogEntry) THEN
         EXIT(JobQueueLogEntry.Status + 1);
       IF IsCompanySetupInProgress(Name) THEN
@@ -197,48 +201,146 @@ OBJECT Codeunit 1800 Assisted Company Setup
       END;
     END;
 
-    LOCAL PROCEDURE FilterConfigurationPackageFile@24(VAR ConfigurationPackageFile@1000 : Record 2000000170;CompanyData@1001 : 'Evaluation Data,Standard Data,None');
+    PROCEDURE FillCompanyData@28(NewCompanyName@1001 : Text[30];NewCompanyData@1000 : 'Evaluation Data,Standard Data,None,Extended Data,Full No Data');
+    VAR
+      Company@1002 : Record 2000000006;
+      ConfigurationPackageFile@1003 : Record 2000000170;
+    BEGIN
+      IF NewCompanyData = NewCompanyData::"Evaluation Data" THEN BEGIN
+        Company.GET(NewCompanyName);
+        Company."Evaluation Company" := TRUE;
+        Company.MODIFY;
+      END;
+      IF FindConfigurationPackageFile(ConfigurationPackageFile,NewCompanyData) THEN
+        ScheduleConfigPackageImport(ConfigurationPackageFile,NewCompanyName);
+    END;
+
+    LOCAL PROCEDURE FilterConfigurationPackageFile@24(VAR ConfigurationPackageFile@1000 : Record 2000000170;CompanyData@1001 : 'Evaluation Data,Standard Data,None,Extended Data,Full No Data') : Boolean;
     BEGIN
       CASE CompanyData OF
         CompanyData::"Evaluation Data":
           ConfigurationPackageFile.SETFILTER(Code,'*' + EvaluationTxt + '*');
         CompanyData::"Standard Data":
           ConfigurationPackageFile.SETFILTER(Code,'*' + StandardTxt + '*');
+        CompanyData::"Extended Data":
+          ConfigurationPackageFile.SETFILTER(Code,'*' + ExtendedTxt + '*');
+        ELSE
+          EXIT(FALSE);
       END;
-      ConfigurationPackageFile.SETRANGE("Language ID",GLOBALLANGUAGE);
       ConfigurationPackageFile.SETRANGE("Setup Type",ConfigurationPackageFile."Setup Type"::Company);
+      ConfigurationPackageFile.SETRANGE("Language ID",GLOBALLANGUAGE);
+      IF ConfigurationPackageFile.ISEMPTY THEN
+        ConfigurationPackageFile.SETRANGE("Language ID");
+      EXIT(TRUE);
     END;
 
     [External]
-    PROCEDURE ExistsConfigurationPackageFile@23(CompanyData@1000 : 'Evaluation Data,Standard Data,None') : Boolean;
+    PROCEDURE ExistsConfigurationPackageFile@23(CompanyData@1000 : Option) : Boolean;
     VAR
       ConfigurationPackageFile@1001 : Record 2000000170;
     BEGIN
-      FilterConfigurationPackageFile(ConfigurationPackageFile,CompanyData);
-      EXIT(NOT ConfigurationPackageFile.ISEMPTY);
+      IF FilterConfigurationPackageFile(ConfigurationPackageFile,CompanyData) THEN
+        EXIT(NOT ConfigurationPackageFile.ISEMPTY);
+      EXIT(FALSE);
     END;
 
     [External]
-    PROCEDURE FindConfigurationPackageFile@21(VAR ConfigurationPackageFile@1000 : Record 2000000170;CompanyData@1001 : 'Evaluation Data,Standard Data,None') : Boolean;
+    PROCEDURE FindConfigurationPackageFile@21(VAR ConfigurationPackageFile@1000 : Record 2000000170;CompanyData@1001 : Option) : Boolean;
     BEGIN
-      FilterConfigurationPackageFile(ConfigurationPackageFile,CompanyData);
-      EXIT(ConfigurationPackageFile.FINDFIRST);
+      IF FilterConfigurationPackageFile(ConfigurationPackageFile,CompanyData) THEN
+        EXIT(ConfigurationPackageFile.FINDFIRST);
+      EXIT(FALSE);
     END;
 
     [External]
     PROCEDURE ScheduleConfigPackageImport@20(ConfigurationPackageFile@1001 : Record 2000000170;Name@1002 : Text);
     VAR
       AssistedCompanySetupStatus@1000 : Record 1802;
+      DoNotScheduleTask@1003 : Boolean;
+      TaskID@1004 : GUID;
+      ImportSessionID@1005 : Integer;
     BEGIN
       WITH AssistedCompanySetupStatus DO BEGIN
         LOCKTABLE;
         GET(Name);
-        "Task ID" :=
-          TASKSCHEDULER.CREATETASK(
-            CODEUNIT::"Import Config. Package File",0,TRUE,"Company Name",CURRENTDATETIME,ConfigurationPackageFile.RECORDID);
+        OnBeforeScheduleTask(DoNotScheduleTask,TaskID);
+        IF DoNotScheduleTask THEN
+          "Task ID" := TaskID
+        ELSE
+          IF TASKSCHEDULER.CANCREATETASK THEN
+            "Task ID" :=
+              TASKSCHEDULER.CREATETASK(
+                CODEUNIT::"Import Config. Package File",0,TRUE,"Company Name",CURRENTDATETIME,ConfigurationPackageFile.RECORDID)
+          ELSE BEGIN
+            COMMIT;
+            ImportSessionID := 0;
+            STARTSESSION(ImportSessionID,CODEUNIT::"Import Config. Package File","Company Name",ConfigurationPackageFile);
+            EXIT;
+          END;
         MODIFY;
         COMMIT;
       END;
+    END;
+
+    LOCAL PROCEDURE SetApplicationArea@30(NewCompanyName@1003 : Text[30];NewCompanyData@1002 : 'Evaluation Data,Standard Data,None,Extended Data,Full No Data');
+    VAR
+      ApplicationAreaSetup@1000 : Record 9178;
+      ExperienceTier@1001 : ' ,,,,,Basic,,,,,,,,,,Suite,,,,,Custom,,,,,Advanced';
+    BEGIN
+      ApplicationAreaSetup.SETRANGE("Company Name",NewCompanyName);
+      ApplicationAreaSetup.DELETEALL;
+
+      CASE NewCompanyData OF
+        NewCompanyData::"Standard Data",NewCompanyData::None:
+          ExperienceTier := ExperienceTier::Suite;
+        NewCompanyData::"Extended Data",NewCompanyData::"Full No Data":
+          ExperienceTier := ExperienceTier::Advanced;
+        NewCompanyData::"Evaluation Data":
+          ExperienceTier := ExperienceTier::Basic;
+      END;
+
+      ApplicationAreaSetup.INIT;
+      ApplicationAreaSetup."Company Name" := NewCompanyName;
+      ApplicationAreaSetup.SetExperienceTier(ExperienceTier);
+      ApplicationAreaSetup.INSERT;
+    END;
+
+    PROCEDURE SetUpNewCompany@29(NewCompanyName@1001 : Text[30];NewCompanyData@1000 : 'Evaluation Data,Standard Data,None,Extended Data,Full No Data');
+    VAR
+      AssistedCompanySetupStatus@1004 : Record 1802;
+    BEGIN
+      SetApplicationArea(NewCompanyName,NewCompanyData);
+      IF NOT (NewCompanyData IN [NewCompanyData::None,NewCompanyData::"Full No Data"]) THEN BEGIN
+        AssistedCompanySetupStatus.SetEnabled(NewCompanyName,NewCompanyData = NewCompanyData::"Standard Data",FALSE);
+        FillCompanyData(NewCompanyName,NewCompanyData);
+      END;
+    END;
+
+    PROCEDURE CreateNewCompany@32(NewCompanyName@1003 : Text[30]);
+    VAR
+      Company@1001 : Record 2000000006;
+      GeneralLedgerSetup@1002 : Record 98;
+      Window@1000 : Dialog;
+    BEGIN
+      Window.OPEN(CreatingCompanyMsg);
+
+      Company.INIT;
+      Company.Name := NewCompanyName;
+      Company.INSERT;
+
+      IF NOT GeneralLedgerSetup.CHANGECOMPANY(NewCompanyName) THEN
+        ERROR(NoPermissionsErr);
+      IF NOT GeneralLedgerSetup.WRITEPERMISSION THEN
+        ERROR(NoPermissionsErr);
+
+      COMMIT;
+
+      Window.CLOSE;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeScheduleTask@31(VAR DoNotScheduleTask@1000 : Boolean;VAR TaskID@1001 : GUID);
+    BEGIN
     END;
 
     [EventSubscriber(Codeunit,2,OnCompanyInitialize)]
@@ -303,6 +405,8 @@ OBJECT Codeunit 1800 Assisted Company Setup
     VAR
       JobQueueLogEntry@1001 : Record 474;
     BEGIN
+      IF NOT JobQueueLogEntry.CHANGECOMPANY(Name) THEN
+        EXIT;
       IF FindJobQueueLogEntries(Name,JobQueueLogEntry) THEN
         PAGE.RUNMODAL(PAGE::"Job Queue Log Entries",JobQueueLogEntry);
     END;

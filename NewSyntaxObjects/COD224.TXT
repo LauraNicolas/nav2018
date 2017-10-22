@@ -1,0 +1,452 @@
+OBJECT Codeunit 224 EmplEntry-Apply Posted Entries
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Employee Ledger Entry";
+    EventSubscriberInstance=Manual;
+    Permissions=TableData "Employee Ledger Entry"=rimd,
+                TableData "Detailed Employee Ledger Entry"=rimd;
+    OnRun=BEGIN
+            if PreviewMode then
+              case RunOptionPreviewContext of
+                RunOptionPreview::Apply:
+                  Apply(Rec,DocumentNoPreviewContext,ApplicationDatePreviewContext);
+                RunOptionPreview::Unapply:
+                  PostUnApplyEmployee(DetailedEmployeeLedgEntryPreviewContext,DocumentNoPreviewContext,ApplicationDatePreviewContext);
+              end
+            else
+              Apply(Rec,"Document No.",0D);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PostingApplicationMsg@1000 : TextConst 'ENU=Posting application...';
+      MustNotBeBeforeErr@1002 : TextConst 'ENU=The posting date entered must not be before the posting date on the employee ledger entry.';
+      NoEntriesAppliedErr@1003 : TextConst '@@@=%1 - Caption of "Applies to ID" field of Gen. Journal Line;ENU=Cannot post because you did not specify which entry to apply. You must specify an entry in the Applies-to ID field for one or more open entries.';
+      UnapplyPostedAfterThisEntryErr@1018 : TextConst 'ENU=Before you can unapply this entry, you must first unapply all application entries that were posted after this entry.';
+      NoApplicationEntryErr@1017 : TextConst '@@@=%1 - arbitrary text, the identifier of the ledger entry;ENU=Employee ledger entry number %1 does not have an application entry.';
+      UnapplyingMsg@1015 : TextConst 'ENU=Unapplying and posting...';
+      UnapplyAllPostedAfterThisEntryErr@1021 : TextConst '@@@=%1 - arbitrary text, the identifier of the ledger entry;ENU=Before you can unapply this entry, you must first unapply all application entries in employee ledger entry number %1 that were posted after this entry.';
+      NotAllowedPostingDatesErr@1019 : TextConst 'ENU=Posting date is not within the range of allowed posting dates.';
+      LatestEntryMustBeApplicationErr@1023 : TextConst '@@@=%1 - arbitrary text, the identifier of the ledger entry;ENU=The latest transaction number must be an application in employee ledger entry number %1.';
+      CannotUnapplyExchRateErr@1025 : TextConst '@@@=%1 - a date;ENU=You cannot unapply the entry with the posting date %1, because the exchange rate for the additional reporting currency has been changed.';
+      CannotApplyClosedEntriesErr@1102601000 : TextConst 'ENU=One or more of the entries that you selected is closed. You cannot apply closed entries.';
+      DetailedEmployeeLedgEntryPreviewContext@1010 : Record "Detailed Employee Ledger Entry";
+      ApplicationDatePreviewContext@1009 : Date;
+      DocumentNoPreviewContext@1008 : Code[20];
+      RunOptionPreview@1007 : 'Apply,Unapply';
+      RunOptionPreviewContext@1006 : 'Apply,Unapply';
+      PreviewMode@1005 : Boolean;
+
+    [Internal]
+    PROCEDURE Apply@17(EmplLedgEntry@1000 : Record "Employee Ledger Entry";DocumentNo@1001 : Code[20];ApplicationDate@1002 : Date);
+    BEGIN
+      with EmplLedgEntry do begin
+        GET("Entry No.");
+
+        if ApplicationDate = 0D then
+          ApplicationDate := GetApplicationDate(EmplLedgEntry)
+        else
+          if ApplicationDate < GetApplicationDate(EmplLedgEntry) then
+            ERROR(MustNotBeBeforeErr);
+
+        if DocumentNo = '' then
+          DocumentNo := "Document No.";
+
+        EmplPostApplyEmplLedgEntry(EmplLedgEntry,DocumentNo,ApplicationDate);
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetApplicationDate@14(EmplLedgEntry@1000 : Record "Employee Ledger Entry") ApplicationDate : Date;
+    VAR
+      ApplyToEmplLedgEntry@1001 : Record "Employee Ledger Entry";
+    BEGIN
+      with EmplLedgEntry do begin
+        ApplicationDate := 0D;
+        ApplyToEmplLedgEntry.SETCURRENTKEY("Employee No.","Applies-to ID");
+        ApplyToEmplLedgEntry.SETRANGE("Employee No.","Employee No.");
+        ApplyToEmplLedgEntry.SETRANGE("Applies-to ID","Applies-to ID");
+        ApplyToEmplLedgEntry.FIND('-');
+        repeat
+          if ApplyToEmplLedgEntry."Posting Date" > ApplicationDate then
+            ApplicationDate := ApplyToEmplLedgEntry."Posting Date";
+        until ApplyToEmplLedgEntry.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE EmplPostApplyEmplLedgEntry@12(EmplLedgEntry@1000 : Record "Employee Ledger Entry";DocumentNo@1002 : Code[20];ApplicationDate@1003 : Date);
+    VAR
+      SourceCodeSetup@1004 : Record "Source Code Setup";
+      GenJnlLine@1005 : Record "Gen. Journal Line";
+      UpdateAnalysisView@1001 : Codeunit "Update Analysis View";
+      GenJnlPostLine@1006 : Codeunit "Gen. Jnl.-Post Line";
+      GenJnlPostPreview@1008 : Codeunit "Gen. Jnl.-Post Preview";
+      Window@1007 : Dialog;
+      EntryNoBeforeApplication@1010 : Integer;
+      EntryNoAfterApplication@1009 : Integer;
+    BEGIN
+      with EmplLedgEntry do begin
+        Window.OPEN(PostingApplicationMsg);
+
+        SourceCodeSetup.GET;
+
+        GenJnlLine.INIT;
+        GenJnlLine."Document No." := DocumentNo;
+        GenJnlLine."Posting Date" := ApplicationDate;
+        GenJnlLine."Document Date" := GenJnlLine."Posting Date";
+        GenJnlLine."Account Type" := GenJnlLine."Account Type"::Employee;
+        GenJnlLine."Account No." := "Employee No.";
+        CALCFIELDS("Debit Amount","Credit Amount","Debit Amount (LCY)","Credit Amount (LCY)");
+        GenJnlLine.Correction :=
+          ("Debit Amount" < 0) or ("Credit Amount" < 0) or
+          ("Debit Amount (LCY)" < 0) or ("Credit Amount (LCY)" < 0);
+        GenJnlLine."Document Type" := "Document Type";
+        GenJnlLine.Description := Description;
+        GenJnlLine."Shortcut Dimension 2 Code" := "Global Dimension 2 Code";
+        GenJnlLine."Shortcut Dimension 1 Code" := "Global Dimension 1 Code";
+        GenJnlLine."Dimension Set ID" := "Dimension Set ID";
+        GenJnlLine."Posting Group" := "Employee Posting Group";
+        GenJnlLine."Source No." := "Employee No.";
+        GenJnlLine."Source Type" := GenJnlLine."Source Type"::Employee;
+        GenJnlLine."Source Code" := SourceCodeSetup."Employee Entry Application";
+        GenJnlLine."System-Created Entry" := true;
+
+        EntryNoBeforeApplication := FindLastApplDtldEmplLedgEntry;
+
+        GenJnlPostLine.EmplPostApplyEmplLedgEntry(GenJnlLine,EmplLedgEntry);
+
+        EntryNoAfterApplication := FindLastApplDtldEmplLedgEntry;
+        if EntryNoAfterApplication = EntryNoBeforeApplication then
+          ERROR(NoEntriesAppliedErr);
+
+        if PreviewMode then
+          GenJnlPostPreview.ThrowError;
+
+        COMMIT;
+        Window.CLOSE;
+        UpdateAnalysisView.UpdateAll(0,true);
+      end;
+    END;
+
+    LOCAL PROCEDURE FindLastApplDtldEmplLedgEntry@1() : Integer;
+    VAR
+      DtldEmplLedgEntry@1000 : Record "Detailed Employee Ledger Entry";
+    BEGIN
+      DtldEmplLedgEntry.LOCKTABLE;
+      if DtldEmplLedgEntry.FINDLAST then
+        exit(DtldEmplLedgEntry."Entry No.");
+
+      exit(0);
+    END;
+
+    LOCAL PROCEDURE FindLastApplEntry@2(EmplLedgEntryNo@1002 : Integer) : Integer;
+    VAR
+      DtldEmplLedgEntry@1001 : Record "Detailed Employee Ledger Entry";
+      ApplicationEntryNo@1000 : Integer;
+    BEGIN
+      with DtldEmplLedgEntry do begin
+        SETCURRENTKEY("Employee Ledger Entry No.","Entry Type");
+        SETRANGE("Employee Ledger Entry No.",EmplLedgEntryNo);
+        SETRANGE("Entry Type","Entry Type"::Application);
+        SETRANGE(Unapplied,false);
+        ApplicationEntryNo := 0;
+        if FIND('-') then
+          repeat
+            if "Entry No." > ApplicationEntryNo then
+              ApplicationEntryNo := "Entry No.";
+          until NEXT = 0;
+      end;
+      exit(ApplicationEntryNo);
+    END;
+
+    LOCAL PROCEDURE FindLastTransactionNo@6(EmplLedgEntryNo@1002 : Integer) : Integer;
+    VAR
+      DtldEmplLedgEntry@1001 : Record "Detailed Employee Ledger Entry";
+      LastTransactionNo@1000 : Integer;
+    BEGIN
+      with DtldEmplLedgEntry do begin
+        SETCURRENTKEY("Employee Ledger Entry No.","Entry Type");
+        SETRANGE("Employee Ledger Entry No.",EmplLedgEntryNo);
+        SETRANGE(Unapplied,false);
+        LastTransactionNo := 0;
+        if FINDSET then
+          repeat
+            if LastTransactionNo < "Transaction No." then
+              LastTransactionNo := "Transaction No.";
+          until NEXT = 0;
+      end;
+      exit(LastTransactionNo);
+    END;
+
+    [External]
+    PROCEDURE UnApplyDtldEmplLedgEntry@3(DtldEmplLedgEntry@1000 : Record "Detailed Employee Ledger Entry");
+    VAR
+      ApplicationEntryNo@1001 : Integer;
+    BEGIN
+      DtldEmplLedgEntry.TESTFIELD("Entry Type",DtldEmplLedgEntry."Entry Type"::Application);
+      DtldEmplLedgEntry.TESTFIELD(Unapplied,false);
+      ApplicationEntryNo := FindLastApplEntry(DtldEmplLedgEntry."Employee Ledger Entry No.");
+
+      if DtldEmplLedgEntry."Entry No." <> ApplicationEntryNo then
+        ERROR(UnapplyPostedAfterThisEntryErr);
+      UnApplyEmployee(DtldEmplLedgEntry);
+    END;
+
+    [External]
+    PROCEDURE UnApplyEmplLedgEntry@7(EmplLedgEntryNo@1000 : Integer);
+    VAR
+      DtldEmplLedgEntry@1002 : Record "Detailed Employee Ledger Entry";
+      ApplicationEntryNo@1001 : Integer;
+    BEGIN
+      ApplicationEntryNo := FindLastApplEntry(EmplLedgEntryNo);
+      if ApplicationEntryNo = 0 then
+        ERROR(NoApplicationEntryErr,EmplLedgEntryNo);
+      DtldEmplLedgEntry.GET(ApplicationEntryNo);
+      UnApplyEmployee(DtldEmplLedgEntry);
+    END;
+
+    LOCAL PROCEDURE UnApplyEmployee@19(DtldEmplLedgEntry@1000000000 : Record "Detailed Employee Ledger Entry");
+    VAR
+      UnapplyEmplEntries@1000 : Page "Unapply Employee Entries";
+    BEGIN
+      with DtldEmplLedgEntry do begin
+        TESTFIELD("Entry Type","Entry Type"::Application);
+        TESTFIELD(Unapplied,false);
+        UnapplyEmplEntries.SetDtldEmplLedgEntry("Entry No.");
+        UnapplyEmplEntries.LOOKUPMODE(true);
+        UnapplyEmplEntries.RUNMODAL;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE PostUnApplyEmployee@4(DtldEmplLedgEntry2@1007 : Record "Detailed Employee Ledger Entry";DocNo@1000 : Code[20];PostingDate@1001 : Date);
+    VAR
+      GLEntry@1013 : Record "G/L Entry";
+      EmplLedgEntry@1004 : Record "Employee Ledger Entry";
+      DtldEmplLedgEntry@1010 : Record "Detailed Employee Ledger Entry";
+      SourceCodeSetup@1006 : Record "Source Code Setup";
+      GenJnlLine@1005 : Record "Gen. Journal Line";
+      DateComprReg@1014 : Record "Date Compr. Register";
+      GenJnlPostLine@1003 : Codeunit "Gen. Jnl.-Post Line";
+      GenJnlPostPreview@1011 : Codeunit "Gen. Jnl.-Post Preview";
+      Window@1002 : Dialog;
+      LastTransactionNo@1009 : Integer;
+      AddCurrChecked@1012 : Boolean;
+      MaxPostingDate@1008 : Date;
+    BEGIN
+      MaxPostingDate := 0D;
+      GLEntry.LOCKTABLE;
+      DtldEmplLedgEntry.LOCKTABLE;
+      EmplLedgEntry.LOCKTABLE;
+      EmplLedgEntry.GET(DtldEmplLedgEntry2."Employee Ledger Entry No.");
+      CheckPostingDate(PostingDate,MaxPostingDate);
+      if PostingDate < DtldEmplLedgEntry2."Posting Date" then
+        ERROR(MustNotBeBeforeErr);
+      if DtldEmplLedgEntry2."Transaction No." = 0 then begin
+        DtldEmplLedgEntry.SETCURRENTKEY("Application No.","Employee No.","Entry Type");
+        DtldEmplLedgEntry.SETRANGE("Application No.",DtldEmplLedgEntry2."Application No.");
+      end else begin
+        DtldEmplLedgEntry.SETCURRENTKEY("Transaction No.","Employee No.","Entry Type");
+        DtldEmplLedgEntry.SETRANGE("Transaction No.",DtldEmplLedgEntry2."Transaction No.");
+      end;
+      DtldEmplLedgEntry.SETRANGE("Employee No.",DtldEmplLedgEntry2."Employee No.");
+      DtldEmplLedgEntry.SETFILTER("Entry Type",'<>%1',DtldEmplLedgEntry."Entry Type"::"Initial Entry");
+      DtldEmplLedgEntry.SETRANGE(Unapplied,false);
+      if DtldEmplLedgEntry.FIND('-') then
+        repeat
+          if not AddCurrChecked then begin
+            CheckAdditionalCurrency(PostingDate,DtldEmplLedgEntry."Posting Date");
+            AddCurrChecked := true;
+          end;
+          if DtldEmplLedgEntry."Transaction No." <> 0 then begin
+            if DtldEmplLedgEntry."Entry Type" = DtldEmplLedgEntry."Entry Type"::Application then begin
+              LastTransactionNo :=
+                FindLastApplTransactionEntry(DtldEmplLedgEntry."Employee Ledger Entry No.");
+              if (LastTransactionNo <> 0) and (LastTransactionNo <> DtldEmplLedgEntry."Transaction No.") then
+                ERROR(UnapplyAllPostedAfterThisEntryErr,DtldEmplLedgEntry."Employee Ledger Entry No.");
+            end;
+            LastTransactionNo := FindLastTransactionNo(DtldEmplLedgEntry."Employee Ledger Entry No.");
+            if (LastTransactionNo <> 0) and (LastTransactionNo <> DtldEmplLedgEntry."Transaction No.") then
+              ERROR(LatestEntryMustBeApplicationErr,DtldEmplLedgEntry."Employee Ledger Entry No.");
+          end;
+        until DtldEmplLedgEntry.NEXT = 0;
+
+      DateComprReg.CheckMaxDateCompressed(MaxPostingDate,0);
+
+      with DtldEmplLedgEntry2 do begin
+        SourceCodeSetup.GET;
+        EmplLedgEntry.GET("Employee Ledger Entry No.");
+        GenJnlLine."Document No." := DocNo;
+        GenJnlLine."Posting Date" := PostingDate;
+        GenJnlLine."Account Type" := GenJnlLine."Account Type"::Employee;
+        GenJnlLine."Account No." := "Employee No.";
+        GenJnlLine.Correction := true;
+        GenJnlLine."Document Type" := "Document Type";
+        GenJnlLine.Description := EmplLedgEntry.Description;
+        GenJnlLine."Dimension Set ID" := EmplLedgEntry."Dimension Set ID";
+        GenJnlLine."Shortcut Dimension 1 Code" := EmplLedgEntry."Global Dimension 1 Code";
+        GenJnlLine."Shortcut Dimension 2 Code" := EmplLedgEntry."Global Dimension 2 Code";
+        GenJnlLine."Source Type" := GenJnlLine."Source Type"::Employee;
+        GenJnlLine."Source No." := "Employee No.";
+        GenJnlLine."Source Code" := SourceCodeSetup."Unapplied Empl. Entry Appln.";
+        GenJnlLine."Posting Group" := EmplLedgEntry."Employee Posting Group";
+        GenJnlLine."Source Currency Code" := "Currency Code";
+        GenJnlLine."System-Created Entry" := true;
+        Window.OPEN(UnapplyingMsg);
+        GenJnlPostLine.UnapplyEmplLedgEntry(GenJnlLine,DtldEmplLedgEntry2);
+
+        if PreviewMode then
+          GenJnlPostPreview.ThrowError;
+
+        COMMIT;
+        Window.CLOSE;
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckPostingDate@5(PostingDate@1001 : Date;VAR MaxPostingDate@1005 : Date);
+    VAR
+      GenJnlCheckLine@1000 : Codeunit "Gen. Jnl.-Check Line";
+    BEGIN
+      if GenJnlCheckLine.DateNotAllowed(PostingDate) then
+        ERROR(NotAllowedPostingDatesErr);
+
+      if PostingDate > MaxPostingDate then
+        MaxPostingDate := PostingDate;
+    END;
+
+    LOCAL PROCEDURE CheckAdditionalCurrency@8(OldPostingDate@1000 : Date;NewPostingDate@1001 : Date);
+    VAR
+      GLSetup@1002 : Record "General Ledger Setup";
+      CurrExchRate@1003 : Record "Currency Exchange Rate";
+    BEGIN
+      if OldPostingDate = NewPostingDate then
+        exit;
+      GLSetup.GET;
+      if GLSetup."Additional Reporting Currency" <> '' then
+        if CurrExchRate.ExchangeRate(OldPostingDate,GLSetup."Additional Reporting Currency") <>
+           CurrExchRate.ExchangeRate(NewPostingDate,GLSetup."Additional Reporting Currency")
+        then
+          ERROR(CannotUnapplyExchRateErr,NewPostingDate);
+    END;
+
+    [External]
+    PROCEDURE ApplyEmplEntryFormEntry@10(VAR ApplyingEmplLedgEntry@1000 : Record "Employee Ledger Entry");
+    VAR
+      EmplLedgEntry@1002 : Record "Employee Ledger Entry";
+      ApplyEmplEntries@1001 : Page "Apply Employee Entries";
+      EmplEntryApplID@1004 : Code[50];
+    BEGIN
+      if not ApplyingEmplLedgEntry.Open then
+        ERROR(CannotApplyClosedEntriesErr);
+
+      EmplEntryApplID := USERID;
+      if EmplEntryApplID = '' then
+        EmplEntryApplID := '***';
+      if ApplyingEmplLedgEntry."Remaining Amount" = 0 then
+        ApplyingEmplLedgEntry.CALCFIELDS("Remaining Amount");
+
+      ApplyingEmplLedgEntry."Applying Entry" := true;
+      if ApplyingEmplLedgEntry."Applies-to ID" = '' then
+        ApplyingEmplLedgEntry."Applies-to ID" := EmplEntryApplID;
+      ApplyingEmplLedgEntry."Amount to Apply" := ApplyingEmplLedgEntry."Remaining Amount";
+      CODEUNIT.RUN(CODEUNIT::"Empl. Entry-Edit",ApplyingEmplLedgEntry);
+      COMMIT;
+
+      EmplLedgEntry.SETCURRENTKEY("Employee No.",Open,Positive);
+      EmplLedgEntry.SETRANGE("Employee No.",ApplyingEmplLedgEntry."Employee No.");
+      EmplLedgEntry.SETRANGE(Open,true);
+      if EmplLedgEntry.FINDFIRST then begin
+        ApplyEmplEntries.SetEmplLedgEntry(ApplyingEmplLedgEntry);
+        ApplyEmplEntries.SETRECORD(EmplLedgEntry);
+        ApplyEmplEntries.SETTABLEVIEW(EmplLedgEntry);
+        if ApplyingEmplLedgEntry."Applies-to ID" <> EmplEntryApplID then
+          ApplyEmplEntries.SetAppliesToID(ApplyingEmplLedgEntry."Applies-to ID");
+        ApplyEmplEntries.RUNMODAL;
+        CLEAR(ApplyEmplEntries);
+        ApplyingEmplLedgEntry."Applying Entry" := false;
+        ApplyingEmplLedgEntry."Applies-to ID" := '';
+        ApplyingEmplLedgEntry."Amount to Apply" := 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE FindLastApplTransactionEntry@11(EmplLedgEntryNo@1000 : Integer) : Integer;
+    VAR
+      DtldEmplLedgEntry@1001 : Record "Detailed Employee Ledger Entry";
+      LastTransactionNo@1002 : Integer;
+    BEGIN
+      DtldEmplLedgEntry.SETCURRENTKEY("Employee Ledger Entry No.","Entry Type");
+      DtldEmplLedgEntry.SETRANGE("Employee Ledger Entry No.",EmplLedgEntryNo);
+      DtldEmplLedgEntry.SETRANGE("Entry Type",DtldEmplLedgEntry."Entry Type"::Application);
+      LastTransactionNo := 0;
+      if DtldEmplLedgEntry.FIND('-') then
+        repeat
+          if (DtldEmplLedgEntry."Transaction No." > LastTransactionNo) and not DtldEmplLedgEntry.Unapplied then
+            LastTransactionNo := DtldEmplLedgEntry."Transaction No.";
+        until DtldEmplLedgEntry.NEXT = 0;
+      exit(LastTransactionNo);
+    END;
+
+    [Internal]
+    PROCEDURE PreviewApply@16(EmployeeLedgerEntry@1003 : Record "Employee Ledger Entry";DocumentNo@1002 : Code[20];ApplicationDate@1001 : Date);
+    VAR
+      GenJnlPostPreview@1004 : Codeunit "Gen. Jnl.-Post Preview";
+      EmplEntryApplyPostedEntries@1000 : Codeunit "EmplEntry-Apply Posted Entries";
+    BEGIN
+      BINDSUBSCRIPTION(EmplEntryApplyPostedEntries);
+      EmplEntryApplyPostedEntries.SetApplyContext(ApplicationDate,DocumentNo);
+      GenJnlPostPreview.Preview(EmplEntryApplyPostedEntries,EmployeeLedgerEntry);
+    END;
+
+    [Internal]
+    PROCEDURE PreviewUnapply@15(DetailedEmployeeLedgEntry@1002 : Record "Detailed Employee Ledger Entry";DocumentNo@1001 : Code[20];ApplicationDate@1000 : Date);
+    VAR
+      EmployeeLedgerEntry@1004 : Record "Employee Ledger Entry";
+      GenJnlPostPreview@1003 : Codeunit "Gen. Jnl.-Post Preview";
+      EmplEntryApplyPostedEntries@1005 : Codeunit "EmplEntry-Apply Posted Entries";
+    BEGIN
+      BINDSUBSCRIPTION(EmplEntryApplyPostedEntries);
+      EmplEntryApplyPostedEntries.SetUnapplyContext(DetailedEmployeeLedgEntry,ApplicationDate,DocumentNo);
+      GenJnlPostPreview.Preview(EmplEntryApplyPostedEntries,EmployeeLedgerEntry);
+    END;
+
+    [External]
+    PROCEDURE SetApplyContext@13(ApplicationDate@1000 : Date;DocumentNo@1001 : Code[20]);
+    BEGIN
+      ApplicationDatePreviewContext := ApplicationDate;
+      DocumentNoPreviewContext := DocumentNo;
+      RunOptionPreviewContext := RunOptionPreview::Apply;
+    END;
+
+    [External]
+    PROCEDURE SetUnapplyContext@28(VAR DetailedEmployeeLedgEntry@1002 : Record "Detailed Employee Ledger Entry";ApplicationDate@1000 : Date;DocumentNo@1001 : Code[20]);
+    BEGIN
+      ApplicationDatePreviewContext := ApplicationDate;
+      DocumentNoPreviewContext := DocumentNo;
+      DetailedEmployeeLedgEntryPreviewContext := DetailedEmployeeLedgEntry;
+      RunOptionPreviewContext := RunOptionPreview::Unapply;
+    END;
+
+    [EventSubscriber(Codeunit,19,OnRunPreview)]
+    LOCAL PROCEDURE OnRunPreview@18(VAR Result@1000 : Boolean;Subscriber@1001 : Variant;RecVar@1002 : Variant);
+    VAR
+      EmplEntryApplyPostedEntries@1003 : Codeunit "EmplEntry-Apply Posted Entries";
+    BEGIN
+      EmplEntryApplyPostedEntries := Subscriber;
+      PreviewMode := true;
+      Result := EmplEntryApplyPostedEntries.RUN(RecVar);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

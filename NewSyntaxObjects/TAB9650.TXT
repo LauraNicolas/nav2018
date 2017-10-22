@@ -1,0 +1,920 @@
+OBJECT Table 9650 Custom Report Layout
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    DataPerCompany=false;
+    OnInsert=BEGIN
+               TESTFIELD("Report ID");
+               if Code = '' then
+                 Code := GetDefaultCode("Report ID");
+               SetUpdated;
+             END;
+
+    OnModify=BEGIN
+               TESTFIELD("Report ID");
+               SetUpdated;
+             END;
+
+    OnDelete=BEGIN
+               if "Built-In" then
+                 ERROR(DeleteBuiltInLayoutErr);
+             END;
+
+    CaptionML=ENU=Custom Report Layout;
+    LookupPageID="Custom Report Layouts";
+    DrillDownPageID="Custom Report Layouts";
+  }
+  FIELDS
+  {
+    { 1   ;   ;Code                ;Code20        ;CaptionML=ENU=Code }
+    { 2   ;   ;Report ID           ;Integer       ;TableRelation=AllObjWithCaption."Object ID" WHERE ("Object Type"=CONST(Report));
+                                                   CaptionML=ENU=Report ID }
+    { 3   ;   ;Report Name         ;Text80        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(AllObjWithCaption."Object Caption" WHERE ("Object Type"=CONST(Report),
+                                                                                                                "Object ID"=FIELD("Report ID")));
+                                                   CaptionML=ENU=Report Name;
+                                                   Editable=false }
+    { 4   ;   ;Company Name        ;Text30        ;TableRelation=Company;
+                                                   CaptionML=ENU=Company Name }
+    { 6   ;   ;Type                ;Option        ;InitValue=Word;
+                                                   CaptionML=ENU=Type;
+                                                   OptionCaptionML=ENU=RDLC,Word;
+                                                   OptionString=RDLC,Word }
+    { 7   ;   ;Layout              ;BLOB          ;CaptionML=ENU=Layout }
+    { 8   ;   ;Last Modified       ;DateTime      ;CaptionML=ENU=Last Modified;
+                                                   Editable=false }
+    { 9   ;   ;Last Modified by User;Code50       ;TableRelation=User."User Name";
+                                                   OnLookup=VAR
+                                                              UserMgt@1000 : Codeunit "User Management";
+                                                            BEGIN
+                                                              UserMgt.LookupUserID("Last Modified by User");
+                                                            END;
+
+                                                   ValidateTableRelation=false;
+                                                   CaptionML=ENU=Last Modified by User;
+                                                   Editable=false }
+    { 10  ;   ;File Extension      ;Text30        ;CaptionML=ENU=File Extension;
+                                                   Editable=false }
+    { 11  ;   ;Description         ;Text80        ;CaptionML=ENU=Description }
+    { 12  ;   ;Custom XML Part     ;BLOB          ;CaptionML=ENU=Custom XML Part }
+    { 13  ;   ;App ID              ;GUID          ;CaptionML=ENU=App ID;
+                                                   Editable=false }
+    { 14  ;   ;Built-In            ;Boolean       ;CaptionML=ENU=Built-In;
+                                                   Editable=false }
+  }
+  KEYS
+  {
+    {    ;Code                                    ;Clustered=true }
+    {    ;"Report ID","Company Name",Type          }
+  }
+  FIELDGROUPS
+  {
+    { 1   ;DropDown            ;Description                              }
+  }
+  CODE
+  {
+    VAR
+      ImportWordTxt@1000 : TextConst 'ENU=Import Word Document';
+      ImportRdlcTxt@1006 : TextConst 'ENU=Import Report Layout';
+      FileFilterWordTxt@1001 : TextConst '@@@="{Split=r''\|''}{Locked=s''1''}";ENU=Word Files (*.docx)|*.docx';
+      FileFilterRdlcTxt@1005 : TextConst '@@@="{Split=r''\|''}{Locked=s''1''}";ENU="SQL Report Builder (*.rdl;*.rdlc)|*.rdl;*.rdlc"';
+      NoRecordsErr@1002 : TextConst 'ENU=There is no record in the list.';
+      BuiltInTxt@1003 : TextConst 'ENU=Built-in layout';
+      CopyOfTxt@1004 : TextConst 'ENU=Copy of %1';
+      NewLayoutTxt@1007 : TextConst 'ENU=New layout';
+      ErrorInLayoutErr@1008 : TextConst '@@@="%1=a name, %2=a number, %3=a sentence/error description.";ENU=The following issue has been found in the layout %1 for report ID  %2:\%3.';
+      TemplateValidationQst@1011 : TextConst '@@@="%1 = an error message.";ENU=The RDLC layout does not comply with the current report design (for example, fields are missing or the report ID is wrong).\The following errors were detected during the layout validation:\%1\Do you want to continue?';
+      TemplateValidationErr@1010 : TextConst 'ENU=The RDLC layout does not comply with the current report design (for example, fields are missing or the report ID is wrong).\The following errors were detected during the document validation:\%1\You must update the layout to match the current report design.';
+      AbortWithValidationErr@1009 : TextConst 'ENU=The RDLC layout action has been canceled because of validation errors.';
+      ModifyBuiltInLayoutQst@1012 : TextConst 'ENU=This is a built-in custom report layout, and it cannot be modified.\\Do you want to modify a copy of the custom report layout instead?';
+      NoLayoutSelectedMsg@1013 : TextConst 'ENU=You must specify if you want to insert a Word layout or an RDLC layout for the report.';
+      DeleteBuiltInLayoutErr@1014 : TextConst 'ENU=This is a built-in custom report layout, and it cannot be deleted.';
+      ModifyBuiltInLayoutErr@1015 : TextConst 'ENU=This is a built-in custom report layout, and it cannot be modified.';
+      SkipModifyRec@1016 : Boolean;
+
+    LOCAL PROCEDURE SetUpdated@2();
+    BEGIN
+      "Last Modified" := ROUNDDATETIME(CURRENTDATETIME);
+      "Last Modified by User" := USERID;
+    END;
+
+    [Internal]
+    PROCEDURE InitBuiltInLayout@11(ReportID@1003 : Integer;LayoutType@1004 : Option) : Code[20];
+    VAR
+      CustomReportLayout@1002 : Record "Custom Report Layout";
+      TempBlob@1007 : Record TempBlob;
+      DocumentReportMgt@1005 : Codeunit "Document Report Mgt.";
+      InStr@1001 : InStream;
+      OutStr@1000 : OutStream;
+    BEGIN
+      if ReportID = 0 then
+        exit;
+
+      CustomReportLayout.INIT;
+      CustomReportLayout."Report ID" := ReportID;
+      CustomReportLayout.Type := LayoutType;
+      CustomReportLayout.Description := COPYSTR(STRSUBSTNO(CopyOfTxt,BuiltInTxt),1,MAXSTRLEN(Description));
+      CustomReportLayout."Built-In" := false;
+      CustomReportLayout.Code := GetDefaultCode(ReportID);
+      CustomReportLayout.INSERT(true);
+
+      case LayoutType of
+        CustomReportLayout.Type::Word:
+          begin
+            TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+            if not REPORT.WORDLAYOUT(ReportID,InStr) then begin
+              DocumentReportMgt.NewWordLayout(ReportID,OutStr);
+              CustomReportLayout.Description := COPYSTR(NewLayoutTxt,1,MAXSTRLEN(Description));
+            end else
+              COPYSTREAM(OutStr,InStr);
+            CustomReportLayout.SetLayoutBlob(TempBlob);
+          end;
+        CustomReportLayout.Type::RDLC:
+          if REPORT.RDLCLAYOUT(ReportID,InStr) then begin
+            TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+            COPYSTREAM(OutStr,InStr);
+            CustomReportLayout.SetLayoutBlob(TempBlob);
+          end;
+      end;
+
+      CustomReportLayout.SetDefaultCustomXmlPart;
+
+      exit(CustomReportLayout.Code);
+    END;
+
+    [Internal]
+    PROCEDURE CopyBuiltInLayout@13();
+    VAR
+      ReportLayoutLookup@1000 : Page "Report Layout Lookup";
+      ReportID@1001 : Integer;
+    BEGIN
+      FILTERGROUP(4);
+      if GETFILTER("Report ID") = '' then
+        FILTERGROUP(0);
+      if GETFILTER("Report ID") <> '' then
+        if EVALUATE(ReportID,GETFILTER("Report ID")) then
+          ReportLayoutLookup.SetReportID(ReportID);
+      FILTERGROUP(0);
+      if ReportLayoutLookup.RUNMODAL = ACTION::OK then begin
+        if not ReportLayoutLookup.SelectedAddWordLayot and not ReportLayoutLookup.SelectedAddRdlcLayot then begin
+          MESSAGE(NoLayoutSelectedMsg);
+          exit;
+        end;
+
+        if ReportLayoutLookup.SelectedAddWordLayot then
+          InitBuiltInLayout(ReportLayoutLookup.SelectedReportID,Type::Word);
+        if ReportLayoutLookup.SelectedAddRdlcLayot then
+          InitBuiltInLayout(ReportLayoutLookup.SelectedReportID,Type::RDLC);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE GetCustomRdlc@10(ReportID@1000 : Integer) : Text;
+    VAR
+      ReportLayoutSelection@1003 : Record "Report Layout Selection";
+      InStream@1002 : InStream;
+      RdlcTxt@1001 : Text;
+      CustomLayoutCode@1004 : Code[20];
+    BEGIN
+      // Temporarily selected layout for Design-time report execution?
+      if ReportLayoutSelection.GetTempLayoutSelected <> '' then
+        CustomLayoutCode := ReportLayoutSelection.GetTempLayoutSelected
+      else  // Normal selection
+        if ReportLayoutSelection.HasCustomLayout(ReportID) = 1 then
+          CustomLayoutCode := ReportLayoutSelection."Custom Report Layout Code";
+
+      if (CustomLayoutCode <> '') and GET(CustomLayoutCode) then begin
+        TESTFIELD(Type,Type::RDLC);
+        SkipModifyRec := true;
+        if UpdateLayout(true,false) then
+          COMMIT; // Save the updated layout
+        SkipModifyRec := false;
+        RdlcTxt := GetLayout;
+      end else begin
+        REPORT.RDLCLAYOUT(ReportID,InStream);
+        InStream.READ(RdlcTxt);
+      end;
+
+      exit(RdlcTxt);
+    END;
+
+    [Internal]
+    PROCEDURE CopyRecord@7() : Code[20];
+    VAR
+      CustomReportLayout@1001 : Record "Custom Report Layout";
+      TempBlob@1002 : Record TempBlob;
+    BEGIN
+      if ISEMPTY then
+        ERROR(NoRecordsErr);
+
+      CustomReportLayout := Rec;
+
+      Description := COPYSTR(STRSUBSTNO(CopyOfTxt,Description),1,MAXSTRLEN(Description));
+      Code := GetDefaultCode("Report ID");
+      "Built-In" := false;
+      INSERT(true);
+
+      CustomReportLayout.GetLayoutBlob(TempBlob);
+      SetLayoutBlob(TempBlob);
+
+      if not HasCustomXmlPart then
+        SetDefaultCustomXmlPart;
+
+      exit(Code);
+    END;
+
+    [Internal]
+    PROCEDURE ImportLayout@6(DefaultFileName@1005 : Text);
+    VAR
+      TempBlob@1000 : Record TempBlob;
+      FileMgt@1001 : Codeunit "File Management";
+      FileName@1003 : Text;
+      FileFilterTxt@1002 : Text;
+      ImportTxt@1004 : Text;
+    BEGIN
+      if ISEMPTY then
+        ERROR(NoRecordsErr);
+
+      if not CanBeModified then
+        exit;
+
+      case Type of
+        Type::Word:
+          begin
+            ImportTxt := ImportWordTxt;
+            FileFilterTxt := FileFilterWordTxt;
+          end;
+        Type::RDLC:
+          begin
+            ImportTxt := ImportRdlcTxt;
+            FileFilterTxt := FileFilterRdlcTxt;
+          end;
+      end;
+      FileName := FileMgt.BLOBImportWithFilter(TempBlob,ImportTxt,DefaultFileName,FileFilterTxt,FileFilterTxt);
+      if FileName = '' then
+        exit;
+
+      ImportLayoutBlob(TempBlob,UPPERCASE(FileMgt.GetExtension(FileName)));
+    END;
+
+    [Internal]
+    PROCEDURE ImportLayoutBlob@17(VAR TempBlob@1000 : Record TempBlob;FileExtension@1001 : Text[30]);
+    VAR
+      OutputTempBlob@1008 : Record TempBlob;
+      DocumentReportMgt@1006 : Codeunit "Document Report Mgt.";
+      DocumentInStream@1007 : InStream;
+      DocumentOutStream@1009 : OutStream;
+      ErrorMessage@1010 : Text;
+      XmlPart@1002 : Text;
+    BEGIN
+      // Layout is stored in the DocumentInStream (RDLC requires UTF8 encoding for which reason is stream is created in the case block.
+      // Result is stored in the DocumentOutStream (..)
+      TESTFIELD("Report ID");
+      OutputTempBlob.Blob.CREATEOUTSTREAM(DocumentOutStream);
+      XmlPart := GetWordXmlPart("Report ID");
+
+      case Type of
+        Type::Word:
+          begin
+            // Run update
+            TempBlob.Blob.CREATEINSTREAM(DocumentInStream);
+            ErrorMessage := DocumentReportMgt.TryUpdateWordLayout(DocumentInStream,DocumentOutStream,'',XmlPart);
+            // Validate the Word document layout against the layout of the current report
+            if ErrorMessage = '' then begin
+              COPYSTREAM(DocumentOutStream,DocumentInStream);
+              DocumentReportMgt.ValidateWordLayout("Report ID",DocumentInStream,true,true);
+            end;
+          end;
+        Type::RDLC:
+          begin
+            // Update the Rdlc document layout against the layout of the current report
+            TempBlob.Blob.CREATEINSTREAM(DocumentInStream,TEXTENCODING::UTF8);
+            ErrorMessage := DocumentReportMgt.TryUpdateRdlcLayout("Report ID",DocumentInStream,DocumentOutStream,'',XmlPart,false);
+          end;
+      end;
+
+      SetLayoutBlob(OutputTempBlob);
+
+      if FileExtension <> '' then
+        "File Extension" := FileExtension;
+      SetDefaultCustomXmlPart;
+      MODIFY(true);
+      COMMIT;
+
+      if ErrorMessage <> '' then
+        MESSAGE(ErrorMessage);
+    END;
+
+    [Internal]
+    PROCEDURE ExportLayout@1(DefaultFileName@1003 : Text;ShowFileDialog@1002 : Boolean) : Text;
+    VAR
+      TempBlob@1001 : Record TempBlob;
+      FileMgt@1000 : Codeunit "File Management";
+    BEGIN
+      UpdateLayout(true,false); // Don't block on errors (return false) as we in all cases want to have an export file to edit.
+
+      GetLayoutBlob(TempBlob);
+      if not TempBlob.Blob.HASVALUE then
+        exit('');
+
+      if DefaultFileName = '' then
+        DefaultFileName := '*.' + GetFileExtension;
+
+      exit(FileMgt.BLOBExport(TempBlob,DefaultFileName,ShowFileDialog));
+    END;
+
+    [Internal]
+    PROCEDURE ValidateLayout@14(useConfirm@1002 : Boolean;UpdateContext@1003 : Boolean) : Boolean;
+    VAR
+      TempBlob@1005 : Record TempBlob;
+      DocumentReportMgt@1001 : Codeunit "Document Report Mgt.";
+      DocumentInStream@1000 : InStream;
+      ValidationErrorFormat@1004 : Text;
+    BEGIN
+      TESTFIELD("Report ID");
+      GetLayoutBlob(TempBlob);
+      if not TempBlob.Blob.HASVALUE then
+        exit;
+
+      TempBlob.Blob.CREATEINSTREAM(DocumentInStream);
+
+      case Type of
+        Type::Word:
+          exit(DocumentReportMgt.ValidateWordLayout("Report ID",DocumentInStream,useConfirm,UpdateContext));
+        Type::RDLC:
+          if not TryValidateRdlcReport(DocumentInStream) then begin
+            if useConfirm then begin
+              if not CONFIRM(TemplateValidationQst,false,GETLASTERRORTEXT) then
+                ERROR(AbortWithValidationErr);
+            end else begin
+              ValidationErrorFormat := TemplateValidationErr;
+              ERROR(ValidationErrorFormat,GETLASTERRORTEXT);
+            end;
+            exit(false);
+          end;
+      end;
+
+      exit(true);
+    END;
+
+    [Internal]
+    PROCEDURE UpdateLayout@22(ContinueOnError@1007 : Boolean;IgnoreDelete@1000 : Boolean) : Boolean;
+    VAR
+      ErrorMessage@1008 : Text;
+    BEGIN
+      ErrorMessage := TryUpdateLayout(IgnoreDelete);
+
+      if ErrorMessage = '' then begin
+        if Type = Type::Word then
+          exit(ValidateLayout(true,true));
+        exit(true); // We have no validate for RDLC
+      end;
+
+      ErrorMessage := STRSUBSTNO(ErrorInLayoutErr,Description,"Report ID",ErrorMessage);
+      if ContinueOnError then begin
+        MESSAGE(ErrorMessage);
+        exit(true);
+      end;
+
+      ERROR(ErrorMessage);
+    END;
+
+    [Internal]
+    PROCEDURE TryUpdateLayout@16(IgnoreDelete@1006 : Boolean) : Text;
+    VAR
+      InTempBlob@1003 : Record TempBlob;
+      OutTempBlob@1005 : Record TempBlob;
+      DocumentReportMgt@1004 : Codeunit "Document Report Mgt.";
+      DocumentInStream@1000 : InStream;
+      DocumentOutStream@1001 : OutStream;
+      WordXmlPart@1002 : Text;
+      ErrorMessage@1007 : Text;
+    BEGIN
+      GetLayoutBlob(InTempBlob);
+      if not InTempBlob.Blob.HASVALUE then
+        exit('');
+
+      TestCustomXmlPart;
+      TESTFIELD("Report ID");
+
+      WordXmlPart := GetWordXmlPart("Report ID");
+      InTempBlob.Blob.CREATEINSTREAM(DocumentInStream);
+
+      case Type of
+        Type::Word:
+          begin
+            OutTempBlob.Blob.CREATEOUTSTREAM(DocumentOutStream);
+            ErrorMessage := DocumentReportMgt.TryUpdateWordLayout(DocumentInStream,DocumentOutStream,GetCustomXmlPart,WordXmlPart);
+          end;
+        Type::RDLC:
+          begin
+            OutTempBlob.Blob.CREATEOUTSTREAM(DocumentOutStream,TEXTENCODING::UTF8);
+            ErrorMessage := DocumentReportMgt.TryUpdateRdlcLayout(
+                "Report ID",DocumentInStream,DocumentOutStream,GetCustomXmlPart,WordXmlPart,IgnoreDelete);
+          end;
+      end;
+
+      SetCustomXmlPart(WordXmlPart);
+
+      if OutTempBlob.Blob.HASVALUE then
+        SetLayoutBlob(OutTempBlob);
+
+      exit(ErrorMessage);
+    END;
+
+    LOCAL PROCEDURE GetWordXML@8(VAR TempBlob@1001 : Record TempBlob);
+    VAR
+      OutStr@1000 : OutStream;
+    BEGIN
+      TESTFIELD("Report ID");
+      TempBlob.Blob.CREATEOUTSTREAM(OutStr,TEXTENCODING::UTF16);
+      OutStr.WRITETEXT(REPORT.WORDXMLPART("Report ID"));
+    END;
+
+    [Internal]
+    PROCEDURE ExportSchema@9(DefaultFileName@1003 : Text;ShowFileDialog@1002 : Boolean) : Text;
+    VAR
+      TempBlob@1001 : Record TempBlob;
+      FileMgt@1000 : Codeunit "File Management";
+    BEGIN
+      TESTFIELD(Type,Type::Word);
+
+      if DefaultFileName = '' then
+        DefaultFileName := '*.xml';
+
+      GetWordXML(TempBlob);
+      if TempBlob.Blob.HASVALUE then
+        exit(FileMgt.BLOBExport(TempBlob,DefaultFileName,ShowFileDialog));
+    END;
+
+    [Internal]
+    PROCEDURE EditLayout@4();
+    BEGIN
+      if CanBeModified then begin
+        UpdateLayout(true,true); // Don't block on errors (return false) as we in all cases want to have an export file to edit.
+
+        case Type of
+          Type::Word:
+            CODEUNIT.RUN(CODEUNIT::"Edit MS Word Report Layout",Rec);
+          Type::RDLC:
+            CODEUNIT.RUN(CODEUNIT::"Edit RDLC Report Layout",Rec);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetFileExtension@12() : Text[4];
+    BEGIN
+      case Type of
+        Type::Word:
+          exit('docx');
+        Type::RDLC:
+          exit('rdl');
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE GetWordXmlPart@18(ReportID@1000 : Integer) : Text;
+    VAR
+      WordXmlPart@1001 : Text;
+    BEGIN
+      // Store the current design as an extended WordXmlPart. This data is used for later updates / refactorings.
+      WordXmlPart := REPORT.WORDXMLPART(ReportID,true);
+      exit(WordXmlPart);
+    END;
+
+    [External]
+    PROCEDURE RunCustomReport@3();
+    VAR
+      ReportLayoutSelection@1000 : Record "Report Layout Selection";
+    BEGIN
+      if "Report ID" = 0 then
+        exit;
+
+      ReportLayoutSelection.SetTempLayoutSelected(Code);
+      REPORT.RUNMODAL("Report ID");
+      ReportLayoutSelection.SetTempLayoutSelected('');
+    END;
+
+    [Internal]
+    PROCEDURE ApplyUpgrade@5(VAR ReportUpgrade@1007 : DotNet "'Microsoft.Dynamics.Nav.DocumentReport, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.DocumentReport.ReportUpgradeSet";VAR ReportChangeLogCollection@1001 : DotNet "'Microsoft.Dynamics.Nav.Types.Report, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Types.Report.IReportChangeLogCollection";testOnly@1000 : Boolean);
+    VAR
+      InTempBlob@1005 : Record TempBlob;
+      OutTempBlob@1010 : Record TempBlob;
+      TempReportChangeLogCollection@1008 : DotNet "'Microsoft.Dynamics.Nav.Types.Report, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Types.Report.IReportChangeLogCollection";
+      DataInStream@1004 : InStream;
+      DataOutStream@1003 : OutStream;
+      ModifyLayout@1002 : Boolean;
+    BEGIN
+      GetLayoutBlob(InTempBlob);
+      if not InTempBlob.Blob.HASVALUE then
+        exit;
+
+      if ReportUpgrade.ChangeCount < 1 then
+        exit;
+
+      CLEAR(DataInStream);
+      CLEAR(DataOutStream);
+
+      if Type = Type::Word then begin
+        InTempBlob.Blob.CREATEINSTREAM(DataInStream);
+        OutTempBlob.Blob.CREATEOUTSTREAM(DataOutStream);
+      end else begin
+        InTempBlob.Blob.CREATEINSTREAM(DataInStream,TEXTENCODING::UTF8);
+        OutTempBlob.Blob.CREATEOUTSTREAM(DataOutStream,TEXTENCODING::UTF8);
+      end;
+
+      TempReportChangeLogCollection := ReportUpgrade.Upgrade(Description,DataInStream,DataOutStream);
+
+      if not testOnly then begin
+        if TempReportChangeLogCollection.Failures = 0 then begin
+          SetDefaultCustomXmlPart;
+          ModifyLayout := true;
+        end;
+        if OutTempBlob.Blob.HASVALUE then begin
+          SetLayoutBlob(OutTempBlob);
+          ModifyLayout := true;
+        end;
+        if ModifyLayout then
+          COMMIT;
+      end;
+
+      if TempReportChangeLogCollection.Count > 0 then begin
+        if ISNULL(ReportChangeLogCollection) then
+          ReportChangeLogCollection := TempReportChangeLogCollection
+        else
+          ReportChangeLogCollection.AddRange(TempReportChangeLogCollection);
+      end;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryValidateRdlcReport@15(VAR InStr@1002 : InStream);
+    VAR
+      RdlcReportManager@1001 : DotNet "'Microsoft.Dynamics.Nav.DocumentReport, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.DocumentReport.RdlcReportManager";
+      RdlcString@1000 : Text;
+    BEGIN
+      InStr.READ(RdlcString);
+      RdlcReportManager.ValidateReport("Report ID",RdlcString);
+    END;
+
+    LOCAL PROCEDURE FilterOnReport@20(ReportID@1000 : Integer);
+    BEGIN
+      RESET;
+      SETCURRENTKEY("Report ID","Company Name",Type);
+      SETFILTER("Company Name",'%1|%2','',STRSUBSTNO('@%1',COMPANYNAME));
+      SETRANGE("Report ID",ReportID);
+    END;
+
+    [External]
+    PROCEDURE LookupLayoutOK@21(ReportID@1000 : Integer) : Boolean;
+    BEGIN
+      FilterOnReport(ReportID);
+      exit(PAGE.RUNMODAL(PAGE::"Custom Report Layouts",Rec) = ACTION::LookupOK);
+    END;
+
+    [External]
+    PROCEDURE GetDefaultCode@23(ReportID@1002 : Integer) : Code[20];
+    VAR
+      CustomReportLayout@1000 : Record "Custom Report Layout";
+      NewCode@1001 : Code[20];
+    BEGIN
+      CustomReportLayout.SETRANGE("Report ID",ReportID);
+      CustomReportLayout.SETFILTER(Code,STRSUBSTNO('%1-*',ReportID));
+      if CustomReportLayout.FINDLAST then
+        NewCode := INCSTR(CustomReportLayout.Code)
+      else
+        NewCode := STRSUBSTNO('%1-000001',ReportID);
+
+      exit(NewCode);
+    END;
+
+    [Internal]
+    PROCEDURE CanBeModified@24() : Boolean;
+    BEGIN
+      if not "Built-In" then
+        exit(true);
+
+      if not CONFIRM(ModifyBuiltInLayoutQst) then
+        exit(false);
+
+      CopyRecord;
+      exit(true);
+    END;
+
+    [Internal]
+    PROCEDURE NewExtensionLayout@26(ExtensionAppId@1000 : GUID;LayoutDataTable@1003 : DotNet "'System.Data, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Data.DataTable");
+    VAR
+      Row@1006 : DotNet "'System.Data, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Data.DataRow";
+      Version@1002 : Text;
+    BEGIN
+      Row := LayoutDataTable.Rows.Item(0);
+      if LayoutDataTable.Columns.Contains('NavApplicationVersion') then
+        Version := Row.Item('NavApplicationVersion');
+
+      case Version of
+        else
+          HandleW10Layout(ExtensionAppId,Row,LayoutDataTable);
+      end;
+    END;
+
+    LOCAL PROCEDURE HandleW10Layout@25(ExtensionAppId@1005 : GUID;Row@1003 : DotNet "'System.Data, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Data.DataRow";LayoutDataTable@1004 : DotNet "'System.Data, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Data.DataTable");
+    VAR
+      CustomReportLayout@1002 : Record "Custom Report Layout";
+      LayoutCode@1000 : Code[20];
+    BEGIN
+      if not LayoutDataTable.Columns.Contains('Code') then begin
+        LayoutCode := 'MS-EXT-0000000001';
+        CustomReportLayout.SETFILTER(Code,'MS-EXT-*');
+        if CustomReportLayout.FINDLAST then
+          LayoutCode := INCSTR(CustomReportLayout.Code);
+      end else
+        LayoutCode := Row.Item('Code');
+
+      CustomReportLayout.RESET;
+      CustomReportLayout.INIT;
+      CustomReportLayout.Code := LayoutCode;
+      CustomReportLayout."App ID" := ExtensionAppId;
+      CustomReportLayout.Type := Row.Item('Type');
+      CustomReportLayout."Custom XML Part" := Row.Item('CustomXMLPart');
+      CustomReportLayout.Description := Row.Item('Description');
+      CustomReportLayout.Layout := Row.Item('Layout');
+      CustomReportLayout."Report ID" := Row.Item('ReportID');
+      CustomReportLayout.CALCFIELDS("Report Name");
+      CustomReportLayout."Built-In" := true;
+      CustomReportLayout.INSERT;
+    END;
+
+    [External]
+    PROCEDURE HasLayout@29() : Boolean;
+    BEGIN
+      if "Built-In" then
+        exit(HasBuiltInLayout);
+      exit(HasNonBuiltInLayout);
+    END;
+
+    [External]
+    PROCEDURE HasCustomXmlPart@47() : Boolean;
+    BEGIN
+      if "Built-In" then
+        exit(HasBuiltInCustomXmlPart);
+      exit(HasNonBuiltInCustomXmlPart);
+    END;
+
+    [External]
+    PROCEDURE GetLayout@30() : Text;
+    BEGIN
+      if "Built-In" then
+        exit(GetBuiltInLayout);
+      exit(GetNonBuiltInLayout);
+    END;
+
+    [External]
+    PROCEDURE GetCustomXmlPart@46() : Text;
+    BEGIN
+      if "Built-In" then
+        exit(GetBuiltInCustomXmlPart);
+      exit(GetNonBuiltInCustomXmlPart);
+    END;
+
+    [External]
+    PROCEDURE GetLayoutBlob@105(VAR TempBlob@1000 : Record TempBlob);
+    VAR
+      ReportLayout@1001 : Record "Report Layout";
+    BEGIN
+      TempBlob.INIT;
+      if not "Built-In" then begin
+        CALCFIELDS(Layout);
+        TempBlob.Blob := Layout;
+      end else begin
+        ReportLayout.GET(Code);
+        ReportLayout.CALCFIELDS(Layout);
+        TempBlob.Blob := ReportLayout.Layout;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ClearLayout@57();
+    BEGIN
+      if "Built-In" then
+        ERROR(ModifyBuiltInLayoutErr);
+      SetNonBuiltInLayout('');
+    END;
+
+    [External]
+    PROCEDURE ClearCustomXmlPart@63();
+    BEGIN
+      if "Built-In" then
+        ERROR(ModifyBuiltInLayoutErr);
+      SetNonBuiltInCustomXmlPart('');
+    END;
+
+    [External]
+    PROCEDURE TestLayout@115();
+    VAR
+      ReportLayout@1000 : Record "Report Layout";
+    BEGIN
+      if not "Built-In" then begin
+        CALCFIELDS(Layout);
+        TESTFIELD(Layout);
+        exit;
+      end;
+      ReportLayout.GET(Code);
+      ReportLayout.CALCFIELDS(Layout);
+      ReportLayout.TESTFIELD(Layout);
+    END;
+
+    [External]
+    PROCEDURE TestCustomXmlPart@117();
+    VAR
+      ReportLayout@1000 : Record "Report Layout";
+    BEGIN
+      if not "Built-In" then begin
+        CALCFIELDS("Custom XML Part");
+        TESTFIELD("Custom XML Part");
+        exit;
+      end;
+      ReportLayout.GET(Code);
+      ReportLayout.CALCFIELDS("Custom XML Part");
+      ReportLayout.TESTFIELD("Custom XML Part");
+    END;
+
+    [External]
+    PROCEDURE SetLayout@19(Content@1000 : Text);
+    BEGIN
+      if "Built-In" then
+        ERROR(ModifyBuiltInLayoutErr);
+      SetNonBuiltInLayout(Content);
+    END;
+
+    [External]
+    PROCEDURE SetCustomXmlPart@45(Content@1000 : Text);
+    BEGIN
+      if "Built-In" then
+        ERROR(ModifyBuiltInLayoutErr);
+      SetNonBuiltInCustomXmlPart(Content);
+    END;
+
+    [External]
+    PROCEDURE SetDefaultCustomXmlPart@60();
+    BEGIN
+      SetCustomXmlPart(GetWordXmlPart("Report ID"));
+    END;
+
+    [External]
+    PROCEDURE SetLayoutBlob@39(VAR TempBlob@1000 : Record TempBlob);
+    BEGIN
+      if "Built-In" then
+        ERROR(ModifyBuiltInLayoutErr);
+      CLEAR(Layout);
+      if TempBlob.Blob.HASVALUE then
+        Layout := TempBlob.Blob;
+      if not SkipModifyRec then
+        MODIFY;
+    END;
+
+    LOCAL PROCEDURE HasNonBuiltInLayout@35() : Boolean;
+    BEGIN
+      CALCFIELDS(Layout);
+      exit(Layout.HASVALUE);
+    END;
+
+    LOCAL PROCEDURE HasNonBuiltInCustomXmlPart@53() : Boolean;
+    BEGIN
+      CALCFIELDS("Custom XML Part");
+      exit("Custom XML Part".HASVALUE);
+    END;
+
+    LOCAL PROCEDURE HasBuiltInLayout@32() : Boolean;
+    VAR
+      ReportLayout@1000 : Record "Report Layout";
+    BEGIN
+      if not ReportLayout.GET(Code) then
+        exit(false);
+
+      ReportLayout.CALCFIELDS(Layout);
+      exit(ReportLayout.Layout.HASVALUE);
+    END;
+
+    LOCAL PROCEDURE HasBuiltInCustomXmlPart@50() : Boolean;
+    VAR
+      ReportLayout@1000 : Record "Report Layout";
+    BEGIN
+      if not ReportLayout.GET(Code) then
+        exit(false);
+
+      ReportLayout.CALCFIELDS("Custom XML Part");
+      exit(ReportLayout."Custom XML Part".HASVALUE);
+    END;
+
+    LOCAL PROCEDURE GetNonBuiltInLayout@34() : Text;
+    VAR
+      InStr@1002 : InStream;
+      Content@1001 : Text;
+    BEGIN
+      CALCFIELDS(Layout);
+      if not Layout.HASVALUE then
+        exit('');
+
+      if Type = Type::RDLC then
+        Layout.CREATEINSTREAM(InStr,TEXTENCODING::UTF8)
+      else
+        Layout.CREATEINSTREAM(InStr);
+
+      InStr.READ(Content);
+      exit(Content);
+    END;
+
+    LOCAL PROCEDURE GetNonBuiltInCustomXmlPart@52() : Text;
+    VAR
+      InStr@1002 : InStream;
+      Content@1001 : Text;
+    BEGIN
+      CALCFIELDS("Custom XML Part");
+      if not "Custom XML Part".HASVALUE then
+        exit('');
+
+      "Custom XML Part".CREATEINSTREAM(InStr,TEXTENCODING::UTF16);
+      InStr.READ(Content);
+      exit(Content);
+    END;
+
+    LOCAL PROCEDURE GetBuiltInLayout@80() : Text;
+    VAR
+      ReportLayout@1000 : Record "Report Layout";
+      InStr@1002 : InStream;
+      Content@1001 : Text;
+    BEGIN
+      if not ReportLayout.GET(Code) then
+        exit('');
+
+      ReportLayout.CALCFIELDS(Layout);
+      if not ReportLayout.Layout.HASVALUE then
+        exit('');
+
+      if Type = Type::RDLC then
+        ReportLayout.Layout.CREATEINSTREAM(InStr,TEXTENCODING::UTF8)
+      else
+        ReportLayout.Layout.CREATEINSTREAM(InStr);
+
+      InStr.READ(Content);
+      exit(Content);
+    END;
+
+    LOCAL PROCEDURE GetBuiltInCustomXmlPart@49() : Text;
+    VAR
+      ReportLayout@1000 : Record "Report Layout";
+      InStr@1002 : InStream;
+      Content@1001 : Text;
+    BEGIN
+      if not ReportLayout.GET(Code) then
+        exit('');
+
+      ReportLayout.CALCFIELDS("Custom XML Part");
+      if not ReportLayout."Custom XML Part".HASVALUE then
+        exit('');
+
+      ReportLayout."Custom XML Part".CREATEINSTREAM(InStr,TEXTENCODING::UTF16);
+      InStr.READ(Content);
+      exit(Content);
+    END;
+
+    LOCAL PROCEDURE SetNonBuiltInLayout@33(Content@1001 : Text);
+    VAR
+      OutStr@1002 : OutStream;
+    BEGIN
+      if Content = '' then
+        CLEAR(Layout)
+      else begin
+        if Type = Type::RDLC then
+          Layout.CREATEOUTSTREAM(OutStr,TEXTENCODING::UTF8)
+        else
+          Layout.CREATEOUTSTREAM(OutStr);
+        OutStr.WRITE(Content);
+      end;
+      MODIFY;
+    END;
+
+    LOCAL PROCEDURE SetNonBuiltInCustomXmlPart@51(Content@1001 : Text);
+    VAR
+      OutStr@1002 : OutStream;
+    BEGIN
+      if Content = '' then
+        CLEAR("Custom XML Part")
+      else begin
+        "Custom XML Part".CREATEOUTSTREAM(OutStr,TEXTENCODING::UTF16);
+        OutStr.WRITE(Content);
+      end;
+      if not SkipModifyRec then
+        MODIFY;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,440 @@
+OBJECT Codeunit 5612 Calculate Custom 1 Depr.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "FA Ledger Entry"=r,
+                TableData "FA Posting Type Setup"=r;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU="A depreciation entry must be posted on %2 = %3 for %1."';
+      Text001@1001 : TextConst 'ENU="%2 is positive on %3 = %4 for %1."';
+      Text002@1002 : TextConst 'ENU=%2 must not be 100 for %1.';
+      Text003@1003 : TextConst 'ENU=%2 is later than %3 for %1.';
+      Text004@1004 : TextConst 'ENU="You must not specify %2 together with %3 = %4 for %1."';
+      FA@1005 : Record "Fixed Asset";
+      FALedgEntry@1006 : Record "FA Ledger Entry";
+      DeprBook@1007 : Record "Depreciation Book";
+      FADeprBook@1008 : Record "FA Depreciation Book";
+      FAPostingTypeSetup@1009 : Record "FA Posting Type Setup";
+      DepreciationCalc@1010 : Codeunit "Depreciation Calculation";
+      DeprBookCode@1011 : Code[10];
+      UntilDate@1012 : Date;
+      Sign@1013 : Integer;
+      FirstDeprDate@1014 : Date;
+      DaysInFiscalYear@1015 : Integer;
+      NumberOfDays@1016 : Integer;
+      NumberOfDays4@1017 : Integer;
+      DaysInPeriod@1018 : Integer;
+      EntryAmounts@1019 : ARRAY [4] OF Decimal;
+      DateFromProjection@1020 : Date;
+      UseDeprStartingDate@1021 : Boolean;
+      BookValue@1022 : Decimal;
+      MinusBookValue@1024 : Decimal;
+      SalvageValue@1026 : Decimal;
+      AcquisitionDate@1028 : Date;
+      DisposalDate@1029 : Date;
+      DeprMethod@1030 : 'StraightLine,DB1,DB2,DB1SL,DB2SL,"User-Defined",Manual,BelowZero';
+      DeprStartingDate@1031 : Date;
+      FirstUserDefinedDeprDate@1032 : Date;
+      SLPercent@1033 : Decimal;
+      DBPercent@1034 : Decimal;
+      FixedAmount@1035 : Decimal;
+      DeprYears@1036 : Decimal;
+      DeprTable@1037 : Code[10];
+      FinalRoundingAmount@1038 : Decimal;
+      EndingBookValue@1039 : Decimal;
+      Custom1DeprStartingDate@1042 : Date;
+      Custom1DeprUntil@1043 : Date;
+      Custom1AccumPercent@1044 : Decimal;
+      Custom1PercentThisYear@1045 : Decimal;
+      Custom1PropertyClass@1046 : '" ","Personal Property","Real Property"';
+      AcquisitionCost@1047 : Decimal;
+      Custom1Depr@1048 : Decimal;
+      ExtraDays@1049 : Integer;
+
+    [External]
+    PROCEDURE Calculate@1(VAR DeprAmount@1000 : Decimal;VAR Custom1DeprAmount@1001 : Decimal;VAR NumberOfDays3@1002 : Integer;VAR Custom1NumberOfDays3@1003 : Integer;FANo@1004 : Code[20];DeprBookCode2@1005 : Code[10];UntilDate2@1006 : Date;EntryAmounts2@1007 : ARRAY [4] OF Decimal;DateFromProjection2@1008 : Date;DaysInPeriod2@1009 : Integer);
+    VAR
+      i@1010 : Integer;
+    BEGIN
+      CLEARALL;
+      DeprAmount := 0;
+      Custom1DeprAmount := 0;
+      NumberOfDays3 := 0;
+      Custom1NumberOfDays3 := 0;
+      DeprBookCode := DeprBookCode2;
+      FALedgEntry.LOCKTABLE;
+      FA.GET(FANo);
+      DeprBook.GET(DeprBookCode);
+      if not FADeprBook.GET(FANo,DeprBookCode) then
+        exit;
+      DeprBook.TESTFIELD("Fiscal Year 365 Days",false);
+      for i := 1 to 4 do
+        EntryAmounts[i] := EntryAmounts2[i];
+      DateFromProjection := DateFromProjection2;
+      DaysInPeriod := DaysInPeriod2;
+      UntilDate := UntilDate2;
+      DeprBook.TESTFIELD("Allow Depr. below Zero",false);
+      FADeprBook.TESTFIELD("Fixed Depr. Amount below Zero",0);
+      FADeprBook.TESTFIELD("Depr. below Zero %",0);
+      FADeprBook.TESTFIELD("Use Half-Year Convention",false);
+      DeprBook.TESTFIELD(
+        "Periodic Depr. Date Calc.",DeprBook."Periodic Depr. Date Calc."::"Last Entry");
+
+      FADeprBook.TESTFIELD("Property Class (Custom 1)");
+      FAPostingTypeSetup.GET(
+        DeprBookCode,FAPostingTypeSetup."FA Posting Type"::"Custom 1");
+      FAPostingTypeSetup.TESTFIELD("Part of Book Value",true);
+      FAPostingTypeSetup.TESTFIELD("Part of Depreciable Basis",false);
+      FAPostingTypeSetup.TESTFIELD("Include in Depr. Calculation",true);
+      FAPostingTypeSetup.TESTFIELD(Sign,FAPostingTypeSetup.Sign::Credit);
+
+      TransferValues;
+      if not SkipRecord then begin
+        Sign := 1;
+        if not FADeprBook."Use FA Ledger Check" then begin
+          if DeprBook."Use FA Ledger Check" then
+            FADeprBook.TESTFIELD("Use FA Ledger Check",true);
+          Sign :=
+            DepreciationCalc.GetCustom1Sign(
+              BookValue,AcquisitionCost,Custom1Depr,SalvageValue,MinusBookValue);
+          if Sign = 0 then
+            exit;
+          if Sign = -1 then
+            DepreciationCalc.GetNewCustom1Signs(
+              BookValue,AcquisitionCost,Custom1Depr,SalvageValue,MinusBookValue);
+        end;
+        if BookValue + SalvageValue <= 0 then
+          exit;
+        if (SalvageValue >= 0) and (BookValue <= EndingBookValue) then
+          exit;
+        if DateFromProjection > 0D then
+          FirstDeprDate := DateFromProjection
+        else begin
+          FirstDeprDate := DepreciationCalc.GetFirstDeprDate(FANo,DeprBookCode,false);
+          if (FirstDeprDate > UntilDate) or (FirstDeprDate = 0D) then
+            exit;
+          if (Custom1DeprUntil = 0D) or (FirstDeprDate <= Custom1DeprUntil) then begin
+            UseDeprStartingDate := DepreciationCalc.UseDeprStartingDate(FANo,DeprBookCode);
+            if UseDeprStartingDate then
+              FirstDeprDate := DeprStartingDate;
+          end;
+          if FirstDeprDate < DeprStartingDate then
+            FirstDeprDate := DeprStartingDate;
+          if FirstDeprDate > UntilDate then
+            exit;
+        end;
+        if UseDeprStartingDate then
+          ExtraDays := DepreciationCalc.DeprDays(
+              Custom1DeprStartingDate,DeprStartingDate,false) - 1;
+        if (Custom1DeprUntil > 0D) and (FirstDeprDate <= Custom1DeprUntil) and
+           (UntilDate > Custom1DeprUntil)
+        then
+          ERROR(
+            Text000,
+            FAName,FADeprBook.FIELDCAPTION("Depr. Ending Date (Custom 1)"),Custom1DeprUntil);
+        NumberOfDays := DepreciationCalc.DeprDays(FirstDeprDate,UntilDate,false);
+
+        if NumberOfDays <= 0 then
+          exit;
+
+        if DaysInPeriod > 0 then begin
+          NumberOfDays4 := NumberOfDays;
+          NumberOfDays := DaysInPeriod;
+          ExtraDays := 0;
+        end;
+
+        CalcDeprBasis;
+
+        case DeprMethod of
+          DeprMethod::StraightLine:
+            DeprAmount := CalcSLAmount;
+          DeprMethod::DB1:
+            DeprAmount := CalcDB1Amount;
+          DeprMethod::DB2:
+            DeprAmount := CalcDB2Amount;
+          DeprMethod::DB1SL:
+            DeprAmount := CalcDBSLAmount;
+          DeprMethod::DB2SL,
+          DeprMethod::Manual:
+            DeprAmount := 0;
+          DeprMethod::"User-Defined":
+            DeprAmount := CalcCustom1Amount;
+        end;
+
+        Custom1DeprAmount := CalcCustom1DeprAmount;
+        DepreciationCalc.AdjustCustom1(
+          DeprBookCode,DeprAmount,Custom1DeprAmount,BookValue,SalvageValue,
+          EndingBookValue,FinalRoundingAmount);
+        DeprAmount := Sign * DeprAmount;
+        Custom1DeprAmount := Sign * Custom1DeprAmount;
+        NumberOfDays3 := NumberOfDays;
+        Custom1NumberOfDays3 := NumberOfDays + ExtraDays;
+      end;
+    END;
+
+    LOCAL PROCEDURE SkipRecord@4() : Boolean;
+    BEGIN
+      exit(
+        (DisposalDate > 0D) or
+        (AcquisitionDate = 0D) or
+        (DeprMethod = DeprMethod::Manual) or
+        (AcquisitionDate > UntilDate) or
+        FA.Inactive or
+        FA.Blocked);
+    END;
+
+    LOCAL PROCEDURE CalcSLAmount@6() : Decimal;
+    VAR
+      RemainingLife@1000 : Decimal;
+    BEGIN
+      if SLPercent > 0 then
+        exit(-CalcDeprBasis * CalcSLPercent / 100);
+
+      if FixedAmount > 0 then
+        exit(-FixedAmount * NumberOfDays / DaysInFiscalYear);
+
+      if DeprYears > 0 then begin
+        if (Custom1DeprUntil = 0D) or (UntilDate > Custom1DeprUntil) then begin
+          RemainingLife :=
+            (DeprYears * DaysInFiscalYear) -
+            DepreciationCalc.DeprDays(
+              DeprStartingDate,DepreciationCalc.Yesterday(FirstDeprDate,false),false);
+          if RemainingLife < 1 then
+            exit(-BookValue);
+
+          exit(-(BookValue + SalvageValue - MinusBookValue) * NumberOfDays / RemainingLife);
+        end;
+        exit(-AcquisitionCost * NumberOfDays / DeprYears / DaysInFiscalYear);
+      end;
+      exit(0);
+    END;
+
+    LOCAL PROCEDURE CalcDBSLAmount@2() : Decimal;
+    VAR
+      SLAmount@1000 : Decimal;
+      DBAmount@1001 : Decimal;
+    BEGIN
+      if DeprMethod = DeprMethod::DB1SL then
+        DBAmount := CalcDB1Amount
+      else
+        DBAmount := CalcDB2Amount;
+      if UntilDate <= Custom1DeprUntil then
+        exit(DBAmount);
+      SLAmount := CalcSLAmount;
+      if SLAmount < DBAmount then
+        exit(SLAmount);
+
+      exit(DBAmount)
+    END;
+
+    LOCAL PROCEDURE CalcDB2Amount@7() : Decimal;
+    BEGIN
+      exit(
+        -(1 - POWER(1 - DBPercent / 100,NumberOfDays / DaysInFiscalYear)) *
+        (BookValue - MinusBookValue));
+    END;
+
+    LOCAL PROCEDURE CalcDB1Amount@11() : Decimal;
+    VAR
+      DeprInFiscalYear@1000 : Decimal;
+    BEGIN
+      if DateFromProjection = 0D then
+        DeprInFiscalYear := DepreciationCalc.DeprInFiscalYear(FA."No.",DeprBookCode,UntilDate)
+      else
+        DeprInFiscalYear := EntryAmounts[3];
+      exit(
+        -(DBPercent / 100) * (NumberOfDays / DaysInFiscalYear) *
+        (BookValue - MinusBookValue - Sign * DeprInFiscalYear));
+    END;
+
+    LOCAL PROCEDURE CalcCustom1Amount@8() : Decimal;
+    VAR
+      TableDeprCalc@1000 : Codeunit "Table Depr. Calculation";
+      Factor@1001 : Decimal;
+    BEGIN
+      Factor := 1;
+      if DaysInPeriod > 0 then
+        Factor := DaysInPeriod / NumberOfDays4;
+      exit(
+        -TableDeprCalc.GetTablePercent(
+          DeprBook.Code,DeprTable,FirstUserDefinedDeprDate,FirstDeprDate,UntilDate) *
+        AcquisitionCost * Factor);
+    END;
+
+    LOCAL PROCEDURE CalcSLPercent@17() : Decimal;
+    VAR
+      FractionOfFiscalYear@1000 : Decimal;
+      CalcDeprYears@1001 : Decimal;
+      YearsOfCustom1Depr@1002 : Decimal;
+    BEGIN
+      FractionOfFiscalYear := NumberOfDays / DaysInFiscalYear;
+      if SLPercent <= 0 then
+        exit(0);
+      if (Custom1PropertyClass = Custom1PropertyClass::"Real Property") or
+         (Custom1DeprUntil = 0D) or (UntilDate <= Custom1DeprUntil)
+      then
+        exit(SLPercent * FractionOfFiscalYear);
+
+      YearsOfCustom1Depr :=
+        DepreciationCalc.DeprDays(
+          Custom1DeprStartingDate,Custom1DeprUntil,false) / DaysInFiscalYear;
+      CalcDeprYears := 100 / SLPercent;
+      if (CalcDeprYears - YearsOfCustom1Depr) <= 0.001 then
+        exit(0);
+      exit(100 * FractionOfFiscalYear / (CalcDeprYears - YearsOfCustom1Depr));
+    END;
+
+    LOCAL PROCEDURE CalcCustom1DeprPercent@12() : Decimal;
+    VAR
+      MaxPercent@1000 : Decimal;
+      CurrentPercent@1001 : Decimal;
+    BEGIN
+      if (Custom1DeprUntil = 0D) or (UntilDate > Custom1DeprUntil) or (AcquisitionCost < 0.01) then
+        exit(0);
+
+      MaxPercent := Custom1AccumPercent - (-Custom1Depr * 100 / AcquisitionCost);
+      if MaxPercent < 0 then
+        exit(0);
+      CurrentPercent := Custom1PercentThisYear * (NumberOfDays + ExtraDays) / DaysInFiscalYear;
+      if CurrentPercent > MaxPercent then
+        CurrentPercent := MaxPercent;
+      exit(CurrentPercent);
+    END;
+
+    LOCAL PROCEDURE CalcCustom1DeprAmount@18() : Decimal;
+    BEGIN
+      exit(-AcquisitionCost * CalcCustom1DeprPercent / 100);
+    END;
+
+    LOCAL PROCEDURE CalcDeprBasis@15() : Decimal;
+    VAR
+      FALedgEntry@1000 : Record "FA Ledger Entry";
+    BEGIN
+      if (Custom1DeprUntil = 0D) or (UntilDate <= Custom1DeprUntil) then
+        exit(AcquisitionCost);
+      with FALedgEntry do begin
+        SETCURRENTKEY("FA No.","Depreciation Book Code","Part of Book Value","FA Posting Date");
+        SETRANGE("FA No.",FA."No.");
+        SETRANGE("Depreciation Book Code",DeprBookCode);
+        SETRANGE("Part of Book Value",true);
+        SETRANGE("FA Posting Date",0D,Custom1DeprUntil);
+        CALCSUMS(Amount);
+        if (Sign = -1) and (Amount > 0) then
+          ERROR(
+            Text001,
+            FAName,FADeprBook.FIELDCAPTION("Book Value"),
+            FADeprBook.FIELDCAPTION("Depr. Ending Date (Custom 1)"),Custom1DeprUntil);
+        if DateFromProjection = 0D then
+          exit(ABS(Amount));
+
+        exit(EntryAmounts[4]);
+      end;
+    END;
+
+    LOCAL PROCEDURE TransferValues@3();
+    BEGIN
+      with FADeprBook do begin
+        TESTFIELD("Depreciation Starting Date");
+        if "Depreciation Method" = "Depreciation Method"::"User-Defined" then begin
+          TESTFIELD("Depreciation Table Code");
+          TESTFIELD("First User-Defined Depr. Date");
+        end;
+        case "Depreciation Method" of
+          "Depreciation Method"::"Declining-Balance 1",
+          "Depreciation Method"::"Declining-Balance 2":
+            if "Declining-Balance %" >= 100 then
+              ERROR(Text002,FAName,FIELDCAPTION("Declining-Balance %"));
+        end;
+        if DateFromProjection = 0D then begin
+          CALCFIELDS("Book Value","Acquisition Cost","Custom 1","Salvage Value");
+          BookValue := "Book Value";
+          Custom1Depr := "Custom 1";
+        end else begin
+          CALCFIELDS("Acquisition Cost","Salvage Value");
+          BookValue := EntryAmounts[1];
+          Custom1Depr := EntryAmounts[2];
+        end;
+        MinusBookValue := DepreciationCalc.GetMinusBookValue(FA."No.",DeprBookCode,0D,0D);
+        AcquisitionCost := "Acquisition Cost";
+        SalvageValue := "Salvage Value";
+        DeprMethod := "Depreciation Method";
+        DeprStartingDate := "Depreciation Starting Date";
+        DeprTable := "Depreciation Table Code";
+        FirstUserDefinedDeprDate := "First User-Defined Depr. Date";
+        if ("Depreciation Method" = "Depreciation Method"::"User-Defined") and
+           (FirstUserDefinedDeprDate > DeprStartingDate)
+        then
+          ERROR(
+            Text003,
+            FAName,FIELDCAPTION("First User-Defined Depr. Date"),FIELDCAPTION("Depreciation Starting Date"));
+        SLPercent := "Straight-Line %";
+        DeprYears := "No. of Depreciation Years";
+        DBPercent := "Declining-Balance %";
+        if "Depreciation Ending Date" > 0D then begin
+          if  "Depreciation Starting Date" > "Depreciation Ending Date" then
+            ERROR(
+              Text003,
+              FAName,FIELDCAPTION("Depreciation Starting Date"),FIELDCAPTION("Depreciation Ending Date"));
+          DeprYears :=
+            DepreciationCalc.DeprDays(
+              "Depreciation Starting Date","Depreciation Ending Date",false) / 360;
+        end;
+        FixedAmount := "Fixed Depr. Amount";
+        FinalRoundingAmount := "Final Rounding Amount";
+        if FinalRoundingAmount = 0 then
+          FinalRoundingAmount := DeprBook."Default Final Rounding Amount";
+        EndingBookValue := "Ending Book Value";
+        if not "Ignore Def. Ending Book Value" and (EndingBookValue = 0) then
+          EndingBookValue := DeprBook."Default Ending Book Value";
+        AcquisitionDate := "Acquisition Date";
+        DisposalDate := "Disposal Date";
+        DaysInFiscalYear := DeprBook."No. of Days in Fiscal Year";
+        if DaysInFiscalYear = 0 then
+          DaysInFiscalYear := 360;
+        Custom1DeprStartingDate := "Depr. Starting Date (Custom 1)";
+        Custom1DeprUntil := "Depr. Ending Date (Custom 1)";
+        Custom1AccumPercent := "Accum. Depr. % (Custom 1)";
+        Custom1PercentThisYear := "Depr. This Year % (Custom 1)";
+        Custom1PropertyClass := "Property Class (Custom 1)";
+        if Custom1DeprStartingDate = 0D then
+          Custom1DeprStartingDate := DeprStartingDate;
+        if Custom1DeprStartingDate > DeprStartingDate then
+          ERROR(
+            Text003,
+            FAName,FIELDCAPTION("Depr. Starting Date (Custom 1)"),FIELDCAPTION("Depreciation Starting Date"));
+        if (Custom1DeprUntil > 0D) and (Custom1DeprUntil < DeprStartingDate) then
+          ERROR(
+            Text003,
+            FAName,FIELDCAPTION("Depreciation Starting Date"),FIELDCAPTION("Depr. Ending Date (Custom 1)"));
+        if (DeprMethod = DeprMethod::DB2SL) and (Custom1DeprUntil > 0D) then
+          ERROR(
+            Text004,
+            FAName,FIELDCAPTION("Depr. Ending Date (Custom 1)"),
+            FIELDCAPTION("Depreciation Method"),"Depreciation Method");
+      end;
+    END;
+
+    LOCAL PROCEDURE FAName@5() : Text[200];
+    VAR
+      DepreciationCalc@1000 : Codeunit "Depreciation Calculation";
+    BEGIN
+      exit(DepreciationCalc.FAName(FA,DeprBookCode));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

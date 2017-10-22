@@ -1,0 +1,126 @@
+OBJECT Codeunit 1231 SEPA DD-Fill Export Buffer
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Payment Export Data";
+    Permissions=TableData "Payment Export Data"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      HasErrorsErr@1002 : TextConst 'ENU=The file export has one or more errors.\\For each line to be exported, resolve the errors displayed to the right and then try to export again.';
+
+    [External]
+    PROCEDURE FillExportBuffer@3(VAR DirectDebitCollectionEntry@1013 : Record "Direct Debit Collection Entry";VAR PaymentExportData@1001 : Record "Payment Export Data");
+    VAR
+      BankAccount@1010 : Record "Bank Account";
+      BankExportImportSetup@1003 : Record "Bank Export/Import Setup";
+      Customer@1009 : Record Customer;
+      CustomerBankAccount@1006 : Record "Customer Bank Account";
+      DirectDebitCollection@1004 : Record "Direct Debit Collection";
+      GLSetup@1005 : Record "General Ledger Setup";
+      SEPADirectDebitMandate@1002 : Record "SEPA Direct Debit Mandate";
+      TempDirectDebitCollectionEntry@1000 : TEMPORARY Record "Direct Debit Collection Entry";
+    BEGIN
+      TempDirectDebitCollectionEntry.COPYFILTERS(DirectDebitCollectionEntry);
+      CODEUNIT.RUN(CODEUNIT::"SEPA DD-Prepare Source",TempDirectDebitCollectionEntry);
+
+      TempDirectDebitCollectionEntry.SETAUTOCALCFIELDS("Applies-to Entry Document No.","Applies-to Entry Description");
+
+      if not TempDirectDebitCollectionEntry.FINDSET then
+        exit;
+
+      DirectDebitCollection.GET(TempDirectDebitCollectionEntry."Direct Debit Collection No.");
+      BankAccount.GET(DirectDebitCollection."To Bank Account No.");
+      BankAccount.GetDDExportImportSetup(BankExportImportSetup);
+      BankExportImportSetup.TESTFIELD("Check Export Codeunit");
+      repeat
+        CODEUNIT.RUN(BankExportImportSetup."Check Export Codeunit",TempDirectDebitCollectionEntry);
+      until TempDirectDebitCollectionEntry.NEXT = 0;
+
+      if DirectDebitCollection.HasPaymentFileErrors then begin
+        COMMIT;
+        ERROR(HasErrorsErr);
+      end;
+
+      GLSetup.GET;
+      GLSetup.TESTFIELD("LCY Code");
+
+      TempDirectDebitCollectionEntry.FINDSET;
+      with PaymentExportData do begin
+        RESET;
+        if FINDLAST then;
+        repeat
+          INIT;
+          "Entry No." += 1;
+          SetPreserveNonLatinCharacters(BankExportImportSetup."Preserve Non-Latin Characters");
+          SetBankAsSenderBank(BankAccount);
+          SetCreditorIdentifier(BankAccount);
+          "SEPA Direct Debit Mandate ID" := TempDirectDebitCollectionEntry."Mandate ID";
+          SEPADirectDebitMandate.GET(TempDirectDebitCollectionEntry."Mandate ID");
+          "SEPA DD Mandate Signed Date" := SEPADirectDebitMandate."Date of Signature";
+
+          TempDirectDebitCollectionEntry."Sequence Type" :=
+            UpdateSourceEntrySequenceType(TempDirectDebitCollectionEntry);
+
+          VALIDATE("SEPA Direct Debit Seq. Type",TempDirectDebitCollectionEntry."Sequence Type");
+          "Transfer Date" := TempDirectDebitCollectionEntry."Transfer Date";
+          "Document No." := TempDirectDebitCollectionEntry."Applies-to Entry Document No.";
+          Amount := TempDirectDebitCollectionEntry."Transfer Amount";
+          "Currency Code" := GLSetup.GetCurrencyCode(TempDirectDebitCollectionEntry."Currency Code");
+
+          Customer.GET(TempDirectDebitCollectionEntry."Customer No.");
+          CustomerBankAccount.GET(Customer."No.",SEPADirectDebitMandate."Customer Bank Account Code");
+          SetCustomerAsRecipient(Customer,CustomerBankAccount);
+
+          VALIDATE("SEPA Partner Type",Customer."Partner Type");
+          VALIDATE("SEPA Instruction Priority","SEPA Instruction Priority"::NORMAL);
+          VALIDATE("SEPA Payment Method","SEPA Payment Method"::TRF);
+          VALIDATE("SEPA Charge Bearer","SEPA Charge Bearer"::SLEV);
+
+          "SEPA Batch Booking" := false;
+          "Message ID" := DirectDebitCollection."Message ID";
+          "Payment Information ID" := TempDirectDebitCollectionEntry."Transaction ID";
+          "End-to-End ID" := TempDirectDebitCollectionEntry."Transaction ID";
+          "Message to Recipient 1" := TempDirectDebitCollectionEntry."Applies-to Entry Description";
+          INSERT(true);
+        until TempDirectDebitCollectionEntry.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateSourceEntrySequenceType@1(TempDirectDebitCollectionEntry@1000 : TEMPORARY Record "Direct Debit Collection Entry") SequenceType : Integer;
+    VAR
+      DirectDebitCollectionEntry@1001 : Record "Direct Debit Collection Entry";
+      SEPADirectDebitMandate@1002 : Record "SEPA Direct Debit Mandate";
+    BEGIN
+      if TempDirectDebitCollectionEntry.Status <> TempDirectDebitCollectionEntry.Status::New then
+        exit(TempDirectDebitCollectionEntry."Sequence Type");
+
+      with SEPADirectDebitMandate do begin
+        GET(TempDirectDebitCollectionEntry."Mandate ID");
+        SequenceType := GetSequenceType;
+        UpdateCounter;
+      end;
+
+      DirectDebitCollectionEntry := TempDirectDebitCollectionEntry;
+      with DirectDebitCollectionEntry do
+        if FIND then begin
+          "Sequence Type" := SequenceType;
+          MODIFY;
+        end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

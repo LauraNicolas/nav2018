@@ -1,0 +1,167 @@
+OBJECT Table 5998 Standard Service Item Gr. Code
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    DataCaptionFields="Service Item Group Code";
+    OnDelete=BEGIN
+               StdServiceLine.RESET;
+               StdServiceLine.SETRANGE("Standard Service Code",Code);
+               if FINDSET then
+                 StdServiceLine.DELETEALL(true);
+             END;
+
+    CaptionML=ENU=Standard Service Item Gr. Code;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Service Item Group Code;Code10     ;TableRelation="Service Item Group";
+                                                   CaptionML=ENU=Service Item Group Code }
+    { 2   ;   ;Code                ;Code10        ;TableRelation="Standard Service Code";
+                                                   CaptionML=ENU=Code;
+                                                   NotBlank=true }
+    { 3   ;   ;Description         ;Text50        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("Standard Service Code".Description WHERE (Code=FIELD(Code)));
+                                                   CaptionML=ENU=Description;
+                                                   Editable=false }
+  }
+  KEYS
+  {
+    {    ;"Service Item Group Code",Code          ;Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text001@1000 : TextConst 'ENU=%1 of the standard service code must be equal to %2 on the %3.';
+      StdServCode@1001 : Record "Standard Service Code";
+      StdServiceLine@1002 : Record "Standard Service Line";
+
+    [External]
+    PROCEDURE InsertServiceLines@1(ServItemLine@1000 : Record "Service Item Line");
+    VAR
+      Currency@1001 : Record Currency;
+      ServHeader@1003 : Record "Service Header";
+      ServLine@1004 : Record "Service Line";
+      StdServLine@1006 : Record "Standard Service Line";
+      StdServItemGrCode@1007 : Record "Standard Service Item Gr. Code";
+      StdServItemGrCodesForm@1009 : Page "Standard Serv. Item Gr. Codes";
+      Factor@1008 : Integer;
+    BEGIN
+      ServItemLine.TESTFIELD("Line No.");
+
+      CLEAR(StdServItemGrCodesForm);
+      StdServItemGrCode.RESET;
+      if ServItemLine."Service Item Group Code" <> '' then
+        StdServItemGrCode.SETRANGE("Service Item Group Code",ServItemLine."Service Item Group Code");
+      StdServItemGrCodesForm.SETRECORD(StdServItemGrCode);
+      StdServItemGrCodesForm.SETTABLEVIEW(StdServItemGrCode);
+      StdServItemGrCodesForm.LOOKUPMODE := true;
+
+      if not (StdServItemGrCodesForm.RUNMODAL = ACTION::LookupOK) then
+        exit;
+      StdServItemGrCodesForm.GETRECORD(StdServItemGrCode);
+      StdServItemGrCode.TESTFIELD(Code);
+      StdServCode.GET(StdServItemGrCode.Code);
+
+      StdServCode.TESTFIELD(Code);
+      ServHeader.GET(ServItemLine."Document Type",ServItemLine."Document No.");
+      if StdServCode."Currency Code" <> ServHeader."Currency Code" then
+        ERROR(
+          Text001,
+          StdServCode.FIELDCAPTION("Currency Code"),
+          ServHeader.FIELDCAPTION("Currency Code"),ServHeader.TABLECAPTION);
+      StdServLine.SETRANGE("Standard Service Code",StdServCode.Code);
+      Currency.Initialize(StdServCode."Currency Code");
+      ServLine."Document Type" := ServItemLine."Document Type";
+      ServLine."Document No." := ServItemLine."Document No.";
+      ServLine.SETRANGE("Document Type",ServItemLine."Document Type");
+      ServLine.SETRANGE("Document No.",ServItemLine."Document No.");
+      if ServHeader."Prices Including VAT" then
+        Factor := 1
+      else
+        Factor := 0;
+      ServLine.LOCKTABLE;
+      StdServLine.LOCKTABLE;
+      if StdServLine.FIND('-') then
+        repeat
+          ServLine.INIT;
+          ServLine."Line No." := 0;
+          ServLine.VALIDATE(Type,StdServLine.Type);
+          if ServHeader."Link Service to Service Item" then
+            ServLine.VALIDATE("Service Item Line No.",ServItemLine."Line No.");
+          if StdServLine.Type = StdServLine.Type::" " then begin
+            ServLine.VALIDATE("No.",StdServLine."No.");
+            ServLine.Description := StdServLine.Description
+          end else
+            if not StdServLine.EmptyLine then begin
+              StdServLine.TESTFIELD("No.");
+              ServLine.VALIDATE("No.",StdServLine."No.");
+              if StdServLine."Variant Code" <> '' then
+                ServLine.VALIDATE("Variant Code",StdServLine."Variant Code");
+              ServLine.VALIDATE(Quantity,StdServLine.Quantity);
+              if StdServLine."Unit of Measure Code" <> '' then
+                ServLine.VALIDATE("Unit of Measure Code",StdServLine."Unit of Measure Code");
+              ServLine.Description := StdServLine.Description;
+              if StdServLine.Type = StdServLine.Type::"G/L Account" then
+                ServLine.VALIDATE(
+                  "Unit Price",
+                  ROUND(StdServLine."Amount Excl. VAT" *
+                    (ServLine."VAT %" / 100 * Factor + 1),Currency."Unit-Amount Rounding Precision"));
+            end;
+
+          ServLine."Shortcut Dimension 1 Code" := StdServLine."Shortcut Dimension 1 Code";
+          ServLine."Shortcut Dimension 2 Code" := StdServLine."Shortcut Dimension 2 Code";
+
+          CombineDimensions(ServLine,StdServLine);
+
+          if StdServLine.InsertLine then begin
+            ServLine."Line No." := GetNextLineNo(ServLine);
+            ServLine.INSERT(true);
+            InsertExtendedText(ServLine);
+          end;
+        until StdServLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertExtendedText@3(ServLine@1000 : Record "Service Line");
+    VAR
+      TransferExtendedText@1001 : Codeunit "Transfer Extended Text";
+    BEGIN
+      if TransferExtendedText.ServCheckIfAnyExtText(ServLine,false) then
+        TransferExtendedText.InsertServExtText(ServLine);
+    END;
+
+    LOCAL PROCEDURE GetNextLineNo@4(ServLine@1001 : Record "Service Line") : Integer;
+    BEGIN
+      ServLine.SETRANGE("Document Type",ServLine."Document Type");
+      ServLine.SETRANGE("Document No.",ServLine."Document No.");
+      if ServLine.FINDLAST then
+        exit(ServLine."Line No." + 10000);
+      exit(10000);
+    END;
+
+    LOCAL PROCEDURE CombineDimensions@5(VAR ServLine@1001 : Record "Service Line";StdServLine@1002 : Record "Standard Service Line");
+    VAR
+      DimensionManagement@1000 : Codeunit DimensionManagement;
+      DimensionSetIDArr@1005 : ARRAY [10] OF Integer;
+    BEGIN
+      DimensionSetIDArr[1] := ServLine."Dimension Set ID";
+      DimensionSetIDArr[2] := StdServLine."Dimension Set ID";
+
+      ServLine."Dimension Set ID" :=
+        DimensionManagement.GetCombinedDimensionSetID(
+          DimensionSetIDArr,ServLine."Shortcut Dimension 1 Code",ServLine."Shortcut Dimension 2 Code");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

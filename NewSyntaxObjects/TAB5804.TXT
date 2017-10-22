@@ -1,0 +1,236 @@
+OBJECT Table 5804 Avg. Cost Adjmt. Entry Point
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               UpdateItem;
+             END;
+
+    OnModify=BEGIN
+               UpdateItem;
+             END;
+
+    OnDelete=BEGIN
+               UpdateItem;
+             END;
+
+    CaptionML=ENU=Avg. Cost Adjmt. Entry Point;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Item No.            ;Code20        ;TableRelation=Item;
+                                                   CaptionML=ENU=Item No. }
+    { 2   ;   ;Variant Code        ;Code10        ;TableRelation="Item Variant".Code WHERE ("Item No."=FIELD("Item No."));
+                                                   CaptionML=ENU=Variant Code }
+    { 3   ;   ;Location Code       ;Code10        ;TableRelation=Location;
+                                                   CaptionML=ENU=Location Code }
+    { 4   ;   ;Valuation Date      ;Date          ;CaptionML=ENU=Valuation Date }
+    { 5   ;   ;Cost Is Adjusted    ;Boolean       ;CaptionML=ENU=Cost Is Adjusted }
+  }
+  KEYS
+  {
+    {    ;"Item No.","Variant Code","Location Code","Valuation Date";
+                                                   Clustered=true }
+    {    ;"Item No.","Cost Is Adjusted","Valuation Date" }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      Item@1000 : Record Item;
+      FiscalYearAccPeriod@1003 : Record "Accounting Period";
+
+    LOCAL PROCEDURE UpdateItem@3();
+    BEGIN
+      GetItem("Item No.");
+      if Item."Cost is Adjusted" then begin
+        Item.LOCKTABLE;
+        Item."Cost is Adjusted" := false;
+        Item.MODIFY;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE ValuationExists@8(ValueEntry@1000 : Record "Value Entry") : Boolean;
+    VAR
+      CalendarPeriod@1001 : Record Date;
+    BEGIN
+      RESET;
+      "Item No." := ValueEntry."Item No.";
+      "Valuation Date" := ValueEntry."Valuation Date";
+      GetItem(ValueEntry."Item No.");
+      if Item."Costing Method" = Item."Costing Method"::Average then begin
+        CalendarPeriod."Period Start" := "Valuation Date";
+        GetValuationPeriod(CalendarPeriod);
+        "Valuation Date" := CalendarPeriod."Period End";
+      end;
+      if (Item."Costing Method" = Item."Costing Method"::Average) and
+         IsAvgCostCalcTypeItem("Valuation Date")
+      then begin
+        "Location Code" := '';
+        "Variant Code" := '';
+      end else begin
+        "Variant Code" := ValueEntry."Variant Code";
+        "Location Code" := ValueEntry."Location Code";
+      end;
+
+      exit(FIND);
+    END;
+
+    [External]
+    PROCEDURE PrevValuationAdjusted@9(ValueEntry@1001 : Record "Value Entry") ValuationAdjusted : Boolean;
+    VAR
+      CopyOfAvgCostAdjmtPoint@1000 : Record "Avg. Cost Adjmt. Entry Point";
+    BEGIN
+      ValuationAdjusted := true;
+      if ValueEntry."Valuation Date" = 0D then
+        exit(ValuationAdjusted);
+
+      CopyOfAvgCostAdjmtPoint.COPY(Rec);
+      RESET;
+      SETCURRENTKEY("Item No.","Cost Is Adjusted");
+      SETRANGE("Item No.",ValueEntry."Item No.");
+      SETRANGE("Cost Is Adjusted",false);
+      SETRANGE("Valuation Date",0D,CALCDATE('<-1D>',ValueEntry."Valuation Date"));
+      ValuationAdjusted := ISEMPTY;
+      COPY(CopyOfAvgCostAdjmtPoint);
+      exit(ValuationAdjusted);
+    END;
+
+    [External]
+    PROCEDURE UpdateValuationDate@7(ValueEntry@1000 : Record "Value Entry");
+    BEGIN
+      if ValuationExists(ValueEntry) then begin
+        if not "Cost Is Adjusted" then
+          exit;
+        "Cost Is Adjusted" := false;
+        MODIFY;
+      end else begin
+        INIT;
+        INSERT;
+      end;
+
+      UpdateNextValuations;
+    END;
+
+    LOCAL PROCEDURE UpdateNextValuations@1();
+    VAR
+      CopyOfAvgCostAdjmtPoint@1000 : Record "Avg. Cost Adjmt. Entry Point";
+    BEGIN
+      CopyOfAvgCostAdjmtPoint.COPY(Rec);
+      SETCURRENTKEY("Item No.","Cost Is Adjusted");
+      SETRANGE("Item No.","Item No.");
+      SETRANGE("Cost Is Adjusted",true);
+      if true in [Item."Costing Method" <> Item."Costing Method"::Average,
+                  not (IsAvgCostCalcTypeItem("Valuation Date") or
+                       AvgCostCalcTypeIsChanged("Valuation Date"))]
+      then begin
+        SETRANGE("Location Code","Location Code");
+        SETRANGE("Variant Code","Variant Code");
+      end;
+      SETFILTER("Valuation Date",'>%1',"Valuation Date");
+      MODIFYALL("Cost Is Adjusted",false);
+      COPY(CopyOfAvgCostAdjmtPoint);
+    END;
+
+    [External]
+    PROCEDURE AvgCostCalcTypeIsChanged@6(FromDate@1001 : Date) : Boolean;
+    VAR
+      NextFiscalYearAccPeriod@1000 : Record "Accounting Period";
+    BEGIN
+      GetAvgCostCalcTypeIsChgPeriod(NextFiscalYearAccPeriod,FromDate);
+      exit(NextFiscalYearAccPeriod."Starting Date" > FromDate);
+    END;
+
+    [External]
+    PROCEDURE GetAvgCostCalcTypeIsChgPeriod@12(VAR NextFiscalYearAccPeriod@1001 : Record "Accounting Period";FromDate@1000 : Date);
+    BEGIN
+      NextFiscalYearAccPeriod.SETRANGE("New Fiscal Year",true);
+      NextFiscalYearAccPeriod.SETFILTER("Starting Date",'>%1',FromDate);
+      NextFiscalYearAccPeriod.SETFILTER("Average Cost Calc. Type",'<>%1',FiscalYearAccPeriod."Average Cost Calc. Type");
+    END;
+
+    [Internal]
+    PROCEDURE GetValuationPeriod@2(VAR CalendarPeriod@1000 : Record Date);
+    VAR
+      PeriodMgt@1001 : Codeunit PeriodFormManagement;
+    BEGIN
+      GetFiscalYearAccPeriod("Valuation Date");
+
+      if FiscalYearAccPeriod."Average Cost Period" = FiscalYearAccPeriod."Average Cost Period"::" " then
+        FiscalYearAccPeriod.FIELDERROR("Average Cost Period");
+
+      if CalendarPeriod."Period Start" = 0D then begin
+        CalendarPeriod."Period End" := 0D;
+        exit;
+      end;
+
+      if not PeriodMgt.FindDate('',CalendarPeriod,FiscalYearAccPeriod."Average Cost Period" - 1) then
+        FiscalYearAccPeriod.GET(CalendarPeriod."Period Start");
+
+      if FiscalYearAccPeriod."Average Cost Period" in
+         [FiscalYearAccPeriod."Average Cost Period"::Day,
+          FiscalYearAccPeriod."Average Cost Period"::"Accounting Period"]
+      then
+        exit;
+
+      GetFiscalYearAccPeriod(CalendarPeriod."Period End");
+      if FiscalYearAccPeriod."Starting Date" in [CalendarPeriod."Period Start"..CalendarPeriod."Period End"] then
+        if "Valuation Date" < FiscalYearAccPeriod."Starting Date" then
+          CalendarPeriod."Period End" := CALCDATE('<-1D>',FiscalYearAccPeriod."Starting Date")
+        else
+          CalendarPeriod."Period Start" := FiscalYearAccPeriod."Starting Date";
+    END;
+
+    [External]
+    PROCEDURE IsAvgCostCalcTypeItem@4(ValuationDate@1000 : Date) : Boolean;
+    BEGIN
+      GetFiscalYearAccPeriod(ValuationDate);
+      exit(FiscalYearAccPeriod."Average Cost Calc. Type" = FiscalYearAccPeriod."Average Cost Calc. Type"::Item);
+    END;
+
+    LOCAL PROCEDURE GetFiscalYearAccPeriod@13(ValuationDate@1000 : Date);
+    BEGIN
+      FiscalYearAccPeriod.SETRANGE("New Fiscal Year",true);
+      FiscalYearAccPeriod.SETRANGE("Starting Date",0D,ValuationDate);
+      if not FiscalYearAccPeriod.FINDLAST then begin
+        FiscalYearAccPeriod.SETRANGE("Starting Date");
+        FiscalYearAccPeriod.FINDFIRST;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetAvgCostAjmtFilter@10(VAR AvgCostAdjmtPoint@1000 : Record "Avg. Cost Adjmt. Entry Point");
+    VAR
+      NextFiscalYearAccPeriod@1001 : Record "Accounting Period";
+    BEGIN
+      AvgCostAdjmtPoint.RESET;
+      AvgCostAdjmtPoint.SETRANGE("Item No.","Item No.");
+      AvgCostAdjmtPoint.SETRANGE("Variant Code","Variant Code");
+      AvgCostAdjmtPoint.SETRANGE("Location Code","Location Code");
+      if AvgCostCalcTypeIsChanged("Valuation Date") then begin
+        GetAvgCostCalcTypeIsChgPeriod(NextFiscalYearAccPeriod,"Valuation Date");
+        AvgCostAdjmtPoint.SETRANGE("Valuation Date","Valuation Date",CALCDATE('<1D>',NextFiscalYearAccPeriod."Starting Date"));
+      end else
+        AvgCostAdjmtPoint.SETRANGE("Valuation Date","Valuation Date",DMY2DATE(31,12,9999));
+    END;
+
+    LOCAL PROCEDURE GetItem@5(ItemNo@1000 : Code[20]);
+    BEGIN
+      if ItemNo <> Item."No." then
+        Item.GET(ItemNo);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

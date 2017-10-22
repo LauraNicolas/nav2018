@@ -1,0 +1,165 @@
+OBJECT Codeunit 212 Res. Jnl.-Post Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Res. Journal Line";
+    Permissions=TableData "Res. Ledger Entry"=imd,
+                TableData "Resource Register"=imd,
+                TableData "Time Sheet Line"=m,
+                TableData "Time Sheet Detail"=m;
+    OnRun=BEGIN
+            GetGLSetup;
+            RunWithCheck(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GLSetup@1010 : Record "General Ledger Setup";
+      ResJnlLine@1000 : Record "Res. Journal Line";
+      ResLedgEntry@1001 : Record "Res. Ledger Entry";
+      Res@1002 : Record Resource;
+      ResReg@1003 : Record "Resource Register";
+      GenPostingSetup@1004 : Record "General Posting Setup";
+      ResUOM@1011 : Record "Resource Unit of Measure";
+      ResJnlCheckLine@1006 : Codeunit "Res. Jnl.-Check Line";
+      NextEntryNo@1008 : Integer;
+      GLSetupRead@1009 : Boolean;
+
+    [External]
+    PROCEDURE RunWithCheck@3(VAR ResJnlLine2@1000 : Record "Res. Journal Line");
+    BEGIN
+      ResJnlLine.COPY(ResJnlLine2);
+      Code;
+      ResJnlLine2 := ResJnlLine;
+    END;
+
+    LOCAL PROCEDURE Code@1();
+    BEGIN
+      with ResJnlLine do begin
+        if EmptyLine then
+          exit;
+
+        ResJnlCheckLine.RunCheck(ResJnlLine);
+
+        if NextEntryNo = 0 then begin
+          ResLedgEntry.LOCKTABLE;
+          if ResLedgEntry.FINDLAST then
+            NextEntryNo := ResLedgEntry."Entry No.";
+          NextEntryNo := NextEntryNo + 1;
+        end;
+
+        if "Document Date" = 0D then
+          "Document Date" := "Posting Date";
+
+        if ResReg."No." = 0 then begin
+          ResReg.LOCKTABLE;
+          if (not ResReg.FINDLAST) or (ResReg."To Entry No." <> 0) then begin
+            ResReg.INIT;
+            ResReg."No." := ResReg."No." + 1;
+            ResReg."From Entry No." := NextEntryNo;
+            ResReg."To Entry No." := NextEntryNo;
+            ResReg."Creation Date" := TODAY;
+            ResReg."Source Code" := "Source Code";
+            ResReg."Journal Batch Name" := "Journal Batch Name";
+            ResReg."User ID" := USERID;
+            ResReg.INSERT;
+          end;
+        end;
+        ResReg."To Entry No." := NextEntryNo;
+        ResReg.MODIFY;
+
+        Res.GET("Resource No.");
+        Res.TESTFIELD(Blocked,false);
+
+        if (GenPostingSetup."Gen. Bus. Posting Group" <> "Gen. Bus. Posting Group") or
+           (GenPostingSetup."Gen. Prod. Posting Group" <> "Gen. Prod. Posting Group")
+        then
+          GenPostingSetup.GET("Gen. Bus. Posting Group","Gen. Prod. Posting Group");
+
+        "Resource Group No." := Res."Resource Group No.";
+
+        ResLedgEntry.INIT;
+        ResLedgEntry.CopyFromResJnlLine(ResJnlLine);
+
+        GetGLSetup;
+        ResLedgEntry."Total Cost" := ROUND(ResLedgEntry."Total Cost");
+        ResLedgEntry."Total Price" := ROUND(ResLedgEntry."Total Price");
+        if ResLedgEntry."Entry Type" = ResLedgEntry."Entry Type"::Sale then begin
+          ResLedgEntry.Quantity := -ResLedgEntry.Quantity;
+          ResLedgEntry."Total Cost" := -ResLedgEntry."Total Cost";
+          ResLedgEntry."Total Price" := -ResLedgEntry."Total Price";
+        end;
+        ResLedgEntry."Direct Unit Cost" := ROUND(ResLedgEntry."Direct Unit Cost",GLSetup."Unit-Amount Rounding Precision");
+        ResLedgEntry."User ID" := USERID;
+        ResLedgEntry."Entry No." := NextEntryNo;
+        ResUOM.GET(ResLedgEntry."Resource No.",ResLedgEntry."Unit of Measure Code");
+        if ResUOM."Related to Base Unit of Meas." then
+          ResLedgEntry."Quantity (Base)" := ResLedgEntry.Quantity * ResLedgEntry."Qty. per Unit of Measure";
+
+        if ResLedgEntry."Entry Type" = ResLedgEntry."Entry Type"::Usage then begin
+          PostTimeSheetDetail(ResJnlLine,ResLedgEntry."Quantity (Base)");
+          ResLedgEntry.Chargeable := IsChargable(ResJnlLine,ResLedgEntry.Chargeable);
+        end;
+        ResLedgEntry.INSERT(true);
+
+        NextEntryNo := NextEntryNo + 1;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetGLSetup@14();
+    BEGIN
+      if not GLSetupRead then
+        GLSetup.GET;
+      GLSetupRead := true;
+    END;
+
+    LOCAL PROCEDURE PostTimeSheetDetail@4(ResJnlLine2@1002 : Record "Res. Journal Line";QtyToPost@1003 : Decimal);
+    VAR
+      TimeSheetLine@1001 : Record "Time Sheet Line";
+      TimeSheetDetail@1000 : Record "Time Sheet Detail";
+      TimeSheetMgt@1004 : Codeunit "Time Sheet Management";
+    BEGIN
+      with ResJnlLine2 do begin
+        if "Time Sheet No." <> '' then begin
+          TimeSheetDetail.GET("Time Sheet No.","Time Sheet Line No.","Time Sheet Date");
+          TimeSheetDetail."Posted Quantity" += QtyToPost;
+          TimeSheetDetail.Posted := TimeSheetDetail.Quantity = TimeSheetDetail."Posted Quantity";
+          TimeSheetDetail.MODIFY;
+          TimeSheetLine.GET("Time Sheet No.","Time Sheet Line No.");
+          TimeSheetMgt.CreateTSPostingEntry(TimeSheetDetail,Quantity,"Posting Date","Document No.",TimeSheetLine.Description);
+
+          TimeSheetDetail.SETRANGE("Time Sheet No.","Time Sheet No.");
+          TimeSheetDetail.SETRANGE("Time Sheet Line No.","Time Sheet Line No.");
+          TimeSheetDetail.SETRANGE(Posted,false);
+          if TimeSheetDetail.ISEMPTY then begin
+            TimeSheetLine.Posted := true;
+            TimeSheetLine.MODIFY;
+          end;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE IsChargable@6(ResJournalLine@1000 : Record "Res. Journal Line";Chargeable@1002 : Boolean) : Boolean;
+    VAR
+      TimeSheetLine@1001 : Record "Time Sheet Line";
+    BEGIN
+      if ResJournalLine."Time Sheet No." <> '' then begin
+        TimeSheetLine.GET(ResJournalLine."Time Sheet No.",ResJournalLine."Time Sheet Line No.");
+        exit(TimeSheetLine.Chargeable);
+      end;
+      exit(Chargeable);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

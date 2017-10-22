@@ -1,0 +1,202 @@
+OBJECT Codeunit 5923 Service-Quote to Order
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Service Header";
+    Permissions=TableData "Loaner Entry"=m,
+                TableData "Service Order Allocation"=rimd;
+    OnRun=VAR
+            ServQuoteLine@1001 : Record "Service Line";
+            CustCheckCreditLimit@1000 : Codeunit "Cust-Check Cr. Limit";
+            ItemCheckAvail@1002 : Codeunit "Item-Check Avail.";
+            ApprovalsMgmt@1003 : Codeunit "Approvals Mgmt.";
+            RecordLinkManagement@1004 : Codeunit "Record Link Management";
+          BEGIN
+            NewServHeader := Rec;
+
+            ServMgtSetup.GET;
+
+            NewServHeader."Document Type" := "Document Type"::Order;
+
+            CustCheckCreditLimit.ServiceHeaderCheck(NewServHeader);
+
+            ServQuoteLine.SETRANGE("Document Type","Document Type");
+            ServQuoteLine.SETRANGE("Document No.","No.");
+            ServQuoteLine.SETRANGE(Type,ServQuoteLine.Type::Item);
+            ServQuoteLine.SETFILTER("No.",'<>%1','');
+            if ServQuoteLine.FIND('-') then
+              repeat
+                ServLine := ServQuoteLine;
+                ServLine.VALIDATE("Reserved Qty. (Base)",0);
+                ServLine."Line No." := 0;
+                if GUIALLOWED then
+                  if ItemCheckAvail.ServiceInvLineCheck(ServLine) then
+                    ItemCheckAvail.RaiseUpdateInterruptedError;
+              until ServQuoteLine.NEXT = 0;
+
+            with NewServHeader do begin
+              "No." := '';
+              "No. Printed" := 0;
+              VALIDATE(Status,Status::Pending);
+              "Order Date" := WORKDATE;
+              "Order Time" := TIME;
+              "Actual Response Time (Hours)" := 0;
+              "Service Time (Hours)" := 0;
+              "Starting Date" := 0D;
+              "Starting Time" := 000000T;
+              "Finishing Date" := 0D;
+              "Finishing Time" := 000000T;
+
+              TestNoSeries;
+              NoSeriesMgt.InitSeries(GetNoSeriesCode,'',0D,"No.","No. Series");
+
+              "Quote No." := Rec."No.";
+              RecordLinkManagement.CopyLinks(Rec,NewServHeader);
+              InsertServHeaderAndRecoverDocDate(Rec."Document Date");
+
+              ServCommentLine.RESET;
+              ServCommentLine.SETRANGE("Table Name",ServCommentLine."Table Name"::"Service Header");
+              ServCommentLine.SETRANGE("Table Subtype",Rec."Document Type");
+              ServCommentLine.SETRANGE("No.",Rec."No.");
+              ServCommentLine.SETRANGE("Table Line No.",0);
+              if ServCommentLine.FIND('-') then
+                repeat
+                  ServCommentLine2 := ServCommentLine;
+                  ServCommentLine2."Table Subtype" := "Document Type";
+                  ServCommentLine2."No." := "No.";
+                  ServCommentLine2.INSERT;
+                until ServCommentLine.NEXT = 0;
+
+              ServOrderAlloc.RESET;
+              ServOrderAlloc.SETCURRENTKEY("Document Type","Document No.",Status);
+              ServOrderAlloc.SETRANGE("Document Type",Rec."Document Type");
+              ServOrderAlloc.SETRANGE("Document No.",Rec."No.");
+              ServOrderAlloc.SETRANGE(Status,ServOrderAlloc.Status::Active);
+              while ServOrderAlloc.FINDFIRST do begin
+                ServOrderAlloc."Document Type" := "Document Type";
+                ServOrderAlloc."Document No." := "No.";
+                ServOrderAlloc."Service Started" := true;
+                ServOrderAlloc.Status := ServOrderAlloc.Status::"Reallocation Needed";
+                ServOrderAlloc.MODIFY;
+              end;
+
+              ServItemLine.RESET;
+              ServItemLine.SETRANGE("Document Type",Rec."Document Type");
+              ServItemLine.SETRANGE("Document No.",Rec."No.");
+              if ServItemLine.FIND('-') then
+                repeat
+                  ServItemLine2 := ServItemLine;
+                  ServItemLine2."Document Type" := "Document Type";
+                  ServItemLine2."Document No." := "No.";
+                  ServItemLine2."Starting Date" := 0D;
+                  ServItemLine2."Starting Time" := 000000T;
+                  ServItemLine2."Actual Response Time (Hours)" := 0;
+                  ServItemLine2."Finishing Date" := 0D;
+                  ServItemLine2."Finishing Time" := 000000T;
+                  RepairStatus.RESET;
+                  RepairStatus.SETRANGE(Initial,true);
+                  if RepairStatus.FINDFIRST then
+                    ServItemLine2."Repair Status Code" := RepairStatus.Code;
+                  ServItemLine2.INSERT(true);
+                until ServItemLine.NEXT = 0;
+
+              UpdateResponseDateTime;
+
+              LoanerEntry.RESET;
+              LoanerEntry.SETCURRENTKEY("Document Type","Document No.");
+              LoanerEntry.SETRANGE("Document Type",Rec."Document Type" + 1);
+              LoanerEntry.SETRANGE("Document No.",Rec."No.");
+              while LoanerEntry.FINDFIRST do begin
+                LoanerEntry."Document Type" := "Document Type" + 1;
+                LoanerEntry."Document No." := "No.";
+                LoanerEntry.MODIFY;
+              end;
+
+              ServCommentLine.RESET;
+              ServCommentLine.SETRANGE("Table Name",ServCommentLine."Table Name"::"Service Header");
+              ServCommentLine.SETRANGE("Table Subtype",Rec."Document Type");
+              ServCommentLine.SETRANGE("No.",Rec."No.");
+              ServCommentLine.SETFILTER("Table Line No.",'>%1',0);
+              if ServCommentLine.FIND('-') then
+                repeat
+                  ServCommentLine2 := ServCommentLine;
+                  ServCommentLine2."Table Subtype" := "Document Type";
+                  ServCommentLine2."No." := "No.";
+                  ServCommentLine2.INSERT;
+                until ServCommentLine.NEXT = 0;
+
+              ServLine.RESET;
+              ServLine.SETRANGE("Document Type",Rec."Document Type");
+              ServLine.SETRANGE("Document No.",Rec."No.");
+              if ServLine.FIND('-') then
+                repeat
+                  ServLine2 := ServLine;
+                  ServLine2."Document Type" := "Document Type";
+                  ServLine2."Document No." := "No.";
+                  ServLine2."Posting Date" := "Posting Date";
+                  ServLine2.INSERT;
+                  ReserveServiceLine.TransServLineToServLine(ServLine,ServLine2,ServLine.Quantity);
+                until ServLine.NEXT = 0;
+
+              ServLogMgt.ServOrderQuoteChanged(NewServHeader,Rec);
+              ApprovalsMgmt.CopyApprovalEntryQuoteToOrder(Rec.RECORDID,"No.",RECORDID);
+              ApprovalsMgmt.DeleteApprovalEntries(Rec.RECORDID);
+              ServLine.DELETEALL(true);
+            end;
+
+            DELETE(true);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ServMgtSetup@1006 : Record "Service Mgt. Setup";
+      RepairStatus@1004 : Record "Repair Status";
+      ServItemLine@1001 : Record "Service Item Line";
+      ServItemLine2@1008 : Record "Service Item Line";
+      ServLine@1000 : Record "Service Line";
+      ServLine2@1009 : Record "Service Line";
+      ServOrderAlloc@1005 : Record "Service Order Allocation";
+      NewServHeader@1010 : Record "Service Header";
+      LoanerEntry@1019 : Record "Loaner Entry";
+      ServCommentLine@1020 : Record "Service Comment Line";
+      ServCommentLine2@1021 : Record "Service Comment Line";
+      NoSeriesMgt@1007 : Codeunit NoSeriesManagement;
+      ServLogMgt@1011 : Codeunit ServLogManagement;
+      ReserveServiceLine@1012 : Codeunit "Service Line-Reserve";
+
+    LOCAL PROCEDURE TestNoSeries@21();
+    BEGIN
+      ServMgtSetup.TESTFIELD("Service Order Nos.");
+    END;
+
+    LOCAL PROCEDURE GetNoSeriesCode@20() : Code[10];
+    BEGIN
+      exit(ServMgtSetup."Service Order Nos.");
+    END;
+
+    [External]
+    PROCEDURE ReturnOrderNo@1() : Code[20];
+    BEGIN
+      exit(NewServHeader."No.");
+    END;
+
+    LOCAL PROCEDURE InsertServHeaderAndRecoverDocDate@4(DocDate@1000 : Date);
+    BEGIN
+      NewServHeader.INSERT(true);
+      NewServHeader."Document Date" := DocDate; // Inside OnInsert trigger it was updated with WORKDATE, but it should not
+      NewServHeader.MODIFY;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,390 @@
+OBJECT Codeunit 1006 Copy Job
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CopyPrices@1002 : Boolean;
+      CopyQuantity@1001 : Boolean;
+      CopyDimensions@1000 : Boolean;
+      JobPlanningLineSource@1009 : '"Job Planning Lines","Job Ledger Entries"';
+      JobPlanningLineType@1007 : '" ",Budget,Billable';
+      JobLedgerEntryType@1008 : '" ",Usage,Sale';
+      JobTaskRangeFrom@1004 : Code[20];
+      JobTaskRangeTo@1003 : Code[20];
+      JobTaskDateRangeFrom@1006 : Date;
+      JobTaskDateRangeTo@1005 : Date;
+
+    [Internal]
+    PROCEDURE CopyJob@1(SourceJob@1000 : Record Job;TargetJobNo@1003 : Code[20];TargetJobDescription@1002 : Text[50];TargetJobBillToCustomer@1001 : Code[20]);
+    VAR
+      TargetJob@1004 : Record Job;
+    BEGIN
+      TargetJob."No." := TargetJobNo;
+      TargetJob.TRANSFERFIELDS(SourceJob,false);
+      TargetJob.INSERT(true);
+      if CopyDimensions then begin
+        CopyJobDimensions(SourceJob,TargetJob);
+        TargetJob.FIND;
+      end;
+      if TargetJobDescription <> '' then
+        TargetJob.VALIDATE(Description,TargetJobDescription);
+      if TargetJobBillToCustomer <> '' then
+        TargetJob.VALIDATE("Bill-to Customer No.",TargetJobBillToCustomer);
+      TargetJob.VALIDATE(Status,TargetJob.Status::Planning);
+
+      CopyJobTasks(SourceJob,TargetJob);
+
+      if CopyPrices then
+        CopyJobPrices(SourceJob,TargetJob);
+
+      TargetJob.MODIFY;
+    END;
+
+    [Internal]
+    PROCEDURE CopyJobTasks@2(SourceJob@1000 : Record Job;TargetJob@1001 : Record Job);
+    VAR
+      SourceJobTask@1003 : Record "Job Task";
+      TargetJobTask@1002 : Record "Job Task";
+    BEGIN
+      SourceJobTask.SETRANGE("Job No.",SourceJob."No.");
+      case true of
+        (JobTaskRangeFrom <> '') and (JobTaskRangeTo <> ''):
+          SourceJobTask.SETRANGE("Job Task No.",JobTaskRangeFrom,JobTaskRangeTo);
+        (JobTaskRangeFrom <> '') and (JobTaskRangeTo = ''):
+          SourceJobTask.SETFILTER("Job Task No.",'%1..',JobTaskRangeFrom);
+        (JobTaskRangeFrom = '') and (JobTaskRangeTo <> ''):
+          SourceJobTask.SETFILTER("Job Task No.",'..%1',JobTaskRangeTo);
+      end;
+
+      if SourceJobTask.FINDSET then
+        repeat
+          TargetJobTask.INIT;
+          TargetJobTask.VALIDATE("Job No.",TargetJob."No.");
+          TargetJobTask.VALIDATE("Job Task No.",SourceJobTask."Job Task No.");
+          TargetJobTask.TRANSFERFIELDS(SourceJobTask,false);
+          if TargetJobTask."WIP Method" <> '' then begin
+            TargetJobTask.VALIDATE("WIP-Total",TargetJobTask."WIP-Total"::Total);
+            TargetJobTask.VALIDATE("WIP Method",TargetJob."WIP Method");
+          end;
+          TargetJobTask.VALIDATE("Recognized Sales Amount",0);
+          TargetJobTask.VALIDATE("Recognized Costs Amount",0);
+          TargetJobTask.VALIDATE("Recognized Sales G/L Amount",0);
+          TargetJobTask.VALIDATE("Recognized Costs G/L Amount",0);
+          TargetJobTask.INSERT(true);
+          case true of
+            JobPlanningLineSource = JobPlanningLineSource::"Job Planning Lines":
+              CopyJobPlanningLines(SourceJobTask,TargetJobTask);
+            JobPlanningLineSource = JobPlanningLineSource::"Job Ledger Entries":
+              CopyJLEsToJobPlanningLines(SourceJobTask,TargetJobTask);
+          end;
+          if CopyDimensions then
+            CopyJobTaskDimensions(SourceJobTask,TargetJobTask);
+        until SourceJobTask.NEXT = 0;
+    END;
+
+    [Internal]
+    PROCEDURE CopyJobPlanningLines@3(SourceJobTask@1000 : Record "Job Task";TargetJobTask@1001 : Record "Job Task");
+    VAR
+      SourceJobPlanningLine@1002 : Record "Job Planning Line";
+      TargetJobPlanningLine@1003 : Record "Job Planning Line";
+      SourceJob@1004 : Record Job;
+      NextPlanningLineNo@1005 : Integer;
+    BEGIN
+      SourceJob.GET(SourceJobTask."Job No.");
+
+      case true of
+        (JobTaskDateRangeFrom <> 0D) and (JobTaskDateRangeTo <> 0D):
+          SourceJobTask.SETRANGE("Planning Date Filter",JobTaskDateRangeFrom,JobTaskDateRangeTo);
+        (JobTaskDateRangeFrom <> 0D) and (JobTaskDateRangeTo = 0D):
+          SourceJobTask.SETFILTER("Planning Date Filter",'%1..',JobTaskDateRangeFrom);
+        (JobTaskDateRangeFrom = 0D) and (JobTaskDateRangeTo <> 0D):
+          SourceJobTask.SETFILTER("Planning Date Filter",'..%1',JobTaskDateRangeTo);
+      end;
+
+      SourceJobPlanningLine.SETRANGE("Job No.",SourceJobTask."Job No.");
+      SourceJobPlanningLine.SETRANGE("Job Task No.",SourceJobTask."Job Task No.");
+      case JobPlanningLineType of
+        JobPlanningLineType::Budget:
+          SourceJobPlanningLine.SETRANGE("Line Type",SourceJobPlanningLine."Line Type"::Budget);
+        JobPlanningLineType::Billable:
+          SourceJobPlanningLine.SETRANGE("Line Type",SourceJobPlanningLine."Line Type"::Billable);
+      end;
+      SourceJobPlanningLine.SETFILTER("Planning Date",SourceJobTask.GETFILTER("Planning Date Filter"));
+      if not SourceJobPlanningLine.FINDLAST then
+        exit;
+      SourceJobPlanningLine.SETRANGE("Line No.",0,SourceJobPlanningLine."Line No.");
+      if SourceJobPlanningLine.FINDSET then
+        repeat
+          with TargetJobPlanningLine do begin
+            INIT;
+            VALIDATE("Job No.",TargetJobTask."Job No.");
+            VALIDATE("Job Task No.",TargetJobTask."Job Task No.");
+            if NextPlanningLineNo = 0 then
+              NextPlanningLineNo := FindLastJobPlanningLine(TargetJobPlanningLine);
+            NextPlanningLineNo += 10000;
+            VALIDATE("Line No.",NextPlanningLineNo);
+            TRANSFERFIELDS(SourceJobPlanningLine,false);
+            "Remaining Qty." := 0;
+            "Remaining Qty. (Base)" := 0;
+            "Remaining Total Cost" := 0;
+            "Remaining Total Cost (LCY)" := 0;
+            "Remaining Line Amount" := 0;
+            "Remaining Line Amount (LCY)" := 0;
+            "Qty. Posted" := 0;
+            "Qty. to Transfer to Journal" := 0;
+            "Posted Total Cost" := 0;
+            "Posted Total Cost (LCY)" := 0;
+            "Posted Line Amount" := 0;
+            "Posted Line Amount (LCY)" := 0;
+            "Qty. to Transfer to Invoice" := 0;
+            "Qty. to Invoice" := 0;
+            "Ledger Entry No." := 0;
+            "Ledger Entry Type" := "Ledger Entry Type"::" ";
+            INSERT(true);
+            if Type <> Type::Text then begin
+              ExchangeJobPlanningLineAmounts(TargetJobPlanningLine,SourceJob."Currency Code");
+              if not CopyQuantity then
+                VALIDATE(Quantity,0)
+              else
+                VALIDATE(Quantity);
+              MODIFY;
+            end;
+          end;
+        until SourceJobPlanningLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyJLEsToJobPlanningLines@12(SourceJobTask@1001 : Record "Job Task";TargetJobTask@1000 : Record "Job Task");
+    VAR
+      TargetJobPlanningLine@1004 : Record "Job Planning Line";
+      JobLedgEntry@1002 : Record "Job Ledger Entry";
+      SourceJob@1006 : Record Job;
+      JobTransferLine@1003 : Codeunit "Job Transfer Line";
+      NextPlanningLineNo@1005 : Integer;
+    BEGIN
+      SourceJob.GET(SourceJobTask."Job No.");
+      TargetJobPlanningLine.SETRANGE("Job No.",TargetJobTask."Job No.");
+      TargetJobPlanningLine.SETRANGE("Job Task No.",TargetJobTask."Job Task No.");
+      if TargetJobPlanningLine.FINDLAST then
+        NextPlanningLineNo := TargetJobPlanningLine."Line No." + 10000
+      else
+        NextPlanningLineNo := 10000;
+
+      JobLedgEntry.SETRANGE("Job No.",SourceJobTask."Job No.");
+      JobLedgEntry.SETRANGE("Job Task No.",SourceJobTask."Job Task No.");
+      case true of
+        JobLedgerEntryType = JobLedgerEntryType::Usage:
+          JobLedgEntry.SETRANGE("Entry Type",JobLedgEntry."Entry Type"::Usage);
+        JobLedgerEntryType = JobLedgerEntryType::Sale:
+          JobLedgEntry.SETRANGE("Entry Type",JobLedgEntry."Entry Type"::Sale);
+      end;
+      JobLedgEntry.SETFILTER("Posting Date",SourceJobTask.GETFILTER("Planning Date Filter"));
+      if JobLedgEntry.FINDSET then
+        repeat
+          TargetJobPlanningLine.INIT;
+          JobTransferLine.FromJobLedgEntryToPlanningLine(JobLedgEntry,TargetJobPlanningLine);
+          TargetJobPlanningLine."Job No." := TargetJobTask."Job No.";
+          TargetJobPlanningLine.VALIDATE("Line No.",NextPlanningLineNo);
+          TargetJobPlanningLine.INSERT(true);
+          if JobLedgEntry."Entry Type" = JobLedgEntry."Entry Type"::Usage then
+            TargetJobPlanningLine.VALIDATE("Line Type",TargetJobPlanningLine."Line Type"::Budget)
+          else begin
+            TargetJobPlanningLine.VALIDATE("Line Type",TargetJobPlanningLine."Line Type"::Billable);
+            TargetJobPlanningLine.VALIDATE(Quantity,-JobLedgEntry.Quantity);
+            TargetJobPlanningLine.VALIDATE("Unit Cost (LCY)",JobLedgEntry."Unit Cost (LCY)");
+            TargetJobPlanningLine.VALIDATE("Unit Price (LCY)",JobLedgEntry."Unit Price (LCY)");
+            TargetJobPlanningLine.VALIDATE("Line Discount %",JobLedgEntry."Line Discount %");
+          end;
+          ExchangeJobPlanningLineAmounts(TargetJobPlanningLine,SourceJob."Currency Code");
+          if not CopyQuantity then
+            TargetJobPlanningLine.VALIDATE(Quantity,0);
+          NextPlanningLineNo += 10000;
+          TargetJobPlanningLine.MODIFY;
+        until JobLedgEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyJobPrices@6(SourceJob@1006 : Record Job;TargetJob@1007 : Record Job);
+    VAR
+      SourceJobItemPrice@1000 : Record "Job Item Price";
+      SourceJobResourcePrice@1001 : Record "Job Resource Price";
+      SourceJobGLAccountPrice@1002 : Record "Job G/L Account Price";
+      TargetJobItemPrice@1005 : Record "Job Item Price";
+      TargetJobResourcePrice@1004 : Record "Job Resource Price";
+      TargetJobGLAccountPrice@1003 : Record "Job G/L Account Price";
+    BEGIN
+      SourceJobItemPrice.SETRANGE("Job No.",SourceJob."No.");
+      SourceJobItemPrice.SETRANGE("Currency Code",SourceJob."Currency Code");
+
+      if SourceJobItemPrice.FINDSET then
+        repeat
+          TargetJobItemPrice.TRANSFERFIELDS(SourceJobItemPrice,true);
+          TargetJobItemPrice."Job No." := TargetJob."No.";
+          TargetJobItemPrice.INSERT(true);
+        until SourceJobItemPrice.NEXT = 0;
+
+      SourceJobResourcePrice.SETRANGE("Job No.",SourceJob."No.");
+      SourceJobResourcePrice.SETRANGE("Currency Code",SourceJob."Currency Code");
+      if SourceJobResourcePrice.FINDSET then
+        repeat
+          TargetJobResourcePrice.TRANSFERFIELDS(SourceJobResourcePrice,true);
+          TargetJobResourcePrice."Job No." := TargetJob."No.";
+          TargetJobResourcePrice.INSERT(true);
+        until SourceJobResourcePrice.NEXT = 0;
+
+      SourceJobGLAccountPrice.SETRANGE("Job No.",SourceJob."No.");
+      SourceJobGLAccountPrice.SETRANGE("Currency Code",SourceJob."Currency Code");
+      if SourceJobGLAccountPrice.FINDSET then
+        repeat
+          TargetJobGLAccountPrice.TRANSFERFIELDS(SourceJobGLAccountPrice,true);
+          TargetJobGLAccountPrice."Job No." := TargetJob."No.";
+          TargetJobGLAccountPrice.INSERT(true);
+        until SourceJobGLAccountPrice.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyJobDimensions@10(SourceJob@1001 : Record Job;TargetJob@1000 : Record Job);
+    VAR
+      DefaultDimension@1002 : Record "Default Dimension";
+      NewDefaultDimension@1003 : Record "Default Dimension";
+    BEGIN
+      DefaultDimension.SETRANGE("Table ID",DATABASE::Job);
+      DefaultDimension.SETRANGE("No.",SourceJob."No.");
+      if DefaultDimension.FINDSET then
+        repeat
+          with NewDefaultDimension do begin
+            INIT;
+            "Table ID" := DATABASE::Job;
+            "No." := TargetJob."No.";
+            "Dimension Code" := DefaultDimension."Dimension Code";
+            TRANSFERFIELDS(DefaultDimension,false);
+            INSERT(true);
+          end;
+        until DefaultDimension.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyJobTaskDimensions@4(SourceJobTask@1000 : Record "Job Task";TargetJobTask@1001 : Record "Job Task");
+    VAR
+      DimensionManagement@1002 : Codeunit DimensionManagement;
+    BEGIN
+      DimensionManagement.CopyJobTaskDimToJobTaskDim(SourceJobTask."Job No.",
+        SourceJobTask."Job Task No.",
+        TargetJobTask."Job No.",
+        TargetJobTask."Job Task No.");
+    END;
+
+    LOCAL PROCEDURE ExchangeJobPlanningLineAmounts@7(VAR JobPlanningLine@1004 : Record "Job Planning Line";CurrencyCode@1002 : Code[10]);
+    VAR
+      Job@1003 : Record Job;
+      CurrExchRate@1000 : Record "Currency Exchange Rate";
+      Currency@1001 : Record Currency;
+    BEGIN
+      Job.GET(JobPlanningLine."Job No.");
+      if CurrencyCode <> Job."Currency Code" then begin
+        if (CurrencyCode = '') and (Job."Currency Code" <> '') then begin
+          JobPlanningLine."Currency Code" := Job."Currency Code";
+          JobPlanningLine.UpdateCurrencyFactor;
+          Currency.GET(JobPlanningLine."Currency Code");
+          Currency.TESTFIELD("Unit-Amount Rounding Precision");
+          JobPlanningLine."Unit Cost" := ROUND(
+              CurrExchRate.ExchangeAmtLCYToFCY(
+                JobPlanningLine."Currency Date",JobPlanningLine."Currency Code",
+                JobPlanningLine."Unit Cost (LCY)",JobPlanningLine."Currency Factor"),
+              Currency."Unit-Amount Rounding Precision");
+          JobPlanningLine."Unit Price" := ROUND(
+              CurrExchRate.ExchangeAmtLCYToFCY(
+                JobPlanningLine."Currency Date",JobPlanningLine."Currency Code",
+                JobPlanningLine."Unit Price (LCY)",JobPlanningLine."Currency Factor"),
+              Currency."Unit-Amount Rounding Precision");
+          JobPlanningLine.VALIDATE("Currency Date");
+        end else begin
+          if (CurrencyCode <> '') and (Job."Currency Code" = '') then begin
+            JobPlanningLine."Currency Code" := '';
+            JobPlanningLine."Currency Date" := 0D;
+            JobPlanningLine.UpdateCurrencyFactor;
+            JobPlanningLine."Unit Cost" := JobPlanningLine."Unit Cost (LCY)";
+            JobPlanningLine."Unit Price" := JobPlanningLine."Unit Price (LCY)";
+            JobPlanningLine.VALIDATE("Currency Date");
+          end else begin
+            if (CurrencyCode <> '') and (Job."Currency Code" <> '') then begin
+              JobPlanningLine."Currency Code" := Job."Currency Code";
+              JobPlanningLine.UpdateCurrencyFactor;
+              Currency.GET(JobPlanningLine."Currency Code");
+              Currency.TESTFIELD("Unit-Amount Rounding Precision");
+              JobPlanningLine."Unit Cost" := ROUND(
+                  CurrExchRate.ExchangeAmtFCYToFCY(
+                    JobPlanningLine."Currency Date",CurrencyCode,
+                    JobPlanningLine."Currency Code",JobPlanningLine."Unit Cost"),
+                  Currency."Unit-Amount Rounding Precision");
+              JobPlanningLine."Unit Price" := ROUND(
+                  CurrExchRate.ExchangeAmtFCYToFCY(
+                    JobPlanningLine."Currency Date",CurrencyCode,
+                    JobPlanningLine."Currency Code",JobPlanningLine."Unit Price"),
+                  Currency."Unit-Amount Rounding Precision");
+              JobPlanningLine.VALIDATE("Currency Date");
+            end;
+          end;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetCopyQuantity@11(CopyQuantity2@1000 : Boolean);
+    BEGIN
+      CopyQuantity := CopyQuantity2;
+    END;
+
+    [External]
+    PROCEDURE SetCopyJobPlanningLineType@13(JobPlanningLineType2@1000 : '" ",Budget,Billable');
+    BEGIN
+      JobPlanningLineType := JobPlanningLineType2;
+    END;
+
+    [External]
+    PROCEDURE SetCopyOptions@5(CopyPrices2@1002 : Boolean;CopyQuantity2@1001 : Boolean;CopyDimensions2@1000 : Boolean;JobPlanningLineSource2@1005 : '"Job Planning Lines","Job Ledger Entries"';JobPlanningLineType2@1003 : '" ",Budget,Billable';JobLedgerEntryType2@1004 : '" ",Usage,Sale');
+    BEGIN
+      CopyPrices := CopyPrices2;
+      CopyQuantity := CopyQuantity2;
+      CopyDimensions := CopyDimensions2;
+      JobPlanningLineSource := JobPlanningLineSource2;
+      JobPlanningLineType := JobPlanningLineType2;
+      JobLedgerEntryType := JobLedgerEntryType2;
+    END;
+
+    [External]
+    PROCEDURE SetJobTaskRange@8(JobTaskRangeFrom2@1000 : Code[20];JobTaskRangeTo2@1001 : Code[20]);
+    BEGIN
+      JobTaskRangeFrom := JobTaskRangeFrom2;
+      JobTaskRangeTo := JobTaskRangeTo2;
+    END;
+
+    [External]
+    PROCEDURE SetJobTaskDateRange@9(JobTaskDateRangeFrom2@1000 : Date;JobTaskDateRangeTo2@1001 : Date);
+    BEGIN
+      JobTaskDateRangeFrom := JobTaskDateRangeFrom2;
+      JobTaskDateRangeTo := JobTaskDateRangeTo2;
+    END;
+
+    LOCAL PROCEDURE FindLastJobPlanningLine@14(JobPlanningLine@1000 : Record "Job Planning Line") : Integer;
+    BEGIN
+      JobPlanningLine.SETRANGE("Job No.",JobPlanningLine."Job No.");
+      JobPlanningLine.SETRANGE("Job Task No.",JobPlanningLine."Job Task No.");
+      if JobPlanningLine.FINDLAST then
+        exit(JobPlanningLine."Line No.");
+      exit(0);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

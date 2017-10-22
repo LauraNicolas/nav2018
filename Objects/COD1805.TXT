@@ -2,9 +2,9 @@ OBJECT Codeunit 1805 Import Config. Package Files
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -31,7 +31,9 @@ OBJECT Codeunit 1805 Import Config. Package Files
       ImportSuccessfulMsg@1001 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=The configuration package %1 was successfully imported to the %2 company.';
       ApplicationStartedMsg@1002 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=Application of the %1 configuration package to the %2 company has started.';
       ApplicationSuccessfulMsg@1005 : TextConst '@@@="%1 = Configuration Package Code, %2 = Company Name";ENU=The configuration package %1 was successfully applied to the %2 company.';
-      ApplicationFailedMsg@1004 : TextConst '@@@="%1 = No. of errors, %2 = Package Code, %3 = Company Name";ENU=Critical Error: %1 errors occurred during the application of the %2 package to the %3 company. Please contact your system administrator.';
+      ApplicationFailedMsg@1004 : TextConst '@@@="%1 = No. of errors, %2 = Package Code, %3 = Company Name";ENU=Critical Error: %1 errors occurred during the package application. Please contact your system administrator.';
+      PackageLbl@1006 : TextConst 'ENU=Package';
+      CompanyLbl@1007 : TextConst 'ENU=Company';
 
     LOCAL PROCEDURE ImportConfigurationPackageFiles@1(VAR ConfigurationPackageFile@1000 : Record 2000000170);
     VAR
@@ -72,19 +74,23 @@ OBJECT Codeunit 1805 Import Config. Package Files
           ErrorCount := TempConfigSetupSystemRapidStart.ApplyPackages;
           TotalNoOfErrors += ErrorCount;
 
-          // Delete everything related to configuration packages after the package has been applied:
-          ConfigPackage.GET(TempConfigSetupSystemRapidStart."Package Code");
-          ConfigPackage.DELETE(TRUE);
-          TempConfigSetupSystemRapidStart.DELETE;
           ERASE(ServerTempFileName);
 
           IF ErrorCount > 0 THEN BEGIN
-            MessageText := STRSUBSTNO(ApplicationFailedMsg,ErrorCount,ConfigurationPackageFile.Code,COMPANYNAME);
+            MessageText :=
+              GetApplicationErrorSourceText(
+                COMPANYNAME,TempConfigSetupSystemRapidStart."Package Code") + ' ' +
+              STRSUBSTNO(ApplicationFailedMsg,ErrorCount);
             JobQueueEntry.Status := JobQueueEntry.Status::Error;
             JobQueueEntry.SetErrorMessage(MessageText);
+            ConfigPackage.GET(TempConfigSetupSystemRapidStart."Package Code");
           END ELSE BEGIN
             MessageText := STRSUBSTNO(ApplicationSuccessfulMsg,ConfigurationPackageFile.Code,COMPANYNAME);
             JobQueueLogEntry.Description := COPYSTR(MessageText,1,MAXSTRLEN(JobQueueLogEntry.Description));
+            // Delete everything related to configuration packages after the package has been applied:
+            ConfigPackage.GET(TempConfigSetupSystemRapidStart."Package Code");
+            ConfigPackage.DELETE(TRUE);
+            TempConfigSetupSystemRapidStart.DELETE;
           END;
           JobQueueEntry.FinalizeLogEntry(JobQueueLogEntry);
           MESSAGE(MessageText);
@@ -126,6 +132,52 @@ OBJECT Codeunit 1805 Import Config. Package Files
       WITH JobQueueEntry DO BEGIN
         "User Session Started" := CURRENTDATETIME;
         Description := COPYSTR(TaskDescription,1,MAXSTRLEN(Description));
+      END;
+    END;
+
+    [EventSubscriber(Page,674,OnShowDetails)]
+    LOCAL PROCEDURE OnShowDetailedLog@4(JobQueueLogEntry@1000 : Record 474);
+    VAR
+      ConfigPackageError@1002 : Record 8617;
+      ApplCompanyName@1001 : Text;
+      PackageCode@1003 : Text;
+    BEGIN
+      IF (JobQueueLogEntry."Object ID to Run" = CODEUNIT::"Import Config. Package Files") AND
+         (JobQueueLogEntry.Status = JobQueueLogEntry.Status::Error) AND
+         ParseApplicationErrorText(ApplCompanyName,PackageCode,JobQueueLogEntry."Error Message")
+      THEN BEGIN
+        ConfigPackageError.CHANGECOMPANY(ApplCompanyName);
+        ConfigPackageError.SETRANGE("Package Code",PackageCode);
+        PAGE.RUNMODAL(0,ConfigPackageError);
+      END;
+    END;
+
+    LOCAL PROCEDURE ParseApplicationErrorText@8(VAR ApplCompanyName@1004 : Text;VAR PackageCode@1000 : Text;ErrorText@1001 : Text) : Boolean;
+    BEGIN
+      ApplCompanyName := ExtractSubstring(ErrorText,CompanyLbl);
+      PackageCode := ExtractSubstring(ErrorText,PackageLbl);
+      EXIT((ApplCompanyName <> '') AND (PackageCode <> ''));
+    END;
+
+    PROCEDURE GetApplicationErrorSourceText@5(ApplCompanyName@1000 : Text;PackageCode@1001 : Text) : Text;
+    BEGIN
+      EXIT(
+        STRSUBSTNO(
+          '%1 <%2>, %3 <%4>.',CompanyLbl,ApplCompanyName,PackageLbl,PackageCode));
+    END;
+
+    LOCAL PROCEDURE ExtractSubstring@17(VAR ErrorText@1000 : Text;Lable@1003 : Text) Substring : Text;
+    VAR
+      StartPos@1002 : Integer;
+      EndPos@1001 : Integer;
+      StartMarker@1004 : Text;
+    BEGIN
+      StartMarker := STRSUBSTNO('%1 <',Lable);
+      StartPos := STRPOS(ErrorText,StartMarker);
+      EndPos := STRPOS(ErrorText,'>');
+      IF (StartPos <> 0) AND (EndPos <> 0) THEN BEGIN
+        Substring := COPYSTR(ErrorText,StartPos + STRLEN(StartMarker),EndPos - STRLEN(StartMarker) - StartPos);
+        ErrorText := COPYSTR(ErrorText,EndPos + 1);
       END;
     END;
 

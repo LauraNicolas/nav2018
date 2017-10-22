@@ -1,0 +1,212 @@
+OBJECT Codeunit 1026 Job Link Usage
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Job Usage Link"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1002 : TextConst '@@@=The specified Job Planning Line does not have Usage Link enabled.;ENU=The specified %1 does not have %2 enabled.';
+      ConfirmUsageWithBlankLineTypeQst@1000 : TextConst 'ENU=Usage will not be linked to the job planning line because the Line Type field is empty.\\Do you want to continue?';
+
+    [External]
+    PROCEDURE ApplyUsage@1(JobLedgerEntry@1001 : Record "Job Ledger Entry";JobJournalLine@1004 : Record "Job Journal Line");
+    BEGIN
+      if JobJournalLine."Job Planning Line No." = 0 then
+        MatchUsageUnspecified(JobLedgerEntry,JobJournalLine."Line Type" = JobJournalLine."Line Type"::" ")
+      else
+        MatchUsageSpecified(JobLedgerEntry,JobJournalLine);
+    END;
+
+    LOCAL PROCEDURE MatchUsageUnspecified@11(JobLedgerEntry@1000 : Record "Job Ledger Entry";EmptyLineType@1005 : Boolean);
+    VAR
+      JobPlanningLine@1001 : Record "Job Planning Line";
+      JobUsageLink@1004 : Record "Job Usage Link";
+      Confirmed@1008 : Boolean;
+      MatchedQty@1006 : Decimal;
+      MatchedTotalCost@1002 : Decimal;
+      MatchedLineAmount@1003 : Decimal;
+      RemainingQtyToMatch@1007 : Decimal;
+    BEGIN
+      RemainingQtyToMatch := JobLedgerEntry."Quantity (Base)";
+      repeat
+        if not FindMatchingJobPlanningLine(JobPlanningLine,JobLedgerEntry) then
+          if EmptyLineType then begin
+            Confirmed := CONFIRM(ConfirmUsageWithBlankLineTypeQst,false);
+            if not Confirmed then
+              ERROR('');
+            RemainingQtyToMatch := 0;
+          end else
+            CreateJobPlanningLine(JobPlanningLine,JobLedgerEntry,RemainingQtyToMatch);
+
+        if RemainingQtyToMatch <> 0 then begin
+          JobUsageLink.Create(JobPlanningLine,JobLedgerEntry);
+          if ABS(RemainingQtyToMatch) > ABS(JobPlanningLine."Remaining Qty. (Base)") then
+            MatchedQty := JobPlanningLine."Remaining Qty. (Base)"
+          else
+            MatchedQty := RemainingQtyToMatch;
+          MatchedTotalCost := (JobLedgerEntry."Total Cost" / JobLedgerEntry."Quantity (Base)") * MatchedQty;
+          MatchedLineAmount := (JobLedgerEntry."Line Amount" / JobLedgerEntry."Quantity (Base)") * MatchedQty;
+          JobPlanningLine.Use(CalcQtyFromBaseQty(MatchedQty,JobPlanningLine."Qty. per Unit of Measure"),
+            MatchedTotalCost,MatchedLineAmount);
+          RemainingQtyToMatch -= MatchedQty;
+        end;
+      until RemainingQtyToMatch = 0;
+    END;
+
+    LOCAL PROCEDURE MatchUsageSpecified@8(JobLedgerEntry@1000 : Record "Job Ledger Entry";JobJournalLine@1001 : Record "Job Journal Line");
+    VAR
+      JobPlanningLine@1002 : Record "Job Planning Line";
+      JobUsageLink@1003 : Record "Job Usage Link";
+      TotalRemainingQtyPrePostBase@1004 : Decimal;
+      PostedQtyBase@1007 : Decimal;
+      TotalQtyBase@1005 : Decimal;
+    BEGIN
+      JobPlanningLine.GET(JobLedgerEntry."Job No.",JobLedgerEntry."Job Task No.",JobJournalLine."Job Planning Line No.");
+      if not JobPlanningLine."Usage Link" then
+        ERROR(Text001,JobPlanningLine.TABLECAPTION,JobPlanningLine.FIELDCAPTION("Usage Link"));
+
+      PostedQtyBase := JobPlanningLine."Quantity (Base)" - JobPlanningLine."Remaining Qty. (Base)";
+      TotalRemainingQtyPrePostBase := JobJournalLine."Quantity (Base)" + JobJournalLine."Remaining Qty. (Base)";
+      TotalQtyBase := PostedQtyBase + TotalRemainingQtyPrePostBase;
+      JobPlanningLine.SetBypassQtyValidation(true);
+      JobPlanningLine.VALIDATE(Quantity,CalcQtyFromBaseQty(TotalQtyBase,JobPlanningLine."Qty. per Unit of Measure"));
+      JobPlanningLine.VALIDATE("Serial No.",JobLedgerEntry."Serial No.");
+      JobPlanningLine.VALIDATE("Lot No.",JobLedgerEntry."Lot No.");
+      JobPlanningLine.Use(CalcQtyFromBaseQty(JobLedgerEntry."Quantity (Base)",JobPlanningLine."Qty. per Unit of Measure"),
+        JobLedgerEntry."Total Cost",JobLedgerEntry."Line Amount");
+      JobUsageLink.Create(JobPlanningLine,JobLedgerEntry);
+    END;
+
+    [External]
+    PROCEDURE FindMatchingJobPlanningLine@5(VAR JobPlanningLine@1000 : Record "Job Planning Line";JobLedgerEntry@1001 : Record "Job Ledger Entry") : Boolean;
+    VAR
+      Resource@1003 : Record Resource;
+      Filter@1002 : Text;
+    BEGIN
+      JobPlanningLine.RESET;
+      JobPlanningLine.SETCURRENTKEY("Job No.","Schedule Line",Type,"No.","Planning Date");
+      JobPlanningLine.SETRANGE("Job No.",JobLedgerEntry."Job No.");
+      JobPlanningLine.SETRANGE("Job Task No.",JobLedgerEntry."Job Task No.");
+      JobPlanningLine.SETRANGE(Type,JobLedgerEntry.Type);
+      JobPlanningLine.SETRANGE("No.",JobLedgerEntry."No.");
+      JobPlanningLine.SETRANGE("Location Code",JobLedgerEntry."Location Code");
+      JobPlanningLine.SETRANGE("Schedule Line",true);
+      JobPlanningLine.SETRANGE("Usage Link",true);
+
+      if JobLedgerEntry.Type = JobLedgerEntry.Type::Resource then begin
+        Filter := Resource.GetUnitOfMeasureFilter(JobLedgerEntry."No.",JobLedgerEntry."Unit of Measure Code");
+        JobPlanningLine.SETFILTER("Unit of Measure Code",Filter);
+      end;
+
+      if (JobLedgerEntry."Line Type" = JobLedgerEntry."Line Type"::Billable) or
+         (JobLedgerEntry."Line Type" = JobLedgerEntry."Line Type"::"Both Budget and Billable")
+      then
+        JobPlanningLine.SETRANGE("Contract Line",true);
+
+      if JobLedgerEntry.Quantity > 0 then
+        JobPlanningLine.SETFILTER("Remaining Qty.",'>0')
+      else
+        JobPlanningLine.SETFILTER("Remaining Qty.",'<0');
+
+      case JobLedgerEntry.Type of
+        JobLedgerEntry.Type::Item:
+          JobPlanningLine.SETRANGE("Variant Code",JobLedgerEntry."Variant Code");
+        JobLedgerEntry.Type::Resource:
+          JobPlanningLine.SETRANGE("Work Type Code",JobLedgerEntry."Work Type Code");
+      end;
+
+      // Match most specific Job Planning Line.
+      if JobPlanningLine.FINDFIRST then
+        exit(true);
+
+      JobPlanningLine.SETRANGE("Variant Code",'');
+      JobPlanningLine.SETRANGE("Work Type Code",'');
+
+      // Match Location Code, while Variant Code and Work Type Code are blank.
+      if JobPlanningLine.FINDFIRST then
+        exit(true);
+
+      JobPlanningLine.SETRANGE("Location Code",'');
+
+      case JobLedgerEntry.Type of
+        JobLedgerEntry.Type::Item:
+          JobPlanningLine.SETRANGE("Variant Code",JobLedgerEntry."Variant Code");
+        JobLedgerEntry.Type::Resource:
+          JobPlanningLine.SETRANGE("Work Type Code",JobLedgerEntry."Work Type Code");
+      end;
+
+      // Match Variant Code / Work Type Code, while Location Code is blank.
+      if JobPlanningLine.FINDFIRST then
+        exit(true);
+
+      JobPlanningLine.SETRANGE("Variant Code",'');
+      JobPlanningLine.SETRANGE("Work Type Code",'');
+
+      // Match unspecific Job Planning Line.
+      if JobPlanningLine.FINDFIRST then
+        exit(true);
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE CreateJobPlanningLine@4(VAR JobPlanningLine@1000 : Record "Job Planning Line";JobLedgerEntry@1002 : Record "Job Ledger Entry";RemainingQtyToMatch@1003 : Decimal);
+    VAR
+      Job@1001 : Record Job;
+      JobPostLine@1004 : Codeunit "Job Post-Line";
+    BEGIN
+      RemainingQtyToMatch := CalcQtyFromBaseQty(RemainingQtyToMatch,JobLedgerEntry."Qty. per Unit of Measure");
+
+      case JobLedgerEntry."Line Type" of
+        JobLedgerEntry."Line Type"::" ":
+          JobLedgerEntry."Line Type" := JobLedgerEntry."Line Type"::Budget;
+        JobLedgerEntry."Line Type"::Billable:
+          JobLedgerEntry."Line Type" := JobLedgerEntry."Line Type"::"Both Budget and Billable";
+      end;
+      JobPlanningLine.RESET;
+      JobPostLine.InsertPlLineFromLedgEntry(JobLedgerEntry);
+      // Retrieve the newly created Job PlanningLine.
+      JobPlanningLine.SETRANGE("Job No.",JobLedgerEntry."Job No.");
+      JobPlanningLine.SETRANGE("Job Task No.",JobLedgerEntry."Job Task No.");
+      JobPlanningLine.SETRANGE("Schedule Line",true);
+      JobPlanningLine.FINDLAST;
+      JobPlanningLine.VALIDATE("Usage Link",true);
+      JobPlanningLine.VALIDATE(Quantity,RemainingQtyToMatch);
+      JobPlanningLine.MODIFY;
+
+      // If type is Both Budget And Billable and that type isn't allowed,
+      // retrieve the Billabe line and modify the quantity as well.
+      // Do the same if the type is G/L Account (Job Planning Lines will always be split in one Budget and one Billable line).
+      Job.GET(JobLedgerEntry."Job No.");
+      if (JobLedgerEntry."Line Type" = JobLedgerEntry."Line Type"::"Both Budget and Billable") and
+         ((not Job."Allow Schedule/Contract Lines") or (JobLedgerEntry.Type = JobLedgerEntry.Type::"G/L Account"))
+      then begin
+        JobPlanningLine.GET(JobLedgerEntry."Job No.",JobLedgerEntry."Job Task No.",JobPlanningLine."Line No." + 10000);
+        JobPlanningLine.VALIDATE(Quantity,RemainingQtyToMatch);
+        JobPlanningLine.MODIFY;
+        JobPlanningLine.GET(JobLedgerEntry."Job No.",JobLedgerEntry."Job Task No.",JobPlanningLine."Line No." - 10000);
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcQtyFromBaseQty@14(BaseQty@1000 : Decimal;QtyPerUnitOfMeasure@1001 : Decimal) : Decimal;
+    BEGIN
+      if QtyPerUnitOfMeasure <> 0 then
+        exit(ROUND(BaseQty / QtyPerUnitOfMeasure,0.00001));
+      exit(BaseQty);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

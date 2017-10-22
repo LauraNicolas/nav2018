@@ -1,0 +1,1458 @@
+OBJECT Codeunit 422 XBRL Import Taxonomy Spec. 2
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="XBRL Schema";
+    OnRun=VAR
+            InStr@1005 : InStream;
+            TaxonomyNode@1001 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+            LinkbaseRefNodes@1004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+            LinkbaseRefNode@1007 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+            LinkbaseFileName@1002 : Text[250];
+            LinkbaseRole@1011 : Text[250];
+            LinkBaseType@1000 : 'Label,Presentation,Calculation,Reference';
+            i@1010 : Integer;
+          BEGIN
+            CALCFIELDS(XSD);
+            if not XSD.HASVALUE then
+              ERROR(Text002,TABLECAPTION,"Line No.");
+
+            XBRLSchema := Rec;
+
+            ProgressBox.OPEN(Text000);
+            ProgressBox.UPDATE(1,STRSUBSTNO(Text001,"XBRL Taxonomy Name"));
+
+            XSD.CREATEINSTREAM(InStr);
+
+            XMLDOMManagement.LoadXMLDocumentFromInStream(InStr,TaxonomyDocument);
+
+            TaxonomyNode := TaxonomyDocument.DocumentElement;
+            if not TaxonomyNode.HasChildNodes then
+              ERROR(Text005,TABLECAPTION,"Line No.");
+
+            DocumentPrefix := GetDocumentPreFix(TaxonomyNode);
+            targetNamespace := GetAttribute('targetNamespace',TaxonomyNode);
+            "xmlns:xbrli" := GetAttribute('xmlns:xbrli',TaxonomyNode);
+            if "xmlns:xbrli" = '' then
+              "xmlns:xbrli" := GetAttribute('xmlns:xbrl',TaxonomyNode);
+            if "xmlns:xbrli" = '' then
+              "xmlns:xbrli" := GetAttribute('xmlns:xbrli01',TaxonomyNode);
+
+            targetNamespacePrefix := GetXmlnsPrefix(targetNamespace,TaxonomyNode);
+            if targetNamespacePrefix <> '' then begin
+              Description := COPYSTR(targetNamespacePrefix,1,MAXSTRLEN(Description));
+              if Description[STRLEN(Description)] = ':' then
+                Description := COPYSTR(Description,1,STRLEN(Description) - 1);
+            end;
+
+            MODIFY;
+            XBRLSchema := Rec;
+
+            GetCommonXmnsPrefixes(TaxonomyNode);
+            CreateNameSpaceManager(TaxonomyDocument);
+            PopulateNamespaceManager(TaxonomyDocument.DocumentElement);
+
+            case "xmlns:xbrli" of
+              'http://www.xbrl.org/2001/instance': // spec. 2.0
+                begin
+                  SelectNodes(
+                    TaxonomyNode,'%1annotation/%1appinfo/' + STRSUBSTNO('%1linkbaseRef',LinkPrefix),xsdPrefix,LinkbaseRefNodes);
+                  HandleDocument;
+                  if not ISNULL(LinkbaseRefNodes) and IsWindowsClientSession then
+                    for i := 1 to LinkbaseRefNodes.Count do begin
+                      LinkbaseRefNode := LinkbaseRefNodes.Item(i - 1);
+                      LinkbaseRole := GetAttribute(XLinkPrefix + 'role',LinkbaseRefNode);
+                      LinkbaseFileName := GetAttribute(XLinkPrefix + 'href',LinkbaseRefNode);
+                      case LinkbaseRole of
+                        'http://www.xbrl.org/linkprops/linkRef/presentation':
+                          LinkBaseType := LinkBaseType::Presentation;
+                        'http://www.xbrl.org/linkprops/linkRef/calculation':
+                          LinkBaseType := LinkBaseType::Calculation;
+                        'http://www.xbrl.org/linkprops/linkRef/label':
+                          LinkBaseType := LinkBaseType::Label;
+                        'http://www.xbrl.org/linkprops/linkRef/reference':
+                          LinkBaseType := LinkBaseType::Reference;
+                        else
+                          LinkbaseFileName := '';
+                      end;
+                      if LinkbaseFileName <> '' then
+                        ImportLinkbase(Rec,LinkBaseType,LinkbaseFileName);
+                    end;
+                end;
+              'http://www.xbrl.org/2003/instance': // spec. 2.1
+                begin
+                  SelectNodes(
+                    TaxonomyNode,'%1annotation/%1appinfo/' + STRSUBSTNO('%1linkbaseRef',LinkPrefix),xsdPrefix,LinkbaseRefNodes);
+                  HandleDocument;
+                  if not ISNULL(LinkbaseRefNodes) and IsWindowsClientSession then
+                    for i := 1 to LinkbaseRefNodes.Count do begin
+                      LinkbaseRefNode := LinkbaseRefNodes.Item(i - 1);
+                      LinkbaseRole := GetAttribute(XLinkPrefix + 'role',LinkbaseRefNode);
+                      LinkbaseFileName := GetAttribute(XLinkPrefix + 'href',LinkbaseRefNode);
+                      case LinkbaseRole of
+                        'http://www.xbrl.org/2003/role/presentationLinkbaseRef':
+                          LinkBaseType := LinkBaseType::Presentation;
+                        'http://www.xbrl.org/2003/role/calculationLinkbaseRef':
+                          LinkBaseType := LinkBaseType::Calculation;
+                        'http://www.xbrl.org/2003/role/labelLinkbaseRef':
+                          LinkBaseType := LinkBaseType::Label;
+                        'http://www.xbrl.org/2003/role/referenceLinkbaseRef':
+                          LinkBaseType := LinkBaseType::Reference;
+                        else
+                          LinkbaseFileName := '';
+                      end;
+                      if LinkbaseFileName <> '' then
+                        ImportLinkbase(Rec,LinkBaseType,LinkbaseFileName);
+                    end;
+                end;
+              else
+                ERROR(Text018,"xmlns:xbrli");
+            end;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      XBRLTaxonomy@1014 : Record "XBRL Taxonomy";
+      XBRLSchema@1005 : Record "XBRL Schema";
+      XBRLLine@1020009 : Record "XBRL Taxonomy Line";
+      TempXBRLLine@1020005 : TEMPORARY Record "XBRL Taxonomy Line";
+      XBRLGLMapLine@1010 : Record "XBRL G/L Map Line";
+      TempXBRLGLMapLine@1011 : TEMPORARY Record "XBRL G/L Map Line";
+      XBRLCommentLine@1012 : Record "XBRL Comment Line";
+      TempXBRLCommentLine@1013 : TEMPORARY Record "XBRL Comment Line";
+      XMLDOMManagement@1021 : Codeunit "XML DOM Management";
+      TaxonomyDocument@1020013 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      NamespaceMgr@1004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNamespaceManager";
+      ProgressBox@1020010 : Dialog;
+      Text000@1020012 : TextConst 'ENU=#1###################################### \Progress            @2@@@@@@@@@@@@@@@@@@';
+      Text001@1020011 : TextConst 'ENU=Importing taxonomy %1';
+      Text002@1020000 : TextConst 'ENU=You must first import a taxonomy into %1 %2.';
+      NextLineNo@1020028 : Integer;
+      Text005@1020023 : TextConst 'ENU=%1 %2 has no Elements.';
+      Text007@1020030 : TextConst 'ENU=Unexpected type: "%1".';
+      UpdatingTaxonomyfromTaxonomyMsg@1000 : TextConst '@@@=%1: Field(XBRL Taxonomy Name);ENU=Updating new taxonomy from existing taxonomy %1.';
+      Text009@1001 : TextConst 'ENU=Updating database';
+      Text012@1003 : TextConst 'ENU=You must first import a linkbase into %1 %2.';
+      Text013@1006 : TextConst 'ENU=%1 %2\%3 #4######## #5##################\@6@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@';
+      Text015@1008 : TextConst 'ENU=There is no Schemalocation defined in the document.';
+      Text017@1015 : TextConst 'ENU=%1 %2 has a different version than %3 %4. Do you want to continue anyway?';
+      Text018@1016 : TextConst 'ENU=This document has an unknown version (%1).';
+      targetNamespacePrefix@1009 : Text;
+      xsdPrefix@1018 : Text;
+      xbrliPrefix@1019 : Text;
+      XLinkPrefix@1017 : Text;
+      LinkPrefix@1007 : Text;
+      FilesOnServer@1002 : Boolean;
+      DocumentPrefix@1020 : Text[30];
+
+    LOCAL PROCEDURE ImportLinkbase@11(XBRLSchema@1000 : Record "XBRL Schema";LinkBaseType@1001 : 'Label,Presentation,Calculation,Reference';LinkBaseName@1002 : Text[250]);
+    VAR
+      XBRLLinkbase@1003 : Record "XBRL Linkbase";
+      TempBlob@1005 : Record TempBlob;
+      FileMgt@1004 : Codeunit "File Management";
+    BEGIN
+      XBRLLinkbase.SETRANGE("XBRL Taxonomy Name",XBRLSchema."XBRL Taxonomy Name");
+      XBRLLinkbase.SETRANGE("XBRL Schema Line No.",XBRLSchema."Line No.");
+      XBRLLinkbase.SETRANGE(Type,LinkBaseType);
+      if XBRLSchema."Folder Name" <> '' then
+        if XBRLSchema."Folder Name"[STRLEN(XBRLSchema."Folder Name")] <> '\' then
+          XBRLSchema."Folder Name" := XBRLSchema."Folder Name" + '\';
+
+      // FilesOnServer is used when scripting this codeunit.
+      if FilesOnServer then
+        if not EXISTS(XBRLSchema."Folder Name" + LinkBaseName) then
+          exit;
+
+      XBRLLinkbase.SETRANGE(Type);
+      if XBRLLinkbase.FINDLAST then
+        XBRLLinkbase."Line No." := XBRLLinkbase."Line No." + 10000
+      else
+        XBRLLinkbase."Line No." := 10000;
+
+      XBRLLinkbase."XBRL Taxonomy Name" := XBRLSchema."XBRL Taxonomy Name";
+      XBRLLinkbase."XBRL Schema Line No." := XBRLSchema."Line No.";
+      XBRLLinkbase.Type := LinkBaseType;
+      XBRLLinkbase.Description := FORMAT(XBRLLinkbase.Type);
+      if FilesOnServer then
+        XBRLLinkbase.XML.IMPORT(XBRLSchema."Folder Name" + LinkBaseName)
+      else begin
+        if FileMgt.BLOBImport(TempBlob,XBRLSchema."Folder Name" + LinkBaseName) = '' then
+          exit;
+        XBRLLinkbase.XML := TempBlob.Blob;
+      end;
+
+      XBRLLinkbase."File Name" := LinkBaseName;
+      XBRLLinkbase.INSERT;
+
+      case LinkBaseType of
+        LinkBaseType::Label:
+          ImportLabels(XBRLLinkbase);
+        LinkBaseType::Presentation:
+          ImportPresentation(XBRLLinkbase);
+        LinkBaseType::Reference:
+          ImportReference(XBRLLinkbase);
+        LinkBaseType::Calculation:
+          ImportCalculation(XBRLLinkbase);
+      end;
+    END;
+
+    LOCAL PROCEDURE HandleDocument@6();
+    VAR
+      TaxonomyNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      TaxonomyNodeList@1005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      NoOfNodes@1004 : Integer;
+      Progress@1003 : Integer;
+      NewProgress@1002 : Integer;
+      i@1001 : Integer;
+      NodeIndex@1006 : Integer;
+    BEGIN
+      XBRLTaxonomy.GET(XBRLSchema."XBRL Taxonomy Name");
+      if XBRLTaxonomy.schemaLocation = '' then begin
+        XBRLTaxonomy.schemaLocation := XBRLSchema.schemaLocation;
+        XBRLTaxonomy.MODIFY;
+      end;
+      if XBRLTaxonomy."xmlns:xbrli" = '' then begin
+        XBRLTaxonomy."xmlns:xbrli" := XBRLSchema."xmlns:xbrli";
+        XBRLTaxonomy.MODIFY;
+      end else
+        if XBRLTaxonomy."xmlns:xbrli" <> XBRLSchema."xmlns:xbrli" then
+          if not CONFIRM(
+               STRSUBSTNO(
+                 Text017,XBRLSchema.TABLECAPTION,XBRLSchema.Description,
+                 XBRLTaxonomy.TABLECAPTION,XBRLSchema."XBRL Taxonomy Name"),false)
+          then
+            exit;
+      XBRLLine.LOCKTABLE;
+      XBRLLine.SETRANGE("XBRL Taxonomy Name",XBRLSchema."XBRL Taxonomy Name");
+      if XBRLLine.FIND('+') then;
+      NextLineNo := XBRLLine."Line No." + 10000;
+
+      TaxonomyNode := TaxonomyDocument.DocumentElement;
+      TaxonomyNodeList := TaxonomyNode.ChildNodes;
+      NodeIndex := 0;
+      TaxonomyNode := TaxonomyNodeList.Item(NodeIndex);
+      NoOfNodes := TaxonomyNodeList.Count;
+      Progress := 0;
+      NewProgress := 0;
+      i := 0;
+      while not ISNULL(TaxonomyNode) do begin
+        if (TaxonomyNode.Name = STRSUBSTNO('%1element',xsdPrefix)) or
+           (TaxonomyNode.Name = STRSUBSTNO('%1element',DocumentPrefix)) or
+           (TaxonomyNode.Name = 'element')
+        then
+          HandleElement(TaxonomyNode,0,-1);
+        i := i + 1;
+        NewProgress := ROUND(i / NoOfNodes * 10000,1);
+        if (Progress = 0) or (NewProgress >= Progress + 100) then begin
+          ProgressBox.UPDATE(2,NewProgress);
+          Progress := NewProgress;
+        end;
+        NodeIndex := NodeIndex + 1;
+        TaxonomyNode := TaxonomyNodeList.Item(NodeIndex);
+      end;
+      SortPresentationOrder(0,0,'');
+
+      if TempXBRLLine.COUNT = 0 then
+        exit;
+
+      // Update from existing data, if any
+      ProgressBox.UPDATE(1,STRSUBSTNO(UpdatingTaxonomyfromTaxonomyMsg,XBRLSchema."XBRL Taxonomy Name"));
+      ProgressBox.UPDATE(2,0);
+      Progress := 0;
+      NewProgress := 0;
+      i := 0;
+      XBRLLine.SETRANGE("XBRL Taxonomy Name",XBRLSchema."XBRL Taxonomy Name");
+      XBRLLine.SETRANGE("XBRL Schema Line No.",XBRLSchema."Line No.");
+      if XBRLLine.FIND('-') then
+        repeat
+          i := i + 1;
+          NewProgress := ROUND(i / NoOfNodes * 10000,1);
+          if (Progress = 0) or (NewProgress >= Progress + 100) then begin
+            ProgressBox.UPDATE(2,NewProgress);
+            Progress := NewProgress;
+          end;
+          XBRLLine.CALCFIELDS("G/L Map Lines",Notes);
+          if (XBRLLine."Constant Amount" <> 0) or (XBRLLine.Description <> '') or
+             XBRLLine."G/L Map Lines" or XBRLLine.Notes
+          then begin
+            TempXBRLLine.SETCURRENTKEY(Name);
+            TempXBRLLine.SETRANGE("XBRL Taxonomy Name",XBRLLine."XBRL Taxonomy Name");
+            TempXBRLLine.SETRANGE(Name,XBRLLine.Name);
+            if TempXBRLLine.FIND('-') then begin
+              TempXBRLLine."Constant Amount" := XBRLLine."Constant Amount";
+              if TempXBRLLine.Description = '' then
+                TempXBRLLine.Description := XBRLLine.Description;
+              TempXBRLLine.MODIFY;
+
+              XBRLGLMapLine.SETRANGE("XBRL Taxonomy Name",TempXBRLLine."XBRL Taxonomy Name");
+              XBRLGLMapLine.SETRANGE("XBRL Taxonomy Line No.",TempXBRLLine."Line No.");
+              if XBRLGLMapLine.FIND('-') then
+                repeat
+                  TempXBRLGLMapLine := XBRLGLMapLine;
+                  TempXBRLGLMapLine."XBRL Taxonomy Line No." := TempXBRLLine."Line No.";
+                  TempXBRLGLMapLine.INSERT;
+                until XBRLGLMapLine.NEXT = 0;
+
+              XBRLCommentLine.SETRANGE("XBRL Taxonomy Name",TempXBRLLine."XBRL Taxonomy Name");
+              XBRLCommentLine.SETRANGE("XBRL Taxonomy Line No.",TempXBRLLine."Line No.");
+              XBRLCommentLine.SETRANGE("Comment Type",XBRLCommentLine."Comment Type"::Notes);
+              if XBRLCommentLine.FIND('-') then
+                repeat
+                  TempXBRLCommentLine := XBRLCommentLine;
+                  TempXBRLCommentLine."XBRL Taxonomy Line No." := TempXBRLLine."Line No.";
+                  TempXBRLCommentLine.INSERT;
+                until XBRLCommentLine.NEXT = 0;
+            end;
+          end;
+          XBRLLine.DELETE(true);
+        until XBRLLine.NEXT = 0;
+      TempXBRLLine.RESET;
+
+      // Write back to database
+      ProgressBox.UPDATE(1,Text009);
+      ProgressBox.UPDATE(2,0);
+      if TempXBRLLine.FIND('-') then
+        repeat
+          XBRLLine := TempXBRLLine;
+          XBRLLine.INSERT;
+        until TempXBRLLine.NEXT = 0;
+      if TempXBRLCommentLine.FIND('-') then
+        repeat
+          XBRLCommentLine := TempXBRLCommentLine;
+          XBRLCommentLine.INSERT;
+        until TempXBRLCommentLine.NEXT = 0;
+      if TempXBRLGLMapLine.FIND('-') then
+        repeat
+          XBRLGLMapLine := TempXBRLGLMapLine;
+          XBRLGLMapLine.INSERT;
+        until TempXBRLGLMapLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE HandleElement@9(ElementNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";ParentLineNo@1001 : Integer;ParentLevel@1004 : Integer);
+    VAR
+      ThisXBRLLine@1006 : Record "XBRL Taxonomy Line";
+      XMLNode@1005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      NamespacePrefix@1002 : Text[250];
+      ReferenceElementName@1003 : Text[250];
+      NumericContextPeriodType@1007 : Text[250];
+      IsTypeDescription@1008 : Boolean;
+    BEGIN
+      IsTypeDescription := IsElementTypeDescription(ElementNode);
+
+      ReferenceElementName := GetAttribute('ref',ElementNode);
+      if ReferenceElementName <> '' then begin
+        if STRPOS(ReferenceElementName,':') > 0 then
+          ReferenceElementName := COPYSTR(ReferenceElementName,STRPOS(ReferenceElementName,':') + 1);
+        ElementNode := TaxonomyDocument.DocumentElement;
+        ElementNode := ElementNode.SelectSingleNode(STRSUBSTNO('%1element[@name="%2"]',xsdPrefix,ReferenceElementName),NamespaceMgr);
+        if ISNULL(ElementNode) then
+          exit;
+      end;
+      TempXBRLLine.INIT;
+      TempXBRLLine."XBRL Taxonomy Name" := XBRLSchema."XBRL Taxonomy Name";
+      TempXBRLLine."XBRL Schema Line No." := XBRLSchema."Line No.";
+      TempXBRLLine."Line No." := NextLineNo;
+      NextLineNo := NextLineNo + 10000;
+      TempXBRLLine."Parent Line No." := ParentLineNo;
+      TempXBRLLine.Level := ParentLevel + 1;
+      TempXBRLLine.Name := GetAttribute('name',ElementNode);
+      TempXBRLLine."Element ID" := COPYSTR(GetAttribute('id',ElementNode),1,MAXSTRLEN(TempXBRLLine."Element ID"));
+      if TempXBRLLine."Element ID" = '' then
+        TempXBRLLine."Element ID" := TempXBRLLine.Name;
+      if TempXBRLLine.Name = '' then
+        TempXBRLLine.Name := TempXBRLLine."Element ID";
+      TempXBRLLine.TESTFIELD(Name);
+      NumericContextPeriodType := COPYSTR(GetAttribute('xbrli:periodType',ElementNode),1,MAXSTRLEN(NumericContextPeriodType));
+      case NumericContextPeriodType of
+        'instant':
+          TempXBRLLine."Numeric Context Period Type" := TempXBRLLine."Numeric Context Period Type"::Instant;
+        'duration':
+          TempXBRLLine."Numeric Context Period Type" := TempXBRLLine."Numeric Context Period Type"::Duration;
+      end;
+
+      TempXBRLLine."Type Description Element" := IsTypeDescription;
+      TempXBRLLine."XBRL Item Type" := GetAttribute('type',ElementNode);
+      if STRPOS(TempXBRLLine."XBRL Item Type",':') > 0 then begin
+        NamespacePrefix := COPYSTR(TempXBRLLine."XBRL Item Type",1,STRPOS(TempXBRLLine."XBRL Item Type",':'));
+        TempXBRLLine."XBRL Item Type" :=
+          COPYSTR(TempXBRLLine."XBRL Item Type",STRPOS(TempXBRLLine."XBRL Item Type",':') + 1);
+      end;
+      if (TempXBRLLine."XBRL Item Type" = '') or (NamespacePrefix = targetNamespacePrefix) then begin
+        if GetAttribute('substitutionGroup',ElementNode) = STRSUBSTNO('%1tuple',xbrliPrefix) then
+          TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::Tuple
+        else
+          TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::Description;
+        TempXBRLLine.INSERT;
+        ThisXBRLLine := TempXBRLLine;
+        HandleCustomType(TempXBRLLine,TempXBRLLine."XBRL Item Type",ElementNode);
+      end else begin
+        case LOWERCASE(TempXBRLLine."XBRL Item Type") of
+          'stringitemtype','string':
+            TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::Description;
+          'monetaryitemtype':
+            TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::"General Ledger";
+          'decimalitemtype':
+            TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::Constant;
+          'sharesitemtype':
+            TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::Constant;
+          'uriitemtype':
+            TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::Description;
+          'tupletype':
+            TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::Tuple;
+          'datetimeitemtype','dateitemtype':
+            begin
+              TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::Description;
+              TempXBRLLine.Description := '%6%3%2';
+            end;
+          else
+            begin
+            TempXBRLLine."Source Type" := TempXBRLLine."Source Type"::"Not Applicable";
+            if TempXBRLLine."XBRL Item Type" <> '' then
+              TempXBRLLine.Description := STRSUBSTNO(Text007,TempXBRLLine."XBRL Item Type");
+          end;
+        end;
+        TempXBRLLine.INSERT;
+        ThisXBRLLine := TempXBRLLine;
+      end;
+
+      XMLNode := ElementNode.SelectSingleNode(STRSUBSTNO('%1annotation//%1documentation',xsdPrefix),NamespaceMgr);
+      if not ISNULL(XMLNode) then begin
+        XBRLCommentLine.SETRANGE("XBRL Taxonomy Name",ThisXBRLLine."XBRL Taxonomy Name");
+        XBRLCommentLine.SETRANGE("XBRL Taxonomy Line No.",ThisXBRLLine."Line No.");
+        XBRLCommentLine.SETRANGE("Comment Type",XBRLCommentLine."Comment Type"::Information);
+        XBRLCommentLine.DELETEALL;
+        XBRLCommentLine.INIT;
+        XBRLCommentLine."XBRL Taxonomy Name" := ThisXBRLLine."XBRL Taxonomy Name";
+        XBRLCommentLine."XBRL Taxonomy Line No." := ThisXBRLLine."Line No.";
+        XBRLCommentLine."Comment Type" := XBRLCommentLine."Comment Type"::Information;
+        XBRLCommentLine."Line No." := 0;
+        InsertReference(XMLNode,XBRLCommentLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE HandleCustomType@17(ParentXBRLLine@1000 : Record "XBRL Taxonomy Line";ElementType@1001 : Text[250];SourceNode@1008 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      XMLElementList@1003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      XMLNode@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLElement@1005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      ReferenceElementName@1004 : Text;
+      i@1006 : Integer;
+    BEGIN
+      if ElementType = '' then
+        SelectSingleNode(SourceNode,'%1complexType',xsdPrefix,XMLNode)
+      else
+        SelectSingleNode(
+          TaxonomyDocument.DocumentElement,'%1' + STRSUBSTNO('complexType[@name="%1"]',ElementType),
+          xsdPrefix,XMLNode);
+      if ISNULL(XMLNode) then
+        exit;
+      SelectNodes(XMLNode,'%1complexContent/%1extension/%1sequence/%1element',xsdPrefix,XMLElementList);
+      if XMLElementList.Count = 0 then
+        SelectNodes(XMLNode,'%1sequence/%1element',xsdPrefix,XMLElementList);
+      // Choice Type
+      if XMLElementList.Count = 0 then begin
+        SelectSingleNode(XMLNode,'%1choice/%1element',xsdPrefix,XMLElement);
+        if ISNULL(XMLElement) then
+          exit;
+        ReferenceElementName := GetAttribute('ref',XMLElement);
+        SelectNodes(
+          XMLNode.OwnerDocument.DocumentElement,'%1' + STRSUBSTNO(
+            'element[@substitutionGroup=''%1'']',ReferenceElementName),xsdPrefix,XMLElementList);
+      end;
+
+      if XMLElementList.Count = 0 then
+        exit;
+      for i := 1 to XMLElementList.Count do begin
+        XMLElement := XMLElementList.Item(i - 1);
+        HandleElement(XMLElement,ParentXBRLLine."Line No.",ParentXBRLLine.Level);
+      end;
+    END;
+
+    LOCAL PROCEDURE GetAttribute@1(AttributeName@1001 : Text;XMLNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode") : Text[1024];
+    VAR
+      XMLAttributeNode@1003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+    BEGIN
+      XMLAttributeNode := XMLNode.Attributes.GetNamedItem(AttributeName);
+      if ISNULL(XMLAttributeNode) then
+        exit('');
+
+      exit(FORMAT(XMLAttributeNode.InnerText));
+    END;
+
+    LOCAL PROCEDURE GetAttributeNameByValue@16(AttributeValue@1001 : Text;XMLNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";IncludeTargetNamespace@1004 : Boolean) : Text;
+    VAR
+      XMLAttributeNode@1003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLAttributes@1006 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlAttributeCollection";
+      Index@1005 : Integer;
+    BEGIN
+      XMLAttributes := XMLNode.Attributes;
+      for Index := 1 to XMLAttributes.Count do begin
+        XMLAttributeNode := XMLAttributes.Item(Index - 1);
+        if (FORMAT(XMLAttributeNode.InnerText) = AttributeValue) and
+           (IncludeTargetNamespace or
+            not IncludeTargetNamespace and (XMLAttributeNode.Name <> 'targetNamespace'))
+        then
+          exit(XMLAttributeNode.Name);
+      end;
+      exit('');
+    END;
+
+    [Internal]
+    PROCEDURE ImportLabels@2(VAR XBRLLinkbase@1000 : Record "XBRL Linkbase");
+    VAR
+      XBRLTaxonomyLine@1003 : Record "XBRL Taxonomy Line";
+      InStr@1001 : InStream;
+      LinkbaseDocument@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      LinkbaseDocNode@1005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLNode@1008 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      ArcNodeList@1006 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      LabelNodeList@1015 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      LabelNode@1009 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      Window@1004 : Dialog;
+      i@1007 : Integer;
+      j@1014 : Integer;
+      Progress@1010 : Integer;
+      NoOfRecords@1011 : Integer;
+      Schemalocation@1013 : Text[1024];
+    BEGIN
+      XBRLSchema.GET(XBRLLinkbase."XBRL Taxonomy Name",XBRLLinkbase."XBRL Schema Line No.");
+      Window.OPEN(
+        STRSUBSTNO(
+          Text013,XBRLSchema.TABLECAPTION,XBRLSchema.Description,XBRLLinkbase.TABLECAPTION));
+      Window.UPDATE(4,XBRLLinkbase.Type);
+      Window.UPDATE(5,XBRLLinkbase.Description);
+
+      with XBRLLinkbase do begin
+        TESTFIELD(Type,Type::Label);
+        CALCFIELDS(XML);
+        if not XML.HASVALUE then
+          ERROR(Text012,TABLECAPTION,"Line No.");
+        XML.CREATEINSTREAM(InStr);
+      end;
+      XMLDOMManagement.LoadXMLDocumentFromInStream(InStr,LinkbaseDocument);
+      LinkbaseDocNode := LinkbaseDocument.FirstChild;
+      while LOWERCASE(LinkbaseDocNode.NodeType.ToString) in ['xmldeclaration','processinginstruction','comment'] do
+        LinkbaseDocNode := LinkbaseDocNode.NextSibling;
+      Schemalocation := GetAttribute('xsi:schemaLocation',LinkbaseDocNode);
+      if Schemalocation = '' then
+        ERROR(Text015);
+      i := STRPOS(Schemalocation,XBRLSchema.targetNamespace + ' ');
+      if i <> 0 then begin
+        i := i + STRLEN(XBRLSchema.targetNamespace);
+        while Schemalocation[i] = ' ' do
+          i := i + 1;
+        j := i;
+        while (Schemalocation[j] <> ' ') and (j <= STRLEN(Schemalocation)) do
+          j := j + 1;
+        Schemalocation := COPYSTR(Schemalocation,i,j - i);
+      end else
+        Schemalocation := XBRLSchema.schemaLocation;
+
+      GetCommonXmnsPrefixes(LinkbaseDocNode);
+      CreateNameSpaceManager(LinkbaseDocument);
+      PopulateNamespaceManager(LinkbaseDocument.DocumentElement);
+      PopulateNamespaceManager(LinkbaseDocNode.FirstChild);
+
+      XBRLTaxonomyLine.SETRANGE("XBRL Taxonomy Name",XBRLLinkbase."XBRL Taxonomy Name");
+      XBRLTaxonomyLine.SETRANGE("XBRL Schema Line No.",XBRLLinkbase."XBRL Schema Line No.");
+      NoOfRecords := XBRLTaxonomyLine.COUNT;
+
+      if XBRLTaxonomyLine.FIND('-') then
+        repeat
+          Progress := Progress + 1;
+          Window.UPDATE(6,ROUND(Progress / NoOfRecords * 10000,1));
+          XMLNode :=
+            LinkbaseDocNode.SelectSingleNode(
+              STRSUBSTNO(
+                '%3labelLink/%3loc[@%4href="%1#%2"]',
+                Schemalocation,XBRLTaxonomyLine."Element ID",LinkPrefix,XLinkPrefix),NamespaceMgr);
+          if not ISNULL(XMLNode) then begin
+            ArcNodeList :=
+              LinkbaseDocNode.SelectNodes(
+                STRSUBSTNO(
+                  '%2labelLink/%2labelArc[@%3from="%1"]',
+                  GetAttribute(XLinkPrefix + 'label',XMLNode),LinkPrefix,XLinkPrefix),NamespaceMgr);
+            for i := 1 to ArcNodeList.Count do begin
+              XMLNode := ArcNodeList.Item(i - 1);
+              LabelNodeList :=
+                LinkbaseDocNode.SelectNodes(
+                  STRSUBSTNO(
+                    '%2labelLink/%2label[@%3label="%1"]',
+                    GetAttribute(XLinkPrefix + 'to',XMLNode),LinkPrefix,XLinkPrefix),NamespaceMgr);
+              for j := 1 to LabelNodeList.Count do begin
+                LabelNode := LabelNodeList.Item(j - 1);
+                InsertLabel(LabelNode,XBRLTaxonomyLine);
+              end
+            end;
+          end;
+        until XBRLTaxonomyLine.NEXT = 0;
+      Window.CLOSE;
+    END;
+
+    LOCAL PROCEDURE InsertLabel@31(XMLNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";VAR XBRLLine@1001 : Record "XBRL Taxonomy Line");
+    VAR
+      XBRLTaxonomyLabel@1002 : Record "XBRL Taxonomy Label";
+      langAttribute@1003 : Text[30];
+      roleAttribute@1004 : Text[1024];
+      Label@1005 : Text[250];
+    BEGIN
+      langAttribute := GetAttribute('xml:lang',XMLNode);
+      roleAttribute := LOWERCASE(GetAttribute(XLinkPrefix + 'role',XMLNode));
+      if (roleAttribute <> 'http://www.xbrl.org/2003/role/label') and // spec. 2.1
+         (roleAttribute <> 'http://www.xbrl.org/linkprops/label/standard') // spec. 2.0
+      then
+        exit;
+      Label := COPYSTR(XMLNode.InnerText,1,MAXSTRLEN(XBRLTaxonomyLabel.Label));
+      if not XBRLTaxonomyLabel.GET(XBRLLine."XBRL Taxonomy Name",XBRLLine."Line No.",langAttribute) then begin
+        XBRLTaxonomyLabel.INIT;
+        XBRLTaxonomyLabel."XBRL Taxonomy Name" := XBRLLine."XBRL Taxonomy Name";
+        XBRLTaxonomyLabel."XBRL Taxonomy Line No." := XBRLLine."Line No.";
+        XBRLTaxonomyLabel."XML Language Identifier" := langAttribute;
+        XBRLTaxonomyLabel.Label := Label;
+        XBRLTaxonomyLabel.INSERT;
+      end else
+        if XBRLTaxonomyLabel.Label <> Label then begin
+          XBRLTaxonomyLabel.Label := Label;
+          XBRLTaxonomyLabel.MODIFY;
+        end;
+    END;
+
+    [Internal]
+    PROCEDURE ImportPresentation@4(VAR XBRLLinkbase@1000 : Record "XBRL Linkbase");
+    VAR
+      XBRLTaxonomyLine@1003 : Record "XBRL Taxonomy Line";
+      XBRLTaxonomyLine2@1004 : Record "XBRL Taxonomy Line";
+      XBRLSchema@1020 : Record "XBRL Schema";
+      TempXBRLSchema@1022 : TEMPORARY Record "XBRL Schema";
+      LinkbaseDocument@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      LinkbaseDocNode@1005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLNodeList@1006 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      XMLNode@1008 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      Window@1001 : Dialog;
+      CurrNodeIndex@1024 : Integer;
+      i@1007 : Integer;
+      Progress@1010 : Integer;
+      NoOfRecords@1011 : Integer;
+      Schemalocation@1013 : Text;
+      FromSchemalocation@1023 : Text;
+      ToSchemalocation@1019 : Text;
+      fromLabel@1014 : Text[250];
+      toLabel@1015 : Text[250];
+      ToName@1016 : Text[250];
+      t@1018 : Text[30];
+      Order@1017 : Decimal;
+      UpdateParentPresentationLineNo@1009 : Boolean;
+      LastXBRLLineNo@1025 : Integer;
+    BEGIN
+      XBRLSchema.GET(XBRLLinkbase."XBRL Taxonomy Name",XBRLLinkbase."XBRL Schema Line No.");
+      Window.OPEN(
+        STRSUBSTNO(
+          Text013,XBRLSchema.TABLECAPTION,XBRLSchema.Description,XBRLLinkbase.TABLECAPTION));
+      Window.UPDATE(4,XBRLLinkbase.Type);
+      Window.UPDATE(5,XBRLLinkbase.Description);
+
+      LoadLinkbaseDocument(XBRLLinkbase,LinkbaseDocument);
+      FindLinkbaseDocNode(LinkbaseDocument,LinkbaseDocNode);
+      Schemalocation := GetAttribute('xsi:schemaLocation',LinkbaseDocNode);
+
+      if Schemalocation = '' then
+        ERROR(Text015);
+
+      UpdateSchemaLocation(TempXBRLSchema,XBRLSchema,XBRLLinkbase,Schemalocation,FromSchemalocation);
+      GetCommonXmnsPrefixes(LinkbaseDocNode);
+      CreateNameSpaceManager(LinkbaseDocument);
+      PopulateNamespaceManager(LinkbaseDocument.DocumentElement);
+      PopulateNamespaceManager(LinkbaseDocNode.FirstChild);
+
+      XBRLTaxonomyLine.SETRANGE("XBRL Taxonomy Name",XBRLLinkbase."XBRL Taxonomy Name");
+      XBRLTaxonomyLine.SETRANGE("Presentation Linkbase Line No.",XBRLLinkbase."Line No.");
+      XBRLTaxonomyLine.MODIFYALL("Presentation Linkbase Line No.",0);
+      XBRLTaxonomyLine.SETRANGE("Presentation Linkbase Line No.");
+      NoOfRecords := XBRLTaxonomyLine.COUNT;
+
+      if XBRLTaxonomyLine.FINDLAST then
+        LastXBRLLineNo := XBRLTaxonomyLine."Line No.";
+
+      InitTaxonomyLinesBuf(XBRLTaxonomyLine,TempXBRLLine);
+      if TempXBRLLine.FINDSET then
+        repeat
+          Progress := Progress + 1;
+          Window.UPDATE(6,ROUND(Progress / NoOfRecords * 10000,1));
+          if TempXBRLSchema."Line No." <> TempXBRLLine."XBRL Schema Line No." then
+            TempXBRLSchema.GET(TempXBRLLine."XBRL Taxonomy Name",TempXBRLLine."XBRL Schema Line No.");
+          FromSchemalocation := TempXBRLSchema.schemaLocation;
+          XMLNode :=
+            LinkbaseDocNode.SelectSingleNode(
+              STRSUBSTNO(
+                '%3presentationLink/%3loc[@%4href="%1#%2"]',
+                FromSchemalocation,TempXBRLLine."Element ID",LinkPrefix,XLinkPrefix),NamespaceMgr);
+          if not ISNULL(XMLNode) then begin
+            fromLabel := GetAttribute(XLinkPrefix + 'label',XMLNode);
+            if XBRLSchema."xmlns:xbrli" = 'http://www.xbrl.org/2001/instance' then // spec. 2.0
+              XMLNodeList :=
+                LinkbaseDocNode.SelectNodes(
+                  STRSUBSTNO(
+                    '%3presentationLink/%3presentationArc[@%4from="%1" and @%4arcrole="%2"]',
+                    fromLabel,'http://www.xbrl.org/linkprops/arc/parent-child',LinkPrefix,XLinkPrefix),NamespaceMgr)
+            else // 'http://www.xbrl.org/2003/instance' // spec. 2.1
+              XMLNodeList :=
+                LinkbaseDocNode.SelectNodes(
+                  STRSUBSTNO(
+                    '%3presentationLink/%3presentationArc[@%4from="%1" and @%4arcrole="%2"]',
+                    fromLabel,'http://www.xbrl.org/2003/arcrole/parent-child',LinkPrefix,XLinkPrefix),NamespaceMgr);
+
+            for CurrNodeIndex := 0 to XMLNodeList.Count - 1 do begin
+              XMLNode := XMLNodeList.Item(CurrNodeIndex);
+              t := GetAttribute('order',XMLNode);
+              if t = '' then
+                Order := 1
+              else
+                EVALUATE(Order,t);
+              toLabel := GetAttribute(XLinkPrefix + 'to',XMLNode);
+              XMLNode :=
+                LinkbaseDocNode.SelectSingleNode(
+                  STRSUBSTNO(
+                    '%2presentationLink/%2loc[@%3label="%1"]',toLabel,LinkPrefix,XLinkPrefix),NamespaceMgr);
+              if not ISNULL(XMLNode) then begin
+                ToName := GetAttribute(XLinkPrefix + 'href',XMLNode);
+                if ToName <> '' then begin
+                  i := STRPOS(ToName,'#');
+                  if i > 0 then begin
+                    ToSchemalocation := COPYSTR(ToName,1,i - 1);
+                    ToName := COPYSTR(ToName,i + 1);
+                  end else
+                    ToSchemalocation := '';
+                  CopyXBRLElementsForPresentation(
+                    LinkbaseDocNode,XBRLSchema."xmlns:xbrli",XBRLLinkbase."XBRL Taxonomy Name",ToName,LastXBRLLineNo);
+                  XBRLTaxonomyLine2.COPY(TempXBRLLine);
+                  TempXBRLLine.SETCURRENTKEY("XBRL Taxonomy Name","Element ID");
+                  TempXBRLLine.SETRANGE("Element ID",ToName);
+                  TempXBRLLine.SETRANGE(
+                    "XBRL Taxonomy Name",TempXBRLLine."XBRL Taxonomy Name");
+                  if TempXBRLSchema.schemaLocation = ToSchemalocation then
+                    TempXBRLLine.SETRANGE("XBRL Schema Line No.",TempXBRLSchema."Line No.")
+                  else begin
+                    TempXBRLSchema.SETRANGE("XBRL Taxonomy Name",XBRLLinkbase."XBRL Taxonomy Name");
+                    TempXBRLSchema.SETRANGE(schemaLocation,ToSchemalocation);
+                    if TempXBRLSchema.FINDFIRST then
+                      TempXBRLLine.SETRANGE("XBRL Schema Line No.",TempXBRLSchema."Line No.")
+                    else
+                      TempXBRLLine.SETRANGE("XBRL Schema Line No.");
+                  end;
+                  UpdateParentPresentationLineNo := false;
+                  TempXBRLLine.SETRANGE("Presentation Linkbase Line No.",0);
+                  if TempXBRLLine.ISEMPTY then
+                    TempXBRLLine.SETRANGE("Presentation Linkbase Line No.");
+                  if TempXBRLLine.FIND('-') then begin
+                    TempXBRLLine."Parent Line No." := XBRLTaxonomyLine2."Line No.";
+                    TempXBRLLine."Presentation Order No." := ROUND(Order,1);
+                    TempXBRLLine."Presentation Linkbase Line No." := XBRLLinkbase."Line No.";
+                    TempXBRLLine.MODIFY;
+                    UpdateParentPresentationLineNo := true;
+                  end;
+                  TempXBRLLine.COPY(XBRLTaxonomyLine2);
+                  if UpdateParentPresentationLineNo and (TempXBRLLine."Presentation Linkbase Line No." = 0) then begin
+                    TempXBRLLine."Presentation Linkbase Line No." := XBRLLinkbase."Line No.";
+                    TempXBRLLine.MODIFY;
+                  end;
+                  TempXBRLLine.SETCURRENTKEY("XBRL Taxonomy Name","Line No.");
+                end;
+              end;
+            end;
+          end;
+        until TempXBRLLine.NEXT = 0;
+
+      SortPresentationOrder(0,0,'');
+      SaveTaxonomyLines(TempXBRLLine);
+
+      Window.CLOSE;
+    END;
+
+    [Internal]
+    PROCEDURE ImportCalculation@5(VAR XBRLLinkbase@1000 : Record "XBRL Linkbase");
+    VAR
+      XBRLTaxonomyLine@1003 : Record "XBRL Taxonomy Line";
+      XBRLTaxonomyLine2@1004 : Record "XBRL Taxonomy Line";
+      XBRLRollupLine@1017 : Record "XBRL Rollup Line";
+      TempXBRLSchema@1021 : TEMPORARY Record "XBRL Schema";
+      InStr@1001 : InStream;
+      LinkbaseDocument@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      LinkbaseDocNode@1005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLNodeList@1006 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      XMLNode@1008 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      Window@1012 : Dialog;
+      CurrNodeIndex@1009 : Integer;
+      i@1007 : Integer;
+      Progress@1010 : Integer;
+      NoOfRecords@1011 : Integer;
+      Schemalocation@1013 : Text;
+      fromLabel@1014 : Text[250];
+      toLabel@1015 : Text[250];
+      ToName@1016 : Text[250];
+      WeightTxt@1019 : Text[30];
+      Weight@1018 : Decimal;
+      FromSchemalocation@1022 : Text;
+      ToSchemalocation@1023 : Text;
+    BEGIN
+      XBRLSchema.GET(XBRLLinkbase."XBRL Taxonomy Name",XBRLLinkbase."XBRL Schema Line No.");
+      Window.OPEN(
+        STRSUBSTNO(
+          Text013,XBRLSchema.TABLECAPTION,XBRLSchema.Description,XBRLLinkbase.TABLECAPTION));
+      Window.UPDATE(4,XBRLLinkbase.Type);
+      Window.UPDATE(5,XBRLLinkbase.Description);
+
+      with XBRLLinkbase do begin
+        TESTFIELD(Type,Type::Calculation);
+        CALCFIELDS(XML);
+        if not XML.HASVALUE then
+          ERROR(Text012,TABLECAPTION,"Line No.");
+        XML.CREATEINSTREAM(InStr);
+      end;
+      XMLDOMManagement.LoadXMLDocumentFromInStream(InStr,LinkbaseDocument);
+      LinkbaseDocNode := LinkbaseDocument.FirstChild;
+      while LOWERCASE(LinkbaseDocNode.NodeType.ToString) in ['xmldeclaration','processinginstruction','comment'] do
+        LinkbaseDocNode := LinkbaseDocNode.NextSibling;
+      Schemalocation := GetAttribute('xsi:schemaLocation',LinkbaseDocNode);
+      if Schemalocation = '' then
+        ERROR(Text015);
+      i := STRPOS(Schemalocation,XBRLSchema.targetNamespace + ' ');
+      if i = 0 then
+        Schemalocation := XBRLSchema.schemaLocation;
+
+      UpdateSchemaLocation(TempXBRLSchema,XBRLSchema,XBRLLinkbase,Schemalocation,FromSchemalocation);
+      GetCommonXmnsPrefixes(LinkbaseDocNode);
+      CreateNameSpaceManager(LinkbaseDocument);
+      PopulateNamespaceManager(LinkbaseDocument.DocumentElement);
+      PopulateNamespaceManager(LinkbaseDocNode.FirstChild);
+
+      XBRLTaxonomyLine.SETRANGE("XBRL Taxonomy Name",XBRLLinkbase."XBRL Taxonomy Name");
+      NoOfRecords := XBRLTaxonomyLine.COUNT;
+
+      if XBRLTaxonomyLine.FIND('-') then
+        repeat
+          Progress := Progress + 1;
+          Window.UPDATE(6,ROUND(Progress / NoOfRecords * 10000,1));
+          if TempXBRLSchema."Line No." <> XBRLTaxonomyLine."XBRL Schema Line No." then
+            TempXBRLSchema.GET(XBRLTaxonomyLine."XBRL Taxonomy Name",XBRLTaxonomyLine."XBRL Schema Line No.");
+          FromSchemalocation := TempXBRLSchema.schemaLocation;
+          XMLNode :=
+            LinkbaseDocNode.SelectSingleNode(
+              STRSUBSTNO(
+                '%3calculationLink/%3loc[@%4href="%1#%2"]',
+                FromSchemalocation,XBRLTaxonomyLine."Element ID",LinkPrefix,XLinkPrefix),NamespaceMgr);
+          if not ISNULL(XMLNode) then begin
+            fromLabel := GetAttribute(XLinkPrefix + 'label',XMLNode);
+            if XBRLSchema."xmlns:xbrli" = 'http://www.xbrl.org/2001/instance' then // spec. 2.0
+              XMLNodeList :=
+                LinkbaseDocNode.SelectNodes(
+                  STRSUBSTNO(
+                    '%3calculationLink/%3calculationArc[@%4from="%1" and @%4arcrole="%2"]',
+                    fromLabel,'http://www.xbrl.org/linkprops/arc/parent-child',LinkPrefix,XLinkPrefix),NamespaceMgr)
+            else // 'http://www.xbrl.org/2003/instance' // spec. 2.1
+              XMLNodeList :=
+                LinkbaseDocNode.SelectNodes(
+                  STRSUBSTNO(
+                    '%3calculationLink/%3calculationArc[@%4from="%1" and @%4arcrole="%2"]',
+                    fromLabel,'http://www.xbrl.org/2003/arcrole/summation-item',LinkPrefix,XLinkPrefix),NamespaceMgr);
+
+            for CurrNodeIndex := 0 to XMLNodeList.Count - 1 do begin
+              XMLNode := XMLNodeList.Item(CurrNodeIndex);
+              toLabel := GetAttribute(STRSUBSTNO('%1to',XLinkPrefix),XMLNode);
+              WeightTxt := GetAttribute('weight',XMLNode);
+              if WeightTxt <> '' then
+                EVALUATE(Weight,WeightTxt)
+              else
+                Weight := 0;
+              XMLNode :=
+                LinkbaseDocNode.SelectSingleNode(
+                  STRSUBSTNO('%2calculationLink/%2loc[@%3label="%1"]',toLabel,LinkPrefix,XLinkPrefix),NamespaceMgr);
+              if not ISNULL(XMLNode) then begin
+                ToName := GetAttribute(STRSUBSTNO('%1href',XLinkPrefix),XMLNode);
+                if ToName <> '' then begin
+                  i := STRPOS(ToName,'#');
+                  if i > 0 then begin
+                    ToSchemalocation := COPYSTR(ToName,1,i - 1);
+                    ToName := COPYSTR(ToName,i + 1);
+                  end else
+                    ToSchemalocation := '';
+                  XBRLTaxonomyLine2.SETCURRENTKEY("XBRL Taxonomy Name","Element ID");
+                  XBRLTaxonomyLine2.SETRANGE("Element ID",ToName);
+                  XBRLTaxonomyLine2.SETRANGE(
+                    "XBRL Taxonomy Name",XBRLTaxonomyLine."XBRL Taxonomy Name");
+                  if TempXBRLSchema.schemaLocation = ToSchemalocation then
+                    XBRLTaxonomyLine2.SETRANGE("XBRL Schema Line No.",TempXBRLSchema."Line No.")
+                  else begin
+                    TempXBRLSchema.SETRANGE("XBRL Taxonomy Name",XBRLLinkbase."XBRL Taxonomy Name");
+                    TempXBRLSchema.SETRANGE(schemaLocation,ToSchemalocation);
+                    if TempXBRLSchema.FINDFIRST then
+                      XBRLTaxonomyLine2.SETRANGE("XBRL Schema Line No.",TempXBRLSchema."Line No.")
+                    else
+                      XBRLTaxonomyLine2.SETRANGE("XBRL Schema Line No.");
+                  end;
+                  if XBRLTaxonomyLine2.FINDFIRST then begin
+                    if not XBRLRollupLine.GET(
+                         XBRLTaxonomyLine."XBRL Taxonomy Name",XBRLTaxonomyLine."Line No.",
+                         XBRLTaxonomyLine2."Line No.")
+                    then begin
+                      XBRLRollupLine.INIT;
+                      XBRLRollupLine."XBRL Taxonomy Name" := XBRLTaxonomyLine2."XBRL Taxonomy Name";
+                      XBRLRollupLine."XBRL Taxonomy Line No." := XBRLTaxonomyLine."Line No.";
+                      XBRLRollupLine."From XBRL Taxonomy Line No." := XBRLTaxonomyLine2."Line No.";
+                      XBRLRollupLine.Weight := Weight;
+                      XBRLRollupLine.INSERT;
+                    end else
+                      if XBRLRollupLine.Weight <> Weight then begin
+                        XBRLRollupLine.Weight := Weight;
+                        XBRLRollupLine.MODIFY;
+                      end;
+                    if XBRLTaxonomyLine."Source Type" <> XBRLTaxonomyLine."Source Type"::Rollup then begin
+                      XBRLTaxonomyLine."Source Type" := XBRLTaxonomyLine."Source Type"::Rollup;
+                      XBRLTaxonomyLine.MODIFY;
+                    end;
+                  end;
+                end;
+              end;
+            end;
+          end;
+        until XBRLTaxonomyLine.NEXT = 0;
+      Window.CLOSE;
+    END;
+
+    [Internal]
+    PROCEDURE ImportReference@8(VAR XBRLLinkbase@1000 : Record "XBRL Linkbase");
+    VAR
+      XBRLTaxonomyLine@1003 : Record "XBRL Taxonomy Line";
+      XBRLCommentLine@1004 : Record "XBRL Comment Line";
+      InStr@1001 : InStream;
+      LinkbaseDocument@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      LinkbaseDocNode@1005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLNodeList@1006 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      XMLNode@1008 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      ReferenceNode@1009 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      Window@1012 : Dialog;
+      CurrNodeIndex@1016 : Integer;
+      i@1007 : Integer;
+      j@1015 : Integer;
+      Progress@1010 : Integer;
+      NoOfRecords@1011 : Integer;
+      Schemalocation@1013 : Text[1024];
+      FromLabel@1014 : Text[250];
+    BEGIN
+      XBRLSchema.GET(XBRLLinkbase."XBRL Taxonomy Name",XBRLLinkbase."XBRL Schema Line No.");
+      Window.OPEN(
+        STRSUBSTNO(
+          Text013,XBRLSchema.TABLECAPTION,XBRLSchema.Description,XBRLLinkbase.TABLECAPTION));
+      Window.UPDATE(4,XBRLLinkbase.Type);
+      Window.UPDATE(5,XBRLLinkbase.Description);
+
+      with XBRLLinkbase do begin
+        TESTFIELD(Type,Type::Reference);
+        CALCFIELDS(XML);
+        if not XML.HASVALUE then
+          ERROR(Text012,TABLECAPTION,"Line No.");
+        XML.CREATEINSTREAM(InStr);
+      end;
+      XMLDOMManagement.LoadXMLDocumentFromInStream(InStr,LinkbaseDocument);
+      LinkbaseDocNode := LinkbaseDocument.FirstChild;
+      while LOWERCASE(LinkbaseDocNode.NodeType.ToString) in ['xmldeclaration','processinginstruction','comment'] do
+        LinkbaseDocNode := LinkbaseDocNode.NextSibling;
+      Schemalocation := GetAttribute('xsi:schemaLocation',LinkbaseDocNode);
+      if Schemalocation = '' then
+        ERROR(Text015);
+      i := STRPOS(Schemalocation,XBRLSchema.targetNamespace + ' ');
+      if i <> 0 then begin
+        i := i + STRLEN(XBRLSchema.targetNamespace);
+        while Schemalocation[i] = ' ' do
+          i := i + 1;
+        j := i;
+        while (Schemalocation[j] <> ' ') and (j <= STRLEN(Schemalocation)) do
+          j := j + 1;
+        Schemalocation := COPYSTR(Schemalocation,i,j - i);
+      end else
+        Schemalocation := XBRLSchema.schemaLocation;
+
+      GetCommonXmnsPrefixes(LinkbaseDocNode);
+      CreateNameSpaceManager(LinkbaseDocument);
+      PopulateNamespaceManager(LinkbaseDocument.DocumentElement);
+      PopulateNamespaceManager(LinkbaseDocNode.FirstChild);
+
+      XBRLTaxonomyLine.SETRANGE("XBRL Taxonomy Name",XBRLLinkbase."XBRL Taxonomy Name");
+      XBRLTaxonomyLine.SETRANGE("XBRL Schema Line No.",XBRLLinkbase."XBRL Schema Line No.");
+      NoOfRecords := XBRLTaxonomyLine.COUNT;
+
+      if XBRLTaxonomyLine.FIND('-') then
+        repeat
+          Progress := Progress + 1;
+          Window.UPDATE(6,ROUND(Progress / NoOfRecords * 10000,1));
+          XMLNode :=
+            LinkbaseDocNode.SelectSingleNode(
+              STRSUBSTNO(
+                '%3referenceLink/%3loc[@%4href="%1#%2"]',
+                Schemalocation,XBRLTaxonomyLine."Element ID",LinkPrefix,XLinkPrefix),NamespaceMgr);
+          if not ISNULL(XMLNode) then begin
+            FromLabel := GetAttribute(STRSUBSTNO('%1label',XLinkPrefix),XMLNode);
+            if XBRLSchema."xmlns:xbrli" = 'http://www.xbrl.org/2001/instance' then // spec. 2.0
+              XMLNodeList :=
+                LinkbaseDocNode.SelectNodes(
+                  STRSUBSTNO(
+                    '%3referenceLink/%3referenceArc[@%4from="%1" and @%4arcrole="%2"]',
+                    FromLabel,'http://www.xbrl.org/linkprops/arc/element-reference',LinkPrefix,XLinkPrefix),NamespaceMgr)
+            else // 'http://www.xbrl.org/2003/instance' // spec. 2.1
+              XMLNodeList :=
+                LinkbaseDocNode.SelectNodes(
+                  STRSUBSTNO(
+                    '%3referenceLink/%3referenceArc[@%4from="%1" and @%4arcrole="%2"]',
+                    FromLabel,'http://www.xbrl.org/2003/arcrole/concept-reference',LinkPrefix,XLinkPrefix),NamespaceMgr);
+
+            if XMLNodeList.Count > 0 then begin
+              XBRLCommentLine.SETRANGE("XBRL Taxonomy Name",XBRLTaxonomyLine."XBRL Taxonomy Name");
+              XBRLCommentLine.SETRANGE("XBRL Taxonomy Line No.",XBRLTaxonomyLine."Line No.");
+              XBRLCommentLine.SETRANGE("Comment Type",XBRLCommentLine."Comment Type"::Reference);
+              XBRLCommentLine.DELETEALL;
+              XBRLCommentLine.INIT;
+              XBRLCommentLine."XBRL Taxonomy Name" := XBRLTaxonomyLine."XBRL Taxonomy Name";
+              XBRLCommentLine."XBRL Taxonomy Line No." := XBRLTaxonomyLine."Line No.";
+              XBRLCommentLine."Comment Type" := XBRLCommentLine."Comment Type"::Reference;
+              XBRLCommentLine."Line No." := 0;
+              for CurrNodeIndex := 0 to XMLNodeList.Count - 1 do begin
+                XMLNode := XMLNodeList.Item(CurrNodeIndex);
+                ReferenceNode :=
+                  LinkbaseDocNode.SelectSingleNode(
+                    STRSUBSTNO(
+                      '%2referenceLink/%2reference[@%3label="%1"]',
+                      GetAttribute(XLinkPrefix + 'to',XMLNode),LinkPrefix,XLinkPrefix),NamespaceMgr);
+                if not ISNULL(ReferenceNode) then begin
+                  ReferenceNode := ReferenceNode.FirstChild;
+                  while not ISNULL(ReferenceNode) do begin
+                    InsertReference(ReferenceNode,XBRLCommentLine);
+                    ReferenceNode := ReferenceNode.NextSibling;
+                  end;
+                end;
+              end;
+            end;
+          end;
+        until XBRLTaxonomyLine.NEXT = 0;
+      Window.CLOSE;
+    END;
+
+    LOCAL PROCEDURE InsertReference@10(DocumentationNode2@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";VAR XBRLCommentLine@1008 : Record "XBRL Comment Line");
+    VAR
+      i@1003 : Integer;
+      CommentTextCutIndex@1010 : Integer;
+      s@1006 : Text[1024];
+      CommentText@1009 : Text[1024];
+    BEGIN
+      if XBRLCommentLine."Comment Type" = XBRLCommentLine."Comment Type"::Reference then begin
+        s := COPYSTR(DocumentationNode2.LocalName,1,70);
+        i := STRPOS(s,':');
+        if i > 0 then
+          s := COPYSTR(s,i + 1);
+        s := s + ': ';
+        i := STRLEN(s);
+      end;
+
+      CommentText := COPYSTR(DocumentationNode2.InnerText,1,1024);
+      CommentTextCutIndex := STRPOS(CommentText,' ');
+      if s <> '' then begin
+        CommentText := COPYSTR(s,1,i) + COPYSTR(CommentText,1,1024 - i);
+        CommentTextCutIndex := CommentTextCutIndex + i;
+      end;
+
+      if (CommentTextCutIndex < 66) or (CommentTextCutIndex > MAXSTRLEN(XBRLCommentLine.Comment)) then
+        CommentTextCutIndex := MAXSTRLEN(XBRLCommentLine.Comment);
+
+      XBRLCommentLine."Line No." := XBRLCommentLine."Line No." + 10000;
+      XBRLCommentLine.Comment := COPYSTR(CommentText,1,CommentTextCutIndex);
+      XBRLCommentLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE SortPresentationOrder@12(ParentLineNo@1001 : Integer;ParentLevel@1002 : Integer;ParentPresentationOrder@1003 : Text[100]);
+    VAR
+      TempXBRLLine0@1000 : TEMPORARY Record "XBRL Taxonomy Line";
+      PresentationOrderNo@1004 : Integer;
+    BEGIN
+      TempXBRLLine0.DELETEALL;
+      TempXBRLLine.SETCURRENTKEY("Parent Line No.");
+      TempXBRLLine.SETRANGE("Parent Line No.",ParentLineNo);
+      if not TempXBRLLine.FIND('-') then begin
+        TempXBRLLine.SETRANGE("Parent Line No.");
+        exit;
+      end;
+      repeat
+        if ParentLineNo = 0 then begin
+          TempXBRLLine.Level := ParentLevel;
+          TempXBRLLine."Presentation Order" := COPYSTR(FORMAT(100000000 + TempXBRLLine."Line No."),2)
+        end else begin
+          TempXBRLLine.Level := ParentLevel + 1;
+          PresentationOrderNo := PresentationOrderNo + 1;
+          if TempXBRLLine."Presentation Order No." = 0 then
+            TempXBRLLine."Presentation Order No." := PresentationOrderNo;
+          TempXBRLLine."Presentation Order" :=
+            ParentPresentationOrder + '.' + COPYSTR(FORMAT(1000 + TempXBRLLine."Presentation Order No."),2);
+          // Presentation order must be unique
+          TempXBRLLine0.RESET;
+          TempXBRLLine0.SETCURRENTKEY("XBRL Taxonomy Name","Presentation Order");
+          TempXBRLLine0.SETRANGE("XBRL Taxonomy Name",TempXBRLLine."XBRL Taxonomy Name");
+          TempXBRLLine0.SETRANGE("Presentation Order",TempXBRLLine."Presentation Order");
+          if not TempXBRLLine0.ISEMPTY then begin
+            TempXBRLLine0.SETRANGE("Presentation Order");
+            TempXBRLLine0.SETRANGE("Parent Line No.",ParentLineNo);
+            TempXBRLLine0.FINDLAST;
+            TempXBRLLine."Presentation Order" := INCSTR(TempXBRLLine0."Presentation Order");
+          end;
+        end;
+        TempXBRLLine.MODIFY;
+        TempXBRLLine0 := TempXBRLLine;
+        TempXBRLLine0.INSERT;
+      until TempXBRLLine.NEXT = 0;
+      TempXBRLLine.SETRANGE("Parent Line No.");
+
+      TempXBRLLine0.RESET;
+      if TempXBRLLine0.FIND('-') then
+        repeat
+          SortPresentationOrder(TempXBRLLine0."Line No.",TempXBRLLine0.Level,TempXBRLLine0."Presentation Order");
+        until TempXBRLLine0.NEXT = 0;
+      TempXBRLLine.RESET;
+    END;
+
+    LOCAL PROCEDURE GetCommonXmnsPrefixes@14(DocNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    BEGIN
+      xsdPrefix := GetXmlnsPrefix('http://www.w3.org/2001/XMLSchema',DocNode);
+
+      XLinkPrefix := GetXmlnsPrefix('http://www.w3.org/1999/xlink',DocNode);
+
+      LinkPrefix := GetXmlnsPrefix('http://www.xbrl.org/2001/XLink/xbrllinkbase',DocNode);
+      if LinkPrefix = '' then
+        LinkPrefix := GetXmlnsPrefix('http://www.xbrl.org/2003/linkbase',DocNode);
+
+      xbrliPrefix := GetXmlnsPrefix('http://www.xbrl.org/2001/instance',DocNode);
+      if xbrliPrefix = '' then
+        xbrliPrefix := GetXmlnsPrefix('http://www.xbrl.org/2003/instance',DocNode);
+    END;
+
+    LOCAL PROCEDURE GetXmlnsPrefix@15(NameSpace@1000 : Text[260];DocNode@1003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode") : Text;
+    VAR
+      DocNode2@1004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      Prefix@1002 : Text;
+      i@1001 : Integer;
+    BEGIN
+      Prefix := GetAttributeNameByValue(NameSpace,DocNode,false);
+      if (Prefix = '') and DocNode.HasChildNodes then begin
+        DocNode2 := DocNode.FirstChild;
+        Prefix := GetAttributeNameByValue(NameSpace,DocNode2,false);
+      end;
+
+      i := STRPOS(Prefix,'xmlns:');
+      if i > 0 then begin
+        Prefix := COPYSTR(Prefix,i + 6);
+        if STRLEN(Prefix) > 0 then
+          Prefix := Prefix + ':';
+      end else
+        Prefix := '';
+      exit(Prefix);
+    END;
+
+    [Internal]
+    PROCEDURE ReadNamespaceFromSchema@13(VAR SchemaLocation@1003 : Text) : Text[1024];
+    VAR
+      TempBlob@1006 : Record TempBlob;
+      FileMgt@1005 : Codeunit "File Management";
+      TaxonomyNode@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      BlobInStream@1007 : InStream;
+      i@1004 : Integer;
+      FileName@1000 : Text;
+    BEGIN
+      if STRPOS(SchemaLocation,'/') <= 0 then begin
+        i := STRLEN(SchemaLocation);
+        if i > 1 then
+          while (i > 1) and (SchemaLocation[i] <> '\') do
+            i := i - 1;
+        if i > 1 then
+          FileName := COPYSTR(SchemaLocation,1,i);
+      end;
+      FileName := FileMgt.BLOBImport(TempBlob,FileName + '*.xsd');
+      if FileName = '' then
+        exit('');
+
+      TempBlob.Blob.CREATEINSTREAM(BlobInStream);
+      XMLDOMManagement.LoadXMLDocumentFromInStream(BlobInStream,TaxonomyDocument);
+      TaxonomyNode := TaxonomyDocument.DocumentElement;
+      SchemaLocation := FileName;
+      exit(GetAttribute('targetNamespace',TaxonomyNode));
+    END;
+
+    [External]
+    PROCEDURE SetFilesOnServer@19(NewFilesOnServer@1000 : Boolean);
+    BEGIN
+      // FilesOnServer is used when scripting this codeunit.
+      FilesOnServer := NewFilesOnServer;
+    END;
+
+    LOCAL PROCEDURE PopulateNamespaceManager@20(XmlNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      Attribute@1002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlAttribute";
+      Attributes@1003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlAttributeCollection";
+      i@1001 : Integer;
+      Prefix@1004 : Text;
+    BEGIN
+      if not ISNULL(XmlNode) then begin
+        Attributes := XmlNode.Attributes;
+        for i := 0 to Attributes.Count - 1 do begin
+          Attribute := Attributes.Item(i);
+          if STRPOS(Attribute.Name,'xmlns') = 1 then
+            if STRPOS(Attribute.Name,':') > 0 then begin
+              Prefix := COPYSTR(Attribute.Name,STRPOS(Attribute.Name,':') + 1);
+              if XmlNode.Prefix = Prefix then
+                xsdPrefix := Prefix + ':';
+              NamespaceMgr.AddNamespace(Prefix,Attribute.Value)
+            end else begin
+              NamespaceMgr.AddNamespace('defns',Attribute.Value);
+              xsdPrefix := 'defns:'
+            end;
+        end;
+
+        if XLinkPrefix = '' then
+          XLinkPrefix := xsdPrefix;
+        if LinkPrefix = '' then
+          LinkPrefix := xsdPrefix;
+        if xbrliPrefix = '' then
+          xbrliPrefix := xsdPrefix;
+      end;
+    END;
+
+    LOCAL PROCEDURE IsWindowsClientSession@3() : Boolean;
+    VAR
+      ActiveSession@1000 : Record "Active Session";
+    BEGIN
+      ActiveSession.GET(SERVICEINSTANCEID,SESSIONID);
+      exit(ActiveSession."Client Type" = ActiveSession."Client Type"::"Windows Client");
+    END;
+
+    LOCAL PROCEDURE CreateNameSpaceManager@18(XmlDocument@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    BEGIN
+      if not ISNULL(NamespaceMgr) then
+        CLEAR(NamespaceMgr);
+
+      NamespaceMgr := NamespaceMgr.XmlNamespaceManager(XmlDocument.NameTable);
+    END;
+
+    LOCAL PROCEDURE GetDocumentPreFix@27(TaxonomyNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode") : Text[30];
+    BEGIN
+      if STRPOS(TaxonomyNode.Name,':') > 1 then
+        exit(COPYSTR(TaxonomyNode.Name,1,STRPOS(TaxonomyNode.Name,':')));
+    END;
+
+    LOCAL PROCEDURE IsElementTypeDescription@22(ElementNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode") : Boolean;
+    VAR
+      XMLElement@1001 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+    BEGIN
+      // "Sequence" type
+      XMLElement :=
+        ElementNode.OwnerDocument.DocumentElement.SelectSingleNode(
+          STRSUBSTNO('%1element/%1complexType/%1sequence/%1element[@ref="%2%3"]',
+            xsdPrefix,targetNamespacePrefix,GetAttribute('name',ElementNode)),
+          NamespaceMgr);
+
+      // "Choice" type
+      if ISNULL(XMLElement) then
+        XMLElement :=
+          ElementNode.OwnerDocument.DocumentElement.SelectSingleNode(
+            STRSUBSTNO('%1element/%1complexType/%1choice/%1element[@ref="%2%3"]',
+              xsdPrefix,targetNamespacePrefix,GetAttribute('name',ElementNode)),
+            NamespaceMgr);
+
+      if ISNULL(XMLElement) then
+        XMLElement :=
+          ElementNode.OwnerDocument.DocumentElement.SelectSingleNode(
+            STRSUBSTNO('%1element/%1complexType/%1choice/%1element[@ref="%2%3"]',
+              xsdPrefix,targetNamespacePrefix,GetAttribute('substitutionGroup',ElementNode)),
+            NamespaceMgr);
+
+      exit(not ISNULL(XMLElement));
+    END;
+
+    LOCAL PROCEDURE SelectSingleNode@29(SourceNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";XPathExpr@1001 : Text;Prefix@1002 : Text;VAR ResultNode@1004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    BEGIN
+      ResultNode := SourceNode.SelectSingleNode(STRSUBSTNO(XPathExpr,Prefix),NamespaceMgr);
+      if ISNULL(ResultNode) then
+        ResultNode := SourceNode.SelectSingleNode(STRSUBSTNO(XPathExpr,''),NamespaceMgr);
+    END;
+
+    LOCAL PROCEDURE SelectNodes@28(SourceNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";XPathExpr@1001 : Text;Prefix@1002 : Text;VAR ResultElementList@1003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList");
+    BEGIN
+      ResultElementList := SourceNode.SelectNodes(STRSUBSTNO(XPathExpr,Prefix),NamespaceMgr);
+      if ResultElementList.Count = 0 then
+        ResultElementList := SourceNode.SelectNodes(STRSUBSTNO(XPathExpr,''),NamespaceMgr);
+    END;
+
+    LOCAL PROCEDURE CopyXBRLElementsForPresentation@23(VAR LinkbaseDocNode@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";xbrli@1001 : Text;XBRLTaxonomyName@1002 : Code[20];XBRLElementName@1003 : Text;VAR LastXBRLLineNo@1007 : Integer);
+    VAR
+      XBRLTaxonomyLine2@1004 : Record "XBRL Taxonomy Line";
+      XMLNodeList@1005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      i@1006 : Integer;
+    BEGIN
+      if xbrli = 'http://www.xbrl.org/2001/instance' then // spec. 2.0
+        XMLNodeList :=
+          LinkbaseDocNode.SelectNodes(
+            STRSUBSTNO(
+              '%3presentationLink/%3presentationArc[@%4to="%1" and @%4arcrole="%2"]',
+              XBRLElementName,'http://www.xbrl.org/linkprops/arc/parent-child',LinkPrefix,XLinkPrefix),NamespaceMgr)
+      else // 'http://www.xbrl.org/2003/instance' // spec. 2.1
+        XMLNodeList :=
+          LinkbaseDocNode.SelectNodes(
+            STRSUBSTNO(
+              '%3presentationLink/%3presentationArc[@%4to="%1" and @%4arcrole="%2"]',
+              XBRLElementName,'http://www.xbrl.org/2003/arcrole/parent-child',LinkPrefix,XLinkPrefix),NamespaceMgr);
+
+      // TempXBRLLine is a global variable, so we must save its current state before any manupulations to restore it later
+      XBRLTaxonomyLine2.COPY(TempXBRLLine);
+      TempXBRLLine.RESET;
+      TempXBRLLine.SETRANGE("XBRL Taxonomy Name",XBRLTaxonomyName);
+      TempXBRLLine.SETRANGE("Element ID",XBRLElementName);
+      TempXBRLLine.SETRANGE("Type Description Element",false);
+
+      for i := 1 to XMLNodeList.Count - TempXBRLLine.COUNT do begin
+        LastXBRLLineNo += 10000;
+        CopyElementLine(XBRLTaxonomyName,XBRLElementName,LastXBRLLineNo);
+      end;
+
+      TempXBRLLine.COPY(XBRLTaxonomyLine2);
+    END;
+
+    LOCAL PROCEDURE CopyElementLine@24(TaxonomyName@1000 : Code[20];ElementName@1001 : Text;XBRLLineNo@1002 : Integer);
+    VAR
+      XBRLTaxonomyLine@1003 : Record "XBRL Taxonomy Line";
+    BEGIN
+      with TempXBRLLine do begin
+        XBRLTaxonomyLine.SETRANGE("XBRL Taxonomy Name",TaxonomyName);
+        XBRLTaxonomyLine.SETRANGE("Element ID",ElementName);
+        if XBRLTaxonomyLine.FINDFIRST then begin
+          TRANSFERFIELDS(XBRLTaxonomyLine);
+          "Presentation Linkbase Line No." := 0;
+          "Line No." := XBRLLineNo;
+          INSERT;
+
+          CopyRelatedXBRLSetup(TaxonomyName,XBRLTaxonomyLine."Line No.",XBRLLineNo,DATABASE::"XBRL Taxonomy Label");
+          CopyRelatedXBRLSetup(TaxonomyName,XBRLTaxonomyLine."Line No.",XBRLLineNo,DATABASE::"XBRL Comment Line");
+          CopyRelatedXBRLSetup(TaxonomyName,XBRLTaxonomyLine."Line No.",XBRLLineNo,DATABASE::"XBRL G/L Map Line");
+          CopyRelatedXBRLSetup(TaxonomyName,XBRLTaxonomyLine."Line No.",XBRLLineNo,DATABASE::"XBRL Rollup Line");
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyRelatedXBRLSetup@25(TaxonomyName@1000 : Code[20];FromTaxonomyLineNo@1001 : Integer;ToTaxonomyLineNo@1002 : Integer;TableNo@1003 : Integer);
+    VAR
+      FromRecRef@1004 : RecordRef;
+      ToRecRef@1005 : RecordRef;
+      FilterFieldRef@1006 : FieldRef;
+      NewLineNoFieldRef@1007 : FieldRef;
+    BEGIN
+      FromRecRef.OPEN(TableNo);
+      FilterFieldRef := FromRecRef.FIELD(1);  // Field "XBRL Taxonomy Name"
+      FilterFieldRef.SETRANGE(TaxonomyName);
+      FilterFieldRef := FromRecRef.FIELD(2);  // Field "XBRL Taxonomy Line No."
+      FilterFieldRef.SETRANGE(FromTaxonomyLineNo);
+      if FromRecRef.FINDSET then
+        repeat
+          ToRecRef := FromRecRef.DUPLICATE;
+          NewLineNoFieldRef := ToRecRef.FIELD(2);
+          NewLineNoFieldRef.VALUE := ToTaxonomyLineNo;
+          ToRecRef.INSERT;
+        until FromRecRef.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE LoadLinkbaseDocument@21(VAR XBRLLinkbase@1001 : Record "XBRL Linkbase";VAR LinkbaseDocument@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    VAR
+      InStr@1002 : InStream;
+    BEGIN
+      with XBRLLinkbase do begin
+        TESTFIELD(Type,Type::Presentation);
+        CALCFIELDS(XML);
+        if not XML.HASVALUE then
+          ERROR(Text012,TABLECAPTION,"Line No.");
+        XML.CREATEINSTREAM(InStr);
+      end;
+      XMLDOMManagement.LoadXMLDocumentFromInStream(InStr,LinkbaseDocument);
+    END;
+
+    LOCAL PROCEDURE FindLinkbaseDocNode@26(VAR LinkbaseDocument@1000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";VAR LinkbaseDocNode@1001 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    BEGIN
+      LinkbaseDocNode := LinkbaseDocument.FirstChild;
+      while LOWERCASE(LinkbaseDocNode.NodeType.ToString) in ['xmldeclaration','processinginstruction','comment'] do
+        LinkbaseDocNode := LinkbaseDocNode.NextSibling;
+    END;
+
+    LOCAL PROCEDURE SaveTaxonomyLines@32(VAR TempXBRLTaxonomyLine@1000 : TEMPORARY Record "XBRL Taxonomy Line");
+    VAR
+      XBRLTaxonomyLine@1001 : Record "XBRL Taxonomy Line";
+    BEGIN
+      if TempXBRLTaxonomyLine.FINDSET then
+        repeat
+          with XBRLTaxonomyLine do begin
+            XBRLTaxonomyLine := TempXBRLTaxonomyLine;
+            SETRANGE("XBRL Taxonomy Name","XBRL Taxonomy Name");
+            SETRANGE("Line No.","Line No.");
+            if ISEMPTY then
+              INSERT
+            else
+              MODIFY;
+          end;
+        until TempXBRLTaxonomyLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InitTaxonomyLinesBuf@36(VAR XBRLTaxonomyLine@1000 : Record "XBRL Taxonomy Line";VAR TempXBRLTaxonomyLine@1001 : TEMPORARY Record "XBRL Taxonomy Line");
+    BEGIN
+      TempXBRLTaxonomyLine.DELETEALL;
+      XBRLTaxonomyLine.SETRANGE("Type Description Element",false);
+      if XBRLTaxonomyLine.FINDSET then
+        repeat
+          TempXBRLTaxonomyLine := XBRLTaxonomyLine;
+          TempXBRLTaxonomyLine.INSERT;
+        until XBRLTaxonomyLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateSchemaLocation@30(VAR TempXBRLSchema@1000 : TEMPORARY Record "XBRL Schema";VAR XBRLSchema@1001 : Record "XBRL Schema";XBRLLinkbase@1002 : Record "XBRL Linkbase";SchemaLocation@1004 : Text;VAR FromSchemalocation@1006 : Text);
+    VAR
+      i@1003 : Integer;
+      j@1005 : Integer;
+    BEGIN
+      TempXBRLSchema.DELETEALL;
+      XBRLSchema.SETRANGE("XBRL Taxonomy Name",XBRLLinkbase."XBRL Taxonomy Name");
+      if XBRLSchema.FIND('-') then
+        repeat
+          if XBRLSchema."Line No." = XBRLLinkbase."XBRL Schema Line No." then begin
+            i := STRPOS(SchemaLocation,XBRLSchema.targetNamespace + ' ');
+            if i > 0 then begin
+              i := i + STRLEN(XBRLSchema.targetNamespace);
+              while (i < STRLEN(SchemaLocation)) and (SchemaLocation[i] <> ' ') do
+                i := i + 1;
+              while (i < STRLEN(SchemaLocation)) and (SchemaLocation[i] = ' ') do
+                i := i + 1;
+              j := i;
+              while (i < STRLEN(SchemaLocation)) and (SchemaLocation[i] <> ' ') do
+                i := i + 1;
+              if i = STRLEN(SchemaLocation) then
+                i := i + 1;
+              XBRLSchema.schemaLocation := COPYSTR(SchemaLocation,j,i - j);
+              XBRLSchema.MODIFY;
+              FromSchemalocation := XBRLSchema.schemaLocation;
+            end;
+          end;
+          TempXBRLSchema := XBRLSchema;
+          TempXBRLSchema.INSERT;
+        until XBRLSchema.NEXT = 0;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

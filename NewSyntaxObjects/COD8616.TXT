@@ -1,0 +1,922 @@
+OBJECT Codeunit 8616 Config. Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=You must specify a company name.';
+      Text001@1001 : TextConst 'ENU=Do you want to copy the data from the %1 table in %2?';
+      Text002@1002 : TextConst 'ENU=Data from the %1 table in %2 has been copied successfully.';
+      Text003@1003 : TextConst 'ENU=Do you want to copy the data from the selected tables in %1?';
+      Text004@1026 : TextConst 'ENU=Data from the selected tables in %1 has been copied successfully.';
+      Text006@1006 : TextConst 'ENU=The base company must not be the same as the current company.';
+      Text007@1007 : TextConst 'ENU=The %1 table in %2 already contains data.\\You must delete the data from the table before you can use this function.';
+      Text009@1009 : TextConst 'ENU=There is no data in the %1 table in %2.\\You must set up the table in %3 manually.';
+      TempFieldRec@1004 : TEMPORARY Record Field;
+      ConfigProgressBar@1024 : Codeunit "Config. Progress Bar";
+      HideDialog@1035 : Boolean;
+      Text023@1005 : TextConst 'ENU=Processing tables';
+
+    [Internal]
+    PROCEDURE CopyDataDialog@3(NewCompanyName@1000 : Text[30];VAR ConfigLine@1001 : Record "Config. Line");
+    VAR
+      ConfirmTableText@1002 : Text[250];
+      MessageTableText@1004 : Text[250];
+      SingleTable@1003 : Boolean;
+    BEGIN
+      with ConfigLine do begin
+        if NewCompanyName = '' then
+          ERROR(Text000);
+        if not FINDFIRST then
+          exit;
+        SingleTable := NEXT = 0;
+        if SingleTable then begin
+          ConfirmTableText := STRSUBSTNO(Text001,Name,NewCompanyName);
+          MessageTableText := STRSUBSTNO(Text002,Name,NewCompanyName);
+        end else begin
+          ConfirmTableText := STRSUBSTNO(Text003,NewCompanyName);
+          MessageTableText := STRSUBSTNO(Text004,NewCompanyName);
+        end;
+        if not CONFIRM(ConfirmTableText,SingleTable) then
+          exit;
+        if FINDSET then
+          repeat
+            CopyData(ConfigLine);
+          until NEXT = 0;
+        COMMIT;
+        MESSAGE(MessageTableText)
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyData@2(VAR ConfigLine@1000 : Record "Config. Line");
+    VAR
+      BaseCompanyName@1001 : Text[30];
+    BEGIN
+      with ConfigLine do begin
+        CheckBlocked;
+        FILTERGROUP := 2;
+        BaseCompanyName := GETRANGEMAX("Company Filter (Source Table)");
+        FILTERGROUP := 0;
+        if BaseCompanyName = COMPANYNAME then
+          ERROR(Text006);
+        CALCFIELDS("No. of Records","No. of Records (Source Table)");
+        if "No. of Records" <> 0 then
+          ERROR(
+            Text007,
+            Name,COMPANYNAME);
+        if "No. of Records (Source Table)" = 0 then
+          ERROR(
+            Text009,
+            Name,BaseCompanyName,COMPANYNAME);
+        TransferContents("Table ID",BaseCompanyName,true);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE TransferContents@6(TableID@1000 : Integer;NewCompanyName@1001 : Text[30];CopyTable@1002 : Boolean) : Boolean;
+    BEGIN
+      TempFieldRec.DELETEALL;
+      if CopyTable then
+        MarkPostValidationData(DATABASE::Contact,5053);
+      TransferContent(TableID,NewCompanyName,CopyTable);
+      TempFieldRec.DELETEALL;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TransferContent@4(TableNumber@1000 : Integer;NewCompanyName@1002 : Text[30];CopyTable@1001 : Boolean);
+    VAR
+      FieldRec@1007 : Record Field;
+      FromCompanyRecRef@1003 : RecordRef;
+      ToCompanyRecRef@1004 : RecordRef;
+      FromCompanyFieldRef@1005 : FieldRef;
+      ToCompanyFieldRef@1006 : FieldRef;
+    BEGIN
+      if not CopyTable then
+        exit;
+      FromCompanyRecRef.OPEN(TableNumber,false,NewCompanyName);
+      if FromCompanyRecRef.ISEMPTY then begin
+        FromCompanyRecRef.CLOSE;
+        exit;
+      end;
+      FromCompanyRecRef.FIND('-');
+      ToCompanyRecRef.OPEN(TableNumber,false,COMPANYNAME);
+      FieldRec.SETRANGE(TableNo,TableNumber);
+      repeat
+        if FieldRec.FINDSET then begin
+          ToCompanyRecRef.INIT;
+          repeat
+            if not TempFieldRec.GET(TableNumber,FieldRec."No.") then begin
+              FromCompanyFieldRef := FromCompanyRecRef.FIELD(FieldRec."No.");
+              ToCompanyFieldRef := ToCompanyRecRef.FIELD(FieldRec."No.");
+              ToCompanyFieldRef.VALUE(FromCompanyFieldRef.VALUE);
+            end;
+          until FieldRec.NEXT = 0;
+          ToCompanyRecRef.INSERT(true);
+        end;
+      until FromCompanyRecRef.NEXT = 0;
+      // Treatment of fields that require post-validation:
+      TempFieldRec.SETRANGE(TableNo,TableNumber);
+      if TempFieldRec.FINDSET then begin
+        FromCompanyRecRef.FIND('-');
+        repeat
+          ToCompanyRecRef.SETPOSITION(FromCompanyRecRef.GETPOSITION);
+          ToCompanyRecRef.FIND('=');
+          TempFieldRec.FINDSET;
+          repeat
+            FromCompanyFieldRef := FromCompanyRecRef.FIELD(TempFieldRec."No.");
+            ToCompanyFieldRef := ToCompanyRecRef.FIELD(TempFieldRec."No.");
+            ToCompanyFieldRef.VALUE(FromCompanyFieldRef.VALUE);
+          until TempFieldRec.NEXT = 0;
+          ToCompanyRecRef.MODIFY(true);
+        until FromCompanyRecRef.NEXT = 0;
+      end;
+
+      FromCompanyRecRef.CLOSE;
+      ToCompanyRecRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE MarkPostValidationData@10(TableNo@1000 : Integer;FieldNo@1001 : Integer);
+    BEGIN
+      TempFieldRec.INIT;
+      TempFieldRec.TableNo := TableNo;
+      TempFieldRec."No." := FieldNo;
+      if TempFieldRec.INSERT then;
+    END;
+
+    [External]
+    PROCEDURE FindPage@9(TableID@1000 : Integer) : Integer;
+    BEGIN
+      case TableID of
+        DATABASE::"Company Information":
+          exit(PAGE::"Company Information");
+        DATABASE::"Responsibility Center":
+          exit(PAGE::"Responsibility Center List");
+        DATABASE::"Accounting Period":
+          exit(PAGE::"Accounting Periods");
+        DATABASE::"General Ledger Setup":
+          exit(PAGE::"General Ledger Setup");
+        DATABASE::"No. Series":
+          exit(PAGE::"No. Series");
+        DATABASE::"No. Series Line":
+          exit(PAGE::"No. Series Lines");
+        DATABASE::"G/L Account":
+          exit(PAGE::"Chart of Accounts");
+        DATABASE::"Gen. Business Posting Group":
+          exit(PAGE::"Gen. Business Posting Groups");
+        DATABASE::"Gen. Product Posting Group":
+          exit(PAGE::"Gen. Product Posting Groups");
+        DATABASE::"General Posting Setup":
+          exit(PAGE::"General Posting Setup");
+        DATABASE::"VAT Business Posting Group":
+          exit(PAGE::"VAT Business Posting Groups");
+        DATABASE::"VAT Product Posting Group":
+          exit(PAGE::"VAT Product Posting Groups");
+        DATABASE::"VAT Posting Setup":
+          exit(PAGE::"VAT Posting Setup");
+        DATABASE::"Acc. Schedule Name":
+          exit(PAGE::"Account Schedule Names");
+        DATABASE::"Column Layout Name":
+          exit(PAGE::"Column Layout Names");
+        DATABASE::"G/L Budget Name":
+          exit(PAGE::"G/L Budget Names");
+        DATABASE::"VAT Statement Template":
+          exit(PAGE::"VAT Statement Templates");
+        DATABASE::"Tariff Number":
+          exit(PAGE::"Tariff Numbers");
+        DATABASE::"Transaction Type":
+          exit(PAGE::"Transaction Types");
+        DATABASE::"Transaction Specification":
+          exit(PAGE::"Transaction Specifications");
+        DATABASE::"Transport Method":
+          exit(PAGE::"Transport Methods");
+        DATABASE::"Entry/Exit Point":
+          exit(PAGE::"Entry/Exit Points");
+        DATABASE::Area:
+          exit(PAGE::Areas);
+        DATABASE::Territory:
+          exit(PAGE::Territories);
+        DATABASE::"Tax Jurisdiction":
+          exit(PAGE::"Tax Jurisdictions");
+        DATABASE::"Tax Group":
+          exit(PAGE::"Tax Groups");
+        DATABASE::"Tax Detail":
+          exit(PAGE::"Tax Details");
+        DATABASE::"Tax Area":
+          exit(PAGE::"Tax Area");
+        DATABASE::"Tax Area Line":
+          exit(PAGE::"Tax Area Line");
+        DATABASE::"Source Code":
+          exit(PAGE::"Source Codes");
+        DATABASE::"Reason Code":
+          exit(PAGE::"Reason Codes");
+        DATABASE::"Standard Text":
+          exit(PAGE::"Standard Text Codes");
+        DATABASE::"Business Unit":
+          exit(PAGE::"Business Unit List");
+        DATABASE::Dimension:
+          exit(PAGE::Dimensions);
+        DATABASE::"Default Dimension Priority":
+          exit(PAGE::"Default Dimension Priorities");
+        DATABASE::"Dimension Combination":
+          exit(PAGE::"Dimension Combinations");
+        DATABASE::"Analysis View":
+          exit(PAGE::"Analysis View List");
+        DATABASE::"Post Code":
+          exit(PAGE::"Post Codes");
+        DATABASE::"Country/Region":
+          exit(PAGE::"Countries/Regions");
+        DATABASE::Language:
+          exit(PAGE::Languages);
+        DATABASE::Currency:
+          exit(PAGE::Currencies);
+        DATABASE::"Bank Account":
+          exit(PAGE::"Bank Account List");
+        DATABASE::"Bank Account Posting Group":
+          exit(PAGE::"Bank Account Posting Groups");
+        DATABASE::"Change Log Setup (Table)":
+          exit(PAGE::"Change Log Setup (Table) List");
+        DATABASE::"Change Log Setup (Field)":
+          exit(PAGE::"Change Log Setup (Field) List");
+        DATABASE::"Sales & Receivables Setup":
+          exit(PAGE::"Sales & Receivables Setup");
+        DATABASE::Customer:
+          exit(PAGE::"Customer List");
+        DATABASE::"Customer Posting Group":
+          exit(PAGE::"Customer Posting Groups");
+        DATABASE::"Payment Terms":
+          exit(PAGE::"Payment Terms");
+        DATABASE::"Payment Method":
+          exit(PAGE::"Payment Methods");
+        DATABASE::"Reminder Terms":
+          exit(PAGE::"Reminder Terms");
+        DATABASE::"Reminder Level":
+          exit(PAGE::"Reminder Levels");
+        DATABASE::"Reminder Text":
+          exit(PAGE::"Reminder Text");
+        DATABASE::"Finance Charge Terms":
+          exit(PAGE::"Finance Charge Terms");
+        DATABASE::"Shipment Method":
+          exit(PAGE::"Shipment Methods");
+        DATABASE::"Shipping Agent":
+          exit(PAGE::"Shipping Agents");
+        DATABASE::"Shipping Agent Services":
+          exit(PAGE::"Shipping Agent Services");
+        DATABASE::"Customer Discount Group":
+          exit(PAGE::"Customer Disc. Groups");
+        DATABASE::"Salesperson/Purchaser":
+          exit(PAGE::"Salespersons/Purchasers");
+        DATABASE::"Marketing Setup":
+          exit(PAGE::"Marketing Setup");
+        DATABASE::"Duplicate Search String Setup":
+          exit(PAGE::"Duplicate Search String Setup");
+        DATABASE::Contact:
+          exit(PAGE::"Contact List");
+        DATABASE::"Business Relation":
+          exit(PAGE::"Business Relations");
+        DATABASE::"Mailing Group":
+          exit(PAGE::"Mailing Groups");
+        DATABASE::"Industry Group":
+          exit(PAGE::"Industry Groups");
+        DATABASE::"Web Source":
+          exit(PAGE::"Web Sources");
+        DATABASE::"Interaction Group":
+          exit(PAGE::"Interaction Groups");
+        DATABASE::"Interaction Template":
+          exit(PAGE::"Interaction Templates");
+        DATABASE::"Job Responsibility":
+          exit(PAGE::"Job Responsibilities");
+        DATABASE::"Organizational Level":
+          exit(PAGE::"Organizational Levels");
+        DATABASE::"Campaign Status":
+          exit(PAGE::"Campaign Status");
+        DATABASE::Activity:
+          exit(PAGE::Activity);
+        DATABASE::Team:
+          exit(PAGE::Teams);
+        DATABASE::"Profile Questionnaire Header":
+          exit(PAGE::"Profile Questionnaires");
+        DATABASE::"Sales Cycle":
+          exit(PAGE::"Sales Cycles");
+        DATABASE::"Close Opportunity Code":
+          exit(PAGE::"Close Opportunity Codes");
+        DATABASE::"Customer Template":
+          exit(PAGE::"Customer Template List");
+        DATABASE::"Service Mgt. Setup":
+          exit(PAGE::"Service Mgt. Setup");
+        DATABASE::"Service Item":
+          exit(PAGE::"Service Item List");
+        DATABASE::"Service Hour":
+          exit(PAGE::"Default Service Hours");
+        DATABASE::"Work-Hour Template":
+          exit(PAGE::"Work-Hour Templates");
+        DATABASE::"Resource Service Zone":
+          exit(PAGE::"Resource Service Zones");
+        DATABASE::Loaner:
+          exit(PAGE::"Loaner List");
+        DATABASE::"Skill Code":
+          exit(PAGE::"Skill Codes");
+        DATABASE::"Fault Reason Code":
+          exit(PAGE::"Fault Reason Codes");
+        DATABASE::"Service Cost":
+          exit(PAGE::"Service Costs");
+        DATABASE::"Service Zone":
+          exit(PAGE::"Service Zones");
+        DATABASE::"Service Order Type":
+          exit(PAGE::"Service Order Types");
+        DATABASE::"Service Item Group":
+          exit(PAGE::"Service Item Groups");
+        DATABASE::"Service Shelf":
+          exit(PAGE::"Service Shelves");
+        DATABASE::"Service Status Priority Setup":
+          exit(PAGE::"Service Order Status Setup");
+        DATABASE::"Repair Status":
+          exit(PAGE::"Repair Status Setup");
+        DATABASE::"Service Price Group":
+          exit(PAGE::"Service Price Groups");
+        DATABASE::"Serv. Price Group Setup":
+          exit(PAGE::"Serv. Price Group Setup");
+        DATABASE::"Service Price Adjustment Group":
+          exit(PAGE::"Serv. Price Adjmt. Group");
+        DATABASE::"Serv. Price Adjustment Detail":
+          exit(PAGE::"Serv. Price Adjmt. Detail");
+        DATABASE::"Resolution Code":
+          exit(PAGE::"Resolution Codes");
+        DATABASE::"Fault Area":
+          exit(PAGE::"Fault Areas");
+        DATABASE::"Symptom Code":
+          exit(PAGE::"Symptom Codes");
+        DATABASE::"Fault Code":
+          exit(PAGE::"Fault Codes");
+        DATABASE::"Fault/Resol. Cod. Relationship":
+          exit(PAGE::"Fault/Resol. Cod. Relationship");
+        DATABASE::"Contract Group":
+          exit(PAGE::"Service Contract Groups");
+        DATABASE::"Service Contract Template":
+          exit(PAGE::"Service Contract Template");
+        DATABASE::"Service Contract Account Group":
+          exit(PAGE::"Serv. Contract Account Groups");
+        DATABASE::"Troubleshooting Header":
+          exit(PAGE::Troubleshooting);
+        DATABASE::"Purchases & Payables Setup":
+          exit(PAGE::"Purchases & Payables Setup");
+        DATABASE::Vendor:
+          exit(PAGE::"Vendor List");
+        DATABASE::"Vendor Posting Group":
+          exit(PAGE::"Vendor Posting Groups");
+        DATABASE::Purchasing:
+          exit(PAGE::"Purchasing Codes");
+        DATABASE::"Inventory Setup":
+          exit(PAGE::"Inventory Setup");
+        DATABASE::"Nonstock Item Setup":
+          exit(PAGE::"Nonstock Item Setup");
+        DATABASE::"Item Tracking Code":
+          exit(PAGE::"Item Tracking Codes");
+        DATABASE::Item:
+          exit(PAGE::"Item List");
+        DATABASE::"Nonstock Item":
+          exit(PAGE::"Nonstock Item List");
+        DATABASE::"Inventory Posting Group":
+          exit(PAGE::"Inventory Posting Groups");
+        DATABASE::"Inventory Posting Setup":
+          exit(PAGE::"Inventory Posting Setup");
+        DATABASE::"Unit of Measure":
+          exit(PAGE::"Units of Measure");
+        DATABASE::"Customer Price Group":
+          exit(PAGE::"Customer Price Groups");
+        DATABASE::"Item Discount Group":
+          exit(PAGE::"Item Disc. Groups");
+        DATABASE::Manufacturer:
+          exit(PAGE::Manufacturers);
+        DATABASE::"Item Category":
+          exit(PAGE::"Item Categories");
+        DATABASE::"Rounding Method":
+          exit(PAGE::"Rounding Methods");
+        DATABASE::Location:
+          exit(PAGE::"Location List");
+        DATABASE::"Transfer Route":
+          exit(PAGE::"Transfer Routes");
+        DATABASE::"Stockkeeping Unit":
+          exit(PAGE::"Stockkeeping Unit List");
+        DATABASE::"Warehouse Setup":
+          exit(PAGE::"Warehouse Setup");
+        DATABASE::"Resources Setup":
+          exit(PAGE::"Resources Setup");
+        DATABASE::Resource:
+          exit(PAGE::"Resource List");
+        DATABASE::"Resource Group":
+          exit(PAGE::"Resource Groups");
+        DATABASE::"Work Type":
+          exit(PAGE::"Work Types");
+        DATABASE::"Jobs Setup":
+          exit(PAGE::"Jobs Setup");
+        DATABASE::"Job Posting Group":
+          exit(PAGE::"Job Posting Groups");
+        DATABASE::"FA Setup":
+          exit(PAGE::"Fixed Asset Setup");
+        DATABASE::"Fixed Asset":
+          exit(PAGE::"Fixed Asset List");
+        DATABASE::Insurance:
+          exit(PAGE::"Insurance List");
+        DATABASE::"FA Posting Group":
+          exit(PAGE::"FA Posting Groups");
+        DATABASE::"FA Journal Template":
+          exit(PAGE::"FA Journal Templates");
+        DATABASE::"FA Reclass. Journal Template":
+          exit(PAGE::"FA Reclass. Journal Templates");
+        DATABASE::"Insurance Journal Template":
+          exit(PAGE::"Insurance Journal Templates");
+        DATABASE::"Depreciation Book":
+          exit(PAGE::"Depreciation Book List");
+        DATABASE::"FA Class":
+          exit(PAGE::"FA Classes");
+        DATABASE::"FA Subclass":
+          exit(PAGE::"FA Subclasses");
+        DATABASE::"FA Location":
+          exit(PAGE::"FA Locations");
+        DATABASE::"Insurance Type":
+          exit(PAGE::"Insurance Types");
+        DATABASE::Maintenance:
+          exit(PAGE::Maintenance);
+        DATABASE::"Human Resources Setup":
+          exit(PAGE::"Human Resources Setup");
+        DATABASE::Employee:
+          exit(PAGE::"Employee List");
+        DATABASE::"Cause of Absence":
+          exit(PAGE::"Causes of Absence");
+        DATABASE::"Cause of Inactivity":
+          exit(PAGE::"Causes of Inactivity");
+        DATABASE::"Grounds for Termination":
+          exit(PAGE::"Grounds for Termination");
+        DATABASE::"Employment Contract":
+          exit(PAGE::"Employment Contracts");
+        DATABASE::Qualification:
+          exit(PAGE::Qualifications);
+        DATABASE::Relative:
+          exit(PAGE::Relatives);
+        DATABASE::"Misc. Article":
+          exit(PAGE::"Misc. Article Information");
+        DATABASE::Confidential:
+          exit(PAGE::Confidential);
+        DATABASE::"Employee Statistics Group":
+          exit(PAGE::"Employee Statistics Groups");
+        DATABASE::Union:
+          exit(PAGE::Unions);
+        DATABASE::"Manufacturing Setup":
+          exit(PAGE::"Manufacturing Setup");
+        DATABASE::Family:
+          exit(PAGE::Family);
+        DATABASE::"Production BOM Header":
+          exit(PAGE::"Production BOM");
+        DATABASE::"Capacity Unit of Measure":
+          exit(PAGE::"Capacity Units of Measure");
+        DATABASE::"Work Shift":
+          exit(PAGE::"Work Shifts");
+        DATABASE::"Shop Calendar":
+          exit(PAGE::"Shop Calendars");
+        DATABASE::"Work Center Group":
+          exit(PAGE::"Work Center Groups");
+        DATABASE::"Standard Task":
+          exit(PAGE::"Standard Tasks");
+        DATABASE::"Routing Link":
+          exit(PAGE::"Routing Links");
+        DATABASE::Stop:
+          exit(PAGE::"Stop Codes");
+        DATABASE::Scrap:
+          exit(PAGE::"Scrap Codes");
+        DATABASE::"Machine Center":
+          exit(PAGE::"Machine Center List");
+        DATABASE::"Work Center":
+          exit(PAGE::"Work Center List");
+        DATABASE::"Routing Header":
+          exit(PAGE::Routing);
+        DATABASE::"Cost Type":
+          exit(PAGE::"Cost Type List");
+        DATABASE::"Cost Journal Template":
+          exit(PAGE::"Cost Journal Templates");
+        DATABASE::"Cost Allocation Source":
+          exit(PAGE::"Cost Allocation");
+        DATABASE::"Cost Allocation Target":
+          exit(PAGE::"Cost Allocation Target List");
+        DATABASE::"Cost Accounting Setup":
+          exit(PAGE::"Cost Accounting Setup");
+        DATABASE::"Cost Budget Name":
+          exit(PAGE::"Cost Budget Names");
+        DATABASE::"Cost Center":
+          exit(PAGE::"Chart of Cost Centers");
+        DATABASE::"Cost Object":
+          exit(PAGE::"Chart of Cost Objects");
+        DATABASE::"Cash Flow Setup":
+          exit(PAGE::"Cash Flow Setup");
+        DATABASE::"Cash Flow Forecast":
+          exit(PAGE::"Cash Flow Forecast List");
+        DATABASE::"Cash Flow Account":
+          exit(PAGE::"Chart of Cash Flow Accounts");
+        DATABASE::"Cash Flow Manual Expense":
+          exit(PAGE::"Cash Flow Manual Expenses");
+        DATABASE::"Cash Flow Manual Revenue":
+          exit(PAGE::"Cash Flow Manual Revenues");
+        DATABASE::"IC Partner":
+          exit(PAGE::"IC Partner List");
+        DATABASE::"Base Calendar":
+          exit(PAGE::"Base Calendar List");
+        DATABASE::"Finance Charge Text":
+          exit(PAGE::"Reminder Text");
+        DATABASE::"Currency for Fin. Charge Terms":
+          exit(PAGE::"Currencies for Fin. Chrg Terms");
+        DATABASE::"Currency for Reminder Level":
+          exit(PAGE::"Currencies for Reminder Level");
+        DATABASE::"Currency Exchange Rate":
+          exit(PAGE::"Currency Exchange Rates");
+        DATABASE::"VAT Statement Name":
+          exit(PAGE::"VAT Statement Names");
+        DATABASE::"VAT Statement Line":
+          exit(PAGE::"VAT Statement");
+        DATABASE::"No. Series Relationship":
+          exit(PAGE::"No. Series Relationships");
+        DATABASE::"User Setup":
+          exit(PAGE::"User Setup");
+        DATABASE::"Gen. Journal Template":
+          exit(PAGE::"General Journal Template List");
+        DATABASE::"Gen. Journal Batch":
+          exit(PAGE::"General Journal Batches");
+        DATABASE::"Gen. Journal Line":
+          exit(PAGE::"General Journal");
+        DATABASE::"Item Journal Template":
+          exit(PAGE::"Item Journal Template List");
+        DATABASE::"Item Journal Batch":
+          exit(PAGE::"Item Journal Batches");
+        DATABASE::"Customer Bank Account":
+          exit(PAGE::"Customer Bank Account List");
+        DATABASE::"Vendor Bank Account":
+          exit(PAGE::"Vendor Bank Account List");
+        DATABASE::"Cust. Invoice Disc.":
+          exit(PAGE::"Cust. Invoice Discounts");
+        DATABASE::"Vendor Invoice Disc.":
+          exit(PAGE::"Vend. Invoice Discounts");
+        DATABASE::"Dimension Value":
+          exit(PAGE::"Dimension Value List");
+        DATABASE::"Dimension Value Combination":
+          exit(PAGE::"Dimension Combinations");
+        DATABASE::"Default Dimension":
+          exit(PAGE::"Default Dimensions");
+        DATABASE::"Dimension Translation":
+          exit(PAGE::"Dimension Translations");
+        DATABASE::"Dimension Set Entry":
+          exit(PAGE::"Dimension Set Entries");
+        DATABASE::"VAT Report Setup":
+          exit(PAGE::"VAT Report Setup");
+        DATABASE::"VAT Registration No. Format":
+          exit(PAGE::"VAT Registration No. Formats");
+        DATABASE::"G/L Entry":
+          exit(PAGE::"General Ledger Entries");
+        DATABASE::"Cust. Ledger Entry":
+          exit(PAGE::"Customer Ledger Entries");
+        DATABASE::"Vendor Ledger Entry":
+          exit(PAGE::"Vendor Ledger Entries");
+        DATABASE::"Item Ledger Entry":
+          exit(PAGE::"Item Ledger Entries");
+        DATABASE::"Sales Header":
+          exit(PAGE::"Sales List");
+        DATABASE::"Purchase Header":
+          exit(PAGE::"Purchase List");
+        DATABASE::"G/L Register":
+          exit(PAGE::"G/L Registers");
+        DATABASE::"Item Register":
+          exit(PAGE::"Item Registers");
+        DATABASE::"Item Journal Line":
+          exit(PAGE::"Item Journal Lines");
+        DATABASE::"Sales Shipment Header":
+          exit(PAGE::"Posted Sales Shipments");
+        DATABASE::"Sales Invoice Header":
+          exit(PAGE::"Posted Sales Invoices");
+        DATABASE::"Sales Cr.Memo Header":
+          exit(PAGE::"Posted Sales Credit Memos");
+        DATABASE::"Purch. Rcpt. Header":
+          exit(PAGE::"Posted Purchase Receipts");
+        DATABASE::"Purch. Inv. Header":
+          exit(PAGE::"Posted Purchase Invoices");
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          exit(PAGE::"Posted Purchase Credit Memos");
+        DATABASE::"Sales Price":
+          exit(PAGE::"Sales Prices");
+        DATABASE::"Purchase Price":
+          exit(PAGE::"Purchase Prices");
+        DATABASE::"VAT Entry":
+          exit(PAGE::"VAT Entries");
+        DATABASE::"FA Ledger Entry":
+          exit(PAGE::"FA Ledger Entries");
+        DATABASE::"Value Entry":
+          exit(PAGE::"Value Entries");
+        DATABASE::"Source Code Setup":
+          exit(PAGE::"Source Code Setup");
+        else
+          exit(0);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE GetConfigTables@36(VAR AllObj@1004 : Record AllObj;IncludeWithDataOnly@1006 : Boolean;IncludeRelatedTables@1007 : Boolean;IncludeDimensionTables@1008 : Boolean;IncludeLicensedTablesOnly@1010 : Boolean;IncludeReferringTable@1012 : Boolean);
+    VAR
+      TempInt@1013 : TEMPORARY Record Integer;
+      TableInfo@1000 : Record "Table Information";
+      ConfigLine@1001 : Record "Config. Line";
+      Field@1011 : Record Field;
+      ConfigPackageMgt@1003 : Codeunit "Config. Package Management";
+      NextLineNo@1002 : Integer;
+      NextVertNo@1005 : Integer;
+      Include@1009 : Boolean;
+    BEGIN
+      if not HideDialog then
+        ConfigProgressBar.Init(AllObj.COUNT,1,Text023);
+
+      TempInt.DELETEALL;
+
+      NextLineNo := 10000;
+      ConfigLine.RESET;
+      if ConfigLine.FINDLAST then
+        NextLineNo := ConfigLine."Line No." + 10000;
+
+      NextVertNo := 0;
+      ConfigLine.SETCURRENTKEY("Vertical Sorting");
+      if ConfigLine.FINDLAST then
+        NextVertNo := ConfigLine."Vertical Sorting" + 1;
+
+      if AllObj.FINDSET then
+        repeat
+          if not HideDialog then
+            ConfigProgressBar.Update(AllObj."Object Name");
+          Include := true;
+          if IncludeWithDataOnly then begin
+            Include := false;
+            TableInfo.SETRANGE("Company Name",COMPANYNAME);
+            TableInfo.SETRANGE("Table No.",AllObj."Object ID");
+            if TableInfo.FINDFIRST then
+              if TableInfo."No. of Records" > 0 then
+                Include := true;
+          end;
+          if Include then begin
+            if IncludeReferringTable then
+              InsertTempInt(TempInt,AllObj."Object ID",IncludeLicensedTablesOnly);
+            if IncludeRelatedTables then begin
+              ConfigPackageMgt.SetFieldFilter(Field,AllObj."Object ID",0);
+              Field.SETFILTER(RelationTableNo,'<>%1&<>%2&..%3',0,AllObj."Object ID",99000999);
+              if Field.FINDSET then
+                repeat
+                  InsertTempInt(TempInt,Field.RelationTableNo,IncludeLicensedTablesOnly);
+                until Field.NEXT = 0;
+            end;
+            if IncludeDimensionTables then
+              if CheckDimTables(AllObj."Object ID") then begin
+                InsertDimTables(TempInt,IncludeLicensedTablesOnly);
+                IncludeDimensionTables := false;
+              end;
+          end;
+        until AllObj.NEXT = 0;
+
+      if TempInt.FINDSET then
+        repeat
+          InsertConfigLine(TempInt.Number,NextLineNo,NextVertNo);
+        until TempInt.NEXT = 0;
+
+      if not HideDialog then
+        ConfigProgressBar.Close;
+    END;
+
+    LOCAL PROCEDURE InsertConfigLine@8(TableID@1000 : Integer;VAR NextLineNo@1001 : Integer;VAR NextVertNo@1002 : Integer);
+    VAR
+      ConfigLine@1003 : Record "Config. Line";
+    BEGIN
+      ConfigLine.INIT;
+      ConfigLine.VALIDATE("Line Type",ConfigLine."Line Type"::Table);
+      ConfigLine.VALIDATE("Table ID",TableID);
+      ConfigLine."Line No." := NextLineNo;
+      NextLineNo := NextLineNo + 10000;
+      ConfigLine."Vertical Sorting" := NextVertNo;
+      NextVertNo := NextVertNo + 1;
+      ConfigLine.INSERT(true);
+    END;
+
+    LOCAL PROCEDURE CheckDimTables@60(TableID@1005 : Integer) : Boolean;
+    VAR
+      Field@1000 : Record Field;
+    BEGIN
+      Field.SETRANGE(TableNo,TableID);
+      Field.SETRANGE(Class,Field.Class::Normal);
+      if Field.FINDSET then
+        repeat
+          if IsDimSetIDField(Field.TableNo,Field."No.") then
+            exit(true);
+        until Field.NEXT = 0;
+    END;
+
+    [External]
+    LOCAL PROCEDURE CheckTable@22(TableID@1000 : Integer) : Boolean;
+    BEGIN
+      exit(IsNormalTable(TableID) and TableIsInAllowedRange(TableID) and not TableIsExtension(TableID));
+    END;
+
+    LOCAL PROCEDURE InsertDimTables@12(VAR TempInt@1000 : Record Integer;IncludeLicensedTablesOnly@1001 : Boolean);
+    BEGIN
+      InsertTempInt(TempInt,DATABASE::Dimension,IncludeLicensedTablesOnly);
+      InsertTempInt(TempInt,DATABASE::"Dimension Value",IncludeLicensedTablesOnly);
+      InsertTempInt(TempInt,DATABASE::"Dimension Combination",IncludeLicensedTablesOnly);
+      InsertTempInt(TempInt,DATABASE::"Dimension Value Combination",IncludeLicensedTablesOnly);
+      InsertTempInt(TempInt,DATABASE::"Dimension Set Entry",IncludeLicensedTablesOnly);
+      InsertTempInt(TempInt,DATABASE::"Dimension Set Tree Node",IncludeLicensedTablesOnly);
+      InsertTempInt(TempInt,DATABASE::"Default Dimension",IncludeLicensedTablesOnly);
+      InsertTempInt(TempInt,DATABASE::"Default Dimension Priority",IncludeLicensedTablesOnly);
+    END;
+
+    [External]
+    PROCEDURE IsDefaultDimTable@16(TableID@1000 : Integer) : Boolean;
+    BEGIN
+      case TableID of
+        DATABASE::"G/L Account",
+        DATABASE::Customer,
+        DATABASE::Vendor,
+        DATABASE::Item,
+        DATABASE::"Resource Group",
+        DATABASE::Resource,
+        DATABASE::Job,
+        DATABASE::"Bank Account",
+        DATABASE::Employee,
+        DATABASE::"Fixed Asset",
+        DATABASE::Insurance,
+        DATABASE::"Responsibility Center",
+        DATABASE::"Work Center",
+        DATABASE::"Salesperson/Purchaser",
+        DATABASE::Campaign,
+        DATABASE::"Customer Template",
+        DATABASE::"Cash Flow Manual Expense",
+        DATABASE::"Cash Flow Manual Revenue":
+          exit(true);
+        else
+          exit(false);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE IsDimSetIDTable@17(TableID@1000 : Integer) : Boolean;
+    VAR
+      RecRef@1001 : RecordRef;
+    BEGIN
+      RecRef.OPEN(TableID);
+      exit(RecRef.FIELDEXIST(DATABASE::"Dimension Set Entry"));
+    END;
+
+    LOCAL PROCEDURE IsDimSetIDField@11(TableID@1000 : Integer;FieldID@1001 : Integer) : Boolean;
+    VAR
+      ConfigValidateMgt@1002 : Codeunit "Config. Validate Management";
+    BEGIN
+      exit(
+        (FieldID = DATABASE::"Dimension Set Entry") or
+        (ConfigValidateMgt.GetRelationTableID(TableID,FieldID) = DATABASE::"Dimension Value"));
+    END;
+
+    [External]
+    LOCAL PROCEDURE TableIsExtension@19(TableID@1000 : Integer) : Boolean;
+    VAR
+      NAVAppObjectMetadata@1001 : Record "NAV App Object Metadata";
+      Object@1002 : Record Object;
+    BEGIN
+      NAVAppObjectMetadata.SETRANGE("Object Type",NAVAppObjectMetadata."Object Type"::Table);
+      NAVAppObjectMetadata.SETRANGE("Object ID",TableID);
+
+      if NAVAppObjectMetadata.ISEMPTY then
+        exit(false);
+
+      Object.SETRANGE(Type,Object.Type::Table);
+      Object.SETRANGE(ID,TableID);
+      exit(Object.ISEMPTY);
+    END;
+
+    [External]
+    LOCAL PROCEDURE TableIsInAllowedRange@7(TableID@1000 : Integer) : Boolean;
+    BEGIN
+      if (TableID <= 99000999) or (TableID in [2000000004,2000000005]) then // This condition duplicates table relation of ConfigLine."Table ID" field to prevent runtime errors
+        exit(true);
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE IsNormalTable@1(TableID@1000 : Integer) : Boolean;
+    VAR
+      TableMetadata@1001 : Record "Table Metadata";
+    BEGIN
+      if TableMetadata.GET(TableID) then
+        exit(TableMetadata.TableType = TableMetadata.TableType::Normal);
+    END;
+
+    [External]
+    PROCEDURE IsSystemTable@15(TableID@1000 : Integer) : Boolean;
+    BEGIN
+      if (TableID > 2000000000) and not (TableID in [DATABASE::"Permission Set",DATABASE::Permission]) then
+        exit(true);
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE AssignParentLineNos@13();
+    VAR
+      ConfigLine@1000 : Record "Config. Line";
+      LastAreaLineNo@1001 : Integer;
+      LastGroupLineNo@1002 : Integer;
+    BEGIN
+      with ConfigLine do begin
+        RESET;
+        SETCURRENTKEY("Vertical Sorting");
+        if FINDSET then
+          repeat
+            case "Line Type" of
+              "Line Type"::Area:
+                begin
+                  "Parent Line No." := 0;
+                  LastAreaLineNo := "Line No.";
+                  LastGroupLineNo := 0;
+                end;
+              "Line Type"::Group:
+                begin
+                  "Parent Line No." := LastAreaLineNo;
+                  LastGroupLineNo := "Line No.";
+                end;
+              "Line Type"::Table:
+                begin
+                  if LastGroupLineNo <> 0 then
+                    "Parent Line No." := LastGroupLineNo
+                  else
+                    "Parent Line No." := LastAreaLineNo;
+                end;
+            end;
+            MODIFY;
+          until NEXT = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE MakeTableFilter@14(VAR ConfigLine@1000 : Record "Config. Line";Export@1002 : Boolean) Filter : Text;
+    VAR
+      AddDimTables@1001 : Boolean;
+    BEGIN
+      Filter := '';
+      if ConfigLine.FINDSET then
+        repeat
+          ConfigLine.CheckBlocked;
+          if (ConfigLine."Table ID" > 0) and (ConfigLine.Status <= ConfigLine.Status::Completed) then
+            Filter += FORMAT(ConfigLine."Table ID") + '|';
+          AddDimTables := AddDimTables or ConfigLine."Dimensions as Columns";
+        until ConfigLine.NEXT = 0;
+      if AddDimTables and not Export then
+        Filter += STRSUBSTNO('%1|%2|',DATABASE::"Dimension Value",DATABASE::"Default Dimension");
+      if Filter <> '' then
+        Filter := COPYSTR(Filter,1,STRLEN(Filter) - 1);
+
+      exit(Filter);
+    END;
+
+    [External]
+    PROCEDURE SetHideDialog@5(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    LOCAL PROCEDURE InsertTempInt@18(VAR TempInt@1000 : Record Integer;TableId@1001 : Integer;IncludeLicensedTablesOnly@1002 : Boolean);
+    VAR
+      ConfigLine@1003 : Record "Config. Line";
+    BEGIN
+      if CheckTable(TableId) then begin
+        TempInt.Number := TableId;
+
+        ConfigLine.INIT;
+        ConfigLine."Line Type" := ConfigLine."Line Type"::Table;
+        ConfigLine."Table ID" := TableId;
+        if IncludeLicensedTablesOnly then begin
+          ConfigLine.CALCFIELDS("Licensed Table");
+          if ConfigLine."Licensed Table" then
+            if TempInt.INSERT then;
+        end else
+          if TempInt.INSERT then;
+      end;
+    END;
+
+    [External]
+    PROCEDURE DimensionFieldID@20() : Integer;
+    BEGIN
+      exit(999999900);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

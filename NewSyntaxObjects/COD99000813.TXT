@@ -1,0 +1,1347 @@
+OBJECT Codeunit 99000813 Carry Out Action
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Requisition Line";
+    OnRun=BEGIN
+            ProductionExist := true;
+            AssemblyExist := true;
+            case TrySourceType of
+              TrySourceType::Purchase:
+                CarryOutToReqWksh(Rec,TryWkshTempl,TryWkshName);
+              TrySourceType::Transfer:
+                CarryOutTransOrder(Rec,TryChoice,TryWkshTempl,TryWkshName);
+              TrySourceType::Production:
+                ProductionExist := CarryOutProdOrder(Rec,TryChoice,TryWkshTempl,TryWkshName);
+              TrySourceType::Assembly:
+                AssemblyExist := CarryOutAsmOrder(Rec,TryChoice);
+            end;
+
+            if "Action Message" = "Action Message"::Cancel then
+              DELETE(true);
+
+            ReservEntry.SETCURRENTKEY(
+              "Source ID","Source Ref. No.","Source Type","Source Subtype",
+              "Source Batch Name","Source Prod. Order Line");
+            ReqLineReserve.FilterReservFor(ReservEntry,Rec);
+            ReservEntry.DELETEALL(true);
+
+            if not ("Action Message" = "Action Message"::Cancel) then begin
+              BlockDynamicTracking(true);
+              if TrySourceType = TrySourceType::Production then
+                BlockDynamicTrackingOnComp(true);
+              if ProductionExist and AssemblyExist then
+                DELETE(true);
+              BlockDynamicTracking(false);
+            end;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempProductionOrder@1005 : TEMPORARY Record "Production Order";
+      LastTransHeader@1015 : Record "Transfer Header";
+      TempTransHeaderToPrint@1017 : TEMPORARY Record "Transfer Header";
+      ReservEntry@1009 : Record "Reservation Entry";
+      TempDocumentEntry@1006 : TEMPORARY Record "Document Entry";
+      CarryOutAction@1014 : Codeunit "Carry Out Action";
+      CalcProdOrder@1000 : Codeunit "Calculate Prod. Order";
+      ReservMgt@1001 : Codeunit "Reservation Management";
+      ReqLineReserve@1002 : Codeunit "Req. Line-Reserve";
+      ReservePlanningComponent@1003 : Codeunit "Plng. Component-Reserve";
+      CheckDateConflict@1004 : Codeunit "Reservation-Check Date Confl.";
+      PrintOrder@1008 : Boolean;
+      SplitTransferOrders@1016 : Boolean;
+      ProductionExist@1019 : Boolean;
+      AssemblyExist@1020 : Boolean;
+      TrySourceType@1013 : 'Purchase,Transfer,Production,Assembly';
+      TryChoice@1012 : Option;
+      TryWkshTempl@1011 : Code[10];
+      TryWkshName@1010 : Code[10];
+      LineNo@1007 : Integer;
+      CouldNotChangeSupplyTxt@1021 : TextConst '@@@=%1 - Production Order No. or Assembly Header No. or Purchase Header No., %2 - Production Order Line or Assembly Line No. or Purchase Line No.;ENU=The supply type could not be changed in order %1, order line %2.';
+
+    [External]
+    PROCEDURE TryCarryOutAction@20(SourceType@1004 : 'Purchase,Transfer,Production,Assembly';VAR ReqLine@1003 : Record "Requisition Line";Choice@1002 : Option;WkshTempl@1001 : Code[10];WkshName@1000 : Code[10]) : Boolean;
+    BEGIN
+      CarryOutAction.SetSplitTransferOrders(SplitTransferOrders);
+      CarryOutAction.SetTryParameters(SourceType,Choice,WkshTempl,WkshName);
+      exit(CarryOutAction.RUN(ReqLine));
+    END;
+
+    [External]
+    PROCEDURE SetTryParameters@21(SourceType@1004 : 'Purchase,Transfer,Production,Assembly';Choice@1002 : Option;WkshTempl@1001 : Code[10];WkshName@1000 : Code[10]);
+    BEGIN
+      TrySourceType := SourceType;
+      TryChoice := Choice;
+      TryWkshTempl := WkshTempl;
+      TryWkshName := WkshName;
+    END;
+
+    [External]
+    PROCEDURE CarryOutProdOrder@1(ReqLine@1000 : Record "Requisition Line";ProdOrderChoice@1001 : '" ",Planned,"Firm Planned","Firm Planned & Print","Copy to Req. Wksh"';ProdWkshTempl@1003 : Code[10];ProdWkshName@1002 : Code[10]) : Boolean;
+    BEGIN
+      PrintOrder := ProdOrderChoice = ProdOrderChoice::"Firm Planned & Print";
+      case ReqLine."Action Message" of
+        ReqLine."Action Message"::New:
+          if ProdOrderChoice = ProdOrderChoice::"Copy to Req. Wksh" then
+            CarryOutToReqWksh(ReqLine,ProdWkshTempl,ProdWkshName)
+          else
+            InsertProdOrder(ReqLine,ProdOrderChoice);
+        ReqLine."Action Message"::"Change Qty.",
+        ReqLine."Action Message"::Reschedule,
+        ReqLine."Action Message"::"Resched. & Chg. Qty.":
+          exit(ProdOrderChgAndReshedule(ReqLine));
+        ReqLine."Action Message"::Cancel:
+          DeleteOrderLines(ReqLine);
+      end;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE CarryOutTransOrder@3(ReqLine@1000 : Record "Requisition Line";TransOrderChoice@1001 : '" ","Make Trans. Orders","Make Trans. Orders & Print","Copy to Req. Wksh"';TransWkshTempName@1002 : Code[10];TransJournalName@1003 : Code[10]);
+    BEGIN
+      PrintOrder := TransOrderChoice = TransOrderChoice::"Make Trans. Orders & Print";
+
+      if SplitTransferOrders then
+        CLEAR(LastTransHeader);
+
+      if TransOrderChoice = TransOrderChoice::"Copy to Req. Wksh" then
+        CarryOutToReqWksh(ReqLine,TransWkshTempName,TransJournalName)
+      else
+        case ReqLine."Action Message" of
+          ReqLine."Action Message"::New:
+            InsertTransLine(ReqLine,LastTransHeader);
+          ReqLine."Action Message"::"Change Qty.",
+          ReqLine."Action Message"::Reschedule,
+          ReqLine."Action Message"::"Resched. & Chg. Qty.":
+            TransOrderChgAndReshedule(ReqLine);
+          ReqLine."Action Message"::Cancel:
+            DeleteOrderLines(ReqLine);
+        end;
+    END;
+
+    [Internal]
+    PROCEDURE CarryOutAsmOrder@26(ReqLine@1003 : Record "Requisition Line";AsmOrderChoice@1002 : '" ","Make Assembly Orders","Make Assembly Orders & Print"') : Boolean;
+    VAR
+      AsmHeader@1000 : Record "Assembly Header";
+    BEGIN
+      PrintOrder := AsmOrderChoice = AsmOrderChoice::"Make Assembly Orders & Print";
+      case ReqLine."Action Message" of
+        ReqLine."Action Message"::New:
+          InsertAsmHeader(ReqLine,AsmHeader);
+        ReqLine."Action Message"::"Change Qty.",
+        ReqLine."Action Message"::Reschedule,
+        ReqLine."Action Message"::"Resched. & Chg. Qty.":
+          exit(AsmOrderChgAndReshedule(ReqLine));
+        ReqLine."Action Message"::Cancel:
+          DeleteOrderLines(ReqLine);
+      end;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE CarryOutToReqWksh@6(ReqLine@1000 : Record "Requisition Line";ReqWkshTempName@1001 : Code[10];ReqJournalName@1002 : Code[10]);
+    VAR
+      ReqLine2@1003 : Record "Requisition Line";
+      PlanningComp@1005 : Record "Planning Component";
+      PlanningRoutingLine@1006 : Record "Planning Routing Line";
+      ProdOrderCapNeed@1010 : Record "Prod. Order Capacity Need";
+      PlanningComp2@1008 : Record "Planning Component";
+      PlanningRoutingLine2@1007 : Record "Planning Routing Line";
+      ProdOrderCapNeed2@1009 : Record "Prod. Order Capacity Need";
+      ReqLine3@1004 : Record "Requisition Line";
+    BEGIN
+      ReqLine2 := ReqLine;
+      ReqLine2."Worksheet Template Name" := ReqWkshTempName;
+      ReqLine2."Journal Batch Name" := ReqJournalName;
+      if ReqLine2."Planning Line Origin" = ReqLine2."Planning Line Origin"::"Order Planning" then begin
+        ReqLine2."Planning Line Origin" := ReqLine2."Planning Line Origin"::" ";
+        ReqLine2.Level := 0;
+        ReqLine2.Status := 0;
+        ReqLine2.Reserve := false;
+        ReqLine2."Demand Type" := 0;
+        ReqLine2."Demand Subtype" := 0;
+        ReqLine2."Demand Order No." := '';
+        ReqLine2."Demand Line No." := 0;
+        ReqLine2."Demand Ref. No." := 0;
+        ReqLine2."Demand Date" := 0D;
+        ReqLine2."Demand Quantity" := 0;
+        ReqLine2."Demand Quantity (Base)" := 0;
+        ReqLine2."Needed Quantity" := 0;
+        ReqLine2."Needed Quantity (Base)" := 0;
+        ReqLine2."Qty. per UOM (Demand)" := 0;
+        ReqLine2."Unit Of Measure Code (Demand)" := '';
+
+        if LineNo = 0 then begin
+          // we need to find the last line in worksheet
+          ReqLine3.SETCURRENTKEY("Worksheet Template Name","Journal Batch Name","Line No.");
+          ReqLine3.SETRANGE("Worksheet Template Name",ReqWkshTempName);
+          ReqLine3.SETRANGE("Journal Batch Name",ReqJournalName);
+          if ReqLine3.FINDLAST then
+            LineNo := ReqLine3."Line No.";
+        end;
+        LineNo += 10000;
+        ReqLine2."Line No." := LineNo;
+      end;
+      ReqLine2.INSERT;
+
+      ReqLineReserve.TransferReqLineToReqLine(ReqLine,ReqLine2,0,true);
+      if ReqLine.Reserve then
+        ReserveBindingOrderToReqline(ReqLine2,ReqLine);
+
+      PlanningComp.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      PlanningComp.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      PlanningComp.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+      if PlanningComp.FIND('-') then
+        repeat
+          PlanningComp2 := PlanningComp;
+          PlanningComp2."Worksheet Template Name" := ReqWkshTempName;
+          PlanningComp2."Worksheet Batch Name" := ReqJournalName;
+
+          if PlanningComp2."Planning Line Origin" = PlanningComp2."Planning Line Origin"::"Order Planning" then
+            PlanningComp2."Planning Line Origin" := PlanningComp2."Planning Line Origin"::" ";
+          PlanningComp2."Dimension Set ID" := ReqLine2."Dimension Set ID";
+          PlanningComp2.INSERT;
+        until PlanningComp.NEXT = 0;
+
+      PlanningRoutingLine.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      PlanningRoutingLine.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      PlanningRoutingLine.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+      if PlanningRoutingLine.FIND('-') then
+        repeat
+          PlanningRoutingLine2 := PlanningRoutingLine;
+          PlanningRoutingLine2."Worksheet Template Name" := ReqWkshTempName;
+          PlanningRoutingLine2."Worksheet Batch Name" := ReqJournalName;
+
+          PlanningRoutingLine2.INSERT;
+        until PlanningRoutingLine.NEXT = 0;
+
+      ProdOrderCapNeed.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      ProdOrderCapNeed.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      ProdOrderCapNeed.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+      if ProdOrderCapNeed.FIND('-') then
+        repeat
+          ProdOrderCapNeed2 := ProdOrderCapNeed;
+          ProdOrderCapNeed2."Worksheet Template Name" := ReqWkshTempName;
+          ProdOrderCapNeed2."Worksheet Batch Name" := ReqJournalName;
+
+          ProdOrderCapNeed.DELETE;
+          ProdOrderCapNeed2.INSERT;
+        until ProdOrderCapNeed.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE GetTransferOrdersToPrint@36(VAR TransferHeader@1000 : Record "Transfer Header");
+    BEGIN
+      if TempTransHeaderToPrint.FINDSET then
+        repeat
+          TransferHeader := TempTransHeaderToPrint;
+          TransferHeader.INSERT;
+        until TempTransHeaderToPrint.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE ProdOrderChgAndReshedule@17(ReqLine@1000 : Record "Requisition Line") : Boolean;
+    VAR
+      ProdOrderLine@1001 : Record "Prod. Order Line";
+      PlanningComponent@1002 : Record "Planning Component";
+      ProdOrderCapNeed@1003 : Record "Prod. Order Capacity Need";
+      ProdOrderComp@1004 : Record "Prod. Order Component";
+      ProdOrder@1005 : Record "Production Order";
+    BEGIN
+      with ReqLine do begin
+        TESTFIELD("Ref. Order Type","Ref. Order Type"::"Prod. Order");
+        ProdOrderLine.LOCKTABLE;
+        if ProdOrderLine.GET("Ref. Order Status","Ref. Order No.","Ref. Line No.") then begin
+          ProdOrderCapNeed.SETCURRENTKEY("Worksheet Template Name","Worksheet Batch Name","Worksheet Line No.");
+          ProdOrderCapNeed.SETRANGE("Worksheet Template Name","Worksheet Template Name");
+          ProdOrderCapNeed.SETRANGE("Worksheet Batch Name","Journal Batch Name");
+          ProdOrderCapNeed.SETRANGE("Worksheet Line No.","Line No.");
+          ProdOrderCapNeed.DELETEALL;
+          ProdOrderLine.BlockDynamicTracking(true);
+          ProdOrderLine.VALIDATE(Quantity,Quantity);
+          ProdOrderLine."Ending Time" := "Ending Time";
+          ProdOrderLine."Due Date" := "Due Date";
+          ProdOrderLine.VALIDATE("Planning Flexibility","Planning Flexibility");
+          ProdOrderLine.VALIDATE("Ending Date","Ending Date");
+          ReqLineReserve.TransferPlanningLineToPOLine(ReqLine,ProdOrderLine,0,true);
+          ReqLineReserve.UpdateDerivedTracking(ReqLine);
+          ReservMgt.SetProdOrderLine(ProdOrderLine);
+          ReservMgt.DeleteReservEntries(false,ProdOrderLine."Remaining Qty. (Base)");
+          ReservMgt.ClearSurplus;
+          ReservMgt.AutoTrack(ProdOrderLine."Remaining Qty. (Base)");
+          PlanningComponent.SETRANGE("Worksheet Template Name","Worksheet Template Name");
+          PlanningComponent.SETRANGE("Worksheet Batch Name","Journal Batch Name");
+          PlanningComponent.SETRANGE("Worksheet Line No.","Line No.");
+          if PlanningComponent.FIND('-') then
+            repeat
+              if ProdOrderComp.GET(
+                   ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",ProdOrderLine."Line No.",PlanningComponent."Line No.")
+              then begin
+                ReservePlanningComponent.TransferPlanningCompToPOComp(PlanningComponent,ProdOrderComp,0,true);
+                ReservePlanningComponent.UpdateDerivedTracking(PlanningComponent);
+                ReservMgt.SetProdOrderComponent(ProdOrderComp);
+                ReservMgt.DeleteReservEntries(false,ProdOrderComp."Remaining Qty. (Base)");
+                ReservMgt.ClearSurplus;
+                ReservMgt.AutoTrack(ProdOrderComp."Remaining Qty. (Base)");
+                CheckDateConflict.ProdOrderComponentCheck(ProdOrderComp,false,false);
+              end else
+                PlanningComponent.DELETE(true);
+            until PlanningComponent.NEXT = 0;
+
+          if "Planning Level" = 0 then
+            if ProdOrder.GET("Ref. Order Status","Ref. Order No.") then begin
+              ProdOrder.Quantity := Quantity;
+              ProdOrder."Starting Time" := "Starting Time";
+              ProdOrder."Starting Date" := "Starting Date";
+              ProdOrder."Ending Time" := "Ending Time";
+              ProdOrder."Ending Date" := "Ending Date";
+              ProdOrder."Due Date" := "Due Date";
+              ProdOrder.MODIFY;
+
+              FinalizeOrderHeader(ProdOrder);
+            end;
+        end else begin
+          MESSAGE(STRSUBSTNO(CouldNotChangeSupplyTxt,"Ref. Order No.","Ref. Line No."));
+          exit(false);
+        end;
+      end;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE PurchOrderChgAndReshedule@22(ReqLine@1000 : Record "Requisition Line");
+    VAR
+      PurchLine@1001 : Record "Purchase Line";
+      PurchHeader@1002 : Record "Purchase Header";
+    BEGIN
+      ReqLine.TESTFIELD("Ref. Order Type",ReqLine."Ref. Order Type"::Purchase);
+      if PurchLine.GET(
+           PurchLine."Document Type"::Order,
+           ReqLine."Ref. Order No.",
+           ReqLine."Ref. Line No.")
+      then begin
+        PurchLine.BlockDynamicTracking(true);
+        PurchLine.VALIDATE(Quantity,ReqLine.Quantity);
+        PurchLine.VALIDATE("Expected Receipt Date",ReqLine."Due Date");
+        PurchLine.VALIDATE("Planning Flexibility",ReqLine."Planning Flexibility");
+        PurchLine.MODIFY(true);
+        ReqLineReserve.TransferReqLineToPurchLine(ReqLine,PurchLine,0,true);
+        ReqLineReserve.UpdateDerivedTracking(ReqLine);
+        ReservMgt.SetPurchLine(PurchLine);
+        ReservMgt.DeleteReservEntries(false,PurchLine."Outstanding Qty. (Base)");
+        ReservMgt.ClearSurplus;
+        ReservMgt.AutoTrack(PurchLine."Outstanding Qty. (Base)");
+
+        PurchHeader.GET(PurchLine."Document Type",PurchLine."Document No.");
+        PrintPurchaseOrder(PurchHeader);
+      end else
+        ERROR(STRSUBSTNO(CouldNotChangeSupplyTxt,ReqLine."Ref. Order No.",ReqLine."Ref. Line No."));
+    END;
+
+    [External]
+    PROCEDURE TransOrderChgAndReshedule@25(ReqLine@1000 : Record "Requisition Line");
+    VAR
+      TransLine@1002 : Record "Transfer Line";
+      TransHeader@1001 : Record "Transfer Header";
+    BEGIN
+      ReqLine.TESTFIELD("Ref. Order Type",ReqLine."Ref. Order Type"::Transfer);
+
+      if TransLine.GET(ReqLine."Ref. Order No.",ReqLine."Ref. Line No.") then begin
+        TransLine.BlockDynamicTracking(true);
+        TransLine.VALIDATE(Quantity,ReqLine.Quantity);
+        TransLine.VALIDATE("Receipt Date",ReqLine."Due Date");
+        TransLine."Shipment Date" := ReqLine."Transfer Shipment Date";
+        TransLine.VALIDATE("Planning Flexibility",ReqLine."Planning Flexibility");
+        TransLine.MODIFY(true);
+        ReqLineReserve.TransferReqLineToTransLine(ReqLine,TransLine,0,true);
+        ReqLineReserve.UpdateDerivedTracking(ReqLine);
+        ReservMgt.SetTransferLine(TransLine,0);
+        ReservMgt.DeleteReservEntries(false,TransLine."Outstanding Qty. (Base)");
+        ReservMgt.ClearSurplus;
+        ReservMgt.AutoTrack(TransLine."Outstanding Qty. (Base)");
+        ReservMgt.SetTransferLine(TransLine,1);
+        ReservMgt.DeleteReservEntries(false,TransLine."Outstanding Qty. (Base)");
+        ReservMgt.ClearSurplus;
+        ReservMgt.AutoTrack(TransLine."Outstanding Qty. (Base)");
+        TransHeader.GET(TransLine."Document No.");
+        PrintTransferOrder(TransHeader);
+      end;
+    END;
+
+    [External]
+    PROCEDURE AsmOrderChgAndReshedule@32(ReqLine@1000 : Record "Requisition Line") : Boolean;
+    VAR
+      AsmHeader@1001 : Record "Assembly Header";
+      PlanningComponent@1002 : Record "Planning Component";
+      AsmLine@1004 : Record "Assembly Line";
+    BEGIN
+      with ReqLine do begin
+        TESTFIELD("Ref. Order Type","Ref. Order Type"::Assembly);
+        AsmHeader.LOCKTABLE;
+        if AsmHeader.GET(AsmHeader."Document Type"::Order,"Ref. Order No.") then begin
+          AsmHeader.SetWarningsOff;
+          AsmHeader.VALIDATE(Quantity,Quantity);
+          AsmHeader.VALIDATE("Planning Flexibility","Planning Flexibility");
+          AsmHeader.VALIDATE("Due Date","Due Date");
+          AsmHeader.MODIFY(true);
+          ReqLineReserve.TransferPlanningLineToAsmHdr(ReqLine,AsmHeader,0,true);
+          ReqLineReserve.UpdateDerivedTracking(ReqLine);
+          ReservMgt.SetAssemblyHeader(AsmHeader);
+          ReservMgt.DeleteReservEntries(false,AsmHeader."Remaining Quantity (Base)");
+          ReservMgt.ClearSurplus;
+          ReservMgt.AutoTrack(AsmHeader."Remaining Quantity (Base)");
+
+          PlanningComponent.SETRANGE("Worksheet Template Name","Worksheet Template Name");
+          PlanningComponent.SETRANGE("Worksheet Batch Name","Journal Batch Name");
+          PlanningComponent.SETRANGE("Worksheet Line No.","Line No.");
+          if PlanningComponent.FIND('-') then
+            repeat
+              if AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",PlanningComponent."Line No.") then begin
+                ReservePlanningComponent.TransferPlanningCompToAsmLine(PlanningComponent,AsmLine,0,true);
+                ReservePlanningComponent.UpdateDerivedTracking(PlanningComponent);
+                ReservMgt.SetAssemblyLine(AsmLine);
+                ReservMgt.DeleteReservEntries(false,AsmLine."Remaining Quantity (Base)");
+                ReservMgt.ClearSurplus;
+                ReservMgt.AutoTrack(AsmLine."Remaining Quantity (Base)");
+                CheckDateConflict.AssemblyLineCheck(AsmLine,false);
+              end else
+                PlanningComponent.DELETE(true);
+            until PlanningComponent.NEXT = 0;
+
+          PrintAsmOrder(AsmHeader);
+        end else begin
+          MESSAGE(STRSUBSTNO(CouldNotChangeSupplyTxt,"Ref. Order No.","Ref. Line No."));
+          exit(false);
+        end;
+      end;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE DeleteOrderLines@4(ReqLine@1000 : Record "Requisition Line");
+    VAR
+      ProdOrder@1001 : Record "Production Order";
+      ProdOrderLine@1002 : Record "Prod. Order Line";
+      PurchHeader@1003 : Record "Purchase Header";
+      PurchLine@1004 : Record "Purchase Line";
+      TransHeader@1006 : Record "Transfer Header";
+      TransLine@1005 : Record "Transfer Line";
+      AsmHeader@1007 : Record "Assembly Header";
+    BEGIN
+      case ReqLine."Ref. Order Type" of
+        ReqLine."Ref. Order Type"::"Prod. Order":
+          begin
+            ProdOrderLine.SETCURRENTKEY(Status,"Prod. Order No.","Line No.");
+            ProdOrderLine.SETFILTER("Item No.",'<>%1','');
+            ProdOrderLine.SETRANGE(Status,ReqLine."Ref. Order Status");
+            ProdOrderLine.SETRANGE("Prod. Order No.",ReqLine."Ref. Order No.");
+            if ProdOrderLine.COUNT in [0,1] then begin
+              if ProdOrder.GET(ReqLine."Ref. Order Status",ReqLine."Ref. Order No.") then
+                ProdOrder.DELETE(true);
+            end else begin
+              ProdOrderLine.SETRANGE("Line No.",ReqLine."Ref. Line No.");
+              if ProdOrderLine.FINDFIRST then
+                ProdOrderLine.DELETE(true);
+            end;
+          end;
+        ReqLine."Ref. Order Type"::Purchase:
+          begin
+            PurchLine.SETCURRENTKEY("Document Type","Document No.","Line No.");
+            PurchLine.SETFILTER(Type,'<>%1',PurchLine.Type::" ");
+            PurchLine.SETRANGE("Document Type",PurchLine."Document Type"::Order);
+            PurchLine.SETRANGE("Document No.",ReqLine."Ref. Order No.");
+            if PurchLine.COUNT in [0,1] then begin
+              if PurchHeader.GET(PurchHeader."Document Type"::Order,ReqLine."Ref. Order No.") then
+                PurchHeader.DELETE(true);
+            end else begin
+              PurchLine.SETRANGE("Line No.",ReqLine."Ref. Line No.");
+              if PurchLine.FINDFIRST then
+                PurchLine.DELETE(true);
+            end;
+          end;
+        ReqLine."Ref. Order Type"::Transfer:
+          begin
+            TransLine.SETCURRENTKEY("Document No.","Line No.");
+            TransLine.SETRANGE("Document No.",ReqLine."Ref. Order No.");
+            if TransLine.COUNT in [0,1] then begin
+              if TransHeader.GET(ReqLine."Ref. Order No.") then
+                TransHeader.DELETE(true);
+            end else begin
+              TransLine.SETRANGE("Line No.",ReqLine."Ref. Line No.");
+              if TransLine.FINDFIRST then
+                TransLine.DELETE(true);
+            end;
+          end;
+        ReqLine."Ref. Order Type"::Assembly:
+          begin
+            AsmHeader.GET(AsmHeader."Document Type"::Order,ReqLine."Ref. Order No.");
+            AsmHeader.DELETE(true);
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE InsertProdOrder@8(ReqLine@1000 : Record "Requisition Line";ProdOrderChoise@1001 : '" ",Planned,"Firm Planned","Firm Planned & Print"');
+    VAR
+      MfgSetup@1002 : Record "Manufacturing Setup";
+      Item@1003 : Record Item;
+      ProdOrder@1004 : Record "Production Order";
+      HeaderExist@1008 : Boolean;
+    BEGIN
+      Item.GET(ReqLine."No.");
+      MfgSetup.GET;
+      if FindTempProdOrder(ReqLine) then
+        HeaderExist := ProdOrder.GET(TempProductionOrder.Status,TempProductionOrder."No.");
+
+      if not HeaderExist then begin
+        case ProdOrderChoise of
+          ProdOrderChoise::Planned:
+            MfgSetup.TESTFIELD("Planned Order Nos.");
+          ProdOrderChoise::"Firm Planned",ProdOrderChoise::"Firm Planned & Print":
+            MfgSetup.TESTFIELD("Firm Planned Order Nos.");
+        end;
+
+        ProdOrder.INIT;
+        if ProdOrderChoise = ProdOrderChoise::"Firm Planned & Print" then
+          ProdOrder.Status := ProdOrder.Status::"Firm Planned"
+        else
+          ProdOrder.Status := ProdOrderChoise;
+        ProdOrder."No. Series" := ProdOrder.GetNoSeriesCode;
+        if ProdOrder."No. Series" = ReqLine."No. Series" then
+          ProdOrder."No." := ReqLine."Ref. Order No.";
+        ProdOrder.INSERT(true);
+        ProdOrder."Source Type" := ProdOrder."Source Type"::Item;
+        ProdOrder."Source No." := ReqLine."No.";
+        ProdOrder.VALIDATE(Description,ReqLine.Description);
+        ProdOrder."Description 2" := ReqLine."Description 2";
+        ProdOrder."Creation Date" := TODAY;
+        ProdOrder."Last Date Modified" := TODAY;
+        ProdOrder."Inventory Posting Group" := Item."Inventory Posting Group";
+        ProdOrder."Gen. Prod. Posting Group" := ReqLine."Gen. Prod. Posting Group";
+        ProdOrder."Gen. Bus. Posting Group" := ReqLine."Gen. Business Posting Group";
+        ProdOrder."Due Date" := ReqLine."Due Date";
+        ProdOrder."Starting Time" := ReqLine."Starting Time";
+        ProdOrder."Starting Date" := ReqLine."Starting Date";
+        ProdOrder."Ending Time" := ReqLine."Ending Time";
+        ProdOrder."Ending Date" := ReqLine."Ending Date";
+        ProdOrder."Location Code" := ReqLine."Location Code";
+        ProdOrder."Bin Code" := ReqLine."Bin Code";
+        ProdOrder."Low-Level Code" := ReqLine."Low-Level Code";
+        ProdOrder."Routing No." := ReqLine."Routing No.";
+        ProdOrder.Quantity := ReqLine.Quantity;
+        ProdOrder."Unit Cost" := ReqLine."Unit Cost";
+        ProdOrder."Cost Amount" := ReqLine."Cost Amount";
+        ProdOrder."Shortcut Dimension 1 Code" := ReqLine."Shortcut Dimension 1 Code";
+        ProdOrder."Shortcut Dimension 2 Code" := ReqLine."Shortcut Dimension 2 Code";
+        ProdOrder."Dimension Set ID" := ReqLine."Dimension Set ID";
+        ProdOrder.UpdateDatetime;
+        ProdOrder.MODIFY;
+        InsertTempProdOrder(ReqLine,ProdOrder);
+      end;
+      InsertProdOrderLine(ReqLine,ProdOrder,Item);
+    END;
+
+    [External]
+    PROCEDURE InsertProdOrderLine@9(ReqLine@1000 : Record "Requisition Line";ProdOrder@1001 : Record "Production Order";Item@1002 : Record Item);
+    VAR
+      ProdOrderLine@1004 : Record "Prod. Order Line";
+      NextLineNo@1005 : Integer;
+    BEGIN
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrder."No.");
+      ProdOrderLine.SETRANGE(Status,ProdOrder.Status);
+      ProdOrderLine.LOCKTABLE;
+      if ProdOrderLine.FINDLAST then
+        NextLineNo := ProdOrderLine."Line No." + 10000
+      else
+        NextLineNo := 10000;
+
+      ProdOrderLine.INIT;
+      ProdOrderLine.BlockDynamicTracking(true);
+      ProdOrderLine.Status := ProdOrder.Status;
+      ProdOrderLine."Prod. Order No." := ProdOrder."No.";
+      ProdOrderLine."Line No." := NextLineNo;
+      ProdOrderLine."Item No." := ReqLine."No.";
+      ProdOrderLine.VALIDATE("Unit of Measure Code",ReqLine."Unit of Measure Code");
+      ProdOrderLine."Production BOM Version Code" := ReqLine."Production BOM Version Code";
+      ProdOrderLine."Routing Version Code" := ReqLine."Routing Version Code";
+      ProdOrderLine."Routing Type" := ReqLine."Routing Type";
+      ProdOrderLine."Routing Reference No." := ProdOrderLine."Line No.";
+      ProdOrderLine.Description := ReqLine.Description;
+      ProdOrderLine."Description 2" := ReqLine."Description 2";
+      ProdOrderLine."Variant Code" := ReqLine."Variant Code";
+      ProdOrderLine."Location Code" := ReqLine."Location Code";
+      if ReqLine."Bin Code" <> '' then
+        ProdOrderLine.VALIDATE("Bin Code",ReqLine."Bin Code")
+      else
+        CalcProdOrder.SetProdOrderLineBinCodeFromRoute(ProdOrderLine,ProdOrder."Location Code",ProdOrder."Routing No.");
+      ProdOrderLine."Scrap %" := ReqLine."Scrap %";
+      ProdOrderLine."Production BOM No." := ReqLine."Production BOM No.";
+      ProdOrderLine."Inventory Posting Group" := Item."Inventory Posting Group";
+      ProdOrderLine.VALIDATE("Unit Cost",ReqLine."Unit Cost");
+      ProdOrderLine."Routing No." := ReqLine."Routing No.";
+      ProdOrderLine."Starting Time" := ReqLine."Starting Time";
+      ProdOrderLine."Starting Date" := ReqLine."Starting Date";
+      ProdOrderLine."Ending Time" := ReqLine."Ending Time";
+      ProdOrderLine."Ending Date" := ReqLine."Ending Date";
+      ProdOrderLine."Due Date" := ReqLine."Due Date";
+      ProdOrderLine.Status := ProdOrder.Status;
+      ProdOrderLine."Planning Level Code" := ReqLine."Planning Level";
+      ProdOrderLine."Indirect Cost %" := ReqLine."Indirect Cost %";
+      ProdOrderLine."Overhead Rate" := ReqLine."Overhead Rate";
+      ProdOrderLine.VALIDATE(Quantity,ReqLine.Quantity);
+      if not (ProdOrder.Status = ProdOrder.Status::Planned) then
+        ProdOrderLine."Planning Flexibility" := ReqLine."Planning Flexibility";
+      ProdOrderLine.UpdateDatetime;
+      ProdOrderLine."Shortcut Dimension 1 Code" := ReqLine."Shortcut Dimension 1 Code";
+      ProdOrderLine."Shortcut Dimension 2 Code" := ReqLine."Shortcut Dimension 2 Code";
+      ProdOrderLine."Dimension Set ID" := ReqLine."Dimension Set ID";
+      ProdOrderLine.INSERT;
+
+      ReqLineReserve.TransferPlanningLineToPOLine(ReqLine,ProdOrderLine,ReqLine."Net Quantity (Base)",false);
+      if ReqLine.Reserve and not (ProdOrderLine.Status = ProdOrderLine.Status::Planned) then
+        ReserveBindingOrderToProd(ProdOrderLine,ReqLine);
+
+      ProdOrderLine.MODIFY;
+      if TransferRouting(ReqLine,ProdOrder,ProdOrderLine."Routing No.",ProdOrderLine."Routing Reference No.") then begin
+        CalcProdOrder.SetProdOrderLineBinCodeFromPlanningRtngLines(ProdOrderLine,ReqLine);
+        ProdOrderLine.MODIFY;
+      end;
+      TransferBOM(ReqLine,ProdOrder,ProdOrderLine."Line No.");
+      TransferCapNeed(ReqLine,ProdOrder,ProdOrderLine."Routing No.",ProdOrderLine."Routing Reference No.");
+
+      if ProdOrderLine."Planning Level Code" > 0 then
+        UpdateComponentLink(ProdOrderLine);
+      FinalizeOrderHeader(ProdOrder);
+    END;
+
+    [Internal]
+    PROCEDURE InsertAsmHeader@28(ReqLine@1000 : Record "Requisition Line";VAR AsmHeader@1001 : Record "Assembly Header");
+    VAR
+      BOMComp@1006 : Record "BOM Component";
+      Item@1002 : Record Item;
+    BEGIN
+      Item.GET(ReqLine."No.");
+      AsmHeader.INIT;
+      AsmHeader."Document Type" := AsmHeader."Document Type"::Order;
+      AsmHeader.INSERT(true);
+      AsmHeader.SetWarningsOff;
+      AsmHeader.VALIDATE("Item No.",ReqLine."No.");
+      AsmHeader.VALIDATE("Unit of Measure Code",ReqLine."Unit of Measure Code");
+      AsmHeader.Description := ReqLine.Description;
+      AsmHeader."Description 2" := ReqLine."Description 2";
+      AsmHeader."Variant Code" := ReqLine."Variant Code";
+      AsmHeader."Location Code" := ReqLine."Location Code";
+      AsmHeader."Inventory Posting Group" := Item."Inventory Posting Group";
+      AsmHeader.VALIDATE("Unit Cost",ReqLine."Unit Cost");
+      AsmHeader."Due Date" := ReqLine."Due Date";
+      AsmHeader."Starting Date" := ReqLine."Starting Date";
+      AsmHeader."Ending Date" := ReqLine."Ending Date";
+
+      AsmHeader.Quantity := ReqLine.Quantity;
+      AsmHeader."Quantity (Base)" := ReqLine."Quantity (Base)";
+      AsmHeader.InitRemainingQty;
+      AsmHeader.InitQtyToAssemble;
+      if ReqLine."Bin Code" <> '' then
+        AsmHeader."Bin Code" := ReqLine."Bin Code"
+      else
+        AsmHeader.GetDefaultBin;
+
+      AsmHeader."Planning Flexibility" := ReqLine."Planning Flexibility";
+      AsmHeader."Shortcut Dimension 1 Code" := ReqLine."Shortcut Dimension 1 Code";
+      AsmHeader."Shortcut Dimension 2 Code" := ReqLine."Shortcut Dimension 2 Code";
+      AsmHeader."Dimension Set ID" := ReqLine."Dimension Set ID";
+      ReqLineReserve.TransferPlanningLineToAsmHdr(ReqLine,AsmHeader,ReqLine."Net Quantity (Base)",false);
+      if ReqLine.Reserve then
+        ReserveBindingOrderToAsm(AsmHeader,ReqLine);
+      AsmHeader.MODIFY;
+
+      TransferAsmPlanningComp(ReqLine,AsmHeader);
+
+      BOMComp.SETRANGE("Parent Item No.",ReqLine."No.");
+      BOMComp.SETRANGE(Type,BOMComp.Type::Resource);
+      if BOMComp.FIND('-') then
+        repeat
+          AsmHeader.AddBOMLine(BOMComp);
+        until BOMComp.NEXT = 0;
+
+      PrintAsmOrder(AsmHeader);
+      TempDocumentEntry.INIT;
+      TempDocumentEntry."Table ID" := DATABASE::"Assembly Header";
+      TempDocumentEntry."Document Type" := AsmHeader."Document Type"::Order;
+      TempDocumentEntry."Document No." := AsmHeader."No.";
+      TempDocumentEntry."Entry No." := TempDocumentEntry.COUNT + 1;
+      TempDocumentEntry.INSERT;
+    END;
+
+    [External]
+    PROCEDURE TransferAsmPlanningComp@27(ReqLine@1000 : Record "Requisition Line";AsmHeader@1001 : Record "Assembly Header");
+    VAR
+      AsmLine@1004 : Record "Assembly Line";
+      PlanningComponent@1003 : Record "Planning Component";
+    BEGIN
+      PlanningComponent.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      PlanningComponent.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      PlanningComponent.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+      if PlanningComponent.FIND('-') then
+        repeat
+          AsmLine.INIT;
+          AsmLine."Document Type" := AsmHeader."Document Type";
+          AsmLine."Document No." := AsmHeader."No.";
+          AsmLine."Line No." := PlanningComponent."Line No.";
+          AsmLine.Type := AsmLine.Type::Item;
+          AsmLine."Dimension Set ID" := PlanningComponent."Dimension Set ID";
+          AsmLine.VALIDATE("No.",PlanningComponent."Item No.");
+          AsmLine.Description := PlanningComponent.Description;
+          AsmLine."Unit of Measure Code" := PlanningComponent."Unit of Measure Code";
+          AsmLine."Lead-Time Offset" := PlanningComponent."Lead-Time Offset";
+          AsmLine.Position := PlanningComponent.Position;
+          AsmLine."Position 2" := PlanningComponent."Position 2";
+          AsmLine."Position 3" := PlanningComponent."Position 3";
+          AsmLine."Variant Code" := PlanningComponent."Variant Code";
+          AsmLine."Location Code" := PlanningComponent."Location Code";
+
+          AsmLine."Quantity per" := PlanningComponent."Quantity per";
+          AsmLine."Qty. per Unit of Measure" := PlanningComponent."Qty. per Unit of Measure";
+          AsmLine.Quantity := PlanningComponent."Expected Quantity";
+          AsmLine."Quantity (Base)" := PlanningComponent."Expected Quantity (Base)";
+          AsmLine.InitRemainingQty;
+          AsmLine.InitQtyToConsume;
+          if PlanningComponent."Bin Code" <> '' then
+            AsmLine."Bin Code" := PlanningComponent."Bin Code"
+          else
+            AsmLine.GetDefaultBin;
+
+          AsmLine."Due Date" := PlanningComponent."Due Date";
+          AsmLine."Unit Cost" := PlanningComponent."Unit Cost";
+          AsmLine."Variant Code" := PlanningComponent."Variant Code";
+          AsmLine."Cost Amount" := PlanningComponent."Cost Amount";
+
+          AsmLine."Shortcut Dimension 1 Code" := PlanningComponent."Shortcut Dimension 1 Code";
+          AsmLine."Shortcut Dimension 2 Code" := PlanningComponent."Shortcut Dimension 2 Code";
+          AsmLine.INSERT;
+
+          ReservePlanningComponent.TransferPlanningCompToAsmLine(PlanningComponent,AsmLine,0,true);
+          AsmLine.AutoReserve;
+          ReservMgt.SetAssemblyLine(AsmLine);
+          ReservMgt.AutoTrack(AsmLine."Remaining Quantity (Base)");
+        until PlanningComponent.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE InsertTransHeader@23(ReqLine@1000 : Record "Requisition Line";VAR TransHeader@1001 : Record "Transfer Header");
+    VAR
+      InvtSetup@1002 : Record "Inventory Setup";
+    BEGIN
+      InvtSetup.GET;
+      InvtSetup.TESTFIELD("Transfer Order Nos.");
+
+      with ReqLine do begin
+        TransHeader.INIT;
+        TransHeader."No." := '';
+        TransHeader."Posting Date" := WORKDATE;
+        TransHeader.INSERT(true);
+        TransHeader.VALIDATE("Transfer-from Code","Transfer-from Code");
+        TransHeader.VALIDATE("Transfer-to Code","Location Code");
+        TransHeader."Receipt Date" := "Due Date";
+        TransHeader."Shipment Date" := "Transfer Shipment Date";
+        TransHeader."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        TransHeader."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+        TransHeader."Dimension Set ID" := "Dimension Set ID";
+        TransHeader.MODIFY;
+        TempDocumentEntry.INIT;
+        TempDocumentEntry."Table ID" := DATABASE::"Transfer Header";
+        TempDocumentEntry."Document No." := TransHeader."No.";
+        TempDocumentEntry."Entry No." := TempDocumentEntry.COUNT + 1;
+        TempDocumentEntry.INSERT;
+      end;
+
+      if PrintOrder then begin
+        TempTransHeaderToPrint."No." := TransHeader."No.";
+        TempTransHeaderToPrint.INSERT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE InsertTransLine@24(ReqLine@1000 : Record "Requisition Line";VAR TransHeader@1001 : Record "Transfer Header");
+    VAR
+      TransLine@1002 : Record "Transfer Line";
+      NextLineNo@1003 : Integer;
+    BEGIN
+      if (ReqLine."Transfer-from Code" <> TransHeader."Transfer-from Code") or
+         (ReqLine."Location Code" <> TransHeader."Transfer-to Code")
+      then
+        InsertTransHeader(ReqLine,TransHeader);
+
+      TransLine.SETRANGE("Document No.",TransHeader."No.");
+      if TransLine.FINDLAST then
+        NextLineNo := TransLine."Line No." + 10000
+      else
+        NextLineNo := 10000;
+
+      TransLine.INIT;
+      TransLine.BlockDynamicTracking(true);
+      TransLine."Document No." := TransHeader."No.";
+      TransLine."Line No." := NextLineNo;
+      TransLine.VALIDATE("Item No.",ReqLine."No.");
+      TransLine.Description := ReqLine.Description;
+      TransLine."Description 2" := ReqLine."Description 2";
+      TransLine.VALIDATE("Variant Code",ReqLine."Variant Code");
+      TransLine.VALIDATE("Transfer-from Code",ReqLine."Transfer-from Code");
+      TransLine.VALIDATE("Transfer-to Code",ReqLine."Location Code");
+      TransLine.VALIDATE(Quantity,ReqLine.Quantity);
+      TransLine.VALIDATE("Unit of Measure Code",ReqLine."Unit of Measure Code");
+      TransLine."Shortcut Dimension 1 Code" := ReqLine."Shortcut Dimension 1 Code";
+      TransLine."Shortcut Dimension 2 Code" := ReqLine."Shortcut Dimension 2 Code";
+      TransLine."Dimension Set ID" := ReqLine."Dimension Set ID";
+      TransLine."Receipt Date" := ReqLine."Due Date";
+      TransLine."Shipment Date" := ReqLine."Transfer Shipment Date";
+      TransLine.VALIDATE("Planning Flexibility",ReqLine."Planning Flexibility");
+      TransLine.INSERT;
+
+      ReqLineReserve.TransferReqLineToTransLine(ReqLine,TransLine,ReqLine."Quantity (Base)",false);
+      if ReqLine.Reserve then
+        ReserveBindingOrderToTrans(TransLine,ReqLine);
+    END;
+
+    [External]
+    PROCEDURE PrintTransferOrders@34();
+    BEGIN
+      CarryOutAction.GetTransferOrdersToPrint(TempTransHeaderToPrint);
+      if TempTransHeaderToPrint.FINDSET then begin
+        PrintOrder := true;
+        repeat
+          PrintTransferOrder(TempTransHeaderToPrint);
+        until TempTransHeaderToPrint.NEXT = 0;
+
+        TempTransHeaderToPrint.DELETEALL;
+      end;
+    END;
+
+    [External]
+    PROCEDURE PrintTransferOrder@13(TransHeader@1003 : Record "Transfer Header");
+    VAR
+      ReportSelection@1001 : Record "Report Selections";
+      TransHeader2@1000 : Record "Transfer Header";
+    BEGIN
+      if PrintOrder then begin
+        TransHeader2 := TransHeader;
+        TransHeader2.SETRECFILTER;
+        ReportSelection.PrintWithGUIYesNoWithCheck(ReportSelection.Usage::Inv1,TransHeader2,false,'');
+      end;
+    END;
+
+    [External]
+    PROCEDURE PrintPurchaseOrder@19(PurchHeader@1000 : Record "Purchase Header");
+    VAR
+      ReportSelection@1001 : Record "Report Selections";
+      PurchHeader2@1002 : Record "Purchase Header";
+      PurchSetup@1003 : Record "Purchases & Payables Setup";
+      PurchLine@1004 : Record "Purchase Line";
+    BEGIN
+      if PrintOrder and (PurchHeader."Buy-from Vendor No." <> '') then begin
+        PurchHeader2 := PurchHeader;
+        PurchSetup.GET;
+        if PurchSetup."Calc. Inv. Discount" then begin
+          PurchLine.RESET;
+          PurchLine.SETRANGE("Document Type",PurchHeader."Document Type");
+          PurchLine.SETRANGE("Document No.",PurchHeader."No.");
+          PurchLine.FINDFIRST;
+          CODEUNIT.RUN(CODEUNIT::"Purch.-Calc.Discount",PurchLine);
+        end;
+        PurchHeader2.SETRECFILTER;
+        ReportSelection.PrintWithGUIYesNoWithCheck(ReportSelection.Usage::"P.Order",PurchHeader2,false,'');
+      end;
+    END;
+
+    [External]
+    PROCEDURE PrintAsmOrder@33(AsmHeader@1000 : Record "Assembly Header");
+    VAR
+      ReportSelections@1005 : Record "Report Selections";
+      AsmHeader2@1004 : Record "Assembly Header";
+    BEGIN
+      if PrintOrder and (AsmHeader."Item No." <> '') then begin
+        AsmHeader2 := AsmHeader;
+        AsmHeader2.SETRECFILTER;
+        ReportSelections.PrintWithGUIYesNoWithCheck(ReportSelections.Usage::"Asm. Order",AsmHeader2,false,'');
+      end;
+    END;
+
+    LOCAL PROCEDURE FinalizeOrderHeader@16(ProdOrder@1000 : Record "Production Order");
+    VAR
+      ReportSelection@1001 : Record "Report Selections";
+      ProdOrder2@1002 : Record "Production Order";
+    BEGIN
+      if PrintOrder and (ProdOrder."No." <> '') then begin
+        ProdOrder2 := ProdOrder;
+        ProdOrder2.SETRECFILTER;
+        ReportSelection.PrintWithGUIYesNoWithCheck(ReportSelection.Usage::"Prod. Order",ProdOrder2,false,'');
+      end;
+    END;
+
+    [External]
+    PROCEDURE TransferRouting@14(ReqLine@1000 : Record "Requisition Line";ProdOrder@1001 : Record "Production Order";RoutingNo@1002 : Code[20];RoutingRefNo@1003 : Integer) : Boolean;
+    VAR
+      WorkCenter@1004 : Record "Work Center";
+      MachineCenter@1005 : Record "Machine Center";
+      PlanningRtngLine@1006 : Record "Planning Routing Line";
+      ProdOrderRtngLine@1007 : Record "Prod. Order Routing Line";
+      WMSManagement@1008 : Codeunit "WMS Management";
+      FlushingMethod@1009 : Option;
+    BEGIN
+      PlanningRtngLine.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      PlanningRtngLine.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      PlanningRtngLine.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+      if PlanningRtngLine.FIND('-') then
+        repeat
+          ProdOrderRtngLine.INIT;
+          ProdOrderRtngLine.Status := ProdOrder.Status;
+          ProdOrderRtngLine."Prod. Order No." := ProdOrder."No.";
+          ProdOrderRtngLine."Routing No." := RoutingNo;
+          ProdOrderRtngLine."Routing Reference No." := RoutingRefNo;
+          ProdOrderRtngLine."Operation No." := PlanningRtngLine."Operation No.";
+          ProdOrderRtngLine."Next Operation No." := PlanningRtngLine."Next Operation No.";
+          ProdOrderRtngLine."Previous Operation No." := PlanningRtngLine."Previous Operation No.";
+          ProdOrderRtngLine.Type := PlanningRtngLine.Type;
+          ProdOrderRtngLine."No." := PlanningRtngLine."No.";
+          ProdOrderRtngLine."Work Center No." := PlanningRtngLine."Work Center No.";
+          ProdOrderRtngLine."Work Center Group Code" := PlanningRtngLine."Work Center Group Code";
+          ProdOrderRtngLine.Description := PlanningRtngLine.Description;
+          ProdOrderRtngLine."Setup Time" := PlanningRtngLine."Setup Time";
+          ProdOrderRtngLine."Run Time" := PlanningRtngLine."Run Time";
+          ProdOrderRtngLine."Wait Time" := PlanningRtngLine."Wait Time";
+          ProdOrderRtngLine."Move Time" := PlanningRtngLine."Move Time";
+          ProdOrderRtngLine."Fixed Scrap Quantity" := PlanningRtngLine."Fixed Scrap Quantity";
+          ProdOrderRtngLine."Lot Size" := PlanningRtngLine."Lot Size";
+          ProdOrderRtngLine."Scrap Factor %" := PlanningRtngLine."Scrap Factor %";
+          ProdOrderRtngLine."Setup Time Unit of Meas. Code" := PlanningRtngLine."Setup Time Unit of Meas. Code";
+          ProdOrderRtngLine."Run Time Unit of Meas. Code" := PlanningRtngLine."Run Time Unit of Meas. Code";
+          ProdOrderRtngLine."Wait Time Unit of Meas. Code" := PlanningRtngLine."Wait Time Unit of Meas. Code";
+          ProdOrderRtngLine."Move Time Unit of Meas. Code" := PlanningRtngLine."Move Time Unit of Meas. Code";
+          ProdOrderRtngLine."Minimum Process Time" := PlanningRtngLine."Minimum Process Time";
+          ProdOrderRtngLine."Maximum Process Time" := PlanningRtngLine."Maximum Process Time";
+          ProdOrderRtngLine."Concurrent Capacities" := PlanningRtngLine."Concurrent Capacities";
+          ProdOrderRtngLine."Send-Ahead Quantity" := PlanningRtngLine."Send-Ahead Quantity";
+          ProdOrderRtngLine."Routing Link Code" := PlanningRtngLine."Routing Link Code";
+          ProdOrderRtngLine."Standard Task Code" := PlanningRtngLine."Standard Task Code";
+          ProdOrderRtngLine."Unit Cost per" := PlanningRtngLine."Unit Cost per";
+          ProdOrderRtngLine.Recalculate := PlanningRtngLine.Recalculate;
+          ProdOrderRtngLine."Sequence No. (Forward)" := PlanningRtngLine."Sequence No.(Forward)";
+          ProdOrderRtngLine."Sequence No. (Backward)" := PlanningRtngLine."Sequence No.(Backward)";
+          ProdOrderRtngLine."Fixed Scrap Qty. (Accum.)" := PlanningRtngLine."Fixed Scrap Qty. (Accum.)";
+          ProdOrderRtngLine."Scrap Factor % (Accumulated)" := PlanningRtngLine."Scrap Factor % (Accumulated)";
+          ProdOrderRtngLine."Sequence No. (Actual)" := PlanningRtngLine."Sequence No. (Actual)";
+          ProdOrderRtngLine."Starting Time" := PlanningRtngLine."Starting Time";
+          ProdOrderRtngLine."Starting Date" := PlanningRtngLine."Starting Date";
+          ProdOrderRtngLine."Ending Time" := PlanningRtngLine."Ending Time";
+          ProdOrderRtngLine."Ending Date" := PlanningRtngLine."Ending Date";
+          ProdOrderRtngLine."Unit Cost Calculation" := PlanningRtngLine."Unit Cost Calculation";
+          ProdOrderRtngLine."Input Quantity" := PlanningRtngLine."Input Quantity";
+          ProdOrderRtngLine."Critical Path" := PlanningRtngLine."Critical Path";
+          ProdOrderRtngLine."Direct Unit Cost" := PlanningRtngLine."Direct Unit Cost";
+          ProdOrderRtngLine."Indirect Cost %" := PlanningRtngLine."Indirect Cost %";
+          ProdOrderRtngLine."Overhead Rate" := PlanningRtngLine."Overhead Rate";
+          case ProdOrderRtngLine.Type of
+            ProdOrderRtngLine.Type::"Work Center":
+              begin
+                WorkCenter.GET(PlanningRtngLine."No.");
+                ProdOrderRtngLine."Flushing Method" := WorkCenter."Flushing Method";
+              end;
+            ProdOrderRtngLine.Type::"Machine Center":
+              begin
+                MachineCenter.GET(ProdOrderRtngLine."No.");
+                ProdOrderRtngLine."Flushing Method" := MachineCenter."Flushing Method";
+              end;
+          end;
+          ProdOrderRtngLine."Expected Operation Cost Amt." := PlanningRtngLine."Expected Operation Cost Amt.";
+          ProdOrderRtngLine."Expected Capacity Ovhd. Cost" := PlanningRtngLine."Expected Capacity Ovhd. Cost";
+          ProdOrderRtngLine."Expected Capacity Need" := PlanningRtngLine."Expected Capacity Need";
+
+          ProdOrderRtngLine."Location Code" := ReqLine."Location Code";
+          ProdOrderRtngLine."From-Production Bin Code" :=
+            WMSManagement.GetProdCenterBinCode(PlanningRtngLine.Type,PlanningRtngLine."No.",ReqLine."Location Code",false,0);
+
+          FlushingMethod := ProdOrderRtngLine."Flushing Method";
+          if ProdOrderRtngLine."Flushing Method" = ProdOrderRtngLine."Flushing Method"::Manual then
+            ProdOrderRtngLine."To-Production Bin Code" := WMSManagement.GetProdCenterBinCode(
+                PlanningRtngLine.Type,PlanningRtngLine."No.",ReqLine."Location Code",true,
+                FlushingMethod)
+          else
+            ProdOrderRtngLine."Open Shop Floor Bin Code" := WMSManagement.GetProdCenterBinCode(
+                PlanningRtngLine.Type,PlanningRtngLine."No.",ReqLine."Location Code",true,
+                FlushingMethod);
+
+          ProdOrderRtngLine.UpdateDatetime;
+          ProdOrderRtngLine.INSERT;
+          CalcProdOrder.TransferTaskInfo(ProdOrderRtngLine,ReqLine."Routing Version Code");
+        until PlanningRtngLine.NEXT = 0;
+
+      exit(not PlanningRtngLine.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE TransferBOM@11(ReqLine@1000 : Record "Requisition Line";ProdOrder@1001 : Record "Production Order";ProdOrderLineNo@1002 : Integer);
+    VAR
+      PlanningComponent@1004 : Record "Planning Component";
+      ProdOrderComp2@1005 : Record "Prod. Order Component";
+    BEGIN
+      PlanningComponent.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      PlanningComponent.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      PlanningComponent.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+      if PlanningComponent.FIND('-') then
+        repeat
+          ProdOrderComp2.INIT;
+          ProdOrderComp2.Status := ProdOrder.Status;
+          ProdOrderComp2."Prod. Order No." := ProdOrder."No.";
+          ProdOrderComp2."Prod. Order Line No." := ProdOrderLineNo;
+          ProdOrderComp2."Line No." := PlanningComponent."Line No.";
+          ProdOrderComp2."Item No." := PlanningComponent."Item No.";
+          ProdOrderComp2.Description := PlanningComponent.Description;
+          ProdOrderComp2."Unit of Measure Code" := PlanningComponent."Unit of Measure Code";
+          ProdOrderComp2."Quantity per" := PlanningComponent."Quantity per";
+          ProdOrderComp2.Quantity := PlanningComponent.Quantity;
+          ProdOrderComp2.Position := PlanningComponent.Position;
+          ProdOrderComp2."Position 2" := PlanningComponent."Position 2";
+          ProdOrderComp2."Position 3" := PlanningComponent."Position 3";
+          ProdOrderComp2."Lead-Time Offset" := PlanningComponent."Lead-Time Offset";
+          ProdOrderComp2."Routing Link Code" := PlanningComponent."Routing Link Code";
+          ProdOrderComp2."Scrap %" := PlanningComponent."Scrap %";
+          ProdOrderComp2."Variant Code" := PlanningComponent."Variant Code";
+          ProdOrderComp2."Flushing Method" := PlanningComponent."Flushing Method";
+          ProdOrderComp2."Location Code" := PlanningComponent."Location Code";
+          if  PlanningComponent."Bin Code" <> '' then
+            ProdOrderComp2."Bin Code" := PlanningComponent."Bin Code"
+          else
+            ProdOrderComp2.GetDefaultBin;
+          ProdOrderComp2.Length := PlanningComponent.Length;
+          ProdOrderComp2.Width := PlanningComponent.Width;
+          ProdOrderComp2.Weight := PlanningComponent.Weight;
+          ProdOrderComp2.Depth := PlanningComponent.Depth;
+          ProdOrderComp2."Calculation Formula" := PlanningComponent."Calculation Formula";
+          ProdOrderComp2."Qty. per Unit of Measure" := PlanningComponent."Qty. per Unit of Measure";
+          ProdOrderComp2."Quantity (Base)" := PlanningComponent."Quantity (Base)";
+          ProdOrderComp2."Due Date" := PlanningComponent."Due Date";
+          ProdOrderComp2."Due Time" := PlanningComponent."Due Time";
+          ProdOrderComp2."Unit Cost" := PlanningComponent."Unit Cost";
+          ProdOrderComp2."Direct Unit Cost" := PlanningComponent."Direct Unit Cost";
+          ProdOrderComp2."Indirect Cost %" := PlanningComponent."Indirect Cost %";
+          ProdOrderComp2."Variant Code" := PlanningComponent."Variant Code";
+          ProdOrderComp2."Overhead Rate" := PlanningComponent."Overhead Rate";
+          ProdOrderComp2."Expected Quantity" := PlanningComponent."Expected Quantity";
+          ProdOrderComp2."Expected Qty. (Base)" := PlanningComponent."Expected Quantity (Base)";
+          ProdOrderComp2."Cost Amount" := PlanningComponent."Cost Amount";
+          ProdOrderComp2."Overhead Amount" := PlanningComponent."Overhead Amount";
+          ProdOrderComp2."Direct Cost Amount" := PlanningComponent."Direct Cost Amount";
+          ProdOrderComp2."Planning Level Code" := PlanningComponent."Planning Level Code";
+          if ProdOrderComp2.Status in [ProdOrderComp2.Status::Released,ProdOrderComp2.Status::Finished] then
+            ProdOrderComp2.CALCFIELDS("Act. Consumption (Qty)");
+          ProdOrderComp2."Remaining Quantity" :=
+            ProdOrderComp2."Expected Quantity" - ProdOrderComp2."Act. Consumption (Qty)";
+          ProdOrderComp2."Remaining Qty. (Base)" :=
+            ROUND(ProdOrderComp2."Remaining Quantity" * ProdOrderComp2."Qty. per Unit of Measure",0.00001);
+          ProdOrderComp2."Shortcut Dimension 1 Code" := PlanningComponent."Shortcut Dimension 1 Code";
+          ProdOrderComp2."Shortcut Dimension 2 Code" := PlanningComponent."Shortcut Dimension 2 Code";
+          ProdOrderComp2."Dimension Set ID" := PlanningComponent."Dimension Set ID";
+          ProdOrderComp2.UpdateDatetime;
+          ProdOrderComp2.INSERT;
+          ReservePlanningComponent.TransferPlanningCompToPOComp(PlanningComponent,ProdOrderComp2,0,true);
+          if ProdOrderComp2.Status in [ProdOrderComp2.Status::"Firm Planned",ProdOrderComp2.Status::Released] then
+            ProdOrderComp2.AutoReserve;
+
+          ReservMgt.SetProdOrderComponent(ProdOrderComp2);
+          ReservMgt.AutoTrack(ProdOrderComp2."Remaining Qty. (Base)");
+        until PlanningComponent.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE TransferCapNeed@10(ReqLine@1000 : Record "Requisition Line";ProdOrder@1001 : Record "Production Order";RoutingNo@1002 : Code[20];RoutingRefNo@1005 : Integer);
+    VAR
+      ProdOrderCapNeed@1003 : Record "Prod. Order Capacity Need";
+      NewProdOrderCapNeed@1004 : Record "Prod. Order Capacity Need";
+    BEGIN
+      ProdOrderCapNeed.SETCURRENTKEY("Worksheet Template Name","Worksheet Batch Name","Worksheet Line No.");
+      ProdOrderCapNeed.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      ProdOrderCapNeed.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      ProdOrderCapNeed.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+      if ProdOrderCapNeed.FIND('-') then
+        repeat
+          NewProdOrderCapNeed.INIT;
+          NewProdOrderCapNeed := ProdOrderCapNeed;
+          NewProdOrderCapNeed."Requested Only" := false;
+          NewProdOrderCapNeed.Status := ProdOrder.Status;
+          NewProdOrderCapNeed."Prod. Order No." := ProdOrder."No.";
+          NewProdOrderCapNeed."Routing No." := RoutingNo;
+          NewProdOrderCapNeed."Routing Reference No." := RoutingRefNo;
+          NewProdOrderCapNeed."Worksheet Template Name" := '';
+          NewProdOrderCapNeed."Worksheet Batch Name" := '';
+          NewProdOrderCapNeed."Worksheet Line No." := 0;
+          NewProdOrderCapNeed.UpdateDatetime;
+          NewProdOrderCapNeed.INSERT;
+        until ProdOrderCapNeed.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE UpdateComponentLink@15(ProdOrderLine@1000 : Record "Prod. Order Line");
+    VAR
+      ProdOrderComp@1001 : Record "Prod. Order Component";
+    BEGIN
+      ProdOrderComp.SETCURRENTKEY(Status,"Prod. Order No.","Prod. Order Line No.","Item No.");
+      ProdOrderComp.SETRANGE(Status,ProdOrderLine.Status);
+      ProdOrderComp.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+      ProdOrderComp.SETRANGE("Item No.",ProdOrderLine."Item No.");
+      if ProdOrderComp.FIND('-') then
+        repeat
+          ProdOrderComp."Supplied-by Line No." := ProdOrderLine."Line No.";
+          ProdOrderComp.MODIFY;
+        until ProdOrderComp.NEXT = 0;
+    END;
+
+    PROCEDURE SetCreatedDocumentBuffer@37(VAR TempDocumentEntryNew@1000 : TEMPORARY Record "Document Entry");
+    BEGIN
+      TempDocumentEntry.COPY(TempDocumentEntryNew,true);
+    END;
+
+    LOCAL PROCEDURE InsertTempProdOrder@5(VAR RequisitionLine@1000 : Record "Requisition Line";VAR NewProdOrder@1001 : Record "Production Order");
+    BEGIN
+      if TempProductionOrder.GET(NewProdOrder.Status,NewProdOrder."No.") then
+        exit;
+
+      TempDocumentEntry.INIT;
+      TempDocumentEntry."Table ID" := DATABASE::"Production Order";
+      TempDocumentEntry."Document Type" := NewProdOrder.Status;
+      TempDocumentEntry."Document No." := NewProdOrder."No.";
+      TempDocumentEntry."Entry No." := TempDocumentEntry.COUNT + 1;
+      TempDocumentEntry.INSERT;
+
+      TempProductionOrder := NewProdOrder;
+      if RequisitionLine."Ref. Order Status" = RequisitionLine."Ref. Order Status"::Planned then begin
+        TempProductionOrder."Planned Order No." := RequisitionLine."Ref. Order No.";
+        TempProductionOrder.INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE FindTempProdOrder@12(VAR RequisitionLine@1000 : Record "Requisition Line") : Boolean;
+    BEGIN
+      if RequisitionLine."Ref. Order Status" = RequisitionLine."Ref. Order Status"::Planned then begin
+        TempProductionOrder.SETRANGE("Planned Order No.",RequisitionLine."Ref. Order No.");
+        exit(TempProductionOrder.FINDFIRST);
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetPrintOrder@18(OrderPrinting@1000 : Boolean);
+    BEGIN
+      PrintOrder := OrderPrinting;
+    END;
+
+    [External]
+    PROCEDURE SetSplitTransferOrders@31(Split@1000 : Boolean);
+    BEGIN
+      SplitTransferOrders := Split;
+    END;
+
+    [External]
+    PROCEDURE ReserveBindingOrderToProd@2(VAR ProdOrderLine@1005 : Record "Prod. Order Line";VAR ReqLine@1000 : Record "Requisition Line");
+    VAR
+      SalesLine@1004 : Record "Sales Line";
+      ProdOrderComp@1006 : Record "Prod. Order Component";
+      AsmLine@1011 : Record "Assembly Line";
+      SalesLineReserve@1002 : Codeunit "Sales Line-Reserve";
+      ProdOrderCompReserve@1007 : Codeunit "Prod. Order Comp.-Reserve";
+      AsmLineReserve@1008 : Codeunit "Assembly Line-Reserve";
+      ReservQty@1009 : Decimal;
+      ReservQtyBase@1001 : Decimal;
+    BEGIN
+      ProdOrderLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      if ProdOrderLine."Remaining Qty. (Base)" - ProdOrderLine."Reserved Qty. (Base)" >
+         ReqLine."Demand Quantity (Base)"
+      then begin
+        ReservQty := ReqLine."Demand Quantity";
+        ReservQtyBase := ReqLine."Demand Quantity (Base)";
+      end else begin
+        ReservQty := ProdOrderLine."Remaining Quantity" - ProdOrderLine."Reserved Quantity";
+        ReservQtyBase := ProdOrderLine."Remaining Qty. (Base)" - ProdOrderLine."Reserved Qty. (Base)";
+      end;
+
+      case ReqLine."Demand Type" of
+        DATABASE::"Prod. Order Component":
+          begin
+            ProdOrderComp.GET(
+              ReqLine."Demand Subtype",ReqLine."Demand Order No.",ReqLine."Demand Line No.",ReqLine."Demand Ref. No.");
+            ProdOrderCompReserve.BindToProdOrder(ProdOrderComp,ProdOrderLine,ReservQty,ReservQtyBase);
+          end;
+        DATABASE::"Sales Line":
+          begin
+            SalesLine.GET(ReqLine."Demand Subtype",ReqLine."Demand Order No.",ReqLine."Demand Line No.");
+            SalesLineReserve.BindToProdOrder(SalesLine,ProdOrderLine,ReservQty,ReservQtyBase);
+            if SalesLine.Reserve = SalesLine.Reserve::Never then begin
+              SalesLine.Reserve := SalesLine.Reserve::Optional;
+              SalesLine.MODIFY;
+            end;
+          end;
+        DATABASE::"Assembly Line":
+          begin
+            AsmLine.GET(ReqLine."Demand Subtype",ReqLine."Demand Order No.",ReqLine."Demand Line No.");
+            AsmLineReserve.BindToProdOrder(AsmLine,ProdOrderLine,ReservQty,ReservQtyBase);
+            if AsmLine.Reserve = AsmLine.Reserve::Never then begin
+              AsmLine.Reserve := AsmLine.Reserve::Optional;
+              AsmLine.MODIFY;
+            end;
+          end;
+      end;
+      ProdOrderLine.MODIFY;
+    END;
+
+    [External]
+    PROCEDURE ReserveBindingOrderToTrans@7(VAR TransLine@1005 : Record "Transfer Line";VAR ReqLine@1000 : Record "Requisition Line");
+    VAR
+      ProdOrderComp@1004 : Record "Prod. Order Component";
+      SalesLine@1007 : Record "Sales Line";
+      AsmLine@1012 : Record "Assembly Line";
+      ProdOrderCompReserve@1002 : Codeunit "Prod. Order Comp.-Reserve";
+      SalesLineReserve@1008 : Codeunit "Sales Line-Reserve";
+      AsmLineReserve@1011 : Codeunit "Assembly Line-Reserve";
+      ReservQty@1009 : Decimal;
+      ReservQtyBase@1001 : Decimal;
+    BEGIN
+      TransLine.CALCFIELDS("Reserved Quantity Inbnd.","Reserved Qty. Inbnd. (Base)");
+      if (TransLine."Outstanding Qty. (Base)" - TransLine."Reserved Qty. Inbnd. (Base)") > ReqLine."Demand Quantity (Base)" then begin
+        ReservQty := ReqLine."Demand Quantity";
+        ReservQtyBase := ReqLine."Demand Quantity (Base)";
+      end else begin
+        ReservQty := TransLine."Outstanding Quantity" - TransLine."Reserved Quantity Inbnd.";
+        ReservQtyBase := TransLine."Outstanding Qty. (Base)" - TransLine."Reserved Qty. Inbnd. (Base)";
+      end;
+
+      case ReqLine."Demand Type" of
+        DATABASE::"Prod. Order Component":
+          begin
+            ProdOrderComp.GET(
+              ReqLine."Demand Subtype",ReqLine."Demand Order No.",ReqLine."Demand Line No.",ReqLine."Demand Ref. No.");
+            ProdOrderCompReserve.BindToTransfer(ProdOrderComp,TransLine,ReservQty,ReservQtyBase);
+          end;
+        DATABASE::"Sales Line":
+          begin
+            SalesLine.GET(ReqLine."Demand Subtype",ReqLine."Demand Order No.",ReqLine."Demand Line No.");
+            SalesLineReserve.BindToTransfer(SalesLine,TransLine,ReservQty,ReservQtyBase);
+            if SalesLine.Reserve = SalesLine.Reserve::Never then begin
+              SalesLine.Reserve := SalesLine.Reserve::Optional;
+              SalesLine.MODIFY;
+            end;
+          end;
+        DATABASE::"Assembly Line":
+          begin
+            AsmLine.GET(ReqLine."Demand Subtype",ReqLine."Demand Order No.",ReqLine."Demand Line No.");
+            AsmLineReserve.BindToTransfer(AsmLine,TransLine,ReservQty,ReservQtyBase);
+            if AsmLine.Reserve = AsmLine.Reserve::Never then begin
+              AsmLine.Reserve := AsmLine.Reserve::Optional;
+              AsmLine.MODIFY;
+            end;
+          end;
+      end;
+      TransLine.MODIFY;
+    END;
+
+    [External]
+    PROCEDURE ReserveBindingOrderToAsm@29(VAR AsmHeader@1005 : Record "Assembly Header";VAR ReqLine@1000 : Record "Requisition Line");
+    VAR
+      SalesLine@1004 : Record "Sales Line";
+      ProdOrderComp@1006 : Record "Prod. Order Component";
+      AsmLine@1013 : Record "Assembly Line";
+      SalesLineReserve@1002 : Codeunit "Sales Line-Reserve";
+      ProdOrderCompReserve@1007 : Codeunit "Prod. Order Comp.-Reserve";
+      AsmLineReserve@1012 : Codeunit "Assembly Line-Reserve";
+      ReservQty@1008 : Decimal;
+      ReservQtyBase@1001 : Decimal;
+    BEGIN
+      AsmHeader.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      if AsmHeader."Remaining Quantity (Base)" - AsmHeader."Reserved Qty. (Base)" >
+         ReqLine."Demand Quantity (Base)"
+      then begin
+        ReservQty := ReqLine."Demand Quantity";
+        ReservQtyBase := ReqLine."Demand Quantity (Base)";
+      end else begin
+        ReservQty := AsmHeader."Remaining Quantity" - AsmHeader."Reserved Quantity";
+        ReservQtyBase := AsmHeader."Remaining Quantity (Base)" - AsmHeader."Reserved Qty. (Base)";
+      end;
+
+      case ReqLine."Demand Type" of
+        DATABASE::"Prod. Order Component":
+          begin
+            ProdOrderComp.GET(
+              ReqLine."Demand Subtype",ReqLine."Demand Order No.",ReqLine."Demand Line No.",ReqLine."Demand Ref. No.");
+            ProdOrderCompReserve.BindToAssembly(ProdOrderComp,AsmHeader,ReservQty,ReservQtyBase);
+          end;
+        DATABASE::"Sales Line":
+          begin
+            SalesLine.GET(ReqLine."Demand Subtype",ReqLine."Demand Order No.",ReqLine."Demand Line No.");
+            SalesLineReserve.BindToAssembly(SalesLine,AsmHeader,ReservQty,ReservQtyBase);
+            if SalesLine.Reserve = SalesLine.Reserve::Never then begin
+              SalesLine.Reserve := SalesLine.Reserve::Optional;
+              SalesLine.MODIFY;
+            end;
+          end;
+        DATABASE::"Assembly Line":
+          begin
+            AsmLine.GET(ReqLine."Demand Subtype",ReqLine."Demand Order No.",ReqLine."Demand Line No.");
+            AsmLineReserve.BindToAssembly(AsmLine,AsmHeader,ReservQty,ReservQtyBase);
+            if AsmLine.Reserve = AsmLine.Reserve::Never then begin
+              AsmLine.Reserve := AsmLine.Reserve::Optional;
+              AsmLine.MODIFY;
+            end;
+          end;
+      end;
+      AsmHeader.MODIFY;
+    END;
+
+    [External]
+    PROCEDURE ReserveBindingOrderToReqline@30(VAR DemandReqLine@1000 : Record "Requisition Line";VAR SupplyReqLine@1001 : Record "Requisition Line");
+    VAR
+      ProdOrderComp@1002 : Record "Prod. Order Component";
+      SalesLine@1003 : Record "Sales Line";
+      ServiceLine@1008 : Record "Service Line";
+      ProdOrderCompReserve@1005 : Codeunit "Prod. Order Comp.-Reserve";
+      SalesLineReserve@1006 : Codeunit "Sales Line-Reserve";
+      ServiceLineReserve@1009 : Codeunit "Service Line-Reserve";
+    BEGIN
+      case SupplyReqLine."Demand Type" of
+        DATABASE::"Prod. Order Component":
+          begin
+            ProdOrderComp.GET(
+              SupplyReqLine."Demand Subtype",SupplyReqLine."Demand Order No.",SupplyReqLine."Demand Line No.",
+              SupplyReqLine."Demand Ref. No.");
+            ProdOrderCompReserve.BindToRequisition(
+              ProdOrderComp,DemandReqLine,SupplyReqLine."Demand Quantity",SupplyReqLine."Demand Quantity (Base)");
+          end;
+        DATABASE::"Sales Line":
+          begin
+            SalesLine.GET(SupplyReqLine."Demand Subtype",SupplyReqLine."Demand Order No.",SupplyReqLine."Demand Line No.");
+            SalesLineReserve.BindToRequisition(
+              SalesLine,DemandReqLine,SupplyReqLine."Demand Quantity",SupplyReqLine."Demand Quantity (Base)");
+            if SalesLine.Reserve = SalesLine.Reserve::Never then begin
+              SalesLine.Reserve := SalesLine.Reserve::Optional;
+              SalesLine.MODIFY;
+            end;
+          end;
+        DATABASE::"Service Line":
+          begin
+            ServiceLine.GET(SupplyReqLine."Demand Subtype",SupplyReqLine."Demand Order No.",SupplyReqLine."Demand Line No.");
+            ServiceLineReserve.BindToRequisition(
+              ServiceLine,DemandReqLine,SupplyReqLine."Demand Quantity",SupplyReqLine."Demand Quantity (Base)");
+          end;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

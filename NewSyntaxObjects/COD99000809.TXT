@@ -1,0 +1,912 @@
+OBJECT Codeunit 99000809 Planning Line Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Manufacturing Setup"=rm,
+                TableData "Production BOM Line"=r,
+                TableData "Prod. Order Capacity Need"=rd,
+                TableData "Planning Component"=rimd,
+                TableData "Planning Routing Line"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=BOM phantom structure for %1 is higher than 50 levels.';
+      Text002@1002 : TextConst 'ENU=There is not enough space to insert lower level Make-to-Order lines.';
+      Item@1003 : Record Item;
+      SKU@1004 : Record "Stockkeeping Unit";
+      ReqLine@1005 : Record "Requisition Line";
+      BomComponent@1006 : ARRAY [50] OF Record "Production BOM Line";
+      AsmBOMComp@1026 : ARRAY [50] OF Record "BOM Component";
+      PlanningRtngLine2@1007 : Record "Planning Routing Line";
+      PlanningComponent@1008 : Record "Planning Component";
+      TempPlanningComponent@1010 : TEMPORARY Record "Planning Component";
+      TempPlanningErrorLog@1001 : TEMPORARY Record "Planning Error Log";
+      CalcPlanningRtngLine@1020 : Codeunit "Calculate Planning Route Line";
+      UOMMgt@1011 : Codeunit "Unit of Measure Management";
+      CostCalcMgt@1012 : Codeunit "Cost Calculation Management";
+      PlanningRoutingMgt@1013 : Codeunit PlanningRoutingManagement;
+      VersionMgt@1014 : Codeunit VersionManagement;
+      GetPlanningParameters@1015 : Codeunit "Planning-Get Parameters";
+      LeadTimeMgt@1016 : Codeunit "Lead-Time Management";
+      CalendarMgt@1027 : Codeunit CalendarManagement;
+      LineSpacing@1018 : ARRAY [50] OF Integer;
+      NextPlanningCompLineNo@1025 : Integer;
+      Blocked@1019 : Boolean;
+      PlanningResiliency@1017 : Boolean;
+      Text010@1021 : TextConst 'ENU=The line with %1 %2 for %3 %4 or one of its versions, has no %5 defined.';
+      Text011@1022 : TextConst 'ENU=%1 has recalculate set to false.';
+      Text012@1009 : TextConst 'ENU=You must specify %1 in %2 %3.';
+      Text014@1023 : TextConst 'ENU=Production BOM Header No. %1 used by Item %2 has BOM levels that exceed 50.';
+      Text015@1024 : TextConst 'ENU=There is no more space to insert another line in the worksheet.';
+
+    LOCAL PROCEDURE TransferRouting@3();
+    VAR
+      RtngHeader@1003 : Record "Routing Header";
+      RtngLine@1000 : Record "Routing Line";
+      PlanningRtngLine@1001 : Record "Planning Routing Line";
+      MachCenter@1002 : Record "Machine Center";
+    BEGIN
+      if ReqLine."Routing No." = '' then
+        exit;
+
+      RtngHeader.GET(ReqLine."Routing No.");
+      RtngLine.SETRANGE("Routing No.",ReqLine."Routing No.");
+      RtngLine.SETRANGE("Version Code",ReqLine."Routing Version Code");
+      if RtngLine.FIND('-') then
+        repeat
+          if PlanningResiliency and PlanningRtngLine.Recalculate then
+            TempPlanningErrorLog.SetError(
+              STRSUBSTNO(Text011,PlanningRtngLine.TABLECAPTION),
+              DATABASE::"Routing Header",RtngHeader.GETPOSITION);
+          PlanningRtngLine.TESTFIELD(Recalculate,false);
+
+          PlanningRtngLine."Worksheet Template Name" := ReqLine."Worksheet Template Name";
+          PlanningRtngLine."Worksheet Batch Name" := ReqLine."Journal Batch Name";
+          PlanningRtngLine."Worksheet Line No." := ReqLine."Line No.";
+          PlanningRtngLine."Operation No." := RtngLine."Operation No.";
+          PlanningRtngLine."Next Operation No." := RtngLine."Next Operation No.";
+          PlanningRtngLine."Previous Operation No." := RtngLine."Previous Operation No.";
+          PlanningRtngLine.Type := RtngLine.Type;
+          PlanningRtngLine."No." := RtngLine."No.";
+          if PlanningResiliency and (RtngLine."No." = '') then begin
+            RtngHeader.GET(RtngLine."Routing No.");
+            TempPlanningErrorLog.SetError(
+              STRSUBSTNO(
+                Text010,
+                RtngLine.FIELDCAPTION("Operation No."),RtngLine."Operation No.",
+                RtngHeader.TABLECAPTION,RtngHeader."No.",
+                RtngLine.FIELDCAPTION("No.")),
+              DATABASE::"Routing Header",RtngHeader.GETPOSITION);
+          end;
+          RtngLine.TESTFIELD("No.");
+
+          if PlanningResiliency and (RtngLine."Work Center No." = '') then begin
+            MachCenter.GET(RtngLine."No.");
+            TempPlanningErrorLog.SetError(
+              STRSUBSTNO(
+                Text012,
+                MachCenter.FIELDCAPTION("Work Center No."),
+                MachCenter.TABLECAPTION,
+                MachCenter."No."),
+              DATABASE::"Machine Center",MachCenter.GETPOSITION);
+          end;
+          RtngLine.TESTFIELD("Work Center No.");
+
+          PlanningRtngLine."Work Center No." := RtngLine."Work Center No.";
+          PlanningRtngLine."Work Center Group Code" := RtngLine."Work Center Group Code";
+          PlanningRtngLine.Description := RtngLine.Description;
+          PlanningRtngLine."Setup Time" := RtngLine."Setup Time";
+          PlanningRtngLine."Run Time" := RtngLine."Run Time";
+          PlanningRtngLine."Wait Time" := RtngLine."Wait Time";
+          PlanningRtngLine."Move Time" := RtngLine."Move Time";
+          PlanningRtngLine."Fixed Scrap Quantity" := RtngLine."Fixed Scrap Quantity";
+          PlanningRtngLine."Lot Size" := RtngLine."Lot Size";
+          PlanningRtngLine."Scrap Factor %" := RtngLine."Scrap Factor %";
+          PlanningRtngLine."Setup Time Unit of Meas. Code" := RtngLine."Setup Time Unit of Meas. Code";
+          PlanningRtngLine."Run Time Unit of Meas. Code" := RtngLine."Run Time Unit of Meas. Code";
+          PlanningRtngLine."Wait Time Unit of Meas. Code" := RtngLine."Wait Time Unit of Meas. Code";
+          PlanningRtngLine."Move Time Unit of Meas. Code" := RtngLine."Move Time Unit of Meas. Code";
+          PlanningRtngLine."Minimum Process Time" := RtngLine."Minimum Process Time";
+          PlanningRtngLine."Maximum Process Time" := RtngLine."Maximum Process Time";
+          PlanningRtngLine."Concurrent Capacities" := RtngLine."Concurrent Capacities";
+          if PlanningRtngLine."Concurrent Capacities" = 0 then
+            PlanningRtngLine."Concurrent Capacities" := 1;
+
+          PlanningRtngLine."Send-Ahead Quantity" := RtngLine."Send-Ahead Quantity";
+          PlanningRtngLine."Routing Link Code" := RtngLine."Routing Link Code";
+          PlanningRtngLine."Standard Task Code" := RtngLine."Standard Task Code";
+          PlanningRtngLine."Unit Cost per" := RtngLine."Unit Cost per";
+          CostCalcMgt.RoutingCostPerUnit(
+            PlanningRtngLine.Type,
+            PlanningRtngLine."No.",
+            PlanningRtngLine."Direct Unit Cost",
+            PlanningRtngLine."Indirect Cost %",
+            PlanningRtngLine."Overhead Rate",
+            PlanningRtngLine."Unit Cost per",
+            PlanningRtngLine."Unit Cost Calculation");
+          PlanningRtngLine.VALIDATE("Direct Unit Cost");
+          PlanningRtngLine."Sequence No.(Forward)" := RtngLine."Sequence No. (Forward)";
+          PlanningRtngLine."Sequence No.(Backward)" := RtngLine."Sequence No. (Backward)";
+          PlanningRtngLine."Fixed Scrap Qty. (Accum.)" := RtngLine."Fixed Scrap Qty. (Accum.)";
+          PlanningRtngLine."Scrap Factor % (Accumulated)" := RtngLine."Scrap Factor % (Accumulated)";
+          PlanningRtngLine."Output Quantity" := ReqLine.Quantity;
+          PlanningRtngLine."Starting Date" := ReqLine."Starting Date";
+          PlanningRtngLine."Starting Time" := ReqLine."Starting Time";
+          PlanningRtngLine."Ending Date" := ReqLine."Ending Date";
+          PlanningRtngLine."Ending Time" := ReqLine."Ending Time";
+          PlanningRtngLine."Input Quantity" := ReqLine.Quantity;
+          PlanningRtngLine.UpdateDatetime;
+          PlanningRtngLine.INSERT;
+        until RtngLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE TransferBOM@4(ProdBOMNo@1000 : Code[20];Level@1001 : Integer;LineQtyPerUOM@1002 : Decimal;ItemQtyPerUOM@1010 : Decimal);
+    VAR
+      BOMHeader@1003 : Record "Production BOM Header";
+      CompSKU@1004 : Record "Stockkeeping Unit";
+      Item2@1006 : Record Item;
+      ReqQty@1007 : Decimal;
+    BEGIN
+      if ReqLine."Production BOM No." = '' then
+        exit;
+
+      PlanningComponent.LOCKTABLE;
+
+      if Level > 50 then begin
+        if PlanningResiliency then begin
+          BOMHeader.GET(ReqLine."Production BOM No.");
+          TempPlanningErrorLog.SetError(
+            STRSUBSTNO(Text014,ReqLine."Production BOM No.",ReqLine."No."),
+            DATABASE::"Production BOM Header",BOMHeader.GETPOSITION);
+        end;
+        ERROR(
+          Text000,
+          ProdBOMNo);
+      end;
+
+      if NextPlanningCompLineNo = 0 then begin
+        PlanningComponent.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+        PlanningComponent.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+        PlanningComponent.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+        if PlanningComponent.FIND('+') then
+          NextPlanningCompLineNo := PlanningComponent."Line No.";
+        PlanningComponent.RESET;
+      end;
+
+      BOMHeader.GET(ProdBOMNo);
+
+      BomComponent[Level].SETRANGE("Production BOM No.",ProdBOMNo);
+      if Level > 1 then
+        BomComponent[Level].SETRANGE("Version Code",VersionMgt.GetBOMVersion(BOMHeader."No.",ReqLine."Starting Date",true))
+      else
+        BomComponent[Level].SETRANGE("Version Code",ReqLine."Production BOM Version Code");
+
+      BomComponent[Level].SETFILTER("Starting Date",'%1|..%2',0D,ReqLine."Starting Date");
+      BomComponent[Level].SETFILTER("Ending Date",'%1|%2..',0D,ReqLine."Starting Date");
+      if BomComponent[Level].FIND('-') then
+        repeat
+          if BomComponent[Level]."Routing Link Code" <> '' then begin
+            PlanningRtngLine2.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+            PlanningRtngLine2.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+            PlanningRtngLine2.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+            PlanningRtngLine2.SETRANGE("Routing Link Code",BomComponent[Level]."Routing Link Code");
+            PlanningRtngLine2.FINDFIRST;
+            ReqQty :=
+              BomComponent[Level].Quantity *
+              (1 + BomComponent[Level]."Scrap %" / 100) *
+              (1 + PlanningRtngLine2."Scrap Factor % (Accumulated)") *
+              (1 + ReqLine."Scrap %" / 100) *
+              LineQtyPerUOM /
+              ItemQtyPerUOM +
+              PlanningRtngLine2."Fixed Scrap Qty. (Accum.)";
+          end else
+            ReqQty :=
+              BomComponent[Level].Quantity *
+              (1 + BomComponent[Level]."Scrap %" / 100) *
+              (1 + ReqLine."Scrap %" / 100) *
+              LineQtyPerUOM /
+              ItemQtyPerUOM;
+          case BomComponent[Level].Type of
+            BomComponent[Level].Type::Item:
+              begin
+                if ReqQty <> 0 then begin
+                  if not IsPlannedComp(PlanningComponent,ReqLine,BomComponent[Level]) then begin
+                    NextPlanningCompLineNo := NextPlanningCompLineNo + 10000;
+
+                    PlanningComponent.RESET;
+                    PlanningComponent.INIT;
+                    PlanningComponent.BlockDynamicTracking(Blocked);
+                    PlanningComponent."Worksheet Template Name" := ReqLine."Worksheet Template Name";
+                    PlanningComponent."Worksheet Batch Name" := ReqLine."Journal Batch Name";
+                    PlanningComponent."Worksheet Line No." := ReqLine."Line No.";
+                    PlanningComponent."Line No." := NextPlanningCompLineNo;
+                    PlanningComponent.VALIDATE("Item No.",BomComponent[Level]."No.");
+                    PlanningComponent."Variant Code" := BomComponent[Level]."Variant Code";
+                    PlanningComponent."Location Code" := SKU."Components at Location";
+                    PlanningComponent.Description := BomComponent[Level].Description;
+                    PlanningComponent."Planning Line Origin" := ReqLine."Planning Line Origin";
+                    PlanningComponent.VALIDATE("Unit of Measure Code",BomComponent[Level]."Unit of Measure Code");
+                    PlanningComponent."Quantity per" := BomComponent[Level]."Quantity per" * LineQtyPerUOM / ItemQtyPerUOM;
+                    PlanningComponent.GetDefaultBin;
+                    PlanningComponent.Length := BomComponent[Level].Length;
+                    PlanningComponent.Width := BomComponent[Level].Width;
+                    PlanningComponent.Weight := BomComponent[Level].Weight;
+                    PlanningComponent.Depth := BomComponent[Level].Depth;
+                    PlanningComponent.Quantity := BomComponent[Level].Quantity;
+                    PlanningComponent.Position := BomComponent[Level].Position;
+                    PlanningComponent."Position 2" := BomComponent[Level]."Position 2";
+                    PlanningComponent."Position 3" := BomComponent[Level]."Position 3";
+                    PlanningComponent."Lead-Time Offset" := BomComponent[Level]."Lead-Time Offset";
+                    PlanningComponent.VALIDATE("Routing Link Code",BomComponent[Level]."Routing Link Code");
+                    PlanningComponent.VALIDATE("Scrap %",BomComponent[Level]."Scrap %");
+                    PlanningComponent.VALIDATE("Calculation Formula",BomComponent[Level]."Calculation Formula");
+
+                    GetPlanningParameters.AtSKU(
+                      CompSKU,
+                      PlanningComponent."Item No.",
+                      PlanningComponent."Variant Code",
+                      PlanningComponent."Location Code");
+                    if Item2.GET(PlanningComponent."Item No.") then
+                      PlanningComponent.Critical := Item2.Critical;
+
+                    PlanningComponent."Flushing Method" := CompSKU."Flushing Method";
+                    if (SKU."Manufacturing Policy" = SKU."Manufacturing Policy"::"Make-to-Order") and
+                       (CompSKU."Manufacturing Policy" = CompSKU."Manufacturing Policy"::"Make-to-Order") and
+                       (CompSKU."Replenishment System" = CompSKU."Replenishment System"::"Prod. Order")
+                    then
+                      PlanningComponent."Planning Level Code" := ReqLine."Planning Level" + 1;
+
+                    PlanningComponent."Ref. Order Type" := ReqLine."Ref. Order Type";
+                    PlanningComponent."Ref. Order Status" := ReqLine."Ref. Order Status";
+                    PlanningComponent."Ref. Order No." := ReqLine."Ref. Order No.";
+                    PlanningComponent.INSERT;
+                  end else begin
+                    PlanningComponent.RESET;
+                    PlanningComponent.BlockDynamicTracking(Blocked);
+                    PlanningComponent.VALIDATE(
+                      "Quantity per",
+                      PlanningComponent."Quantity per" + BomComponent[Level]."Quantity per" * LineQtyPerUOM / ItemQtyPerUOM);
+                    PlanningComponent.VALIDATE("Routing Link Code",BomComponent[Level]."Routing Link Code");
+                    PlanningComponent.MODIFY;
+                  end;
+
+                  // A temporary list of Planning Components handled is sustained:
+                  TempPlanningComponent := PlanningComponent;
+                  if not TempPlanningComponent.INSERT then
+                    TempPlanningComponent.MODIFY;
+                end;
+              end;
+            BomComponent[Level].Type::"Production BOM":
+              begin
+                TransferBOM(
+                  BomComponent[Level]."No.",
+                  Level + 1,
+                  ReqQty,
+                  1);
+                BomComponent[Level].SETRANGE("Production BOM No.",ProdBOMNo);
+                BomComponent[Level].SETRANGE(
+                  "Version Code",VersionMgt.GetBOMVersion(ProdBOMNo,ReqLine."Starting Date",true));
+                BomComponent[Level].SETFILTER("Starting Date",'%1|..%2',0D,ReqLine."Starting Date");
+                BomComponent[Level].SETFILTER("Ending Date",'%1|%2..',0D,ReqLine."Starting Date");
+              end;
+          end;
+        until BomComponent[Level].NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE TransferAsmBOM@13(ParentItemNo@1000 : Code[20];Level@1001 : Integer;Quantity@1002 : Decimal);
+    VAR
+      ParentItem@1003 : Record Item;
+      CompSKU@1004 : Record "Stockkeeping Unit";
+      Item2@1006 : Record Item;
+      ReqQty@1007 : Decimal;
+    BEGIN
+      PlanningComponent.LOCKTABLE;
+
+      if Level > 50 then begin
+        if PlanningResiliency then begin
+          Item.GET(ReqLine."No.");
+          TempPlanningErrorLog.SetError(
+            STRSUBSTNO(Text014,ReqLine."No.",ReqLine."No."),
+            DATABASE::Item,Item.GETPOSITION);
+        end;
+        ERROR(
+          Text000,
+          ParentItemNo);
+      end;
+
+      if NextPlanningCompLineNo = 0 then begin
+        PlanningComponent.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+        PlanningComponent.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+        PlanningComponent.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+        if PlanningComponent.FIND('+') then
+          NextPlanningCompLineNo := PlanningComponent."Line No.";
+        PlanningComponent.RESET;
+      end;
+
+      ParentItem.GET(ParentItemNo);
+
+      AsmBOMComp[Level].SETRANGE("Parent Item No.",ParentItemNo);
+      if AsmBOMComp[Level].FIND('-') then
+        repeat
+          ReqQty := Quantity * AsmBOMComp[Level]."Quantity per";
+          case AsmBOMComp[Level].Type of
+            AsmBOMComp[Level].Type::Item:
+              begin
+                if ReqQty <> 0 then begin
+                  if not IsPlannedAsmComp(PlanningComponent,ReqLine,AsmBOMComp[Level]) then begin
+                    NextPlanningCompLineNo := NextPlanningCompLineNo + 10000;
+
+                    PlanningComponent.RESET;
+                    PlanningComponent.INIT;
+                    PlanningComponent.BlockDynamicTracking(Blocked);
+                    PlanningComponent."Worksheet Template Name" := ReqLine."Worksheet Template Name";
+                    PlanningComponent."Worksheet Batch Name" := ReqLine."Journal Batch Name";
+                    PlanningComponent."Worksheet Line No." := ReqLine."Line No.";
+                    PlanningComponent."Line No." := NextPlanningCompLineNo;
+                    PlanningComponent.VALIDATE("Item No.",AsmBOMComp[Level]."No.");
+                    PlanningComponent."Variant Code" := AsmBOMComp[Level]."Variant Code";
+                    PlanningComponent."Location Code" := SKU."Components at Location";
+                    PlanningComponent.Description := COPYSTR(AsmBOMComp[Level].Description,1,MAXSTRLEN(PlanningComponent.Description));
+                    PlanningComponent."Planning Line Origin" := ReqLine."Planning Line Origin";
+                    PlanningComponent.VALIDATE("Unit of Measure Code",AsmBOMComp[Level]."Unit of Measure Code");
+                    PlanningComponent."Quantity per" := Quantity * AsmBOMComp[Level]."Quantity per";
+                    PlanningComponent.GetDefaultBin;
+                    PlanningComponent.Quantity := AsmBOMComp[Level]."Quantity per";
+                    PlanningComponent.Position := AsmBOMComp[Level].Position;
+                    PlanningComponent."Position 2" := AsmBOMComp[Level]."Position 2";
+                    PlanningComponent."Position 3" := AsmBOMComp[Level]."Position 3";
+                    PlanningComponent."Lead-Time Offset" := AsmBOMComp[Level]."Lead-Time Offset";
+                    PlanningComponent.VALIDATE("Routing Link Code");
+                    PlanningComponent.VALIDATE("Scrap %",0);
+                    PlanningComponent.VALIDATE("Calculation Formula",PlanningComponent."Calculation Formula"::" ");
+
+                    GetPlanningParameters.AtSKU(
+                      CompSKU,
+                      PlanningComponent."Item No.",
+                      PlanningComponent."Variant Code",
+                      PlanningComponent."Location Code");
+                    if Item2.GET(PlanningComponent."Item No.") then
+                      PlanningComponent.Critical := Item2.Critical;
+
+                    PlanningComponent."Flushing Method" := CompSKU."Flushing Method";
+                    PlanningComponent."Ref. Order Type" := ReqLine."Ref. Order Type";
+                    PlanningComponent."Ref. Order Status" := ReqLine."Ref. Order Status";
+                    PlanningComponent."Ref. Order No." := ReqLine."Ref. Order No.";
+                    PlanningComponent.INSERT;
+                  end else begin
+                    PlanningComponent.RESET;
+                    PlanningComponent.BlockDynamicTracking(Blocked);
+                    PlanningComponent.VALIDATE(
+                      "Quantity per",
+                      PlanningComponent."Quantity per" +
+                      Quantity *
+                      AsmBOMComp[Level]."Quantity per");
+                    PlanningComponent.VALIDATE("Routing Link Code",'');
+                    PlanningComponent.MODIFY;
+                  end;
+
+                  // A temporary list of Planning Components handled is sustained:
+                  TempPlanningComponent := PlanningComponent;
+                  if not TempPlanningComponent.INSERT then
+                    TempPlanningComponent.MODIFY;
+                end;
+              end;
+          end;
+        until AsmBOMComp[Level].NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CalculateComponents@6();
+    VAR
+      PlanningAssignment@1000 : Record "Planning Assignment";
+    BEGIN
+      PlanningComponent.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      PlanningComponent.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      PlanningComponent.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+
+      if PlanningComponent.FIND('-') then
+        repeat
+          PlanningComponent.BlockDynamicTracking(Blocked);
+          PlanningComponent.VALIDATE("Routing Link Code");
+          PlanningComponent.MODIFY;
+          with PlanningComponent do
+            PlanningAssignment.ChkAssignOne("Item No.","Variant Code","Location Code","Due Date");
+        until PlanningComponent.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE CalculateRoutingFromActual@11(PlanningRtngLine@1000 : Record "Planning Routing Line";Direction@1001 : 'Forward,Backward';CalcStartEndDate@1002 : Boolean);
+    BEGIN
+      if (ReqLine."Worksheet Template Name" <> PlanningRtngLine."Worksheet Template Name") or
+         (ReqLine."Journal Batch Name" <> PlanningRtngLine."Worksheet Batch Name") or
+         (ReqLine."Line No." <> PlanningRtngLine."Worksheet Line No.")
+      then
+        ReqLine.GET(
+          PlanningRtngLine."Worksheet Template Name",
+          PlanningRtngLine."Worksheet Batch Name",PlanningRtngLine."Worksheet Line No.");
+
+      if  PlanningRoutingMgt.NeedsCalculation(
+           PlanningRtngLine."Worksheet Template Name",
+           PlanningRtngLine."Worksheet Batch Name",
+           PlanningRtngLine."Worksheet Line No.")
+      then begin
+        PlanningRoutingMgt.Calculate(ReqLine);
+        PlanningRtngLine.GET(
+          PlanningRtngLine."Worksheet Template Name",
+          PlanningRtngLine."Worksheet Batch Name",
+          PlanningRtngLine."Worksheet Line No.",PlanningRtngLine."Operation No.");
+      end;
+      if Direction = Direction::Forward then
+        PlanningRtngLine.SETCURRENTKEY(
+          "Worksheet Template Name",
+          "Worksheet Batch Name",
+          "Worksheet Line No.",
+          "Sequence No.(Forward)")
+      else
+        PlanningRtngLine.SETCURRENTKEY(
+          "Worksheet Template Name",
+          "Worksheet Batch Name",
+          "Worksheet Line No.",
+          "Sequence No.(Backward)");
+
+      PlanningRtngLine.SETRANGE("Worksheet Template Name",PlanningRtngLine."Worksheet Template Name");
+      PlanningRtngLine.SETRANGE("Worksheet Batch Name",PlanningRtngLine."Worksheet Batch Name");
+      PlanningRtngLine.SETRANGE("Worksheet Line No.",PlanningRtngLine."Worksheet Line No.");
+
+      repeat
+        if CalcStartEndDate then begin
+          if ((Direction = Direction::Forward) and (PlanningRtngLine."Previous Operation No." <> '')) or
+             ((Direction = Direction::Backward) and (PlanningRtngLine."Next Operation No." <> ''))
+          then begin
+            PlanningRtngLine."Starting Time" := 000000T;
+            PlanningRtngLine."Starting Date" := 0D;
+            PlanningRtngLine."Ending Time" := 235959T;
+            PlanningRtngLine."Ending Date" := CalendarMgt.GetMaxDate;
+          end;
+        end;
+        CLEAR(CalcPlanningRtngLine);
+        if PlanningResiliency then
+          CalcPlanningRtngLine.SetResiliencyOn(
+            ReqLine."Worksheet Template Name",ReqLine."Journal Batch Name",ReqLine."No.");
+        CalcPlanningRtngLine.CalculateRouteLine(PlanningRtngLine,Direction,CalcStartEndDate,ReqLine);
+        CalcStartEndDate := true;
+      until PlanningRtngLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CalculateRouting@7(Direction@1000 : 'Forward,Backward');
+    VAR
+      PlanningRtngLine@1001 : Record "Planning Routing Line";
+    BEGIN
+      if PlanningRoutingMgt.NeedsCalculation(
+           ReqLine."Worksheet Template Name",
+           ReqLine."Journal Batch Name",
+           ReqLine."Line No.")
+      then
+        PlanningRoutingMgt.Calculate(ReqLine);
+
+      if Direction = Direction::Forward then
+        PlanningRtngLine.SETCURRENTKEY(
+          "Worksheet Template Name",
+          "Worksheet Batch Name",
+          "Worksheet Line No.",
+          "Sequence No.(Forward)")
+      else
+        PlanningRtngLine.SETCURRENTKEY(
+          "Worksheet Template Name",
+          "Worksheet Batch Name",
+          "Worksheet Line No.",
+          "Sequence No.(Backward)");
+
+      PlanningRtngLine.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      PlanningRtngLine.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      PlanningRtngLine.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+      if not PlanningRtngLine.FINDFIRST then begin
+        if Direction = Direction::Forward then
+          ReqLine.CalcEndingDate('')
+        else
+          ReqLine.CalcStartingDate('');
+        ReqLine.UpdateDatetime;
+        ReqLine.MODIFY(true);
+        exit;
+      end;
+
+      if Direction = Direction::Forward then begin
+        PlanningRtngLine."Starting Date" := ReqLine."Starting Date";
+        PlanningRtngLine."Starting Time" := ReqLine."Starting Time";
+      end else begin
+        PlanningRtngLine."Ending Date" := ReqLine."Ending Date";
+        PlanningRtngLine."Ending Time" := ReqLine."Ending Time";
+      end;
+      CalculateRoutingFromActual(PlanningRtngLine,Direction,false);
+
+      CalculatePlanningLineDates(ReqLine);
+    END;
+
+    [External]
+    PROCEDURE CalculatePlanningLineDates@12(VAR ReqLine2@1000 : Record "Requisition Line");
+    VAR
+      PlanningRtngLine@1001 : Record "Planning Routing Line";
+    BEGIN
+      PlanningRtngLine.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      PlanningRtngLine.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+      PlanningRtngLine.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+      PlanningRtngLine.SETFILTER("Next Operation No.",'%1','');
+
+      if PlanningRtngLine.FINDFIRST then begin
+        ReqLine2."Ending Date" := PlanningRtngLine."Ending Date";
+        ReqLine2."Ending Time" := PlanningRtngLine."Ending Time";
+      end;
+
+      PlanningRtngLine.SETRANGE("Next Operation No.");
+      PlanningRtngLine.SETFILTER("Previous Operation No.",'%1','');
+      if PlanningRtngLine.FINDFIRST then begin
+        ReqLine2."Starting Date" := PlanningRtngLine."Starting Date";
+        ReqLine2."Starting Time" := PlanningRtngLine."Starting Time";
+        ReqLine2."Order Date" := PlanningRtngLine."Starting Date";
+      end;
+
+      ReqLine2.MODIFY;
+    END;
+
+    [Internal]
+    PROCEDURE Calculate@8(VAR ReqLine2@1000 : Record "Requisition Line";Direction@1001 : 'Forward,Backward';CalcRouting@1002 : Boolean;CalcComponents@1003 : Boolean;PlanningLevel@1004 : Integer);
+    VAR
+      PlanningRtngLine@1005 : Record "Planning Routing Line";
+      ProdOrderCapNeed@1006 : Record "Prod. Order Capacity Need";
+    BEGIN
+      ReqLine := ReqLine2;
+      if ReqLine."Action Message" <> ReqLine."Action Message"::Cancel then
+        ReqLine.TESTFIELD(Quantity);
+      if Direction = Direction::Backward then
+        ReqLine.TESTFIELD("Ending Date")
+      else
+        ReqLine.TESTFIELD("Starting Date");
+
+      if CalcRouting then begin
+        PlanningRtngLine.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+        PlanningRtngLine.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+        PlanningRtngLine.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+        PlanningRtngLine.DELETEALL;
+
+        ProdOrderCapNeed.SETCURRENTKEY(
+          "Worksheet Template Name","Worksheet Batch Name","Worksheet Line No.");
+        ProdOrderCapNeed.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+        ProdOrderCapNeed.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+        ProdOrderCapNeed.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+        ProdOrderCapNeed.DELETEALL;
+        TransferRouting;
+      end;
+
+      if CalcComponents then begin
+        PlanningComponent.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+        PlanningComponent.SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+        PlanningComponent.SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+        if PlanningComponent.FIND('-') then
+          repeat
+            PlanningComponent.BlockDynamicTracking(Blocked);
+            PlanningComponent.DELETE(true);
+          until PlanningComponent.NEXT = 0;
+        if ReqLine."Planning Level" = 0 then
+          ReqLine.DeleteMultiLevel;
+        if (ReqLine."Replenishment System" = ReqLine."Replenishment System"::Assembly) or
+           ((ReqLine."Replenishment System" = ReqLine."Replenishment System"::"Prod. Order") and (ReqLine."Production BOM No." <> ''))
+        then begin
+          Item.GET(ReqLine."No.");
+          GetPlanningParameters.AtSKU(
+            SKU,
+            ReqLine."No.",
+            ReqLine."Variant Code",
+            ReqLine."Location Code");
+
+          if ReqLine."Replenishment System" = ReqLine."Replenishment System"::Assembly then
+            TransferAsmBOM(
+              Item."No.",
+              1,
+              ReqLine."Qty. per Unit of Measure")
+          else
+            TransferBOM(
+              ReqLine."Production BOM No.",
+              1,
+              ReqLine."Qty. per Unit of Measure",
+              UOMMgt.GetQtyPerUnitOfMeasure(
+                Item,
+                VersionMgt.GetBOMUnitOfMeasure(ReqLine."Production BOM No.",ReqLine."Production BOM Version Code")));
+        end;
+      end;
+      Recalculate(ReqLine,Direction);
+      ReqLine2 := ReqLine;
+      if CalcComponents and
+         (SKU."Manufacturing Policy" = SKU."Manufacturing Policy"::"Make-to-Order")
+      then
+        CheckMultiLevelStructure(ReqLine,CalcRouting,CalcComponents,PlanningLevel);
+    END;
+
+    [External]
+    PROCEDURE Recalculate@9(VAR ReqLine2@1000 : Record "Requisition Line";Direction@1001 : 'Forward,Backward');
+    BEGIN
+      ReqLine := ReqLine2;
+
+      CalculateRouting(Direction);
+      CalculateComponents;
+      if ReqLine."Planning Level" > 0 then begin
+        if Direction = Direction::Forward then
+          ReqLine."Due Date" := ReqLine."Ending Date"
+      end else
+        if (ReqLine."Due Date" < ReqLine."Ending Date") or
+           (Direction = Direction::Forward)
+        then
+          ReqLine."Due Date" :=
+            LeadTimeMgt.PlannedDueDate(
+              ReqLine."No.",
+              ReqLine."Location Code",
+              ReqLine."Variant Code",
+              ReqLine."Ending Date",
+              ReqLine."Vendor No.",
+              ReqLine."Ref. Order Type");
+      ReqLine.UpdateDatetime;
+      ReqLine2 := ReqLine;
+    END;
+
+    LOCAL PROCEDURE CheckMultiLevelStructure@1(ReqLine2@1000 : Record "Requisition Line";CalcRouting@1001 : Boolean;CalcComponents@1002 : Boolean;PlanningLevel@1003 : Integer);
+    VAR
+      ReqLine3@1004 : Record "Requisition Line";
+      Item3@1005 : Record Item;
+      PlanningComp@1006 : Record "Planning Component";
+      PlngComponentReserve@1009 : Codeunit "Plng. Component-Reserve";
+      PlanningLineNo@1008 : Integer;
+      NoOfComponents@1011 : Integer;
+    BEGIN
+      if PlanningLevel < 0 then
+        exit;
+
+      if not Item3.GET(ReqLine2."No.") then
+        exit;
+      if Item3."Manufacturing Policy" <> Item3."Manufacturing Policy"::"Make-to-Order" then
+        exit;
+
+      PlanningLineNo := ReqLine2."Line No.";
+
+      PlanningComp.SETRANGE("Worksheet Line No.",ReqLine2."Line No.");
+      PlanningComp.SETFILTER("Item No.",'<>%1','');
+      PlanningComp.SETFILTER("Expected Quantity",'<>0');
+      PlanningComp.SETFILTER("Planning Level Code",'>0');
+      NoOfComponents := PlanningComp.COUNT;
+      if PlanningLevel = 0 then begin
+        ReqLine3.RESET;
+        ReqLine3.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+        ReqLine3.SETRANGE("Journal Batch Name",ReqLine."Journal Batch Name");
+        ReqLine3 := ReqLine2;
+        if ReqLine3.FIND('>') then
+          LineSpacing[1] := (ReqLine3."Line No." - ReqLine."Line No.") div (1 + NoOfComponents)
+        else
+          LineSpacing[1] := 10000;
+      end else
+        if (PlanningLevel > 0) and (PlanningLevel < 50) then
+          LineSpacing[PlanningLevel + 1] := LineSpacing[PlanningLevel] div (1 + NoOfComponents);
+
+      if PlanningComp.FIND('-') then
+        repeat
+          if LineSpacing[PlanningLevel + 1] = 0 then begin
+            if PlanningResiliency then
+              TempPlanningErrorLog.SetError(Text015,DATABASE::"Requisition Line",ReqLine.GETPOSITION);
+            ERROR(Text002);
+          end;
+          ReqLine3.INIT;
+          ReqLine3.BlockDynamicTracking(Blocked);
+          ReqLine3."Worksheet Template Name" := ReqLine2."Worksheet Template Name";
+          ReqLine3."Journal Batch Name" := ReqLine2."Journal Batch Name";
+          PlanningLineNo := PlanningLineNo + LineSpacing[PlanningLevel + 1];
+          ReqLine3."Line No." := PlanningLineNo;
+          ReqLine3."Ref. Order Type" := ReqLine2."Ref. Order Type";
+          ReqLine3."Ref. Order Status" := ReqLine2."Ref. Order Status";
+          ReqLine3."Ref. Order No." := ReqLine2."Ref. Order No.";
+
+          ReqLine3."Planning Line Origin" := ReqLine2."Planning Line Origin";
+          ReqLine3.Level := ReqLine2.Level;
+          ReqLine3."Demand Type" := ReqLine2."Demand Type";
+          ReqLine3."Demand Subtype" := ReqLine2."Demand Subtype";
+          ReqLine3."Demand Order No." := ReqLine2."Demand Order No.";
+          ReqLine3."Demand Line No." := ReqLine2."Demand Line No.";
+          ReqLine3."Demand Ref. No." := ReqLine2."Demand Ref. No.";
+          ReqLine3."Demand Ref. No." := ReqLine2."Demand Ref. No.";
+          ReqLine3."Demand Date" := ReqLine2."Demand Date";
+          ReqLine3.Status := ReqLine2.Status;
+          ReqLine3."User ID" := ReqLine2."User ID";
+
+          ReqLine3.Type := ReqLine3.Type::Item;
+          ReqLine3.VALIDATE("No.",PlanningComp."Item No.");
+          ReqLine3."Action Message" := ReqLine2."Action Message";
+          ReqLine3."Accept Action Message" := ReqLine2."Accept Action Message";
+          ReqLine3.Description := PlanningComp.Description;
+          ReqLine3."Variant Code" := PlanningComp."Variant Code";
+          ReqLine3."Unit of Measure Code" := PlanningComp."Unit of Measure Code";
+          ReqLine3."Location Code" := PlanningComp."Location Code";
+          ReqLine3."Bin Code" := PlanningComp."Bin Code";
+          ReqLine3."Ending Date" := PlanningComp."Due Date";
+          ReqLine3.VALIDATE("Ending Time",PlanningComp."Due Time");
+          ReqLine3."Due Date" := PlanningComp."Due Date";
+          ReqLine3."Demand Date" := PlanningComp."Due Date";
+          ReqLine3.VALIDATE(Quantity,PlanningComp."Expected Quantity");
+          ReqLine3.VALIDATE("Needed Quantity",PlanningComp."Expected Quantity");
+          ReqLine3.VALIDATE("Demand Quantity",PlanningComp."Expected Quantity");
+          ReqLine3."Demand Qty. Available" := 0;
+
+          ReqLine3."Planning Level" := PlanningLevel + 1;
+          ReqLine3."Related to Planning Line" := ReqLine2."Line No.";
+          ReqLine3."Order Promising ID" := ReqLine2."Order Promising ID";
+          ReqLine3."Order Promising Line ID" := ReqLine2."Order Promising Line ID";
+          InsertPlanningLine(ReqLine3);
+          ReqLine3.Quantity :=
+            ROUND(
+              ReqLine3."Quantity (Base)" /
+              ReqLine3."Qty. per Unit of Measure",0.00001);
+          ReqLine3."Net Quantity (Base)" :=
+            (ReqLine3.Quantity -
+             ReqLine3."Original Quantity") *
+            ReqLine3."Qty. per Unit of Measure";
+          ReqLine3.MODIFY;
+          PlngComponentReserve.BindToRequisition(
+            PlanningComp,ReqLine3,PlanningComp."Expected Quantity",PlanningComp."Expected Quantity (Base)");
+          PlanningComp."Supplied-by Line No." := ReqLine3."Line No.";
+          PlanningComp.MODIFY;
+          ReqLine3.VALIDATE("Production BOM No.");
+          ReqLine3.VALIDATE("Routing No.");
+          ReqLine3.MODIFY;
+          Calculate(ReqLine3,1,CalcRouting,CalcComponents,PlanningLevel + 1);
+          ReqLine3.MODIFY;
+        until PlanningComp.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertPlanningLine@2(VAR ReqLine@1000 : Record "Requisition Line");
+    VAR
+      ReqLine2@1001 : Record "Requisition Line";
+    BEGIN
+      ReqLine2 := ReqLine;
+      ReqLine2.SETCURRENTKEY("Worksheet Template Name","Journal Batch Name",Type,"No.");
+      ReqLine2.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      ReqLine2.SETRANGE("Journal Batch Name",ReqLine."Journal Batch Name");
+      ReqLine2.SETRANGE(Type,ReqLine.Type::Item);
+      ReqLine2.SETRANGE("No.",ReqLine."No.");
+      ReqLine2.SETRANGE("Variant Code",ReqLine."Variant Code");
+      ReqLine2.SETRANGE("Ref. Order Type",ReqLine."Ref. Order Type");
+      ReqLine2.SETRANGE("Ref. Order Status",ReqLine."Ref. Order Status");
+      ReqLine2.SETRANGE("Ref. Order No.",ReqLine."Ref. Order No.");
+      ReqLine2.SETFILTER("Planning Level",'>%1',0);
+
+      if ReqLine2.FINDFIRST then begin
+        ReqLine2.BlockDynamicTracking(Blocked);
+        ReqLine2.VALIDATE(Quantity,ReqLine2.Quantity + ReqLine.Quantity);
+
+        if ReqLine2."Due Date" > ReqLine."Due Date" then
+          ReqLine2."Due Date" := ReqLine."Due Date";
+
+        if ReqLine2."Ending Date" > ReqLine."Ending Date" then begin
+          ReqLine2."Ending Date" := ReqLine."Ending Date";
+          ReqLine2."Ending Time" := ReqLine."Ending Time";
+        end else
+          if (ReqLine2."Ending Date" = ReqLine."Ending Date") and
+             (ReqLine2."Ending Time" > ReqLine."Ending Time")
+          then
+            ReqLine2."Ending Time" := ReqLine."Ending Time";
+
+        if ReqLine2."Planning Level" < ReqLine."Planning Level" then
+          ReqLine2."Planning Level" := ReqLine."Planning Level";
+
+        ReqLine2.MODIFY;
+        ReqLine := ReqLine2;
+      end else
+        ReqLine.INSERT;
+    END;
+
+    [External]
+    PROCEDURE BlockDynamicTracking@17(SetBlock@1000 : Boolean);
+    BEGIN
+      Blocked := SetBlock;
+    END;
+
+    [External]
+    PROCEDURE GetPlanningCompList@5(VAR PlanningCompList@1000 : TEMPORARY Record "Planning Component");
+    BEGIN
+      // The procedure returns a list of the Planning Components handled.
+      if TempPlanningComponent.FIND('-') then
+        repeat
+          PlanningCompList := TempPlanningComponent;
+          if not PlanningCompList.INSERT then
+            PlanningCompList.MODIFY;
+          TempPlanningComponent.DELETE;
+        until TempPlanningComponent.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE IsPlannedComp@10(VAR PlanningComp@1000 : Record "Planning Component";ReqLine@1001 : Record "Requisition Line";BOMComponent@1002 : Record "Production BOM Line") : Boolean;
+    VAR
+      PlanningComp2@1003 : Record "Planning Component";
+    BEGIN
+      with PlanningComp do begin
+        PlanningComp2 := PlanningComp;
+
+        SETCURRENTKEY(
+          "Worksheet Template Name","Worksheet Batch Name","Worksheet Line No.","Item No.");
+        SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+        SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+        SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+        SETRANGE("Item No.",BOMComponent."No.");
+        if FIND('-') then
+          repeat
+            if ("Variant Code" = BOMComponent."Variant Code") and
+               ("Routing Link Code" = BOMComponent."Routing Link Code") and
+               (Position = BOMComponent.Position) and
+               ("Position 2" = BOMComponent."Position 2") and
+               ("Position 3" = BOMComponent."Position 3") and
+               (Length = BOMComponent.Length) and
+               (Width = BOMComponent.Width) and
+               (Weight = BOMComponent.Weight) and
+               (Depth = BOMComponent.Depth) and
+               ("Unit of Measure Code" = BOMComponent."Unit of Measure Code")
+            then
+              exit(true);
+          until NEXT = 0;
+
+        PlanningComp := PlanningComp2;
+        exit(false);
+      end;
+    END;
+
+    LOCAL PROCEDURE IsPlannedAsmComp@14(VAR PlanningComp@1000 : Record "Planning Component";ReqLine@1001 : Record "Requisition Line";AsmBOMComp@1002 : Record "BOM Component") : Boolean;
+    VAR
+      PlanningComp2@1003 : Record "Planning Component";
+    BEGIN
+      with PlanningComp do begin
+        PlanningComp2 := PlanningComp;
+
+        SETCURRENTKEY(
+          "Worksheet Template Name","Worksheet Batch Name","Worksheet Line No.","Item No.");
+        SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+        SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+        SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+        SETRANGE("Item No.",AsmBOMComp."No.");
+        if FIND('-') then
+          repeat
+            if ("Variant Code" = AsmBOMComp."Variant Code") and
+               (Position = AsmBOMComp.Position) and
+               ("Position 2" = AsmBOMComp."Position 2") and
+               ("Position 3" = AsmBOMComp."Position 3") and
+               ("Unit of Measure Code" = AsmBOMComp."Unit of Measure Code")
+            then
+              exit(true);
+          until NEXT = 0;
+
+        PlanningComp := PlanningComp2;
+        exit(false);
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetResiliencyOn@48(WkshTemplName@1001 : Code[10];JnlBatchName@1000 : Code[10];ItemNo@1002 : Code[20]);
+    BEGIN
+      PlanningResiliency := true;
+      TempPlanningErrorLog.SetJnlBatch(WkshTemplName,JnlBatchName,ItemNo);
+    END;
+
+    [External]
+    PROCEDURE GetResiliencyError@47(VAR PlanningErrorLog@1000 : Record "Planning Error Log") : Boolean;
+    BEGIN
+      TempPlanningComponent.DELETEALL;
+      if CalcPlanningRtngLine.GetResiliencyError(PlanningErrorLog) then
+        exit(true);
+      exit(TempPlanningErrorLog.GetError(PlanningErrorLog));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

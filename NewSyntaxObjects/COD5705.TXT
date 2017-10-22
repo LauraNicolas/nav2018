@@ -1,0 +1,626 @@
+OBJECT Codeunit 5705 TransferOrder-Post Receipt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Transfer Header";
+    Permissions=TableData "Item Entry Relation"=i;
+    OnRun=VAR
+            Item@1000 : Record Item;
+            SourceCodeSetup@1001 : Record "Source Code Setup";
+            InvtSetup@1002 : Record "Inventory Setup";
+            ValueEntry@1007 : Record "Value Entry";
+            ItemLedgEntry@1008 : Record "Item Ledger Entry";
+            ItemApplnEntry@1009 : Record "Item Application Entry";
+            ItemReg@1010 : Record "Item Register";
+            NoSeriesMgt@1003 : Codeunit NoSeriesManagement;
+            UpdateAnalysisView@1004 : Codeunit "Update Analysis View";
+            UpdateItemAnalysisView@1012 : Codeunit "Update Item Analysis View";
+            ReservMgt@1013 : Codeunit "Reservation Management";
+            RecordLinkManagement@1014 : Codeunit "Record Link Management";
+            Window@1006 : Dialog;
+            LineCount@1005 : Integer;
+          BEGIN
+            ReleaseDocument(Rec);
+            TransHeader := Rec;
+            TransHeader.SetHideValidationDialog(HideValidationDialog);
+
+            OnBeforeTransferOderPostReceipt(TransHeader);
+            OnBeforeTransferOrderPostReceipt(TransHeader);
+
+            with TransHeader do begin
+              CheckBeforePost;
+
+              WhseReference := "Posting from Whse. Ref.";
+              "Posting from Whse. Ref." := 0;
+
+              CheckDim;
+
+              TransLine.RESET;
+              TransLine.SETRANGE("Document No.","No.");
+              TransLine.SETRANGE("Derived From Line No.",0);
+              TransLine.SETFILTER(Quantity,'<>0');
+              TransLine.SETFILTER("Qty. to Receive",'<>0');
+              if not TransLine.FIND('-') then
+                ERROR(Text001);
+
+              WhseReceive := TempWhseRcptHeader.FINDFIRST;
+              InvtPickPutaway := WhseReference <> 0;
+              if not (WhseReceive or InvtPickPutaway) then
+                CheckWarehouse(TransLine);
+
+              WhsePosting := IsWarehousePosting("Transfer-to Code");
+
+              Window.OPEN(
+                '#1#################################\\' +
+                Text003);
+
+              Window.UPDATE(1,STRSUBSTNO(Text004,"No."));
+
+              SourceCodeSetup.GET;
+              SourceCode := SourceCodeSetup.Transfer;
+              InvtSetup.GET;
+              InvtSetup.TESTFIELD("Posted Transfer Rcpt. Nos.");
+
+              CheckInvtPostingSetup;
+
+              LockTables(InvtSetup."Automatic Cost Posting");
+
+              // Insert receipt header
+              if WhseReceive then
+                PostedWhseRcptHeader.LOCKTABLE;
+              TransRcptHeader.LOCKTABLE;
+              TransRcptHeader.INIT;
+              TransRcptHeader.CopyFromTransferHeader(TransHeader);
+              TransRcptHeader."No. Series" := InvtSetup."Posted Transfer Rcpt. Nos.";
+              TransRcptHeader."No." :=
+                NoSeriesMgt.GetNextNo(
+                  InvtSetup."Posted Transfer Rcpt. Nos.","Posting Date",true);
+              TransRcptHeader.INSERT;
+
+              if InvtSetup."Copy Comments Order to Rcpt." then begin
+                CopyCommentLines(1,3,"No.",TransRcptHeader."No.");
+                RecordLinkManagement.CopyLinks(Rec,TransRcptHeader);
+              end;
+
+              if WhseReceive then begin
+                WhseRcptHeader.GET(TempWhseRcptHeader."No.");
+                WhsePostRcpt.CreatePostedRcptHeader(PostedWhseRcptHeader,WhseRcptHeader,TransRcptHeader."No.","Posting Date");
+              end;
+
+              // Insert receipt lines
+              LineCount := 0;
+              if WhseReceive then
+                PostedWhseRcptLine.LOCKTABLE;
+              if InvtPickPutaway then
+                WhseRqst.LOCKTABLE;
+              TransRcptLine.LOCKTABLE;
+              TransLine.SETRANGE(Quantity);
+              TransLine.SETRANGE("Qty. to Receive");
+              if TransLine.FIND('-') then
+                repeat
+                  LineCount := LineCount + 1;
+                  Window.UPDATE(2,LineCount);
+
+                  if TransLine."Item No." <> '' then begin
+                    Item.GET(TransLine."Item No.");
+                    Item.TESTFIELD(Blocked,false);
+                  end;
+
+                  TransRcptLine.INIT;
+                  TransRcptLine."Document No." := TransRcptHeader."No.";
+                  TransRcptLine.CopyFromTransferLine(TransLine);
+                  TransRcptLine.INSERT;
+
+                  if TransLine."Qty. to Receive" > 0 then begin
+                    OriginalQuantity := TransLine."Qty. to Receive";
+                    OriginalQuantityBase := TransLine."Qty. to Receive (Base)";
+                    PostItemJnlLine(TransLine,TransRcptHeader,TransRcptLine);
+                    TransRcptLine."Item Rcpt. Entry No." := InsertRcptEntryRelation(TransRcptLine);
+                    TransRcptLine.MODIFY;
+                    SaveTempWhseSplitSpec(TransLine);
+                    if WhseReceive then begin
+                      WhseRcptLine.SETCURRENTKEY(
+                        "No.","Source Type","Source Subtype","Source No.","Source Line No.");
+                      WhseRcptLine.SETRANGE("No.",WhseRcptHeader."No.");
+                      WhseRcptLine.SETRANGE("Source Type",DATABASE::"Transfer Line");
+                      WhseRcptLine.SETRANGE("Source No.",TransLine."Document No.");
+                      WhseRcptLine.SETRANGE("Source Line No.",TransLine."Line No.");
+                      WhseRcptLine.FINDFIRST;
+                      WhseRcptLine.TESTFIELD("Qty. to Receive",TransRcptLine.Quantity);
+                      WhsePostRcpt.SetItemEntryRelation(PostedWhseRcptHeader,PostedWhseRcptLine,TempItemEntryRelation2);
+                      WhsePostRcpt.CreatePostedRcptLine(
+                        WhseRcptLine,PostedWhseRcptHeader,PostedWhseRcptLine,TempWhseSplitSpecification);
+                    end;
+                    if WhsePosting then
+                      PostWhseJnlLine(ItemJnlLine,OriginalQuantity,OriginalQuantityBase,TempWhseSplitSpecification);
+                  end;
+                until TransLine.NEXT = 0;
+
+              if InvtSetup."Automatic Cost Adjustment" <> InvtSetup."Automatic Cost Adjustment"::Never then begin
+                InvtAdjmt.SetProperties(true,InvtSetup."Automatic Cost Posting");
+                InvtAdjmt.MakeMultiLevelAdjmt;
+              end;
+
+              ValueEntry.LOCKTABLE;
+              ItemLedgEntry.LOCKTABLE;
+              ItemApplnEntry.LOCKTABLE;
+              ItemReg.LOCKTABLE;
+              TransLine.LOCKTABLE;
+              if WhsePosting then
+                WhseEntry.LOCKTABLE;
+
+              TransLine.SETFILTER(Quantity,'<>0');
+              TransLine.SETFILTER("Qty. to Receive",'<>0');
+              if TransLine.FIND('-') then
+                repeat
+                  TransLine.VALIDATE("Quantity Received",TransLine."Quantity Received" + TransLine."Qty. to Receive");
+                  TransLine.UpdateWithWarehouseShipReceive;
+                  ReservMgt.SetItemJnlLine(ItemJnlLine);
+                  ReservMgt.SetItemTrackingHandling(1); // Allow deletion
+                  ReservMgt.DeleteReservEntries(true,0);
+                  TransLine.MODIFY;
+                until TransLine.NEXT = 0;
+
+              if WhseReceive then
+                WhseRcptLine.LOCKTABLE;
+              LOCKTABLE;
+              if WhseReceive then begin
+                WhsePostRcpt.PostUpdateWhseDocuments(WhseRcptHeader);
+                TempWhseRcptHeader.DELETE;
+              end;
+
+              "Last Receipt No." := TransRcptHeader."No.";
+              MODIFY;
+
+              TransLine.SETRANGE(Quantity);
+              TransLine.SETRANGE("Qty. to Receive");
+              if ShouldDeleteOneTransferOrder(TransLine) then
+                DeleteOneTransferOrder(TransHeader,TransLine)
+              else begin
+                WhseTransferRelease.Release(TransHeader);
+                ReserveTransLine.UpdateItemTrackingAfterPosting(TransHeader,1);
+              end;
+
+              if not InvtPickPutaway then
+                COMMIT;
+              CLEAR(WhsePostRcpt);
+              CLEAR(InvtAdjmt);
+              Window.CLOSE;
+            end;
+            UpdateAnalysisView.UpdateAll(0,true);
+            UpdateItemAnalysisView.UpdateAll(0,true);
+            Rec := TransHeader;
+
+            OnAfterTransferOrderPostReceipt(Rec);
+            OnAfterTransferOderPostReceipt(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1001 : TextConst 'ENU=There is nothing to post.';
+      Text002@1002 : TextConst '@@@="1%=TransLine2.""Document No.""; 2%=TransLine2.FIELDCAPTION(""Line No.""); 3%=TransLine2.""Line No."");";ENU="Warehouse handling is required for Transfer order = %1, %2 = %3."';
+      Text003@1003 : TextConst 'ENU=Posting transfer lines     #2######';
+      Text004@1004 : TextConst 'ENU=Transfer Order %1';
+      Text005@1005 : TextConst 'ENU=The combination of dimensions used in transfer order %1 is blocked. %2.';
+      Text006@1006 : TextConst 'ENU=The combination of dimensions used in transfer order %1, line no. %2 is blocked. %3.';
+      Text007@1007 : TextConst 'ENU=The dimensions that are used in transfer order %1, line no. %2 are not valid. %3.';
+      Text008@1008 : TextConst 'ENU=Base Qty. to Receive must be 0.';
+      TransRcptHeader@1009 : Record "Transfer Receipt Header";
+      TransRcptLine@1010 : Record "Transfer Receipt Line";
+      TransHeader@1011 : Record "Transfer Header";
+      TransLine@1012 : Record "Transfer Line";
+      ItemJnlLine@1015 : Record "Item Journal Line";
+      Location@1016 : Record Location;
+      NewLocation@1040 : Record Location;
+      WhseRqst@1039 : Record "Warehouse Request";
+      WhseRcptHeader@1027 : Record "Warehouse Receipt Header";
+      TempWhseRcptHeader@1033 : TEMPORARY Record "Warehouse Receipt Header";
+      WhseRcptLine@1022 : Record "Warehouse Receipt Line";
+      PostedWhseRcptHeader@1029 : Record "Posted Whse. Receipt Header";
+      PostedWhseRcptLine@1034 : Record "Posted Whse. Receipt Line";
+      TempWhseSplitSpecification@1018 : TEMPORARY Record "Tracking Specification";
+      WhseEntry@1030 : Record "Warehouse Entry";
+      TempItemEntryRelation2@1041 : TEMPORARY Record "Item Entry Relation";
+      ItemJnlPostLine@1020 : Codeunit "Item Jnl.-Post Line";
+      DimMgt@1017 : Codeunit DimensionManagement;
+      WhseTransferRelease@1019 : Codeunit "Whse.-Transfer Release";
+      ReserveTransLine@1021 : Codeunit "Transfer Line-Reserve";
+      WhsePostRcpt@1036 : Codeunit "Whse.-Post Receipt";
+      InvtAdjmt@1043 : Codeunit "Inventory Adjustment";
+      WhseJnlRegisterLine@1045 : Codeunit "Whse. Jnl.-Register Line";
+      SourceCode@1023 : Code[10];
+      HideValidationDialog@1024 : Boolean;
+      WhsePosting@1028 : Boolean;
+      WhseReference@1038 : Integer;
+      OriginalQuantity@1031 : Decimal;
+      OriginalQuantityBase@1032 : Decimal;
+      WhseReceive@1026 : Boolean;
+      InvtPickPutaway@1037 : Boolean;
+
+    LOCAL PROCEDURE PostItemJnlLine@2(VAR TransLine3@1000 : Record "Transfer Line";TransRcptHeader2@1001 : Record "Transfer Receipt Header";TransRcptLine2@1002 : Record "Transfer Receipt Line");
+    BEGIN
+      ItemJnlLine.INIT;
+      ItemJnlLine."Posting Date" := TransRcptHeader2."Posting Date";
+      ItemJnlLine."Document Date" := TransRcptHeader2."Posting Date";
+      ItemJnlLine."Document No." := TransRcptHeader2."No.";
+      ItemJnlLine."Document Type" := ItemJnlLine."Document Type"::"Transfer Receipt";
+      ItemJnlLine."Document Line No." := TransRcptLine2."Line No.";
+      ItemJnlLine."Order Type" := ItemJnlLine."Order Type"::Transfer;
+      ItemJnlLine."Order No." := TransRcptHeader2."Transfer Order No.";
+      ItemJnlLine."Order Line No." := TransLine3."Line No.";
+      ItemJnlLine."External Document No." := TransRcptHeader2."External Document No.";
+      ItemJnlLine."Entry Type" := ItemJnlLine."Entry Type"::Transfer;
+      ItemJnlLine."Item No." := TransRcptLine2."Item No.";
+      ItemJnlLine.Description := TransRcptLine2.Description;
+      ItemJnlLine."Shortcut Dimension 1 Code" := TransRcptLine2."Shortcut Dimension 1 Code";
+      ItemJnlLine."New Shortcut Dimension 1 Code" := TransRcptLine2."Shortcut Dimension 1 Code";
+      ItemJnlLine."Shortcut Dimension 2 Code" := TransRcptLine2."Shortcut Dimension 2 Code";
+      ItemJnlLine."New Shortcut Dimension 2 Code" := TransRcptLine2."Shortcut Dimension 2 Code";
+      ItemJnlLine."Dimension Set ID" := TransRcptLine2."Dimension Set ID";
+      ItemJnlLine."New Dimension Set ID" := TransRcptLine2."Dimension Set ID";
+      ItemJnlLine."Location Code" := TransHeader."In-Transit Code";
+      ItemJnlLine."New Location Code" := TransRcptHeader2."Transfer-to Code";
+      ItemJnlLine.Quantity := TransRcptLine2.Quantity;
+      ItemJnlLine."Invoiced Quantity" := TransRcptLine2.Quantity;
+      ItemJnlLine."Quantity (Base)" := TransRcptLine2."Quantity (Base)";
+      ItemJnlLine."Invoiced Qty. (Base)" := TransRcptLine2."Quantity (Base)";
+      ItemJnlLine."Source Code" := SourceCode;
+      ItemJnlLine."Gen. Prod. Posting Group" := TransRcptLine2."Gen. Prod. Posting Group";
+      ItemJnlLine."Inventory Posting Group" := TransRcptLine2."Inventory Posting Group";
+      ItemJnlLine."Unit of Measure Code" := TransRcptLine2."Unit of Measure Code";
+      ItemJnlLine."Qty. per Unit of Measure" := TransRcptLine2."Qty. per Unit of Measure";
+      ItemJnlLine."Variant Code" := TransRcptLine2."Variant Code";
+      ItemJnlLine."New Bin Code" := TransLine."Transfer-To Bin Code";
+      ItemJnlLine."Product Group Code" := TransLine."Product Group Code";
+      ItemJnlLine."Item Category Code" := TransLine."Item Category Code";
+      if TransHeader."In-Transit Code" <> '' then begin
+        if NewLocation.Code <> TransHeader."In-Transit Code" then
+          NewLocation.GET(TransHeader."In-Transit Code");
+        ItemJnlLine."Country/Region Code" := NewLocation."Country/Region Code";
+      end;
+      ItemJnlLine."Transaction Type" := TransRcptHeader2."Transaction Type";
+      ItemJnlLine."Transport Method" := TransRcptHeader2."Transport Method";
+      ItemJnlLine."Entry/Exit Point" := TransRcptHeader2."Entry/Exit Point";
+      ItemJnlLine.Area := TransRcptHeader2.Area;
+      ItemJnlLine."Transaction Specification" := TransRcptHeader2."Transaction Specification";
+      WriteDownDerivedLines(TransLine3);
+      ItemJnlPostLine.SetPostponeReservationHandling(true);
+
+      OnBeforePostItemJournalLine(ItemJnlLine,TransLine3,TransRcptHeader2,TransRcptLine2);
+      ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+    END;
+
+    LOCAL PROCEDURE CopyCommentLines@22(FromDocumentType@1000 : Integer;ToDocumentType@1001 : Integer;FromNumber@1002 : Code[20];ToNumber@1003 : Code[20]);
+    VAR
+      InvtCommentLine@1004 : Record "Inventory Comment Line";
+      InvtCommentLine2@1005 : Record "Inventory Comment Line";
+    BEGIN
+      InvtCommentLine.SETRANGE("Document Type",FromDocumentType);
+      InvtCommentLine.SETRANGE("No.",FromNumber);
+      if InvtCommentLine.FIND('-') then
+        repeat
+          InvtCommentLine2 := InvtCommentLine;
+          InvtCommentLine2."Document Type" := ToDocumentType;
+          InvtCommentLine2."No." := ToNumber;
+          InvtCommentLine2.INSERT;
+        until InvtCommentLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckDim@34();
+    BEGIN
+      TransLine."Line No." := 0;
+      CheckDimComb(TransHeader,TransLine);
+      CheckDimValuePosting(TransHeader,TransLine);
+
+      TransLine.SETRANGE("Document No.",TransHeader."No.");
+      if TransLine.FINDFIRST then begin
+        CheckDimComb(TransHeader,TransLine);
+        CheckDimValuePosting(TransHeader,TransLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckDimComb@30(TransferHeader@1001 : Record "Transfer Header";TransferLine@1000 : Record "Transfer Line");
+    BEGIN
+      if TransferLine."Line No." = 0 then
+        if not DimMgt.CheckDimIDComb(TransferHeader."Dimension Set ID") then
+          ERROR(
+            Text005,
+            TransHeader."No.",DimMgt.GetDimCombErr);
+      if TransferLine."Line No." <> 0 then
+        if not DimMgt.CheckDimIDComb(TransferLine."Dimension Set ID") then
+          ERROR(
+            Text006,
+            TransHeader."No.",TransferLine."Line No.",DimMgt.GetDimCombErr);
+    END;
+
+    LOCAL PROCEDURE CheckDimValuePosting@28(TransferHeader@1000 : Record "Transfer Header";TransferLine@1004 : Record "Transfer Line");
+    VAR
+      TableIDArr@1002 : ARRAY [10] OF Integer;
+      NumberArr@1003 : ARRAY [10] OF Code[20];
+    BEGIN
+      TableIDArr[1] := DATABASE::Item;
+      NumberArr[1] := TransferLine."Item No.";
+      if TransferLine."Line No." = 0 then
+        if not DimMgt.CheckDimValuePosting(TableIDArr,NumberArr,TransferHeader."Dimension Set ID") then
+          ERROR(
+            Text007,
+            TransHeader."No.",TransferLine."Line No.",DimMgt.GetDimValuePostingErr);
+
+      if TransferLine."Line No." <> 0 then
+        if not DimMgt.CheckDimValuePosting(TableIDArr,NumberArr,TransferLine."Dimension Set ID") then
+          ERROR(
+            Text007,
+            TransHeader."No.",TransferLine."Line No.",DimMgt.GetDimValuePostingErr);
+    END;
+
+    PROCEDURE SetHideValidationDialog@14(NewHideValidationDialog@1000 : Boolean);
+    BEGIN
+      HideValidationDialog := NewHideValidationDialog;
+    END;
+
+    LOCAL PROCEDURE WriteDownDerivedLines@1(VAR TransLine3@1000 : Record "Transfer Line");
+    VAR
+      TransLine4@1001 : Record "Transfer Line";
+      T337@1004 : Record "Reservation Entry";
+      TempDerivedSpecification@1006 : TEMPORARY Record "Tracking Specification";
+      ItemTrackingMgt@1005 : Codeunit "Item Tracking Management";
+      QtyToReceive@1002 : Decimal;
+      BaseQtyToReceive@1003 : Decimal;
+      TrackingSpecificationExists@1007 : Boolean;
+    BEGIN
+      TransLine4.SETRANGE("Document No.",TransLine3."Document No.");
+      TransLine4.SETRANGE("Derived From Line No.",TransLine3."Line No.");
+      if TransLine4.FIND('-') then begin
+        QtyToReceive := TransLine3."Qty. to Receive";
+        BaseQtyToReceive := TransLine3."Qty. to Receive (Base)";
+
+        T337.SETCURRENTKEY(
+          "Source ID","Source Ref. No.","Source Type","Source Subtype",
+          "Source Batch Name","Source Prod. Order Line");
+        T337.SETRANGE("Source ID",TransLine3."Document No.");
+        T337.SETRANGE("Source Ref. No.");
+        T337.SETRANGE("Source Type",DATABASE::"Transfer Line");
+        T337.SETRANGE("Source Subtype",1);
+        T337.SETRANGE("Source Batch Name",'');
+        T337.SETRANGE("Source Prod. Order Line",TransLine3."Line No.");
+        T337.SETFILTER("Qty. to Handle (Base)",'<>0');
+
+        TrackingSpecificationExists :=
+          ItemTrackingMgt.SumUpItemTracking(T337,TempDerivedSpecification,true,false);
+
+        repeat
+          if TrackingSpecificationExists then begin
+            TempDerivedSpecification.SETRANGE("Source Ref. No.",TransLine4."Line No.");
+            if TempDerivedSpecification.FINDFIRST then begin
+              TransLine4."Qty. to Receive (Base)" := TempDerivedSpecification."Qty. to Handle (Base)";
+              TransLine4."Qty. to Receive" := TempDerivedSpecification."Qty. to Handle";
+            end else begin
+              TransLine4."Qty. to Receive (Base)" := 0;
+              TransLine4."Qty. to Receive" := 0;
+            end;
+          end;
+          if TransLine4."Qty. to Receive (Base)" <= BaseQtyToReceive then begin
+            ReserveTransLine.TransferTransferToItemJnlLine(
+              TransLine4,ItemJnlLine,TransLine4."Qty. to Receive (Base)",1);
+            TransLine4."Quantity (Base)" :=
+              TransLine4."Quantity (Base)" - TransLine4."Qty. to Receive (Base)";
+            TransLine4.Quantity :=
+              TransLine4.Quantity - TransLine4."Qty. to Receive";
+            BaseQtyToReceive := BaseQtyToReceive - TransLine4."Qty. to Receive (Base)";
+            QtyToReceive := QtyToReceive - TransLine4."Qty. to Receive";
+          end else begin
+            ReserveTransLine.TransferTransferToItemJnlLine(
+              TransLine4,ItemJnlLine,BaseQtyToReceive,1);
+            TransLine4.Quantity := TransLine4.Quantity - QtyToReceive;
+            TransLine4."Quantity (Base)" := TransLine4."Quantity (Base)" - BaseQtyToReceive;
+            BaseQtyToReceive := 0;
+            QtyToReceive := 0;
+          end;
+          if TransLine4."Quantity (Base)" = 0 then
+            TransLine4.DELETE
+          else begin
+            TransLine4."Qty. to Ship" := TransLine4.Quantity;
+            TransLine4."Qty. to Ship (Base)" := TransLine4."Quantity (Base)";
+            TransLine4."Qty. to Receive" := TransLine4.Quantity;
+            TransLine4."Qty. to Receive (Base)" := TransLine4."Quantity (Base)";
+            TransLine4.ResetPostedQty;
+            TransLine4."Outstanding Quantity" := TransLine4.Quantity;
+            TransLine4."Outstanding Qty. (Base)" := TransLine4."Quantity (Base)";
+            TransLine4.MODIFY;
+          end;
+        until (TransLine4.NEXT = 0) or (BaseQtyToReceive = 0);
+      end;
+
+      if BaseQtyToReceive <> 0 then
+        ERROR(Text008);
+    END;
+
+    LOCAL PROCEDURE InsertRcptEntryRelation@38(VAR TransRcptLine@1002 : Record "Transfer Receipt Line") : Integer;
+    VAR
+      ItemEntryRelation@1001 : Record "Item Entry Relation";
+      TempItemEntryRelation@1000 : TEMPORARY Record "Item Entry Relation";
+    BEGIN
+      TempItemEntryRelation2.RESET;
+      TempItemEntryRelation2.DELETEALL;
+
+      if ItemJnlPostLine.CollectItemEntryRelation(TempItemEntryRelation) then begin
+        if TempItemEntryRelation.FIND('-') then begin
+          repeat
+            ItemEntryRelation := TempItemEntryRelation;
+            ItemEntryRelation.TransferFieldsTransRcptLine(TransRcptLine);
+            ItemEntryRelation.INSERT;
+            TempItemEntryRelation2 := TempItemEntryRelation;
+            TempItemEntryRelation2.INSERT;
+          until TempItemEntryRelation.NEXT = 0;
+          exit(0);
+        end;
+      end else
+        exit(ItemJnlLine."Item Shpt. Entry No.");
+    END;
+
+    LOCAL PROCEDURE CheckWarehouse@7301(VAR TransLine@1000 : Record "Transfer Line");
+    VAR
+      TransLine2@1001 : Record "Transfer Line";
+      WhseValidateSourceLine@1003 : Codeunit "Whse. Validate Source Line";
+      ShowError@1002 : Boolean;
+    BEGIN
+      TransLine2.COPY(TransLine);
+      if TransLine2.FIND('-') then
+        repeat
+          GetLocation(TransLine2."Transfer-to Code");
+          if Location."Require Receive" or Location."Require Put-away" then begin
+            if Location."Bin Mandatory" then
+              ShowError := true
+            else
+              if WhseValidateSourceLine.WhseLinesExist(
+                   DATABASE::"Transfer Line",
+                   1,// In
+                   TransLine2."Document No.",
+                   TransLine2."Line No.",
+                   0,
+                   TransLine2.Quantity)
+              then
+                ShowError := true;
+
+            if ShowError then
+              ERROR(
+                Text002,
+                TransLine2."Document No.",
+                TransLine2.FIELDCAPTION("Line No."),
+                TransLine2."Line No.");
+          end;
+        until TransLine2.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SaveTempWhseSplitSpec@5(TransLine@1001 : Record "Transfer Line");
+    VAR
+      TempHandlingSpecification@1000 : TEMPORARY Record "Tracking Specification";
+    BEGIN
+      TempWhseSplitSpecification.RESET;
+      TempWhseSplitSpecification.DELETEALL;
+      if ItemJnlPostLine.CollectTrackingSpecification(TempHandlingSpecification) then
+        if TempHandlingSpecification.FIND('-') then
+          repeat
+            TempWhseSplitSpecification := TempHandlingSpecification;
+            TempWhseSplitSpecification."Entry No." := TempHandlingSpecification."Transfer Item Entry No.";
+            TempWhseSplitSpecification."Source Type" := DATABASE::"Transfer Line";
+            TempWhseSplitSpecification."Source Subtype" := 1;
+            TempWhseSplitSpecification."Source ID" := TransLine."Document No.";
+            TempWhseSplitSpecification."Source Ref. No." := TransLine."Line No.";
+            TempWhseSplitSpecification.INSERT;
+          until TempHandlingSpecification.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetLocation@7300(LocationCode@1000 : Code[10]);
+    BEGIN
+      if LocationCode = '' then
+        Location.GetLocationSetup(LocationCode,Location)
+      else
+        if Location.Code <> LocationCode then
+          Location.GET(LocationCode);
+    END;
+
+    LOCAL PROCEDURE IsWarehousePosting@12(LocationCode@1000 : Code[10]) : Boolean;
+    BEGIN
+      GetLocation(LocationCode);
+      if Location."Bin Mandatory" and not (WhseReceive or InvtPickPutaway) then
+        exit(true);
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE PostWhseJnlLine@4(ItemJnlLine@1000 : Record "Item Journal Line";OriginalQuantity@1001 : Decimal;OriginalQuantityBase@1006 : Decimal;VAR TempHandlingSpecification@1003 : TEMPORARY Record "Tracking Specification");
+    VAR
+      WhseJnlLine@1002 : Record "Warehouse Journal Line";
+      TempWhseJnlLine2@1005 : TEMPORARY Record "Warehouse Journal Line";
+      ItemTrackingMgt@1004 : Codeunit "Item Tracking Management";
+      WMSMgmt@1007 : Codeunit "WMS Management";
+    BEGIN
+      with ItemJnlLine do begin
+        Quantity := OriginalQuantity;
+        "Quantity (Base)" := OriginalQuantityBase;
+        GetLocation("New Location Code");
+        if Location."Bin Mandatory" then
+          if WMSMgmt.CreateWhseJnlLine(ItemJnlLine,1,WhseJnlLine,true) then begin
+            WMSMgmt.SetTransferLine(TransLine,WhseJnlLine,1,TransRcptHeader."No.");
+            ItemTrackingMgt.SplitWhseJnlLine(WhseJnlLine,TempWhseJnlLine2,TempHandlingSpecification,true);
+            if TempWhseJnlLine2.FIND('-') then
+              repeat
+                WMSMgmt.CheckWhseJnlLine(TempWhseJnlLine2,1,0,true);
+                WhseJnlRegisterLine.RegisterWhseJnlLine(TempWhseJnlLine2);
+              until TempWhseJnlLine2.NEXT = 0;
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetWhseRcptHeader@3(VAR WhseRcptHeader2@1000 : Record "Warehouse Receipt Header");
+    BEGIN
+      WhseRcptHeader := WhseRcptHeader2;
+      TempWhseRcptHeader := WhseRcptHeader;
+      TempWhseRcptHeader.INSERT;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforePostItemJournalLine@19(VAR ItemJournalLine@1000 : Record "Item Journal Line";TransferLine@1001 : Record "Transfer Line";TransferReceiptHeader@1002 : Record "Transfer Receipt Header";TransferReceiptLine@1003 : Record "Transfer Receipt Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeTransferOrderPostReceipt@9(VAR TransferHeader@1000 : Record "Transfer Header");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeTransferOderPostReceipt@7(VAR TransferHeader@1000 : Record "Transfer Header");
+    BEGIN
+      // will be deprecated
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterTransferOrderPostReceipt@11(VAR TransferHeader@1000 : Record "Transfer Header");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterTransferOderPostReceipt@10(VAR TransferHeader@1000 : Record "Transfer Header");
+    BEGIN
+      // will be deprecated
+    END;
+
+    LOCAL PROCEDURE LockTables@6(AutoCostPosting@1000 : Boolean);
+    VAR
+      GLEntry@1001 : Record "G/L Entry";
+      NoSeriesLine@1002 : Record "No. Series Line";
+    BEGIN
+      NoSeriesLine.LOCKTABLE;
+      if NoSeriesLine.FINDLAST then;
+      if AutoCostPosting then begin
+        GLEntry.LOCKTABLE;
+        if GLEntry.FINDLAST then;
+      end;
+    END;
+
+    LOCAL PROCEDURE ReleaseDocument@8(VAR TransferHeader@1000 : Record "Transfer Header");
+    BEGIN
+      if TransferHeader.Status = TransferHeader.Status::Open then begin
+        CODEUNIT.RUN(CODEUNIT::"Release Transfer Document",TransferHeader);
+        TransferHeader.Status := TransferHeader.Status::Open;
+        TransferHeader.MODIFY;
+        COMMIT;
+        TransferHeader.Status := TransferHeader.Status::Released;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

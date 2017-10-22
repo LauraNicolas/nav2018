@@ -1,0 +1,251 @@
+OBJECT Codeunit 951 Time Sheet Approval Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData Employee=r;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1000 : TextConst '@@@="There is nothing to submit for line with Time Sheet No.=10, Line No.=10000.";ENU="There is nothing to submit for line with %1=%2, %3=%4."';
+      Text002@1001 : TextConst 'ENU=You are not authorized to approve time sheet lines. Contact your time sheet administrator.';
+      Text003@1002 : TextConst 'ENU=Time sheet line cannot be reopened because there are linked service lines.';
+      Text004@1004 : TextConst 'ENU=&All open lines [%1 line(s)],&Selected line(s) only';
+      Text005@1003 : TextConst 'ENU=&All submitted lines [%1 line(s)],&Selected line(s) only';
+      Text006@1005 : TextConst 'ENU=&All approved lines [%1 line(s)],&Selected line(s) only';
+      Text007@1007 : TextConst 'ENU=Submit for approval';
+      Text008@1006 : TextConst 'ENU=Reopen for editing';
+      Text009@1010 : TextConst 'ENU=Approve for posting';
+      Text010@1008 : TextConst 'ENU=Reject for correction';
+
+    [External]
+    PROCEDURE Submit@1(VAR TimeSheetLine@1000 : Record "Time Sheet Line");
+    BEGIN
+      with TimeSheetLine do begin
+        if Status = Status::Submitted then
+          exit;
+        if Type = Type::" " then
+          FIELDERROR(Type);
+        TestStatus;
+        CALCFIELDS("Total Quantity");
+        if "Total Quantity" = 0 then
+          ERROR(
+            Text001,
+            FIELDCAPTION("Time Sheet No."),
+            "Time Sheet No.",
+            FIELDCAPTION("Line No."),
+            "Line No.");
+        case Type of
+          Type::Job:
+            begin
+              TESTFIELD("Job No.");
+              TESTFIELD("Job Task No.");
+            end;
+          Type::Absence:
+            TESTFIELD("Cause of Absence Code");
+          Type::Service:
+            TESTFIELD("Service Order No.");
+        end;
+        UpdateApproverID;
+        Status := Status::Submitted;
+        MODIFY(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE ReopenSubmitted@7(VAR TimeSheetLine@1000 : Record "Time Sheet Line");
+    BEGIN
+      with TimeSheetLine do begin
+        if Status = Status::Open then
+          exit;
+        TESTFIELD(Status,Status::Submitted);
+        Status := Status::Open;
+        MODIFY(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE ReopenApproved@3(VAR TimeSheetLine@1000 : Record "Time Sheet Line");
+    BEGIN
+      with TimeSheetLine do begin
+        if Status = Status::Submitted then
+          exit;
+        TESTFIELD(Status,Status::Approved);
+        TESTFIELD(Posted,false);
+        CheckApproverPermissions(TimeSheetLine);
+        CheckLinkedServiceDoc(TimeSheetLine);
+        UpdateApproverID;
+        Status := Status::Submitted;
+        MODIFY(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE Reject@6(VAR TimeSheetLine@1000 : Record "Time Sheet Line");
+    BEGIN
+      with TimeSheetLine do begin
+        if Status = Status::Rejected then
+          exit;
+        TESTFIELD(Status,Status::Submitted);
+        CheckApproverPermissions(TimeSheetLine);
+        Status := Status::Rejected;
+        MODIFY(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE Approve@12(VAR TimeSheetLine@1000 : Record "Time Sheet Line");
+    BEGIN
+      with TimeSheetLine do begin
+        if Status = Status::Approved then
+          exit;
+        TESTFIELD(Status,Status::Submitted);
+        CheckApproverPermissions(TimeSheetLine);
+        Status := Status::Approved;
+        "Approved By" := USERID;
+        "Approval Date" := TODAY;
+        MODIFY(true);
+        case Type of
+          Type::Absence:
+            PostAbsence(TimeSheetLine);
+          Type::Service:
+            AfterApproveServiceOrderTmeSheetEntries(TimeSheetLine);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE PostAbsence@2(VAR TimeSheetLine@1000 : Record "Time Sheet Line");
+    VAR
+      Resource@1005 : Record Resource;
+      TimeSheetHeader@1003 : Record "Time Sheet Header";
+      TimeSheetDetail@1004 : Record "Time Sheet Detail";
+      Employee@1001 : Record Employee;
+      EmployeeAbsence@1002 : Record "Employee Absence";
+      TimeSheetMgt@1006 : Codeunit "Time Sheet Management";
+    BEGIN
+      TimeSheetHeader.GET(TimeSheetLine."Time Sheet No.");
+      Resource.GET(TimeSheetHeader."Resource No.");
+      Employee.SETRANGE("Resource No.",TimeSheetHeader."Resource No.");
+      Employee.FINDFIRST;
+      TimeSheetDetail.SETRANGE("Time Sheet No.",TimeSheetLine."Time Sheet No.");
+      TimeSheetDetail.SETRANGE("Time Sheet Line No.",TimeSheetLine."Line No.");
+      if TimeSheetDetail.FINDSET(true) then
+        repeat
+          EmployeeAbsence.INIT;
+          EmployeeAbsence.VALIDATE("Employee No.",Employee."No.");
+          EmployeeAbsence.VALIDATE("From Date",TimeSheetDetail.Date);
+          EmployeeAbsence.VALIDATE("Cause of Absence Code",TimeSheetDetail."Cause of Absence Code");
+          EmployeeAbsence.VALIDATE("Unit of Measure Code",Resource."Base Unit of Measure");
+          EmployeeAbsence.VALIDATE(Quantity,TimeSheetDetail.Quantity);
+          EmployeeAbsence.INSERT(true);
+
+          TimeSheetDetail.Posted := true;
+          TimeSheetDetail.MODIFY;
+          TimeSheetMgt.CreateTSPostingEntry(
+            TimeSheetDetail,
+            TimeSheetDetail.Quantity,
+            TimeSheetDetail.Date,
+            '',
+            TimeSheetLine.Description);
+        until TimeSheetDetail.NEXT = 0;
+
+      TimeSheetLine.Posted := true;
+      TimeSheetLine.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CheckApproverPermissions@4(TimeSheetLine@1000 : Record "Time Sheet Line");
+    VAR
+      UserSetup@1001 : Record "User Setup";
+    BEGIN
+      UserSetup.GET(USERID);
+      if not UserSetup."Time Sheet Admin." then begin
+        if TimeSheetLine."Approver ID" <> UPPERCASE(USERID) then
+          ERROR(Text002);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckLinkedServiceDoc@8(TimeSheetLine@1000 : Record "Time Sheet Line");
+    VAR
+      ServiceLine@1001 : Record "Service Line";
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",TimeSheetLine."Service Order No.");
+      ServiceLine.SETRANGE("Time Sheet No.",TimeSheetLine."Time Sheet No.");
+      ServiceLine.SETRANGE("Time Sheet Line No.",TimeSheetLine."Line No.");
+      if not ServiceLine.ISEMPTY then
+        ERROR(Text003);
+    END;
+
+    [External]
+    PROCEDURE GetTimeSheetDialogText@9(ActionType@1002 : 'Submit,Reopen';LinesQty@1001 : Integer) : Text[100];
+    BEGIN
+      case ActionType of
+        ActionType::Submit:
+          exit(STRSUBSTNO(Text004,LinesQty));
+        ActionType::Reopen:
+          exit(STRSUBSTNO(Text005,LinesQty));
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetManagerTimeSheetDialogText@10(ActionType@1000 : 'Approve,Reopen,Reject';LinesQty@1001 : Integer) : Text[100];
+    BEGIN
+      case ActionType of
+        ActionType::Approve,
+        ActionType::Reject:
+          exit(STRSUBSTNO(Text005,LinesQty));
+        ActionType::Reopen:
+          exit(STRSUBSTNO(Text006,LinesQty));
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetTimeSheetDialogInstruction@11(ActionType@1000 : 'Submit,Reopen') : Text[100];
+    BEGIN
+      case ActionType of
+        ActionType::Submit:
+          exit(Text007);
+        ActionType::Reopen:
+          exit(Text008);
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetManagerTimeSheetDialogInstruction@15(ActionType@1000 : 'Approve,Reopen,Reject') : Text[100];
+    BEGIN
+      case ActionType of
+        ActionType::Approve:
+          exit(Text009);
+        ActionType::Reject:
+          exit(Text010);
+        ActionType::Reopen:
+          exit(Text008);
+      end;
+    END;
+
+    LOCAL PROCEDURE AfterApproveServiceOrderTmeSheetEntries@13(VAR TimeSheetLine@1000 : Record "Time Sheet Line");
+    VAR
+      ServHeader@1001 : Record "Service Header";
+      ServMgtSetup@1003 : Record "Service Mgt. Setup";
+      TimeSheetMgt@1002 : Codeunit "Time Sheet Management";
+    BEGIN
+      if ServMgtSetup.GET and ServMgtSetup."Copy Time Sheet to Order" then begin
+        ServHeader.GET(ServHeader."Document Type"::Order,TimeSheetLine."Service Order No.");
+        TimeSheetMgt.CreateServDocLinesFromTSLine(ServHeader,TimeSheetLine);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

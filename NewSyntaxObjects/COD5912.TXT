@@ -1,0 +1,1024 @@
+OBJECT Codeunit 5912 ServLedgEntries-Post
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Service Ledger Entry"=rimd,
+                TableData "Warranty Ledger Entry"=rimd,
+                TableData "Service Register"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ServContract@1008 : Record "Service Contract Header";
+      ServLedgEntry@1006 : Record "Service Ledger Entry";
+      WarrantyLedgEntry@1005 : Record "Warranty Ledger Entry";
+      ServiceRegister@1000 : Record "Service Register";
+      Currency@1002 : Record Currency;
+      CurrExchRate@1010 : Record "Currency Exchange Rate";
+      ServOrderMgt@1007 : Codeunit ServOrderManagement;
+      NextServLedgerEntryNo@1001 : Integer;
+      NextWarrantyLedgerEntryNo@1003 : Integer;
+      SrcCode@1004 : Code[10];
+      Text001@1009 : TextConst '@@@=Service Ledger Entry No. Line No. for Service Invoice SO000001 cannot be posted. Please define the Service Item No. 7 in Service Contract No. SC0001.;ENU=%1 No. %2 for Service %3 %4 cannot be posted. Please define the Service Item No. %5 in Service Contract No. %6.';
+
+    [External]
+    PROCEDURE InitServiceRegister@19(VAR PassedServEntryNo@1000 : Integer;VAR PassedWarrantyEntryNo@1001 : Integer);
+    VAR
+      SrcCodeSetup@1002 : Record "Source Code Setup";
+    BEGIN
+      NextServLedgerEntryNo := InitServLedgerEntry;
+      NextWarrantyLedgerEntryNo := InitWarrantyLedgerEntry;
+      PassedServEntryNo := NextServLedgerEntryNo;
+      PassedWarrantyEntryNo := NextWarrantyLedgerEntryNo;
+
+      with ServiceRegister do begin
+        RESET;
+        LOCKTABLE;
+        if FINDLAST then
+          "No." += 1
+        else
+          "No." := 1;
+        INIT;
+        "From Entry No." := NextServLedgerEntryNo;
+        "From Warranty Entry No." := NextWarrantyLedgerEntryNo;
+        "Creation Date" := TODAY;
+        SrcCodeSetup.GET;
+        SrcCode := SrcCodeSetup."Service Management";
+        "Source Code" := SrcCode;
+        "User ID" := USERID;
+      end;
+    END;
+
+    [External]
+    PROCEDURE FinishServiceRegister@14(VAR PassedServEntryNo@1000 : Integer;VAR PassedWarrantyEntryNo@1001 : Integer);
+    BEGIN
+      PassedServEntryNo := NextServLedgerEntryNo;
+      PassedWarrantyEntryNo := NextWarrantyLedgerEntryNo;
+
+      with ServiceRegister do begin
+        "To Warranty Entry No." := NextWarrantyLedgerEntryNo - 1;
+        "To Entry No." := NextServLedgerEntryNo - 1;
+
+        if "To Warranty Entry No." < "From Warranty Entry No." then begin
+          "To Warranty Entry No." := 0;
+          "From Warranty Entry No." := 0;
+        end;
+
+        if "To Entry No." >= "From Entry No." then
+          INSERT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE InsertServLedgerEntry@6(VAR NextEntryNo@1002 : Integer;VAR ServHeader@1006 : Record "Service Header";VAR TempServLine@1000 : Record "Service Line";VAR ServItemLine@1003 : Record "Service Item Line";Qty@1001 : Decimal;DocNo@1005 : Code[20]) : Integer;
+    VAR
+      ServItem@1007 : Record "Service Item";
+      ServLedgEntry2@1008 : Record "Service Ledger Entry";
+      LineAmount@1004 : Decimal;
+    BEGIN
+      ServLedgEntry.LOCKTABLE;
+      with TempServLine do begin
+        ServLedgEntry.INIT;
+        ServLedgEntry."Entry No." := NextEntryNo;
+        if "Contract No." <> '' then
+          if ServOrderMgt.InServiceContract(TempServLine) then begin
+            ServLedgEntry."Service Contract No." := "Contract No.";
+            ServLedgEntry."Contract Group Code" := ServContract."Contract Group Code";
+            if ServContract.GET(ServContract."Contract Type"::Contract,"Contract No.") then
+              ServLedgEntry."Serv. Contract Acc. Gr. Code" :=
+                ServContract."Serv. Contract Acc. Gr. Code";
+          end else
+            ERROR(
+              Text001,
+              TABLECAPTION,"Line No.",ServHeader."Document Type",
+              ServHeader."No.","Service Item No.","Contract No.");
+
+        ServLedgEntry.CopyFromServHeader(ServHeader);
+        ServLedgEntry.CopyFromServLine(TempServLine,DocNo);
+
+        if ServItemLine.GET("Document Type","Document No.","Service Item Line No.") then
+          ServLedgEntry.CopyServicedInfo(
+            ServItemLine."Service Item No.",ServItemLine."Item No.",ServItemLine."Serial No.",ServItemLine."Variant Code")
+        else
+          if ServItem.GET("Service Item No.") then
+            ServLedgEntry.CopyServicedInfo(
+              ServItem."No.",ServItem."Item No.",ServItem."Serial No.",ServItem."Variant Code")
+          else
+            if ServLedgEntry2.GET("Appl.-to Service Entry") then
+              ServLedgEntry.CopyServicedInfo(
+                ServLedgEntry2."Service Item No. (Serviced)",ServLedgEntry2."Item No. (Serviced)",
+                ServLedgEntry2."Serial No. (Serviced)",ServLedgEntry2."Variant Code (Serviced)");
+
+        ServLedgEntry."User ID" := USERID;
+        ServLedgEntry."No." := "No.";
+        ServLedgEntry.Quantity := Qty;
+        ServLedgEntry."Charged Qty." := Qty;
+        if "Qty. to Consume" <> 0 then
+          ServLedgEntry."Charged Qty." := 0;
+
+        ServLedgEntry."Unit Cost" := GetRefinedUnitCost(TempServLine);
+        ServLedgEntry."Cost Amount" := ROUND(ServLedgEntry."Unit Cost" * Qty,Currency."Amount Rounding Precision");
+
+        ServLedgEntry."Discount %" := "Line Discount %";
+        ServLedgEntry."Responsibility Center" := ServHeader."Responsibility Center";
+        ServLedgEntry."Variant Code" := "Variant Code";
+
+        LineAmount := ServLedgEntry."Charged Qty." * "Unit Price";
+        if ServHeader."Currency Code" = '' then begin
+          if "Line Discount Type" = "Line Discount Type"::"Contract Disc." then
+            ServLedgEntry."Contract Disc. Amount" :=
+              ROUND("Line Discount Amount",Currency."Amount Rounding Precision");
+
+          if ServHeader."Prices Including VAT" then begin
+            ServLedgEntry."Unit Price" :=
+              ROUND("Unit Price" / (1 + "VAT %" / 100),Currency."Unit-Amount Rounding Precision");
+            ServLedgEntry."Discount Amount" :=
+              UsageServiceLedgerEntryDiscountAmount(
+                "Qty. to Consume" <> 0,"Line Discount Amount","VAT %",Currency."Amount Rounding Precision",true);
+            ServLedgEntry."Amount (LCY)" :=
+              ROUND(LineAmount / (1 + "VAT %" / 100),Currency."Amount Rounding Precision") - ServLedgEntry."Discount Amount";
+          end else begin
+            ServLedgEntry."Unit Price" :=
+              ROUND("Unit Price",Currency."Unit-Amount Rounding Precision");
+            ServLedgEntry."Discount Amount" :=
+              UsageServiceLedgerEntryDiscountAmount(
+                "Qty. to Consume" <> 0,"Line Discount Amount","VAT %",Currency."Amount Rounding Precision",false);
+            ServLedgEntry."Amount (LCY)" :=
+              ROUND(LineAmount,Currency."Amount Rounding Precision") - ServLedgEntry."Discount Amount";
+          end;
+          ServLedgEntry.Amount := ServLedgEntry."Amount (LCY)";
+        end else begin
+          if "Line Discount Type" = "Line Discount Type"::"Contract Disc." then
+            ServLedgEntry."Contract Disc. Amount" := AmountToLCY(ServHeader,"Line Discount Amount");
+
+          if ServHeader."Prices Including VAT" then begin
+            ServLedgEntry."Unit Price" := UnitAmountToLCY(ServHeader,"Unit Price" / (1 + "VAT %" / 100));
+            ServLedgEntry."Discount Amount" := AmountToLCY(ServHeader,"Line Discount Amount" / (1 + "VAT %" / 100));
+            ServLedgEntry."Amount (LCY)" := AmountToLCY(ServHeader,(LineAmount - "Line Discount Amount") / (1 + "VAT %" / 100));
+          end else begin
+            ServLedgEntry."Unit Price" := UnitAmountToLCY(ServHeader,"Unit Price");
+            ServLedgEntry."Discount Amount" := AmountToLCY(ServHeader,"Line Discount Amount");
+            ServLedgEntry."Amount (LCY)" := AmountToLCY(ServHeader,LineAmount - "Line Discount Amount");
+          end;
+          ServLedgEntry.Amount := AmountToFCY(ServHeader,ServLedgEntry."Amount (LCY)");
+        end;
+        if "Qty. to Consume" <> 0 then
+          ServLedgEntry."Discount Amount" := 0;
+
+        ServLedgEntry.INSERT;
+        NextEntryNo := NextEntryNo + 1;
+        NextServLedgerEntryNo := NextEntryNo;
+
+        exit(ServLedgEntry."Entry No.");
+      end;
+    END;
+
+    [External]
+    PROCEDURE InsertServLedgerEntrySale@1(VAR PassedNextEntryNo@1009 : Integer;VAR ServHeader@1002 : Record "Service Header";VAR ServLine@1000 : Record "Service Line";VAR ServItemLine@1010 : Record "Service Item Line";Qty@1007 : Decimal;QtyToCharge@1005 : Decimal;GenJnlLineDocNo@1001 : Code[20];DocLineNo@1008 : Integer);
+    VAR
+      PServItemLine@1006 : Record "Service Item Line";
+      ServShptLine@1004 : Record "Service Shipment Line";
+      ApplyToServLedgEntry@1003 : Record "Service Ledger Entry";
+      CurrExchRate@1012 : Record "Currency Exchange Rate";
+      ServItem@1011 : Record "Service Item";
+      TotalAmount@1016 : Decimal;
+    BEGIN
+      if (ServLine."Document No." = '') and
+         (ServLine."Contract No." = '')
+      then
+        exit;
+
+      GetCurrencyRec(ServHeader."Currency Code");
+
+      if ApplyToServLedgEntry.GET(ServLine."Appl.-to Service Entry") then begin
+        if ApplyToServLedgEntry.Type = ApplyToServLedgEntry.Type::"Service Contract" then begin
+          ServLedgEntry.RESET;
+          ServLedgEntry.SETCURRENTKEY(
+            "Service Contract No.","Entry No.","Entry Type",Type,"Moved from Prepaid Acc.");
+          ServLedgEntry.SETRANGE("Service Contract No.",ApplyToServLedgEntry."Service Contract No.");
+          ServLedgEntry.SETRANGE("Entry Type",ApplyToServLedgEntry."Entry Type");
+          ServLedgEntry.SETRANGE(Type,ApplyToServLedgEntry.Type);
+          ServLedgEntry.SETRANGE("Moved from Prepaid Acc.",ApplyToServLedgEntry."Moved from Prepaid Acc.");
+          ServLedgEntry.SETRANGE("Entry No.",ApplyToServLedgEntry."Entry No.");
+          ServLedgEntry.MODIFYALL(Open,false);
+          if ServHeader."Document Type" = ServHeader."Document Type"::Invoice then begin
+            ServLedgEntry.MODIFYALL("Document Type",ServLedgEntry."Document Type"::Invoice);
+            ServLedgEntry.MODIFYALL("Document No.",GenJnlLineDocNo);
+          end;
+          exit;
+        end;
+        ApplyToServLedgEntry.Open := false;
+        ApplyToServLedgEntry.MODIFY;
+      end;
+
+      ServContract.RESET;
+      ServLedgEntry.RESET;
+      ServLedgEntry.LOCKTABLE;
+
+      with ServLedgEntry do begin
+        INIT;
+        NextServLedgerEntryNo := PassedNextEntryNo;
+        "Entry No." := NextServLedgerEntryNo;
+
+        if ServLine."Contract No." <> '' then
+          if ServContract.GET(ServContract."Contract Type"::Contract,ServLine."Contract No.") then begin
+            "Service Contract No." := ServContract."Contract No.";
+            "Contract Group Code" := ServContract."Contract Group Code";
+            "Serv. Contract Acc. Gr. Code" := ServContract."Serv. Contract Acc. Gr. Code";
+          end;
+
+        if not ServItemLine.GET(ServLine."Document Type",ServLine."Document No.",ServLine."Service Item Line No.") then begin
+          if (ServLine."Shipment No." <> '') and (ServLine."Shipment Line No." <> 0) then begin
+            ServShptLine.GET(ServLine."Shipment No.",ServLine."Shipment Line No.");
+            if not
+               PServItemLine.GET(ServItemLine."Document Type"::Order,
+                 ServShptLine."Order No.",ServShptLine."Service Item Line No.")
+            then
+              CLEAR(PServItemLine);
+            CopyServicedInfo(
+              PServItemLine."Service Item No.",PServItemLine."Item No.",PServItemLine."Serial No.",PServItemLine."Variant Code");
+          end else
+            if ServItem.GET(ServLine."Service Item No.") then
+              CopyServicedInfo(ServItem."No.",ServItem."Item No.",ServItem."Serial No.",ServItem."Variant Code")
+        end else
+          CopyServicedInfo(
+            ServItemLine."Service Item No.",ServItemLine."Item No.",ServItemLine."Serial No.",ServItemLine."Variant Code");
+
+        case ServHeader."Document Type" of
+          ServHeader."Document Type"::"Credit Memo":
+            "Document Type" := "Document Type"::"Credit Memo";
+          else begin
+            if (ServHeader."Document Type" = ServHeader."Document Type"::Order) and
+               (ServLine."Qty. to Consume" <> 0)
+            then
+              "Document Type" := "Document Type"::Shipment
+            else
+              "Document Type" := "Document Type"::Invoice;
+          end;
+        end;
+
+        "Document No." := GenJnlLineDocNo;
+        Open := false;
+        if ServLine."Document No." <> '' then begin
+          if ServHeader."Document Type" = ServHeader."Document Type"::Order then
+            "Service Order No." := ServLine."Document No.";
+          "Job No." := ServLine."Job No.";
+          "Job Task No." := ServLine."Job Task No.";
+          "Job Line Type" := ServLine."Job Line Type";
+        end;
+
+        // fill-in Service Order No with the value, taken from the shipment specified in Get Shipment Lines
+        if ("Service Order No." = '') and
+           (ServHeader."Document Type" = ServHeader."Document Type"::Invoice) and
+           (ServLine."Shipment No." <> '')
+        then
+          "Service Order No." := GetOrderNoFromShipment(ServLine."Shipment No.");
+
+        "Moved from Prepaid Acc." := true;
+        "Posting Date" := ServHeader."Posting Date";
+        if QtyToCharge = 0 then
+          "Entry Type" := "Entry Type"::Consume
+        else
+          "Entry Type" := "Entry Type"::Sale;
+
+        "Bill-to Customer No." := ServHeader."Bill-to Customer No.";
+        "Customer No." := ServHeader."Customer No.";
+        "Ship-to Code" := ServHeader."Ship-to Code";
+        "Service Order Type" := ServHeader."Service Order Type";
+
+        "Global Dimension 1 Code" := ServLine."Shortcut Dimension 1 Code";
+        "Global Dimension 2 Code" := ServLine."Shortcut Dimension 2 Code";
+        "Dimension Set ID" := ServLine."Dimension Set ID";
+        "Gen. Bus. Posting Group" := ServLine."Gen. Bus. Posting Group";
+        "Gen. Prod. Posting Group" := ServLine."Gen. Prod. Posting Group";
+        "Serv. Price Adjmt. Gr. Code" := ServLine."Serv. Price Adjmt. Gr. Code";
+        "Service Price Group Code" := ServLine."Service Price Group Code";
+        "Fault Reason Code" := ServLine."Fault Reason Code";
+        "Unit of Measure Code" := ServLine."Unit of Measure Code";
+        "Work Type Code" := ServLine."Work Type Code";
+        "Service Item No. (Serviced)" := ServLine."Service Item No.";
+        Description := ServLine.Description;
+        "Responsibility Center" := ServHeader."Responsibility Center";
+        "User ID" := USERID;
+        "Location Code" := ServLine."Location Code";
+        case ServLine.Type of
+          ServLine.Type::" ":
+            Type := Type::" ";
+          ServLine.Type::Item:
+            begin
+              Type := Type::Item;
+              "Bin Code" := ServLine."Bin Code";
+            end;
+          ServLine.Type::Resource:
+            Type := Type::Resource;
+          ServLine.Type::Cost:
+            Type := Type::"Service Cost";
+          ServLine.Type::"G/L Account":
+            Type := Type::"G/L Account";
+        end;
+        "No." := ServLine."No.";
+        "Document Line No." := DocLineNo;
+        Quantity := Qty;
+        "Charged Qty." := QtyToCharge;
+        "Discount %" := -ServLine."Line Discount %";
+        "Unit Cost" := -GetRefinedUnitCost(ServLine);
+        "Cost Amount" := -ROUND("Unit Cost" * Qty,Currency."Amount Rounding Precision");
+        if ServHeader."Currency Code" = '' then begin
+          "Unit Price" := -ServLine."Unit Price";
+          "Discount Amount" := ServLine."Line Discount Amount";
+          "Amount (LCY)" := ServLine.Amount;
+          Amount := "Amount (LCY)";
+          if ServHeader."Prices Including VAT" then begin
+            "Unit Price" :=
+              ROUND("Unit Price" / (1 + ServLine."VAT %" / 100),Currency."Unit-Amount Rounding Precision");
+            "Discount Amount" :=
+              ROUND("Discount Amount" / (1 + ServLine."VAT %" / 100),Currency."Amount Rounding Precision");
+          end;
+        end else begin
+          "Unit Price" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                ServHeader."Posting Date",ServHeader."Currency Code",
+                -ServLine."Unit Price",ServHeader."Currency Factor"),Currency."Unit-Amount Rounding Precision");
+
+          if ServHeader."Prices Including VAT" then
+            "Unit Price" := ROUND("Unit Price" / (1 + ServLine."VAT %" / 100),Currency."Unit-Amount Rounding Precision");
+
+          TotalAmount := "Unit Price" * ABS("Charged Qty.");
+          if "Discount %" <> 0 then
+            "Discount Amount" :=
+              -ROUND(TotalAmount * "Discount %" / 100,Currency."Amount Rounding Precision")
+          else
+            "Discount Amount" := 0;
+          "Amount (LCY)" :=
+            ROUND(TotalAmount - "Discount Amount",Currency."Amount Rounding Precision");
+          Amount :=
+            ROUND(
+              CurrExchRate.ExchangeAmtLCYToFCY(
+                ServHeader."Posting Date",ServHeader."Currency Code",
+                "Amount (LCY)",ServHeader."Currency Factor"),Currency."Unit-Amount Rounding Precision");
+        end;
+
+        if ApplyToServLedgEntry.GET(ServLine."Appl.-to Service Entry") then
+          "Contract Disc. Amount" := ApplyToServLedgEntry."Contract Disc. Amount";
+
+        INSERT;
+        NextServLedgerEntryNo += 1;
+        PassedNextEntryNo := NextServLedgerEntryNo;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertServLedgEntryCrMemo@9(VAR PassedNextEntryNo@1003 : Integer;VAR ServHeader@1002 : Record "Service Header";VAR ServLine@1001 : Record "Service Line";GenJnlLineDocNo@1004 : Code[20]);
+    VAR
+      ServItem@1000 : Record "Service Item";
+      TotalAmount@1005 : Decimal;
+    BEGIN
+      if ServLine."Qty. to Invoice" = 0 then
+        exit;
+
+      GetCurrencyRec(ServHeader."Currency Code");
+
+      ServLedgEntry.RESET;
+      ServLedgEntry.LOCKTABLE;
+
+      with ServLedgEntry do begin
+        INIT;
+        NextServLedgerEntryNo := PassedNextEntryNo;
+        "Entry No." := NextServLedgerEntryNo;
+
+        if ServItem.GET(ServLine."Service Item No.") then begin
+          "Service Item No. (Serviced)" := ServItem."No.";
+          "Item No. (Serviced)" := ServItem."Item No.";
+          "Serial No. (Serviced)" := ServItem."Serial No.";
+        end;
+
+        "Document Type" := "Document Type"::"Credit Memo";
+        "Document No." := GenJnlLineDocNo;
+        "Document Line No." := ServLine."Line No.";
+        Open := false;
+        "Moved from Prepaid Acc." := true;
+        "Posting Date" := ServHeader."Posting Date";
+        "Entry Type" := "Entry Type"::Sale;
+        "Bill-to Customer No." := ServHeader."Bill-to Customer No.";
+        "Customer No." := ServHeader."Customer No.";
+        "Ship-to Code" := ServHeader."Ship-to Code";
+        "Global Dimension 1 Code" := ServLine."Shortcut Dimension 1 Code";
+        "Global Dimension 2 Code" := ServLine."Shortcut Dimension 2 Code";
+        "Dimension Set ID" := ServLine."Dimension Set ID";
+        "Gen. Bus. Posting Group" := ServLine."Gen. Bus. Posting Group";
+        "Gen. Prod. Posting Group" := ServLine."Gen. Prod. Posting Group";
+        "Serv. Price Adjmt. Gr. Code" := ServLine."Serv. Price Adjmt. Gr. Code";
+        "Service Price Group Code" := ServLine."Service Price Group Code";
+        "Fault Reason Code" := ServLine."Fault Reason Code";
+        "Location Code" := ServLine."Location Code";
+        Description := ServLine.Description;
+        "Responsibility Center" := ServHeader."Responsibility Center";
+        "User ID" := USERID;
+        case ServLine.Type of
+          ServLine.Type::" ":
+            Type := Type::" ";
+          ServLine.Type::Item:
+            Type := Type::Item;
+          ServLine.Type::Resource:
+            Type := Type::Resource;
+          ServLine.Type::Cost:
+            Type := Type::"Service Cost";
+          ServLine.Type::"G/L Account":
+            Type := Type::"G/L Account";
+        end;
+        if Type = Type::Item then
+          "Bin Code" := ServLine."Bin Code";
+        "No." := ServLine."No.";
+        Quantity := ServLine.Quantity;
+        "Charged Qty." := ServLine."Qty. to Invoice";
+        "Discount %" := ServLine."Line Discount %";
+        "Unit Cost" := GetRefinedUnitCost(ServLine);
+        "Cost Amount" := ROUND("Unit Cost" * ServLine.Quantity,Currency."Amount Rounding Precision");
+        "Job Line Type" := "Job Line Type"::" ";
+        if ServHeader."Currency Code" = '' then begin
+          "Unit Price" := ServLine."Unit Price";
+          "Discount Amount" := ServLine."Line Discount Amount";
+          "Amount (LCY)" := ServLine.Amount;
+          Amount := "Amount (LCY)";
+          if ServHeader."Prices Including VAT" then begin
+            "Unit Price" :=
+              ROUND("Unit Price" / (1 + ServLine."VAT %" / 100),Currency."Unit-Amount Rounding Precision");
+            "Discount Amount" :=
+              ROUND("Discount Amount" / (1 + ServLine."VAT %" / 100),Currency."Amount Rounding Precision");
+          end;
+        end else begin
+          "Unit Price" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                ServHeader."Posting Date",ServHeader."Currency Code",
+                ServLine."Unit Price",ServHeader."Currency Factor"));
+
+          if ServHeader."Prices Including VAT" then
+            "Unit Price" := ROUND("Unit Price" / (1 + ServLine."VAT %" / 100),Currency."Unit-Amount Rounding Precision");
+
+          TotalAmount := "Unit Price" * ABS("Charged Qty.");
+          if "Discount %" <> 0 then
+            "Discount Amount" :=
+              ABS(ROUND(TotalAmount * "Discount %" / 100,Currency."Amount Rounding Precision"))
+          else
+            "Discount Amount" := 0;
+          "Amount (LCY)" :=
+            ROUND(TotalAmount - "Discount Amount");
+          Amount :=
+            ROUND(
+              CurrExchRate.ExchangeAmtLCYToFCY(
+                ServHeader."Posting Date",ServHeader."Currency Code",
+                "Amount (LCY)",ServHeader."Currency Factor"));
+        end;
+
+        INSERT;
+        NextServLedgerEntryNo += 1;
+        PassedNextEntryNo := NextServLedgerEntryNo;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertServLedgerEntryCrMUsage@2300(VAR NextEntryNo@1102601000 : Integer;VAR ServHeader@2301 : Record "Service Header";VAR ServLine@2302 : Record "Service Line";DocNo@2303 : Code[20]);
+    VAR
+      ServItem@1102601004 : Record "Service Item";
+      ServItemLine@1000 : Record "Service Item Line";
+      LineAmount@1102601005 : Decimal;
+    BEGIN
+      if ServLine."Qty. to Invoice" = 0 then
+        exit;
+      with ServLine do begin
+        ServLedgEntry.INIT;
+        NextServLedgerEntryNo := NextEntryNo;
+        ServLedgEntry."Entry No." := NextServLedgerEntryNo;
+
+        ServLedgEntry.CopyFromServHeader(ServHeader);
+        ServLedgEntry.CopyFromServLine(ServLine,DocNo);
+
+        ServLedgEntry."Service Contract No." := "Contract No.";
+
+        if ServItemLine.GET("Document Type","Document No.","Service Item Line No.") then
+          ServLedgEntry.CopyServicedInfo(
+            ServItemLine."Service Item No.",ServItemLine."Item No.",ServItemLine."Serial No.",ServItemLine."Variant Code")
+        else
+          if ServItem.GET("Service Item No.") then
+            ServLedgEntry.CopyServicedInfo(ServItem."No.",ServItem."Item No.",ServItem."Serial No.",ServItem."Variant Code");
+
+        ServLedgEntry."User ID" := USERID;
+        ServLedgEntry."No." := "No.";
+        ServLedgEntry.Quantity := -Quantity;
+        ServLedgEntry."Charged Qty." := -Quantity;
+        if "Qty. to Consume" <> 0 then
+          ServLedgEntry."Charged Qty." := 0;
+
+        ServLedgEntry."Unit Cost" := GetRefinedUnitCost(ServLine);
+        ServLedgEntry."Cost Amount" := ROUND(ServLedgEntry."Unit Cost" * Quantity,Currency."Amount Rounding Precision");
+
+        LineAmount := ServLedgEntry."Charged Qty." * "Unit Price";
+        if ServHeader."Currency Code" = '' then begin
+          if "Line Discount Type" = "Line Discount Type"::"Contract Disc." then
+            ServLedgEntry."Contract Disc. Amount" :=
+              ROUND("Line Discount Amount",Currency."Amount Rounding Precision");
+
+          if ServHeader."Prices Including VAT" then begin
+            ServLedgEntry."Unit Price" :=
+              ROUND("Unit Price" / (1 + "VAT %" / 100),Currency."Unit-Amount Rounding Precision");
+            ServLedgEntry."Discount Amount" :=
+              - ROUND("Line Discount Amount" / (1 + "VAT %" / 100),Currency."Amount Rounding Precision");
+            ServLedgEntry."Amount (LCY)" :=
+              ROUND(LineAmount / (1 + "VAT %" / 100),Currency."Amount Rounding Precision") - ServLedgEntry."Discount Amount";
+          end else begin
+            ServLedgEntry."Unit Price" :=
+              ROUND("Unit Price",Currency."Unit-Amount Rounding Precision");
+            ServLedgEntry."Discount Amount" :=
+              - ROUND("Line Discount Amount",Currency."Amount Rounding Precision");
+            ServLedgEntry."Amount (LCY)" :=
+              ROUND(LineAmount,Currency."Amount Rounding Precision") - ServLedgEntry."Discount Amount";
+          end;
+          ServLedgEntry.Amount := ServLedgEntry."Amount (LCY)";
+        end else begin
+          if "Line Discount Type" = "Line Discount Type"::"Contract Disc." then
+            ServLedgEntry."Contract Disc. Amount" := AmountToLCY(ServHeader,"Line Discount Amount");
+
+          if ServHeader."Prices Including VAT" then begin
+            ServLedgEntry."Unit Price" := UnitAmountToLCY(ServHeader,"Unit Price" / (1 + "VAT %" / 100));
+            ServLedgEntry."Discount Amount" := -AmountToLCY(ServHeader,"Line Discount Amount" / (1 + "VAT %" / 100));
+            ServLedgEntry."Amount (LCY)" := AmountToLCY(ServHeader,(LineAmount - "Line Discount Amount") / (1 + "VAT %" / 100));
+          end else begin
+            ServLedgEntry."Unit Price" := UnitAmountToLCY(ServHeader,"Unit Price");
+            ServLedgEntry."Discount Amount" := -AmountToLCY(ServHeader,"Line Discount Amount");
+            ServLedgEntry."Amount (LCY)" := AmountToLCY(ServHeader,LineAmount - "Line Discount Amount");
+          end;
+          ServLedgEntry.Amount := AmountToFCY(ServHeader,ServLedgEntry."Amount (LCY)");
+        end;
+
+        if "Qty. to Consume" <> 0 then
+          ServLedgEntry."Discount Amount" := 0;
+
+        ServLedgEntry."Cost Amount" := -ServLedgEntry."Cost Amount";
+        ServLedgEntry."Unit Cost" := -ServLedgEntry."Unit Cost";
+        ServLedgEntry."Unit Price" := -ServLedgEntry."Unit Price";
+        ServLedgEntry.INSERT;
+        NextEntryNo := NextEntryNo + 1;
+        NextServLedgerEntryNo := NextEntryNo;
+      end;
+    END;
+
+    [External]
+    PROCEDURE InsertWarrantyLedgerEntry@3(VAR PassedWarrantyEntryNo@1001 : Integer;VAR ServHeader@1002 : Record "Service Header";VAR TempServLine@1000 : Record "Service Line";VAR ServItemLine@1003 : Record "Service Item Line";Qty@1004 : Decimal;GenJnlLineDocNo@1005 : Code[20]) : Integer;
+    BEGIN
+      with TempServLine do begin
+        if Warranty and (Type in [Type::Item,Type::Resource]) and ("Qty. to Ship" <> 0) then begin
+          CLEAR(WarrantyLedgEntry);
+          WarrantyLedgEntry.LOCKTABLE;
+
+          WarrantyLedgEntry.RESET;
+          WarrantyLedgEntry.INIT;
+          NextWarrantyLedgerEntryNo := PassedWarrantyEntryNo;
+          WarrantyLedgEntry."Entry No." := NextWarrantyLedgerEntryNo;
+          WarrantyLedgEntry."Document No." := GenJnlLineDocNo;
+          WarrantyLedgEntry."Service Order Line No." := "Line No.";
+          WarrantyLedgEntry."Posting Date" := "Posting Date";
+          WarrantyLedgEntry."Customer No." := ServHeader."Customer No.";
+          WarrantyLedgEntry."Ship-to Code" := "Ship-to Code";
+          WarrantyLedgEntry."Bill-to Customer No." := ServHeader."Bill-to Customer No.";
+
+          if not ServItemLine.GET("Document Type","Document No.","Service Item Line No.") then
+            CLEAR(ServItemLine);
+          WarrantyLedgEntry."Service Item No. (Serviced)" := ServItemLine."Service Item No.";
+          WarrantyLedgEntry."Item No. (Serviced)" := ServItemLine."Item No.";
+          WarrantyLedgEntry."Variant Code (Serviced)" := ServItemLine."Variant Code";
+          WarrantyLedgEntry."Serial No. (Serviced)" := ServItemLine."Serial No.";
+          WarrantyLedgEntry."Service Item Group (Serviced)" := ServItemLine."Service Item Group Code";
+          WarrantyLedgEntry."Service Order No." := "Document No.";
+          WarrantyLedgEntry."Service Contract No." := "Contract No.";
+          WarrantyLedgEntry."Fault Reason Code" := "Fault Reason Code";
+          WarrantyLedgEntry."Fault Area Code" := "Fault Area Code";
+          WarrantyLedgEntry."Symptom Code" := "Symptom Code";
+          WarrantyLedgEntry."Fault Code" := "Fault Code";
+          WarrantyLedgEntry."Resolution Code" := "Resolution Code";
+          WarrantyLedgEntry.Type := Type;
+          WarrantyLedgEntry."No." := "No.";
+          WarrantyLedgEntry.Quantity := ABS(Qty);
+          WarrantyLedgEntry."Work Type Code" := "Work Type Code";
+          WarrantyLedgEntry."Unit of Measure Code" := "Unit of Measure Code";
+          WarrantyLedgEntry.Description := Description;
+          WarrantyLedgEntry."Gen. Bus. Posting Group" := "Gen. Bus. Posting Group";
+          WarrantyLedgEntry."Gen. Prod. Posting Group" := "Gen. Prod. Posting Group";
+          WarrantyLedgEntry."Global Dimension 1 Code" := "Shortcut Dimension 1 Code";
+          WarrantyLedgEntry."Global Dimension 2 Code" := "Shortcut Dimension 2 Code";
+          WarrantyLedgEntry."Dimension Set ID" := "Dimension Set ID";
+          WarrantyLedgEntry.Open := true;
+          WarrantyLedgEntry."Vendor No." := ServItemLine."Vendor No.";
+          WarrantyLedgEntry."Vendor Item No." := ServItemLine."Vendor Item No.";
+          WarrantyLedgEntry."Variant Code" := "Variant Code";
+
+          if "Line Discount Type" = "Line Discount Type"::"Warranty Disc." then begin
+            if ServHeader."Currency Code" = '' then
+              WarrantyLedgEntry.Amount := "Line Discount Amount"
+            else
+              WarrantyLedgEntry.Amount := AmountToLCY(ServHeader,"Line Discount Amount");
+            WarrantyLedgEntry.Amount := ABS(WarrantyLedgEntry.Amount);
+          end;
+          WarrantyLedgEntry.INSERT;
+
+          NextWarrantyLedgerEntryNo += 1;
+          PassedWarrantyEntryNo := NextWarrantyLedgerEntryNo;
+
+          exit(WarrantyLedgEntry."Entry No.");
+        end;
+        exit(0);
+      end;
+    END;
+
+    LOCAL PROCEDURE InitServLedgerEntry@8() : Integer;
+    BEGIN
+      // returns NextEntryNo
+      with ServLedgEntry do begin
+        RESET;
+        LOCKTABLE;
+        if FINDLAST then
+          exit("Entry No." + 1);
+        exit(1);
+      end;
+    END;
+
+    LOCAL PROCEDURE InitWarrantyLedgerEntry@18() : Integer;
+    BEGIN
+      with WarrantyLedgEntry do begin
+        RESET;
+        LOCKTABLE;
+        if FINDLAST then
+          exit("Entry No." + 1);
+
+        exit(1);
+      end;
+    END;
+
+    PROCEDURE ReverseCnsmServLedgEntries@13(ServShptLine@1000 : Record "Service Shipment Line");
+    VAR
+      ServLine@1001 : Record "Service Line";
+      ServLedgEntry@1007 : Record "Service Ledger Entry";
+      TempNewServLedgEntry@1008 : TEMPORARY Record "Service Ledger Entry";
+    BEGIN
+      ServLedgEntry.LOCKTABLE;
+      ServLedgEntry.RESET;
+      ServLine.GET(ServLine."Document Type"::Order,ServShptLine."Order No.",ServShptLine."Order Line No.");
+      ServLedgEntry.SETCURRENTKEY("Entry Type","Document Type","Document No.","Document Line No.");
+      ServLedgEntry.SETFILTER("Entry Type",'%1|%2',ServLedgEntry."Entry Type"::Consume,ServLedgEntry."Entry Type"::Usage);
+      ServLedgEntry.SETRANGE("Document Type",ServLedgEntry."Document Type"::Shipment);
+      ServLedgEntry.SETRANGE("Document No.",ServShptLine."Document No.");
+      ServLedgEntry.SETRANGE("Document Line No.",ServShptLine."Line No.");
+      if ServLedgEntry.FIND('-') then begin
+        repeat
+          TempNewServLedgEntry.COPY(ServLedgEntry);
+          InvertServLedgEntry(TempNewServLedgEntry);
+          TempNewServLedgEntry."Entry No." := NextServLedgerEntryNo;
+          TempNewServLedgEntry.INSERT;
+          NextServLedgerEntryNo += 1;
+        until ServLedgEntry.NEXT = 0;
+
+        with TempNewServLedgEntry do begin
+          RESET;
+          if FINDSET then
+            repeat
+              ServLedgEntry.INIT;
+              ServLedgEntry.COPY(TempNewServLedgEntry);
+              ServLedgEntry.INSERT;
+            until NEXT = 0;
+          DELETEALL;
+        end;
+      end;
+    END;
+
+    PROCEDURE ReverseServLedgEntry@20(VAR ServShptLine@1000 : Record "Service Shipment Line");
+    VAR
+      ServLedgEntry@1007 : Record "Service Ledger Entry";
+      NewServLedgEntry@1008 : Record "Service Ledger Entry";
+    BEGIN
+      ServLedgEntry.LOCKTABLE;
+      if ServLedgEntry.GET(ServShptLine."Appl.-to Service Entry") then begin
+        NewServLedgEntry := ServLedgEntry;
+        NewServLedgEntry."Entry No." := NextServLedgerEntryNo;
+        InvertServLedgEntry(NewServLedgEntry);
+        NewServLedgEntry.INSERT;
+        NextServLedgerEntryNo += 1;
+      end;
+    END;
+
+    LOCAL PROCEDURE InvertServLedgEntry@28(VAR ServLedgEntry@1000 : Record "Service Ledger Entry");
+    BEGIN
+      with ServLedgEntry do begin
+        Amount := -Amount;
+        "Amount (LCY)" := -"Amount (LCY)";
+        "Cost Amount" := -"Cost Amount";
+        "Contract Disc. Amount" := -"Contract Disc. Amount";
+        "Discount Amount" := -"Discount Amount";
+        "Charged Qty." := -"Charged Qty.";
+        Quantity := -Quantity;
+      end;
+    END;
+
+    PROCEDURE ReverseWarrantyEntry@27(VAR ServShptLine@1000 : Record "Service Shipment Line");
+    VAR
+      WarrantyLedgEntry@1007 : Record "Warranty Ledger Entry";
+      NewWarrantyLedgEntry@1008 : Record "Warranty Ledger Entry";
+    BEGIN
+      WarrantyLedgEntry.LOCKTABLE;
+      if WarrantyLedgEntry.GET(ServShptLine."Appl.-to Warranty Entry") then begin
+        WarrantyLedgEntry.Open := false;
+        WarrantyLedgEntry.MODIFY;
+        NewWarrantyLedgEntry := WarrantyLedgEntry;
+        NewWarrantyLedgEntry."Entry No." := NextWarrantyLedgerEntryNo;
+        InvertWarrantyLedgEntry(NewWarrantyLedgEntry);
+        NewWarrantyLedgEntry.INSERT;
+        NextWarrantyLedgerEntryNo += 1;
+      end;
+    END;
+
+    LOCAL PROCEDURE InvertWarrantyLedgEntry@26(VAR WarrantyLedgEntry@1000 : Record "Warranty Ledger Entry");
+    BEGIN
+      with WarrantyLedgEntry do begin
+        Amount := -Amount;
+        Quantity := -Quantity;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CreateCreditEntry@2(VAR PassedNextEntryNo@1010 : Integer;VAR ServHeader@1016 : Record "Service Header";VAR ServLine@1000 : Record "Service Line";GenJnlLineDocNo@1001 : Code[20]);
+    VAR
+      ServShptHeader@1002 : Record "Service Shipment Header";
+      ServItem@1004 : Record "Service Item";
+      ServContractAccGr@1015 : Record "Service Contract Account Group";
+      ApplyToServLedgEntry@1007 : Record "Service Ledger Entry";
+      ServDocReg@1009 : Record "Service Document Register";
+      ServDocType@1013 : Integer;
+      ServDocNo@1014 : Code[20];
+    BEGIN
+      if ServLine."Contract No." = '' then begin
+        InsertServLedgEntryCrMemo(PassedNextEntryNo,ServHeader,ServLine,GenJnlLineDocNo);
+        InsertServLedgerEntryCrMUsage(PassedNextEntryNo,ServHeader,ServLine,GenJnlLineDocNo);
+        exit;
+      end;
+
+      if ServLine.Type = ServLine.Type::" " then
+        exit;
+
+      ServHeader.GET(ServLine."Document Type",ServLine."Document No.");
+      if ServHeader."Document Type" <> ServHeader."Document Type"::"Credit Memo" then
+        exit;
+
+      GetCurrencyRec(ServHeader."Currency Code");
+      CLEAR(ServLedgEntry);
+      with ServLedgEntry do begin
+        INIT;
+        NextServLedgerEntryNo := PassedNextEntryNo;
+        "Entry No." := NextServLedgerEntryNo;
+
+        if ServLine."Shipment No." <> '' then begin
+          ServShptHeader.GET(ServLine."Shipment No.");
+          ServLine.TESTFIELD("Contract No.",ServShptHeader."Contract No.");
+          if ServHeader."Document Type" = ServHeader."Document Type"::Order then
+            "Service Order No." := ServLine."Document No.";
+        end;
+
+        if ServLine."Contract No." <> '' then begin
+          ServContract.GET(ServContract."Contract Type"::Contract,ServLine."Contract No.");
+          "Service Contract No." := ServContract."Contract No.";
+          "Contract Group Code" := ServContract."Contract Group Code";
+        end else
+          if ServShptHeader."Contract No." <> '' then begin
+            ServContract.GET(ServContract."Contract Type"::Contract,ServShptHeader."Contract No.");
+            "Service Contract No." := ServContract."Contract No.";
+            "Contract Group Code" := ServContract."Contract Group Code";
+            "Contract Invoice Period" := FORMAT(ServContract."Invoice Period");
+          end;
+
+        if ServLine."Service Item No." <> '' then begin
+          ServItem.GET(ServLine."Service Item No.");
+          CopyServicedInfo(ServItem."No.",ServItem."Item No.",ServItem."Serial No.",ServItem."Variant Code");
+        end;
+
+        "Document Type" := "Document Type"::" ";
+        "Document No." := GenJnlLineDocNo;
+        Open := false;
+        "Posting Date" := ServHeader."Posting Date";
+        "Moved from Prepaid Acc." := true;
+        "Entry Type" := "Entry Type"::Usage;
+        "Bill-to Customer No." := ServHeader."Bill-to Customer No.";
+        "Customer No." := ServHeader."Customer No.";
+        "Ship-to Code" := ServHeader."Ship-to Code";
+        "Location Code" := ServLine."Location Code";
+        "Global Dimension 1 Code" := ServLine."Shortcut Dimension 1 Code";
+        "Global Dimension 2 Code" := ServLine."Shortcut Dimension 2 Code";
+        "Dimension Set ID" := ServLine."Dimension Set ID";
+        "User ID" := USERID;
+        "Job Line Type" := "Job Line Type"::" ";
+
+        CLEAR(ServDocReg);
+        ServDocReg.ServiceDocument(ServHeader."Document Type",ServHeader."No.",ServDocType,ServDocNo);
+        case ServDocType of
+          DATABASE::"Service Shipment Header",DATABASE::"Service Header":
+            begin
+              case ServLine.Type of
+                ServLine.Type::Item:
+                  Type := Type::Item;
+                ServLine.Type::Resource:
+                  Type := Type::Resource;
+                ServLine.Type::Cost:
+                  Type := Type::"Service Cost";
+                ServLine.Type::"G/L Account":
+                  Type := Type::"G/L Account";
+              end;
+              "No." := ServLine."No.";
+              "Entry Type" := "Entry Type"::Sale;
+              "Document Line No." := ServLine."Line No.";
+              "Amount (LCY)" := -ServLine.Amount;
+              Quantity := -ServLine.Quantity;
+              "Charged Qty." := -ServLine."Qty. to Invoice";
+              "Discount Amount" := -ServLine."Line Discount Amount";
+              "Unit Cost" := -GetRefinedUnitCost(ServLine);
+              "Cost Amount" := -ROUND("Unit Cost" * ServLine.Quantity);
+              "Discount %" := -ServLine."Line Discount %";
+              "Unit Price" :=
+                ROUND(
+                  -("Amount (LCY)" + "Discount Amount") / Quantity,Currency."Unit-Amount Rounding Precision");
+              "Gen. Bus. Posting Group" := ServLine."Gen. Bus. Posting Group";
+              "Gen. Prod. Posting Group" := ServLine."Gen. Prod. Posting Group";
+              Open := false;
+              Description := ServLine.Description;
+              INSERT;
+
+              NextServLedgerEntryNo += 1;
+              "Entry No." := NextServLedgerEntryNo;
+              "Document Type" := "Document Type"::"Credit Memo";
+              "Entry Type" := "Entry Type"::Sale;
+              "Document Line No." := ServLine."Line No.";
+              "Amount (LCY)" := ServLine.Amount;
+              if ServHeader."Currency Code" <> '' then
+                Amount := AmountToFCY(ServHeader,"Amount (LCY)")
+              else
+                Amount := "Amount (LCY)";
+              Quantity := ServLine.Quantity;
+              "Charged Qty." := ServLine."Qty. to Invoice";
+              "Discount Amount" := ServLine."Line Discount Amount";
+              "Unit Cost" := GetRefinedUnitCost(ServLine);
+              "Cost Amount" := ROUND("Unit Cost" * ServLine.Quantity);
+              "Discount %" := ServLine."Line Discount %";
+              "Unit Price" :=
+                ROUND(
+                  ("Amount (LCY)" + "Discount Amount") / Quantity,Currency."Unit-Amount Rounding Precision");
+              Description := ServLine.Description;
+              INSERT;
+
+              NextServLedgerEntryNo += 1;
+            end;
+          DATABASE::"Service Contract Header":
+            begin
+              Type := Type::"Service Contract";
+              "No." := ServDocNo;
+              ServContract.TESTFIELD("Serv. Contract Acc. Gr. Code");
+              ServContractAccGr.GET(ServContract."Serv. Contract Acc. Gr. Code");
+              if ServContract.Prepaid and (ServContractAccGr."Prepaid Contract Acc." = ServLine."No.") then begin
+                "Moved from Prepaid Acc." := false;
+                Prepaid := true;
+              end;
+              "Serv. Contract Acc. Gr. Code" := ServContract."Serv. Contract Acc. Gr. Code";
+              "Entry No." := NextServLedgerEntryNo;
+              "Document Type" := "Document Type"::"Credit Memo";
+              "Entry Type" := "Entry Type"::Sale;
+              "Unit Price" := ServLine."Unit Price";
+              "Amount (LCY)" := ServLine.Amount;
+              if ServHeader."Currency Code" <> '' then
+                Amount := AmountToFCY(ServHeader,"Amount (LCY)")
+              else
+                Amount := "Amount (LCY)";
+              Quantity := ServLine.Quantity;
+              "Charged Qty." := ServLine."Qty. to Invoice";
+              "Contract Disc. Amount" := -ServLine."Line Discount Amount";
+              "Unit Cost" := ServLine."Unit Cost (LCY)";
+              "Cost Amount" := ROUND("Unit Cost" * "Charged Qty.",Currency."Amount Rounding Precision");
+              "Discount Amount" := ServLine."Line Discount Amount";
+              "Discount %" := ServLine."Line Discount %";
+              "Gen. Bus. Posting Group" := ServLine."Gen. Bus. Posting Group";
+              "Gen. Prod. Posting Group" := ServLine."Gen. Prod. Posting Group";
+              Description := ServLine.Description;
+              if ServLine."Appl.-to Service Entry" <> 0 then
+                if ApplyToServLedgEntry.GET(ServLine."Appl.-to Service Entry") then
+                  "Posting Date" := ApplyToServLedgEntry."Posting Date";
+              "Applies-to Entry No." := ServLine."Appl.-to Service Entry";
+              INSERT;
+
+              NextServLedgerEntryNo += 1;
+            end;
+        end;
+
+        PassedNextEntryNo := NextServLedgerEntryNo;
+        InsertServLedgerEntryCrMUsage(PassedNextEntryNo,ServHeader,ServLine,GenJnlLineDocNo);
+      end;
+    END;
+
+    LOCAL PROCEDURE GetCurrencyRec@17(CurrencyCode@1000 : Code[10]);
+    BEGIN
+      if CurrencyCode = '' then
+        Currency.InitRoundingPrecision
+      else begin
+        Currency.GET(CurrencyCode);
+        Currency.TESTFIELD("Unit-Amount Rounding Precision");
+        Currency.TESTFIELD("Amount Rounding Precision");
+      end;
+    END;
+
+    [External]
+    PROCEDURE CalcDivideAmount@4(Qty@1005 : Decimal;VAR PassedServHeader@1006 : Record "Service Header";VAR PassedTempServLine@1002 : Record "Service Line";VAR PassedVATAmountLine@1000 : Record "VAT Amount Line");
+    VAR
+      TempVATAmountLineRemainder@1003 : TEMPORARY Record "VAT Amount Line";
+      ServAmtsMgt@1001 : Codeunit "Serv-Amounts Mgt.";
+    BEGIN
+      TempVATAmountLineRemainder.DELETEALL;
+      ServAmtsMgt.DivideAmount(2,Qty,PassedServHeader,PassedTempServLine,PassedVATAmountLine,TempVATAmountLineRemainder);
+    END;
+
+    LOCAL PROCEDURE GetOrderNoFromShipment@5(ShipmentNo@1000 : Code[20]) : Code[20];
+    VAR
+      ServShptHeader@1001 : Record "Service Shipment Header";
+    BEGIN
+      ServShptHeader.GET(ShipmentNo);
+      exit(ServShptHeader."Order No.");
+    END;
+
+    LOCAL PROCEDURE AmountToFCY@15(ServiceHeader@1001 : Record "Service Header";AmountLCY@1000 : Decimal) : Decimal;
+    VAR
+      Currency@1002 : Record Currency;
+    BEGIN
+      Currency.GET(ServiceHeader."Currency Code");
+      Currency.TESTFIELD("Amount Rounding Precision");
+      exit(
+        ROUND(
+          CurrExchRate.ExchangeAmtLCYToFCY(
+            ServiceHeader."Posting Date",ServiceHeader."Currency Code",
+            AmountLCY,ServiceHeader."Currency Factor"),
+          Currency."Amount Rounding Precision"));
+    END;
+
+    LOCAL PROCEDURE AmountToLCY@11(ServiceHeader@1001 : Record "Service Header";FCAmount@1000 : Decimal) : Decimal;
+    VAR
+      Currency@1002 : Record Currency;
+    BEGIN
+      Currency.GET(ServiceHeader."Currency Code");
+      Currency.TESTFIELD("Amount Rounding Precision");
+      exit(
+        ROUND(
+          CurrExchRate.ExchangeAmtFCYToLCY(
+            ServiceHeader."Posting Date",ServiceHeader."Currency Code",
+            FCAmount,ServiceHeader."Currency Factor"),
+          Currency."Amount Rounding Precision"));
+    END;
+
+    LOCAL PROCEDURE UnitAmountToLCY@7(VAR ServiceHeader@1002 : Record "Service Header";FCAmount@1000 : Decimal) : Decimal;
+    VAR
+      Currency@1003 : Record Currency;
+    BEGIN
+      Currency.GET(ServiceHeader."Currency Code");
+      Currency.TESTFIELD("Unit-Amount Rounding Precision");
+      exit(
+        ROUND(
+          CurrExchRate.ExchangeAmtFCYToLCY(
+            ServiceHeader."Posting Date",ServiceHeader."Currency Code",
+            FCAmount,ServiceHeader."Currency Factor"),
+          Currency."Unit-Amount Rounding Precision"));
+    END;
+
+    LOCAL PROCEDURE GetRefinedUnitCost@10(ServiceLine@1000 : Record "Service Line") : Decimal;
+    VAR
+      Item@1001 : Record Item;
+    BEGIN
+      if ServiceLine.Type = ServiceLine.Type::Item then
+        if Item.GET(ServiceLine."No.") then
+          if Item."Costing Method" = Item."Costing Method"::Standard then
+            exit(Item."Unit Cost");
+
+      exit(ServiceLine."Unit Cost (LCY)");
+    END;
+
+    LOCAL PROCEDURE UsageServiceLedgerEntryDiscountAmount@12(Consumption@1004 : Boolean;LineDiscountAmt@1000 : Decimal;VATPct@1001 : Decimal;AmountRoundingPrecision@1002 : Decimal;InclVAT@1003 : Boolean) : Decimal;
+    BEGIN
+      if Consumption then
+        exit(0);
+      if not InclVAT then
+        VATPct := 0;
+      exit(ROUND(LineDiscountAmt / (1 + VATPct / 100),AmountRoundingPrecision));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

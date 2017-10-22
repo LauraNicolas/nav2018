@@ -1,0 +1,529 @@
+OBJECT Codeunit 802 Online Map Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OnlineMapSetup@1004 : Record "Online Map Setup";
+      OnlineMapParameterSetup@1003 : Record "Online Map Parameter Setup";
+      ThisAddressTxt@1007 : TextConst 'ENU=&This address';
+      DirectionsFromLocationTxt@1009 : TextConst 'ENU=&Directions from my location';
+      OtherDirectionsTxt@1012 : TextConst 'ENU=&Other';
+      OtherMenuQst@1000 : TextConst 'ENU=&Directions from my company,Directions to my &company,Directions from &another address,Directions to an&other address';
+      Text002@1008 : TextConst 'ENU=There is no default Map setup.';
+      ShowMapQst@1002 : TextConst 'ENU=Show map with:';
+      Text007@1011 : TextConst 'ENU=Table %1 has not been set up to use Online Map.';
+      Text008@1010 : TextConst 'ENU=The specified record could not be found.';
+      Text015@1001 : TextConst 'ENU=Bing Maps';
+
+    [Internal]
+    PROCEDURE MakeSelection@1(TableID@1008 : Integer;Position@1009 : Text[1000]);
+    VAR
+      LocationProvider@1000 : DotNet "'Microsoft.Dynamics.Nav.ClientExtensions, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Client.Capabilities.LocationProvider" RUNONCLIENT;
+      MainMenu@1002 : Text;
+      Selection@1001 : Integer;
+    BEGIN
+      if LocationProvider.IsAvailable then
+        MainMenu := STRSUBSTNO('%1,%2,%3',ThisAddressTxt,DirectionsFromLocationTxt,OtherDirectionsTxt)
+      else
+        MainMenu := STRSUBSTNO('%1,%2',ThisAddressTxt,OtherDirectionsTxt);
+
+      Selection := STRMENU(MainMenu,1,ShowMapQst);
+      case Selection of
+        1:
+          ProcessMap(TableID,Position);
+        2:
+          if LocationProvider.IsAvailable then
+            SelectAddress(TableID,Position,4)
+          else
+            ShowOtherMenu(TableID,Position);
+        3:
+          ShowOtherMenu(TableID,Position);
+      end;
+    END;
+
+    LOCAL PROCEDURE ShowOtherMenu@16(TableID@1003 : Integer;Position@1002 : Text[1000]);
+    VAR
+      Selection@1000 : Integer;
+    BEGIN
+      Selection := STRMENU(OtherMenuQst,1,ShowMapQst);
+      case Selection of
+        0:
+          MakeSelection(TableID,Position);
+        1:
+          SelectAddress(TableID,Position,3);
+        2:
+          SelectAddress(TableID,Position,2);
+        3:
+          SelectAddress(TableID,Position,1);
+        4:
+          SelectAddress(TableID,Position,0);
+      end;
+    END;
+
+    LOCAL PROCEDURE ProcessWebMap@50(TableNo@1007 : Integer;ToRecPosition@1008 : Text[1000]);
+    VAR
+      Parameters@1010 : ARRAY [12] OF Text[50];
+      url@1000 : Text[1024];
+    BEGIN
+      GetSetup;
+      BuildParameters(TableNo,ToRecPosition,Parameters,OnlineMapSetup."Distance In",OnlineMapSetup.Route);
+
+      url := OnlineMapParameterSetup."Map Service";
+      SubstituteParameters(url,Parameters);
+
+      HYPERLINK(url);
+    END;
+
+    LOCAL PROCEDURE ProcessWebDirections@51(FromNo@1010 : Integer;FromRecPosition@1011 : Text[1000];ToNo@1012 : Integer;ToRecPosition@1013 : Text[1000];Distance@1002 : 'Miles,Kilometers';Route@1001 : 'Quickest,Shortest');
+    VAR
+      Parameters@1015 : ARRAY [2,12] OF Text[50];
+      url@1000 : Text[1024];
+    BEGIN
+      GetSetup;
+      BuildParameters(FromNo,FromRecPosition,Parameters[1],Distance,Route);
+      BuildParameters(ToNo,ToRecPosition,Parameters[2],Distance,Route);
+
+      if FromNo = DATABASE::Geolocation then begin
+        url := OnlineMapParameterSetup."Directions from Location Serv.";
+        SubstituteGPSParameters(url,Parameters[1]);
+        SubstituteParameters(url,Parameters[2]);
+      end else begin
+        url := OnlineMapParameterSetup."Directions Service";
+        SubstituteParameters(url,Parameters[1]);
+        SubstituteParameters(url,Parameters[2]);
+      end;
+
+      HYPERLINK(url);
+    END;
+
+    LOCAL PROCEDURE ProcessMap@7(TableNo@1000 : Integer;ToRecPosition@1001 : Text[1000]);
+    BEGIN
+      TestSetupExists;
+      ProcessWebMap(TableNo,ToRecPosition);
+    END;
+
+    [Internal]
+    PROCEDURE ProcessDirections@5(FromNo@1002 : Integer;FromRecPosition@1003 : Text[1000];ToNo@1004 : Integer;ToRecPosition@1005 : Text[1000];Distance@1000 : Option;Route@1001 : Option);
+    BEGIN
+      TestSetupExists;
+      ProcessWebDirections(FromNo,FromRecPosition,ToNo,ToRecPosition,Distance,Route);
+    END;
+
+    LOCAL PROCEDURE BuildParameters@13(TableNo@1000 : Integer;RecPosition@1001 : Text[1000];VAR Parameters@1002 : ARRAY [12] OF Text[50];Distance@1009 : 'Miles,Kilometers';Route@1008 : 'Quickest,Shortest');
+    VAR
+      CompanyInfo@1004 : Record "Company Information";
+      CountryRegion@1003 : Record "Country/Region";
+      OnlineMapSetup@1005 : Record "Online Map Setup";
+      OnlineMapParameterSetup@1006 : Record "Online Map Parameter Setup";
+      i@1007 : Integer;
+    BEGIN
+      CLEAR(Parameters);
+      if ValidAddresses(TableNo) then
+        GetAddress(TableNo,RecPosition,Parameters)
+      else
+        ERROR(STRSUBSTNO(Text007,FORMAT(TableNo)));
+      if TableNo = DATABASE::Geolocation then
+        exit;
+      OnlineMapSetup.GET;
+      OnlineMapSetup.TESTFIELD("Map Parameter Setup Code");
+      OnlineMapParameterSetup.GET(OnlineMapSetup."Map Parameter Setup Code");
+      CompanyInfo.GET;
+
+      if Parameters[5] = '' then
+        Parameters[5] := CompanyInfo."Country/Region Code";
+      if CountryRegion.GET(COPYSTR(Parameters[5],1,MAXSTRLEN(CountryRegion.Code))) then
+        Parameters[6] := CountryRegion.Name;
+
+      if OnlineMapParameterSetup."URL Encode Non-ASCII Chars" then
+        for i := 1 to 6 do
+          Parameters[i] := COPYSTR(URLEncode(Parameters[i]),1,MAXSTRLEN(Parameters[i]));
+
+      Parameters[7] := GetCultureInfo;
+      if OnlineMapParameterSetup."Miles/Kilometers Option List" <> '' then
+        Parameters[8] := SELECTSTR(Distance + 1,OnlineMapParameterSetup."Miles/Kilometers Option List");
+      if OnlineMapParameterSetup."Quickest/Shortest Option List" <> '' then
+        Parameters[9] := SELECTSTR(Route + 1,OnlineMapParameterSetup."Quickest/Shortest Option List");
+    END;
+
+    LOCAL PROCEDURE GetAddress@12(TableID@1001 : Integer;RecPosition@1002 : Text[1000];VAR Parameters@1000 : ARRAY [12] OF Text[50]);
+    VAR
+      Geolocation@1003 : Record Geolocation;
+      Location@1004 : Record Location;
+      RecordRef@1005 : RecordRef;
+      FieldRef@1006 : FieldRef;
+    BEGIN
+      RecordRef.OPEN(TableID);
+      RecordRef.SETPOSITION(RecPosition);
+      if not RecordRef.FIND('=') then
+        ERROR(Text008);
+
+      case TableID of
+        DATABASE::Location:
+          begin
+            RecordRef.SETTABLE(Location);
+            Parameters[1] := FORMAT(Location.Address);
+            Parameters[2] := FORMAT(Location.City);
+            Parameters[3] := FORMAT(Location.County);
+            Parameters[4] := FORMAT(Location."Post Code");
+            Parameters[5] := FORMAT(Location."Country/Region Code");
+          end;
+        DATABASE::Customer:
+          begin
+            FieldRef := RecordRef.FIELD(5);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(7);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(92);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(91);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(35);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::Vendor:
+          begin
+            FieldRef := RecordRef.FIELD(5);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(7);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(92);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(91);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(35);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::"Company Information":
+          begin
+            FieldRef := RecordRef.FIELD(4);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(6);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(31);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(30);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(36);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::Resource:
+          begin
+            FieldRef := RecordRef.FIELD(6);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(8);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(54);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(53);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(59);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::Job:
+          begin
+            FieldRef := RecordRef.FIELD(59);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(61);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(63);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(64);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(67);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::"Ship-to Address":
+          begin
+            FieldRef := RecordRef.FIELD(5);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(7);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(92);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(91);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(35);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::"Order Address":
+          begin
+            FieldRef := RecordRef.FIELD(5);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(7);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(92);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(91);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(35);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::"Bank Account":
+          begin
+            FieldRef := RecordRef.FIELD(5);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(7);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(92);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(91);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(35);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::Contact:
+          begin
+            FieldRef := RecordRef.FIELD(5);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(7);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(92);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(91);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(35);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::Employee:
+          begin
+            FieldRef := RecordRef.FIELD(8);
+            Parameters[1] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(10);
+            Parameters[2] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(12);
+            Parameters[3] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(11);
+            Parameters[4] := FORMAT(FieldRef);
+            FieldRef := RecordRef.FIELD(25);
+            Parameters[5] := FORMAT(FieldRef);
+          end;
+        DATABASE::Geolocation:
+          begin
+            RecordRef.SETTABLE(Geolocation);
+            Parameters[10] := FORMAT(Geolocation.Latitude,0,2);
+            Parameters[11] := FORMAT(Geolocation.Longitude,0,2);
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE ValidAddresses@53(TableID@1000 : Integer) : Boolean;
+    BEGIN
+      exit(
+        (TableID in
+         [DATABASE::"Bank Account",
+          DATABASE::"Company Information",
+          DATABASE::Contact,
+          DATABASE::Customer,
+          DATABASE::Employee,
+          DATABASE::Job,
+          DATABASE::Location,
+          DATABASE::Resource,
+          DATABASE::"Ship-to Address",
+          DATABASE::"Order Address",
+          DATABASE::Vendor,
+          DATABASE::Geolocation]));
+    END;
+
+    LOCAL PROCEDURE URLEncode@10(InText@1000 : Text[250]) : Text[250];
+    VAR
+      SystemWebHttpUtility@1001 : DotNet "'System.Web, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Web.HttpUtility";
+    BEGIN
+      SystemWebHttpUtility := SystemWebHttpUtility.HttpUtility;
+      exit(COPYSTR(SystemWebHttpUtility.UrlEncodeUnicode(InText),1,MAXSTRLEN(InText)));
+    END;
+
+    LOCAL PROCEDURE GetCultureInfo@9() : Text[30];
+    VAR
+      CultureInfo@1000 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Globalization.CultureInfo";
+    BEGIN
+      CultureInfo := CultureInfo.CultureInfo(WINDOWSLANGUAGE);
+      exit(COPYSTR(CultureInfo.ToString,1,30));
+    END;
+
+    LOCAL PROCEDURE TestSetupExists@54() : Boolean;
+    VAR
+      OnlineMapSetup@1002 : Record "Online Map Setup";
+    BEGIN
+      if not OnlineMapSetup.GET then
+        ERROR(Text002);
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE TestSetup@4() : Boolean;
+    VAR
+      OnlineMapSetup@1000 : Record "Online Map Setup";
+    BEGIN
+      exit(not OnlineMapSetup.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE SelectAddress@56(TableNo@1004 : Integer;RecPosition@1005 : Text[1000];Direction@1006 : '"To Other","From Other","To Company","From Company","From my location"');
+    VAR
+      CompanyInfo@1002 : Record "Company Information";
+      OnlineMapSetup@1001 : Record "Online Map Setup";
+      OnlineMapAddressSelector@1007 : Page "Online Map Address Selector";
+      OnlineMapLocation@1008 : Page "Online Map Location";
+      Distance@1000 : 'Miles,Kilometers';
+      Route@1003 : 'Quickest,Shortest';
+    BEGIN
+      if Direction in [Direction::"To Other",Direction::"From Other"] then begin
+        if not (OnlineMapAddressSelector.RUNMODAL = ACTION::OK) then
+          exit;
+        if OnlineMapAddressSelector.GetRecPosition = '' then
+          exit;
+        OnlineMapAddressSelector.Getdefaults(Distance,Route)
+      end else begin
+        OnlineMapSetup.GET;
+        CompanyInfo.GET;
+      end;
+
+      case Direction of
+        Direction::"To Other":
+          ProcessDirections(
+            TableNo,RecPosition,
+            OnlineMapAddressSelector.GetTableNo,OnlineMapAddressSelector.GetRecPosition,
+            Distance,Route);
+        Direction::"From Other":
+          ProcessDirections(
+            OnlineMapAddressSelector.GetTableNo,OnlineMapAddressSelector.GetRecPosition,
+            TableNo,RecPosition,
+            Distance,Route);
+        Direction::"To Company":
+          ProcessDirections(
+            TableNo,RecPosition,
+            DATABASE::"Company Information",CompanyInfo.GETPOSITION,
+            OnlineMapSetup."Distance In",OnlineMapSetup.Route);
+        Direction::"From Company":
+          ProcessDirections(
+            DATABASE::"Company Information",CompanyInfo.GETPOSITION,
+            TableNo,RecPosition,
+            OnlineMapSetup."Distance In",OnlineMapSetup.Route);
+        Direction::"From my location":
+          begin
+            OnlineMapLocation.SetRecordTo(TableNo,RecPosition);
+            OnlineMapLocation.RUNMODAL;
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE SubstituteParameters@8(VAR url@1000 : Text[1024];Parameters@1001 : ARRAY [12] OF Text[50]);
+    VAR
+      ParameterName@1004 : Text;
+      parameterNumber@1002 : Integer;
+      ParmPos@1003 : Integer;
+    BEGIN
+      for parameterNumber := 1 to ARRAYLEN(Parameters) do begin
+        ParameterName := STRSUBSTNO('{%1}',parameterNumber);
+        ParmPos := STRPOS(url,ParameterName);
+
+        if ParmPos > 1 then
+          url :=
+            COPYSTR(
+              COPYSTR(url,1,ParmPos - 1) + Parameters[parameterNumber] + COPYSTR(url,ParmPos + STRLEN(ParameterName)),
+              1,MAXSTRLEN(url));
+      end;
+    END;
+
+    LOCAL PROCEDURE SubstituteGPSParameters@18(VAR url@1000 : Text[1024];Parameters@1001 : ARRAY [12] OF Text[50]);
+    VAR
+      ParameterName@1004 : Text;
+      parameterNumber@1002 : Integer;
+      ParmPos@1003 : Integer;
+    BEGIN
+      for parameterNumber := 10 to ARRAYLEN(Parameters) do begin
+        ParameterName := STRSUBSTNO('{%1}',parameterNumber);
+        ParmPos := STRPOS(url,ParameterName);
+
+        if ParmPos > 1 then
+          url :=
+            COPYSTR(
+              COPYSTR(url,1,ParmPos - 1) + Parameters[parameterNumber] + COPYSTR(url,ParmPos + STRLEN(ParameterName)),
+              1,MAXSTRLEN(url));
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetupDefault@2();
+    VAR
+      OnlineMapSetup@1000 : Record "Online Map Setup";
+      OnlineMapParameterSetup@1001 : Record "Online Map Parameter Setup";
+    BEGIN
+      OnlineMapSetup.DELETEALL;
+      OnlineMapParameterSetup.DELETEALL;
+      InsertParam(
+        'BING',
+        Text015,
+        'http://bing.com/maps/default.aspx?where1={1}+{2}+{6}&v=2&mkt={7}',
+        'http://bing.com/maps/default.aspx?rtp=adr.{1}+{2}+{6}~adr.{1}+{2}+{6}&v=2&mkt={7}&rtop={9}~0~0',
+        'http://bing.com/maps/default.aspx?rtp=pos.{10}_{11}~adr.{1}+{2}+{6}&v=2&mkt={7}&rtop={9}~0~0',
+        false,'','0,1',
+        'http://go.microsoft.com/fwlink/?LinkId=519372');
+      OnlineMapSetup."Map Parameter Setup Code" := 'BING';
+      OnlineMapSetup.INSERT;
+    END;
+
+    LOCAL PROCEDURE InsertParam@3(Code@1000 : Code[10];Name@1008 : Text[30];MapURL@1001 : Text[250];DirectionsURL@1002 : Text[250];DirectionsFromGpsURL@1009 : Text[250];URLEncode@1003 : Boolean;MilesKilometres@1004 : Text[250];QuickesShortest@1005 : Text[250];Comment@1007 : Text[250]);
+    VAR
+      OnlineMapParameterSetup@1006 : Record "Online Map Parameter Setup";
+    BEGIN
+      OnlineMapParameterSetup.INIT;
+      OnlineMapParameterSetup.Code := Code;
+      OnlineMapParameterSetup.Name := Name;
+      OnlineMapParameterSetup."Map Service" := MapURL;
+      OnlineMapParameterSetup."Directions Service" := DirectionsURL;
+      OnlineMapParameterSetup."Directions from Location Serv." := DirectionsFromGpsURL;
+      OnlineMapParameterSetup."URL Encode Non-ASCII Chars" := URLEncode;
+      OnlineMapParameterSetup."Miles/Kilometers Option List" := MilesKilometres;
+      OnlineMapParameterSetup."Quickest/Shortest Option List" := QuickesShortest;
+      OnlineMapParameterSetup.Comment := Comment;
+      OnlineMapParameterSetup.INSERT(true);
+    END;
+
+    [EventSubscriber(Table,1400,OnRegisterServiceConnection)]
+    [External]
+    PROCEDURE HandleMAPRegisterServiceConnection@11(VAR ServiceConnection@1000 : Record "Service Connection");
+    VAR
+      OnlineMapSetup@1001 : Record "Online Map Setup";
+      RecRef@1002 : RecordRef;
+    BEGIN
+      if not OnlineMapSetup.GET then begin
+        if not OnlineMapSetup.WRITEPERMISSION then
+          exit;
+        OnlineMapSetup.INIT;
+        OnlineMapSetup.INSERT;
+      end;
+      RecRef.GETTABLE(OnlineMapSetup);
+
+      ServiceConnection.Status := ServiceConnection.Status::Enabled;
+      with OnlineMapSetup do begin
+        if "Map Parameter Setup Code" = '' then
+          ServiceConnection.Status := ServiceConnection.Status::Disabled;
+        ServiceConnection.InsertServiceConnection(
+          ServiceConnection,RecRef.RECORDID,TABLECAPTION,'',PAGE::"Online Map Setup");
+      end;
+    END;
+
+    LOCAL PROCEDURE GetSetup@6();
+    BEGIN
+      OnlineMapSetup.GET;
+      OnlineMapSetup.TESTFIELD("Map Parameter Setup Code");
+      OnlineMapParameterSetup.GET(OnlineMapSetup."Map Parameter Setup Code");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,238 @@
+OBJECT Codeunit 60 Sales-Calc. Discount
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Sales Line";
+    OnRun=BEGIN
+            SalesLine.COPY(Rec);
+
+            TempSalesHeader.GET("Document Type","Document No.");
+            UpdateHeader := false;
+            CalculateInvoiceDiscount(TempSalesHeader,TempSalesLine);
+
+            if GET(SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.") then;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Service Charge';
+      TempSalesHeader@1001 : Record "Sales Header";
+      SalesLine@1002 : Record "Sales Line";
+      TempSalesLine@1003 : Record "Sales Line";
+      CustInvDisc@1004 : Record "Cust. Invoice Disc.";
+      CustPostingGr@1005 : Record "Customer Posting Group";
+      Currency@1006 : Record Currency;
+      InvDiscBase@1008 : Decimal;
+      ChargeBase@1009 : Decimal;
+      CurrencyDate@1011 : Date;
+      UpdateHeader@1012 : Boolean;
+
+    LOCAL PROCEDURE CalculateInvoiceDiscount@1(VAR SalesHeader@1000 : Record "Sales Header";VAR SalesLine2@1001 : Record "Sales Line");
+    VAR
+      TempVATAmountLine@1002 : TEMPORARY Record "VAT Amount Line";
+      SalesSetup@1003 : Record "Sales & Receivables Setup";
+      TempServiceChargeLine@1005 : TEMPORARY Record "Sales Line";
+      SalesCalcDiscountByType@1004 : Codeunit "Sales - Calc Discount By Type";
+    BEGIN
+      SalesSetup.GET;
+      if not UpdateHeader then
+        SalesHeader.FIND; // To ensure we have the latest - otherwise update fails.
+      OnBeforeCalcSalesDiscount(SalesHeader);
+
+      with SalesLine do begin
+        LOCKTABLE;
+        SalesHeader.TESTFIELD("Customer Posting Group");
+        CustPostingGr.GET(SalesHeader."Customer Posting Group");
+
+        SalesLine2.RESET;
+        SalesLine2.SETRANGE("Document Type","Document Type");
+        SalesLine2.SETRANGE("Document No.","Document No.");
+        SalesLine2.SETRANGE("System-Created Entry",true);
+        SalesLine2.SETRANGE(Type,SalesLine2.Type::"G/L Account");
+        SalesLine2.SETRANGE("No.",CustPostingGr."Service Charge Acc.");
+        if SalesLine2.FINDSET(true,false) then
+          repeat
+            SalesLine2.VALIDATE("Unit Price",0);
+            SalesLine2.MODIFY;
+            TempServiceChargeLine := SalesLine2;
+            TempServiceChargeLine.INSERT;
+          until SalesLine2.NEXT = 0;
+
+        SalesLine2.RESET;
+        SalesLine2.SETRANGE("Document Type","Document Type");
+        SalesLine2.SETRANGE("Document No.","Document No.");
+        SalesLine2.SETFILTER(Type,'<>0');
+        if SalesLine2.FINDFIRST then;
+        SalesLine2.CalcVATAmountLines(0,SalesHeader,SalesLine2,TempVATAmountLine);
+        InvDiscBase :=
+          TempVATAmountLine.GetTotalInvDiscBaseAmount(
+            SalesHeader."Prices Including VAT",SalesHeader."Currency Code");
+        ChargeBase :=
+          TempVATAmountLine.GetTotalLineAmount(
+            SalesHeader."Prices Including VAT",SalesHeader."Currency Code");
+
+        if not UpdateHeader then
+          SalesHeader.MODIFY;
+
+        if SalesHeader."Posting Date" = 0D then
+          CurrencyDate := WORKDATE
+        else
+          CurrencyDate := SalesHeader."Posting Date";
+
+        CustInvDisc.GetRec(
+          SalesHeader."Invoice Disc. Code",SalesHeader."Currency Code",CurrencyDate,ChargeBase);
+
+        if CustInvDisc."Service Charge" <> 0 then begin
+          Currency.Initialize(SalesHeader."Currency Code");
+          if UpdateHeader then
+            SalesLine2.SetSalesHeader(SalesHeader);
+          if not TempServiceChargeLine.ISEMPTY then begin
+            TempServiceChargeLine.FINDLAST;
+            SalesLine2.GET("Document Type","Document No.",TempServiceChargeLine."Line No.");
+            if SalesHeader."Prices Including VAT" then
+              SalesLine2.VALIDATE(
+                "Unit Price",
+                ROUND(
+                  (1 + SalesLine2."VAT %" / 100) * CustInvDisc."Service Charge",
+                  Currency."Unit-Amount Rounding Precision"))
+            else
+              SalesLine2.VALIDATE("Unit Price",CustInvDisc."Service Charge");
+            SalesLine2.MODIFY;
+          end else begin
+            SalesLine2.RESET;
+            SalesLine2.SETRANGE("Document Type","Document Type");
+            SalesLine2.SETRANGE("Document No.","Document No.");
+            SalesLine2.FINDLAST;
+            SalesLine2.INIT;
+            if UpdateHeader then
+              SalesLine2.SetSalesHeader(SalesHeader);
+            SalesLine2."Line No." := SalesLine2."Line No." + 10000;
+            SalesLine2."System-Created Entry" := true;
+            SalesLine2.Type := SalesLine2.Type::"G/L Account";
+            SalesLine2.VALIDATE("No.",CustPostingGr.GetServiceChargeAccount);
+            SalesLine2.Description := Text000;
+            SalesLine2.VALIDATE(Quantity,1);
+            if SalesLine2."Document Type" in
+               [SalesLine2."Document Type"::"Return Order",SalesLine2."Document Type"::"Credit Memo"]
+            then
+              SalesLine2.VALIDATE("Return Qty. to Receive",SalesLine2.Quantity)
+            else
+              SalesLine2.VALIDATE("Qty. to Ship",SalesLine2.Quantity);
+            if SalesHeader."Prices Including VAT" then
+              SalesLine2.VALIDATE(
+                "Unit Price",
+                ROUND(
+                  (1 + SalesLine2."VAT %" / 100) * CustInvDisc."Service Charge",
+                  Currency."Unit-Amount Rounding Precision"))
+            else
+              SalesLine2.VALIDATE("Unit Price",CustInvDisc."Service Charge");
+            SalesLine2.INSERT;
+          end;
+          SalesLine2.CalcVATAmountLines(0,SalesHeader,SalesLine2,TempVATAmountLine);
+        end else
+          if TempServiceChargeLine.FINDSET(false,false) then
+            repeat
+              if (TempServiceChargeLine."Shipment No." = '') and (TempServiceChargeLine."Qty. Shipped Not Invoiced" = 0) then begin
+                SalesLine2 := TempServiceChargeLine;
+                SalesLine2.DELETE(true);
+              end;
+            until TempServiceChargeLine.NEXT = 0;
+
+        if CustInvDiscRecExists(SalesHeader."Invoice Disc. Code") then begin
+          if InvDiscBase <> ChargeBase then
+            CustInvDisc.GetRec(
+              SalesHeader."Invoice Disc. Code",SalesHeader."Currency Code",CurrencyDate,InvDiscBase);
+
+          SalesHeader."Invoice Discount Calculation" := SalesHeader."Invoice Discount Calculation"::"%";
+          SalesHeader."Invoice Discount Value" := CustInvDisc."Discount %";
+          if not UpdateHeader then
+            SalesHeader.MODIFY;
+
+          TempVATAmountLine.SetInvoiceDiscountPercent(
+            CustInvDisc."Discount %",SalesHeader."Currency Code",
+            SalesHeader."Prices Including VAT",SalesSetup."Calc. Inv. Disc. per VAT ID",
+            SalesHeader."VAT Base Discount %");
+
+          SalesLine2.SetSalesHeader(SalesHeader);
+          SalesLine2.UpdateVATOnLines(0,SalesHeader,SalesLine2,TempVATAmountLine);
+        end;
+      end;
+
+      SalesCalcDiscountByType.ResetRecalculateInvoiceDisc(SalesHeader);
+      OnAfterCalcSalesDiscount(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CustInvDiscRecExists@2(InvDiscCode@1000 : Code[20]) : Boolean;
+    VAR
+      CustInvDisc@1001 : Record "Cust. Invoice Disc.";
+    BEGIN
+      CustInvDisc.SETRANGE(Code,InvDiscCode);
+      exit(CustInvDisc.FINDFIRST);
+    END;
+
+    [Internal]
+    PROCEDURE CalculateWithSalesHeader@24(VAR TempSalesHeader@1000 : Record "Sales Header";VAR TempSalesLine@1001 : Record "Sales Line");
+    VAR
+      FilterSalesLine@1002 : Record "Sales Line";
+    BEGIN
+      FilterSalesLine.COPY(TempSalesLine);
+      SalesLine := TempSalesLine;
+
+      UpdateHeader := true;
+      CalculateInvoiceDiscount(TempSalesHeader,TempSalesLine);
+
+      TempSalesLine.COPY(FilterSalesLine);
+    END;
+
+    [External]
+    PROCEDURE CalculateInvoiceDiscountOnLine@5(VAR SalesLineToUpdate@1001 : Record "Sales Line");
+    BEGIN
+      SalesLine.COPY(SalesLineToUpdate);
+
+      TempSalesHeader.GET(SalesLineToUpdate."Document Type",SalesLineToUpdate."Document No.");
+      UpdateHeader := true;
+      CalculateInvoiceDiscount(TempSalesHeader,SalesLineToUpdate);
+
+      SalesLineToUpdate.COPY(SalesLine);
+    END;
+
+    [External]
+    PROCEDURE CalculateIncDiscForHeader@3(VAR TempSalesHeader@1000 : Record "Sales Header");
+    VAR
+      SalesSetup@1003 : Record "Sales & Receivables Setup";
+    BEGIN
+      SalesSetup.GET;
+      if not SalesSetup."Calc. Inv. Discount" then
+        exit;
+      with TempSalesHeader do begin
+        SalesLine."Document Type" := "Document Type";
+        SalesLine."Document No." := "No.";
+        CalculateInvoiceDiscount(TempSalesHeader,TempSalesLine);
+      end;
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnBeforeCalcSalesDiscount@4(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterCalcSalesDiscount@6(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

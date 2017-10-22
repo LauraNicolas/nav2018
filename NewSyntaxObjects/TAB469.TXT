@@ -1,0 +1,404 @@
+OBJECT Table 469 Workflow Webhook Subscription
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               Id := CREATEGUID;
+               "User Id" := USERID;
+               "Created Date" := CURRENTDATETIME;
+             END;
+
+    OnModify=VAR
+               WorkflowWebhookSubscriptionPreviousRec@1000 : Record "Workflow Webhook Subscription";
+               WorkflowWebhookSubBuffer@1001 : Record "Workflow Webhook Sub Buffer";
+             BEGIN
+               // Inserting new record also calls OnModify so checking to ensure it's a proper insert rather than modify
+               if IsInsert then begin
+                 // Check if incoming Rec's Client ID exists already
+                 WorkflowWebhookSubscriptionPreviousRec.SETRANGE("Client Id","Client Id");
+                 WorkflowWebhookSubscriptionPreviousRec.SETRANGE(Enabled,true);
+                 WorkflowWebhookSubscriptionPreviousRec.SETCURRENTKEY("Created Date");
+                 WorkflowWebhookSubscriptionPreviousRec.SETASCENDING("Created Date",false);
+                 if WorkflowWebhookSubscriptionPreviousRec.FINDFIRST then
+                   // will be creating new workflow so disable previous one
+                   DisableWorkflow(WorkflowWebhookSubscriptionPreviousRec."WF Definition Id")
+                 else begin
+                   WorkflowWebhookSubBuffer.SETRANGE("Client Id","Client Id");
+                   if WorkflowWebhookSubBuffer.FINDSET then begin
+                     repeat
+                       DisableWorkflow(WorkflowWebhookSubBuffer."WF Definition Id");
+                     until WorkflowWebhookSubBuffer.NEXT = 0;
+                   end;
+                 end;
+
+                 CreateWorkflowDefinition;
+                 EnableSubscriptionAndWorkflow(Rec);
+               end;
+             END;
+
+    OnDelete=VAR
+               Workflow@1000 : Record Workflow;
+               WorkflowWebhookSubBuffer@1001 : Record "Workflow Webhook Sub Buffer";
+               IsTaskSchedulerAllowed@1002 : Boolean;
+             BEGIN
+               // this would also clean up related Workflow table entry and Workflow Steps
+               if Workflow.GET("WF Definition Id") then begin
+                 WorkflowWebhookSubBuffer.INIT;
+                 WorkflowWebhookSubBuffer."WF Definition Id" := "WF Definition Id";
+                 WorkflowWebhookSubBuffer."Client Id" := "Client Id";
+                 WorkflowWebhookSubBuffer.INSERT;
+
+                 IsTaskSchedulerAllowed := true;
+                 OnFindTaskSchedulerAllowed(IsTaskSchedulerAllowed);
+
+                 if IsTaskSchedulerAllowed then
+                   TASKSCHEDULER.CREATETASK(CODEUNIT::"Workflow Webhook Sub Delete",0,true,
+                     COMPANYNAME,0DT,Workflow.RECORDID)
+                 else
+                   CODEUNIT.RUN(CODEUNIT::"Workflow Webhook Sub Delete",Workflow);
+               end;
+             END;
+
+    CaptionML=ENU=Workflow Webhook Subscription;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Id                  ;GUID          ;CaptionML=ENU=Id }
+    { 2   ;   ;WF Definition Id    ;Code20        ;CaptionML=ENU=WF Definition Id }
+    { 3   ;   ;Conditions          ;BLOB          ;CaptionML=ENU=Conditions }
+    { 4   ;   ;Notification Url    ;BLOB          ;CaptionML=ENU=Notification Url }
+    { 5   ;   ;Enabled             ;Boolean       ;CaptionML=ENU=Enabled }
+    { 6   ;   ;User Id             ;Code50        ;CaptionML=ENU=User Id }
+    { 7   ;   ;Client Id           ;GUID          ;CaptionML=ENU=Client Id }
+    { 8   ;   ;Client Type         ;Text50        ;CaptionML=ENU=Client Type }
+    { 9   ;   ;Event Code          ;Code128       ;CaptionML=ENU=Event Code }
+    { 10  ;   ;Created Date        ;DateTime      ;CaptionML=ENU=Created Date }
+  }
+  KEYS
+  {
+    {    ;Id                                      ;Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      WorkflowWebhookSetup@1004 : Codeunit "Workflow Webhook Setup";
+      UnableToParseEncodingErr@1003 : TextConst 'ENU=Unable to parse the Conditions. The provided Conditions were not in the correct Base64 encoded format.';
+      UnableToParseInvalidJsonErr@1000 : TextConst 'ENU=Unable to parse the Conditions. The provided Conditions JSON was invalid.';
+      NoControlOnPageErr@1005 : TextConst '@@@="%1=control name;%2=page name";ENU=Unable to find a field with control name ''%1'' on page ''%2''.';
+      JSONManagement@1006 : Codeunit "JSON Management";
+      UnableToParseJsonArrayErr@1001 : TextConst '@@@="%1=conditions property name";ENU=Unable to parse ''%1'' because it was not a valid JSON array.';
+
+    PROCEDURE SetConditions@5(ConditionsTxt@1000 : Text);
+    VAR
+      StreamOutObj@1001 : OutStream;
+    BEGIN
+      // store as blob
+      CLEAR(Conditions);
+      Conditions.CREATEOUTSTREAM(StreamOutObj);
+      StreamOutObj.WRITETEXT(ConditionsTxt);
+    END;
+
+    PROCEDURE SetNotificationUrl@6(NotificationURLTxt@1001 : Text);
+    VAR
+      StreamOutObj@1000 : OutStream;
+    BEGIN
+      // store as blob
+      CLEAR("Notification Url");
+      "Notification Url".CREATEOUTSTREAM(StreamOutObj);
+      StreamOutObj.WRITETEXT(NotificationURLTxt);
+    END;
+
+    PROCEDURE GetConditions@4() ConditionsText : Text;
+    VAR
+      ReadStream@1000 : InStream;
+    BEGIN
+      CALCFIELDS(Conditions);
+      Conditions.CREATEINSTREAM(ReadStream);
+      ReadStream.READTEXT(ConditionsText);
+    END;
+
+    PROCEDURE GetNotificationUrl@2() NotificationUrlText : Text;
+    VAR
+      ReadStream@1000 : InStream;
+    BEGIN
+      CALCFIELDS("Notification Url");
+      "Notification Url".CREATEINSTREAM(ReadStream);
+      ReadStream.READTEXT(NotificationUrlText);
+    END;
+
+    LOCAL PROCEDURE CreateWorkflowDefinition@40();
+    VAR
+      EventConditions@1003 : Text;
+    BEGIN
+      EventConditions := CreateEventConditions(GetConditions,"Event Code");
+
+      // the second argument, Name, is empty at this point by design (hardcoded to be a text constant inside the function)
+      "WF Definition Id" := WorkflowWebhookSetup.CreateWorkflowDefinition("Event Code",'',EventConditions,USERID);
+    END;
+
+    LOCAL PROCEDURE IsInsert@55() : Boolean;
+    BEGIN
+      // This is how we know a new record is being inserted into table
+      exit("WF Definition Id" = '');
+    END;
+
+    LOCAL PROCEDURE EnableSubscription@3(VAR WorkflowWebhookSubscriptionRec@1000 : Record "Workflow Webhook Subscription");
+    BEGIN
+      // Turn On a Subscription
+      WorkflowWebhookSubscriptionRec.Enabled := true;
+      WorkflowWebhookSubscriptionRec.MODIFY;
+    END;
+
+    LOCAL PROCEDURE EnableWorkflow@34(WorkflowCode@1000 : Code[20]);
+    VAR
+      Workflow@1001 : Record Workflow;
+    BEGIN
+      // Enable a workflow
+      if Workflow.GET(WorkflowCode) then begin
+        Workflow.VALIDATE(Enabled,true);
+        Workflow.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE DisableWorkflow@22(WorkflowCode@1000 : Code[20]);
+    VAR
+      Workflow@1001 : Record Workflow;
+    BEGIN
+      // Disable a workflow
+      if Workflow.GET(WorkflowCode) then begin
+        Workflow.VALIDATE(Enabled,false);
+        Workflow.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE EnableSubscriptionAndWorkflow@36(VAR WorkflowWebhookSubscriptionRec@1000 : Record "Workflow Webhook Subscription");
+    BEGIN
+      // Enable Subscription and its corresponding Workflow
+      EnableSubscription(WorkflowWebhookSubscriptionRec);
+      EnableWorkflow(WorkflowWebhookSubscriptionRec."WF Definition Id");
+    END;
+
+    PROCEDURE CreateEventConditions@1(ConditionsTxt@1000 : Text;EventCode@1015 : Code[128]) : Text;
+    VAR
+      WorkflowEventHandling@1013 : Codeunit "Workflow Event Handling";
+      RequestPageParametersHelper@1002 : Codeunit "Request Page Parameters Helper";
+      EventConditions@1001 : FilterPageBuilder;
+      ConditionsObject@1005 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      ConditionsCount@1006 : Integer;
+    BEGIN
+      if not TryDecodeConditions(ConditionsTxt) then
+        SendAndLogError(GETLASTERRORTEXT,UnableToParseEncodingErr);
+
+      if not TryParseJson(ConditionsTxt,ConditionsObject) then
+        SendAndLogError(GETLASTERRORTEXT,UnableToParseInvalidJsonErr);
+
+      ConditionsCount := 1;
+      case EventCode of
+        WorkflowEventHandling.RunWorkflowOnSendSalesDocForApprovalCode:
+          begin
+            AddEventConditionsWrapper(
+              'HeaderConditions',ConditionsObject,PAGE::"Sales Document Entity",EventConditions,ConditionsCount);
+            AddEventConditionsWrapper(
+              'LinesConditions',ConditionsObject,PAGE::"Sales Document Line Entity",EventConditions,ConditionsCount);
+            exit(
+              RequestPageParametersHelper.GetViewFromDynamicRequestPage(
+                EventConditions,WorkflowWebhookSetup.GetSalesDocCategoryTxt,DATABASE::"Sales Header"));
+          end;
+        WorkflowEventHandling.RunWorkflowOnSendPurchaseDocForApprovalCode:
+          begin
+            AddEventConditionsWrapper(
+              'HeaderConditions',ConditionsObject,PAGE::"Purchase Document Entity",EventConditions,ConditionsCount);
+            AddEventConditionsWrapper(
+              'LinesConditions',ConditionsObject,PAGE::"Purchase Document Line Entity",EventConditions,ConditionsCount);
+            exit(
+              RequestPageParametersHelper.GetViewFromDynamicRequestPage(
+                EventConditions,WorkflowWebhookSetup.GetPurchaseDocCategoryTxt,DATABASE::"Purchase Header"));
+          end;
+        WorkflowEventHandling.RunWorkflowOnSendGeneralJournalBatchForApprovalCode:
+          begin
+            AddEventConditionsWrapper(
+              'Conditions',ConditionsObject,PAGE::"Gen. Journal Batch Entity",EventConditions,ConditionsCount);
+            exit(
+              RequestPageParametersHelper.GetViewFromDynamicRequestPage(
+                EventConditions,WorkflowWebhookSetup.GetFinCategoryTxt,DATABASE::"Gen. Journal Batch"));
+          end;
+        WorkflowEventHandling.RunWorkflowOnSendGeneralJournalLineForApprovalCode:
+          begin
+            AddEventConditionsWrapper(
+              'Conditions',ConditionsObject,PAGE::"Gen. Journal Line Entity",EventConditions,ConditionsCount);
+            exit(
+              RequestPageParametersHelper.GetViewFromDynamicRequestPage(
+                EventConditions,WorkflowWebhookSetup.GetFinCategoryTxt,DATABASE::"Gen. Journal Line"));
+          end;
+        WorkflowEventHandling.RunWorkflowOnSendCustomerForApprovalCode:
+          begin
+            AddEventConditionsWrapper(
+              'Conditions',ConditionsObject,PAGE::"Workflow - Customer Entity",EventConditions,ConditionsCount);
+            exit(
+              RequestPageParametersHelper.GetViewFromDynamicRequestPage(
+                EventConditions,WorkflowWebhookSetup.GetSalesMktCategoryTxt,DATABASE::Customer));
+          end;
+        WorkflowEventHandling.RunWorkflowOnSendItemForApprovalCode:
+          begin
+            AddEventConditionsWrapper(
+              'Conditions',ConditionsObject,PAGE::"Workflow - Item Entity",EventConditions,ConditionsCount);
+            exit(
+              RequestPageParametersHelper.GetViewFromDynamicRequestPage(
+                EventConditions,WorkflowWebhookSetup.GetSalesMktCategoryTxt,DATABASE::Item));
+          end;
+        WorkflowEventHandling.RunWorkflowOnSendVendorForApprovalCode:
+          begin
+            AddEventConditionsWrapper(
+              'Conditions',ConditionsObject,PAGE::"Workflow - Vendor Entity",EventConditions,ConditionsCount);
+            exit(
+              RequestPageParametersHelper.GetViewFromDynamicRequestPage(
+                EventConditions,WorkflowWebhookSetup.GetPurchPayCategoryTxt,DATABASE::Vendor));
+          end
+        else
+          SendAndLogError(
+            STRSUBSTNO(WorkflowWebhookSetup.GetUnsupportedWorkflowEventCodeErr,EventCode),
+            STRSUBSTNO(WorkflowWebhookSetup.GetUnsupportedWorkflowEventCodeErr,EventCode));
+      end;
+    END;
+
+    LOCAL PROCEDURE AddEventConditionsWrapper@8(ConditionsPropertyName@1000 : Text;ConditionsObject@1002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";SourcePageNo@1005 : Integer;VAR EventConditions@1003 : FilterPageBuilder;VAR ConditionsCount@1001 : Integer);
+    VAR
+      ConditionsCollection@1004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+    BEGIN
+      if ConditionsObject.TryGetValue(ConditionsPropertyName,ConditionsCollection) then begin
+        if not TryInitializeCollection(ConditionsCollection) then
+          SendAndLogError(GETLASTERRORTEXT,STRSUBSTNO(UnableToParseJsonArrayErr,ConditionsPropertyName));
+        AddEventConditions(ConditionsCollection,EventConditions,SourcePageNo,ConditionsCount);
+        ConditionsCount := ConditionsCount + 1;
+      end;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryInitializeCollection@20(VAR ConditionsCollection@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    BEGIN
+      JSONManagement.InitializeCollectionFromJArray(ConditionsCollection);
+      // need to do some action on the collection to check if it is of Collection type
+      if JSONManagement.GetCollectionCount < 0 then
+        ERROR(GETLASTERRORTEXT);
+    END;
+
+    LOCAL PROCEDURE AddEventConditions@31(ConditionsArray@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";VAR EventConditions@1008 : FilterPageBuilder;SourcePageNo@1014 : Integer;ConditionIndex@1011 : Integer);
+    VAR
+      TableMetadata@1005 : Record "Table Metadata";
+      PageControlField@1006 : Record "Page Control Field";
+      RecRef@1003 : RecordRef;
+      FieldRef@1002 : FieldRef;
+      ConditionName@1010 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      Condition@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      ConditionValue@1007 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      FieldId@1004 : Integer;
+      tableNo@1009 : Integer;
+    BEGIN
+      // get source table id
+      PageControlField.SETFILTER(PageNo,'%1',SourcePageNo);
+      PageControlField.FINDFIRST;
+      tableNo := PageControlField.TableNo;
+      RecRef.OPEN(tableNo);
+
+      PageControlField.RESET;
+      PageControlField.SETFILTER(PageNo,'%1',SourcePageNo);
+
+      foreach Condition in ConditionsArray do
+        if Condition.TryGetValue('Name',ConditionName) and Condition.TryGetValue('Value',ConditionValue) then begin
+          // get id of the field from the page in the page's source table
+          PageControlField.SETFILTER(ControlName,ConditionName.ToString);
+          if not PageControlField.FINDFIRST then
+            SendAndLogError(GETLASTERRORTEXT,STRSUBSTNO(NoControlOnPageErr,ConditionName.ToString,GetPageName(SourcePageNo)));
+
+          FieldId := PageControlField.FieldNo;
+          FieldRef := RecRef.FIELD(FieldId);
+
+          // filter Header/Lines Table
+          // throws an error message if can not convert types
+          FieldRef.SETFILTER(ConditionValue.ToString);
+        end;
+
+      // create Filter Page Builder
+      TableMetadata.GET(tableNo);
+      EventConditions.ADDTABLE(TableMetadata.Caption,tableNo);
+      EventConditions.SETVIEW(EventConditions.NAME(ConditionIndex),RecRef.GETVIEW);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryParseJson@7(ConditionsTxt@1000 : Text;VAR ConditionsArray@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    BEGIN
+      JSONManagement.InitializeObject(ConditionsTxt);
+      JSONManagement.GetJSONObject(ConditionsArray);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryDecodeConditions@30(VAR ConditionsTxt@1000 : Text);
+    VAR
+      Convert@1002 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+      Encoding@1001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+    BEGIN
+      ConditionsTxt := Encoding.UTF8.GetString(Convert.FromBase64String(ConditionsTxt));
+    END;
+
+    LOCAL PROCEDURE SendAndLogError@47(ErrorText@1000 : Text;Description@1003 : Text);
+    VAR
+      Company@1002 : Record Company;
+      ActivityLog@1001 : Record "Activity Log";
+    BEGIN
+      // log exact error message
+      Company.GET(COMPANYNAME);
+      ActivityLog.LogActivityForUser(
+        Company.RECORDID,ActivityLog.Status::Failed,'Microsoft Flow',Description,ErrorText,USERID);
+      // send descriptive error to user
+      ERROR(Description);
+    END;
+
+    PROCEDURE GetPageName@58(PageId@1000 : Integer) : Text;
+    VAR
+      AllObj@1001 : Record AllObj;
+    BEGIN
+      AllObj.SETFILTER("Object ID",FORMAT(PageId));
+      AllObj.SETFILTER("Object Type",'PAGE');
+      AllObj.FINDFIRST;
+      exit(AllObj."Object Name");
+    END;
+
+    PROCEDURE GetUnableToParseEncodingErr@10() : Text;
+    BEGIN
+      exit(UnableToParseEncodingErr);
+    END;
+
+    PROCEDURE GetUnableToParseInvalidJsonErr@13() : Text;
+    BEGIN
+      exit(UnableToParseInvalidJsonErr);
+    END;
+
+    PROCEDURE GetNoControlOnPageErr@14() : Text;
+    BEGIN
+      exit(NoControlOnPageErr);
+    END;
+
+    PROCEDURE GetUnableToParseJsonArrayErr@15() : Text;
+    BEGIN
+      exit(UnableToParseJsonArrayErr);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnFindTaskSchedulerAllowed@9(VAR IsTaskSchedulingAllowed@1000 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

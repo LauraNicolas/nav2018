@@ -1,0 +1,154 @@
+OBJECT Codeunit 1281 Update Currency Exchange Rates
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Data Exch."=rimd;
+    OnRun=BEGIN
+            SyncCurrencyExchangeRates;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ResponseTempBlob@1003 : Record TempBlob;
+      HttpWebRequestMgt@1002 : Codeunit "Http Web Request Mgt.";
+      NoSyncCurrencyExchangeRatesSetupErr@1000 : TextConst 'ENU=There are no active Currency Exchange Rate Sync. Setup records.';
+      InternalErr@1004 : TextConst 'ENU=The service is temporarily unavailable. Please try again later.';
+      YahooInternalErrorTok@1001 : TextConst '@@@={Locked};ENU=No definition found for Table';
+
+    LOCAL PROCEDURE SyncCurrencyExchangeRates@2();
+    VAR
+      CurrExchRateUpdateSetup@1003 : Record "Curr. Exch. Rate Update Setup";
+      ResponseInStream@1000 : InStream;
+      SourceName@1001 : Text;
+    BEGIN
+      CurrExchRateUpdateSetup.SETRANGE(Enabled,true);
+      if not CurrExchRateUpdateSetup.FINDFIRST then
+        ERROR(NoSyncCurrencyExchangeRatesSetupErr);
+
+      GetCurrencyExchangeData(CurrExchRateUpdateSetup,ResponseInStream,SourceName);
+      UpdateCurrencyExchangeRates(CurrExchRateUpdateSetup,ResponseInStream,SourceName);
+    END;
+
+    [Internal]
+    PROCEDURE UpdateCurrencyExchangeRates@6(CurrExchRateUpdateSetup@1003 : Record "Curr. Exch. Rate Update Setup";CurrencyExchRatesDataInStream@1000 : InStream;SourceName@1004 : Text);
+    VAR
+      DataExch@1002 : Record "Data Exch.";
+      DataExchDef@1001 : Record "Data Exch. Def";
+    BEGIN
+      DataExchDef.GET(CurrExchRateUpdateSetup."Data Exch. Def Code");
+      CreateDataExchange(DataExch,DataExchDef,CurrencyExchRatesDataInStream,COPYSTR(SourceName,1,250));
+      DataExchDef.ProcessDataExchange(DataExch);
+    END;
+
+    LOCAL PROCEDURE GetCurrencyExchangeData@15(VAR CurrExchRateUpdateSetup@1001 : Record "Curr. Exch. Rate Update Setup";VAR ResponseInStream@1000 : InStream;VAR SourceName@1003 : Text);
+    VAR
+      ServiceUrl@1002 : Text;
+    BEGIN
+      ExecuteWebServiceRequest(CurrExchRateUpdateSetup,ResponseInStream);
+      CurrExchRateUpdateSetup.GetWebServiceURL(ServiceUrl);
+      SourceName := ServiceUrl;
+    END;
+
+    LOCAL PROCEDURE CreateDataExchange@10(VAR DataExch@1001 : Record "Data Exch.";DataExchDef@1004 : Record "Data Exch. Def";ResponseInStream@1002 : InStream;SourceName@1003 : Text[250]);
+    VAR
+      TempBlob@1007 : Record TempBlob;
+      GetJsonStructure@1005 : Codeunit "Get Json Structure";
+      OutStream@1000 : OutStream;
+      BlankInStream@1006 : InStream;
+    BEGIN
+      if DataExchDef."File Type" = DataExchDef."File Type"::Json then begin
+        TempBlob.INIT;
+        TempBlob.Blob.CREATEINSTREAM(BlankInStream);
+
+        DataExch.InsertRec(SourceName,BlankInStream,DataExchDef.Code);
+        DataExch."File Content".CREATEOUTSTREAM(OutStream);
+        if not GetJsonStructure.JsonToXML(ResponseInStream,OutStream) then
+          GetJsonStructure.JsonToXMLCreateDefaultRoot(ResponseInStream,OutStream);
+        DataExch.MODIFY(true);
+      end else
+        DataExch.InsertRec(SourceName,ResponseInStream,DataExchDef.Code);
+
+      CODEUNIT.RUN(DataExchDef."Reading/Writing Codeunit",DataExch);
+    END;
+
+    LOCAL PROCEDURE ExecuteWebServiceRequest@1(CurrExchRateUpdateSetup@1001 : Record "Curr. Exch. Rate Update Setup";VAR ResponseInStream@1003 : InStream);
+    VAR
+      HttpStatusCode@1000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode";
+      ResponseHeaders@1004 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Specialized.NameValueCollection";
+      URL@1002 : Text;
+    BEGIN
+      CLEAR(ResponseTempBlob);
+      ResponseTempBlob.INIT;
+      ResponseTempBlob.Blob.CREATEINSTREAM(ResponseInStream);
+
+      CurrExchRateUpdateSetup.GetWebServiceURL(URL);
+      HttpWebRequestMgt.Initialize(URL);
+
+      if not GUIALLOWED then
+        HttpWebRequestMgt.DisableUI;
+
+      HttpWebRequestMgt.SetTraceLogEnabled(CurrExchRateUpdateSetup."Log Web Requests");
+
+      if not HttpWebRequestMgt.GetResponse(ResponseInStream,HttpStatusCode,ResponseHeaders) then
+        ShowHttpError(CurrExchRateUpdateSetup,URL);
+    END;
+
+    [Internal]
+    PROCEDURE GenerateTempDataFromService@5(VAR TempCurrencyExchangeRate@1000 : TEMPORARY Record "Currency Exchange Rate";CurrExchRateUpdateSetup@1003 : Record "Curr. Exch. Rate Update Setup");
+    VAR
+      DataExch@1005 : Record "Data Exch.";
+      DataExchDef@1004 : Record "Data Exch. Def";
+      MapCurrencyExchangeRate@1006 : Codeunit "Map Currency Exchange Rate";
+      ResponseInStream@1002 : InStream;
+      SourceName@1001 : Text;
+    BEGIN
+      GetCurrencyExchangeData(CurrExchRateUpdateSetup,ResponseInStream,SourceName);
+      DataExchDef.GET(CurrExchRateUpdateSetup."Data Exch. Def Code");
+      CreateDataExchange(DataExch,DataExchDef,ResponseInStream,COPYSTR(SourceName,1,250));
+
+      MapCurrencyExchangeRate.MapCurrencyExchangeRates(DataExch,TempCurrencyExchangeRate);
+      DataExch.DELETE(true);
+    END;
+
+    LOCAL PROCEDURE ShowHttpError@8(CurrExchRateUpdateSetup@1008 : Record "Curr. Exch. Rate Update Setup";WebServiceURL@1007 : Text);
+    VAR
+      ActivityLog@1000 : Record "Activity Log";
+      WebRequestHelper@1006 : Codeunit "Web Request Helper";
+      XMLDOMMgt@1005 : Codeunit "XML DOM Management";
+      WebException@1004 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebException";
+      XmlNode@1003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      ResponseInputStream@1002 : InStream;
+      ErrorText@1001 : Text;
+    BEGIN
+      ErrorText := WebRequestHelper.GetWebResponseError(WebException,WebServiceURL);
+
+      ResponseInputStream := WebException.Response.GetResponseStream;
+
+      ActivityLog.LogActivity(
+        CurrExchRateUpdateSetup,ActivityLog.Status::Failed,CurrExchRateUpdateSetup."Service Provider",
+        CurrExchRateUpdateSetup.Description,ErrorText);
+
+      XMLDOMMgt.LoadXMLNodeFromInStream(ResponseInputStream,XmlNode);
+
+      ErrorText := XMLDOMMgt.FindNodeText(XmlNode,'description');
+      if STRPOS(ErrorText,YahooInternalErrorTok) <> 0 then
+        ErrorText := InternalErr
+      else
+        ErrorText := WebException.Message;
+
+      ERROR(ErrorText);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

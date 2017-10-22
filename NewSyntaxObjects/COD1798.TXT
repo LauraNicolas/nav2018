@@ -1,0 +1,368 @@
+OBJECT Codeunit 1798 Data Migration Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Job Queue Entry";
+    OnRun=VAR
+            DataMigrationError@1002 : Record "Data Migration Error";
+            DataMigrationStatus@1000 : Record "Data Migration Status";
+            Retry@1001 : Boolean;
+          BEGIN
+            OnBeforeMigrationStarted;
+            DataMigrationStatus.GET("Record ID to Process");
+            DataMigrationStatus.SETRANGE("Migration Type",DataMigrationStatus."Migration Type");
+            Retry := "Parameter String" = RetryTxt;
+
+            // migrate GL accounts (delete the existing ones on a first migration and if GL accounts are migrated)
+            DataMigrationStatus.SETRANGE("Destination Table ID",DATABASE::"G/L Account");
+            if DataMigrationStatus.FINDFIRST and not Retry then
+              if not CODEUNIT.RUN(CODEUNIT::"Data Migration Del G/L Account") then
+                DataMigrationError.CreateEntryNoStagingTable(DataMigrationStatus."Migration Type",DATABASE::"G/L Account");
+
+            if CheckAbortRequestedAndMigrateEntity(
+                 DataMigrationStatus,DATABASE::"G/L Account",CODEUNIT::"GL Acc. Data Migration Facade",Retry)
+            then
+              exit;
+
+            // migrate customers
+            if CheckAbortRequestedAndMigrateEntity(DataMigrationStatus,DATABASE::Customer,CODEUNIT::"Customer Data Migration Facade",Retry) then
+              exit;
+
+            // migrate vendor
+            if CheckAbortRequestedAndMigrateEntity(DataMigrationStatus,DATABASE::Vendor,CODEUNIT::"Vendor Data Migration Facade",Retry) then
+              exit;
+
+            // migrate items
+            CheckAbortRequestedAndMigrateEntity(DataMigrationStatus,DATABASE::Item,CODEUNIT::"Item Data Migration Facade",Retry);
+
+            OnAfterMigrationFinished(DataMigrationStatus,false,StartTime);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      DataMigrationStatusFacade@1000 : Codeunit "Data Migration Status Facade";
+      AbortRequested@1001 : Boolean;
+      StartTime@1002 : DateTime;
+      RetryTxt@1003 : TextConst '@@@={Locked};ENU=Retry';
+      DataMigrationNotCompletedErr@1005 : TextConst '@@@=%1 is the caption for Data Migration Overview;ENU=A data migration is already in process. To see the status of the migration, go to the %1 page.';
+      CustomerTableNotEmptyErr@1004 : TextConst 'ENU=The migration has stopped because we found some customers in Dynamics 365. You must delete them and then restart the migration.';
+      ItemTableNotEmptyErr@1006 : TextConst 'ENU=The migration has stopped because we found some items in Dynamics 365. You must delete them and then restart the migration.';
+      VendorTableNotEmptyErr@1007 : TextConst 'ENU=The migration has stopped because we found some vendors in Dynamics 365. You must delete them and then restart the migration.';
+
+    LOCAL PROCEDURE HandleEntityMigration@25(VAR DataMigrationStatus@1003 : Record "Data Migration Status";BaseAppMigrationCodeunitToRun@1000 : Integer;Retry@1004 : Boolean);
+    VAR
+      DataMigrationError@1001 : Record "Data Migration Error";
+      MigrationStatus@1005 : 'Pending,"In Progress",Completed,"Completed with Errors"';
+    BEGIN
+      if DataMigrationStatus.FINDFIRST then
+        if DataMigrationStatus."Source Staging Table ID" > 0 then
+          StagingTableEntityMigration(DataMigrationStatus,BaseAppMigrationCodeunitToRun,Retry)
+        else begin
+          DataMigrationStatusFacade.UpdateLineStatus(DataMigrationStatus."Migration Type",
+            DataMigrationStatus."Destination Table ID",MigrationStatus::"In Progress");
+          DataMigrationError.ClearEntryNoStagingTable(DataMigrationStatus."Migration Type",
+            DataMigrationStatus."Destination Table ID");
+          COMMIT; // save the dashboard before calling the extension codeunit
+          if CODEUNIT.RUN(DataMigrationStatus."Migration Codeunit To Run") then
+            DataMigrationStatusFacade.UpdateLineStatus(
+              DataMigrationStatus."Migration Type",DataMigrationStatus."Destination Table ID",MigrationStatus::Completed)
+          else begin
+            DataMigrationError.CreateEntryNoStagingTable(DataMigrationStatus."Migration Type",
+              DataMigrationStatus."Destination Table ID");
+            DataMigrationStatusFacade.UpdateLineStatus(
+              DataMigrationStatus."Migration Type",
+              DataMigrationStatus."Destination Table ID",
+              MigrationStatus::"Completed with Errors");
+          end;
+        end;
+    END;
+
+    LOCAL PROCEDURE StagingTableEntityMigration@39(DataMigrationStatus@1003 : Record "Data Migration Status";BaseAppCodeunitToRun@1000 : Integer;Retry@1008 : Boolean);
+    VAR
+      TempDataMigrationParametersBatch@1004 : TEMPORARY Record "Data Migration Parameters";
+      DummyDataMigrationStatus@1005 : Record "Data Migration Status";
+      DataMigrationError@1006 : Record "Data Migration Error";
+      StagingTableRecRef@1002 : RecordRef;
+      Count@1001 : Integer;
+    BEGIN
+      StagingTableRecRef.OPEN(DataMigrationStatus."Source Staging Table ID");
+      if StagingTableRecRef.FINDSET then begin
+        DataMigrationStatusFacade.UpdateLineStatus(DataMigrationStatus."Migration Type",
+          DataMigrationStatus."Destination Table ID",DummyDataMigrationStatus.Status::"In Progress");
+        repeat
+          if AbortRequested then
+            exit;
+
+          DataMigrationError.RESET;
+          if not Retry or
+             (Retry and
+              DataMigrationError.FindEntry(DataMigrationStatus."Migration Type",
+                DataMigrationStatus."Destination Table ID",StagingTableRecRef.RECORDID) and
+              DataMigrationError."Scheduled For Retry" = true)
+          then begin
+            Count += 1;
+
+            TempDataMigrationParametersBatch.INIT;
+            TempDataMigrationParametersBatch.Key := Count;
+            TempDataMigrationParametersBatch."Migration Type" := DataMigrationStatus."Migration Type";
+            TempDataMigrationParametersBatch."Staging Table Migr. Codeunit" := DataMigrationStatus."Migration Codeunit To Run";
+            TempDataMigrationParametersBatch."Staging Table RecId To Process" := StagingTableRecRef.RECORDID;
+            TempDataMigrationParametersBatch.INSERT;
+
+            DataMigrationError.ClearEntry(DataMigrationStatus."Migration Type",
+              DataMigrationStatus."Destination Table ID",
+              StagingTableRecRef.RECORDID);
+          end;
+          if Count = 100 then begin
+            // try to process batch
+            COMMIT; // to save the transaction that has deleted the errors
+            ProcessBatch(DataMigrationStatus,BaseAppCodeunitToRun,TempDataMigrationParametersBatch,Count);
+            Count := 0;
+            TempDataMigrationParametersBatch.DELETEALL;
+          end;
+        until StagingTableRecRef.NEXT = 0;
+
+        if AbortRequested then
+          exit;
+
+        if Count > 0 then begin
+          COMMIT; // to save the transaction that has deleted the errors
+          ProcessBatch(DataMigrationStatus,BaseAppCodeunitToRun,TempDataMigrationParametersBatch,Count);
+        end;
+      end;
+
+      DataMigrationStatus.CALCFIELDS("Error Count");
+      if DataMigrationStatus."Error Count" = 0 then
+        DataMigrationStatusFacade.UpdateLineStatus(
+          DataMigrationStatus."Migration Type",DataMigrationStatus."Destination Table ID",
+          DummyDataMigrationStatus.Status::Completed)
+      else
+        DataMigrationStatusFacade.UpdateLineStatus(
+          DataMigrationStatus."Migration Type",DataMigrationStatus."Destination Table ID",
+          DummyDataMigrationStatus.Status::"Completed with Errors");
+    END;
+
+    LOCAL PROCEDURE ProcessBatch@9(DataMigrationStatus@1007 : Record "Data Migration Status";BaseAppCodeunitToRun@1000 : Integer;VAR TempDataMigrationParametersBatch@1005 : TEMPORARY Record "Data Migration Parameters";Count@1002 : Integer);
+    VAR
+      TempDataMigrationParametersSingle@1006 : TEMPORARY Record "Data Migration Parameters";
+      DataMigrationError@1003 : Record "Data Migration Error";
+    BEGIN
+      // try to process batch
+      if CODEUNIT.RUN(BaseAppCodeunitToRun,TempDataMigrationParametersBatch) then begin
+        // the batch was processed fine, update the dashboard
+        DataMigrationStatusFacade.IncrementMigratedRecordCount(DataMigrationStatus."Migration Type",
+          DataMigrationStatus."Destination Table ID",Count);
+        COMMIT; // save the dashboard status before calling the next Codeunit.RUN
+      end else begin
+        // the batch processing failed
+        TempDataMigrationParametersBatch.FINDSET;
+        repeat
+          // process one by one
+          TempDataMigrationParametersSingle.DELETEALL;
+          TempDataMigrationParametersSingle.INIT;
+          TempDataMigrationParametersSingle.TRANSFERFIELDS(TempDataMigrationParametersBatch);
+          TempDataMigrationParametersSingle.INSERT;
+
+          if CODEUNIT.RUN(BaseAppCodeunitToRun,TempDataMigrationParametersSingle) then begin
+            // single record processing succeeded, update dashboard
+            DataMigrationStatusFacade.IncrementMigratedRecordCount(DataMigrationStatus."Migration Type",
+              DataMigrationStatus."Destination Table ID",1);
+            COMMIT; // save the dashboard status before calling the next Codeunit.RUN
+          end else begin
+            DataMigrationError.CreateEntry(DataMigrationStatus."Migration Type",
+              DataMigrationStatus."Destination Table ID",TempDataMigrationParametersSingle."Staging Table RecId To Process");
+            COMMIT; // save the new errors discovered
+          end;
+        until TempDataMigrationParametersBatch.NEXT = 0;
+      end;
+    END;
+
+    PROCEDURE RunStagingTableMigrationCodeunit@15(CodeunitToRun@1000 : Integer;StagingTableEntityVariant@1001 : Variant) : Boolean;
+    BEGIN
+      exit(CODEUNIT.RUN(CodeunitToRun,StagingTableEntityVariant));
+    END;
+
+    [EventSubscriber(Page,1799,OnRequestAbort)]
+    LOCAL PROCEDURE OnRequestAbortSubscriber@1();
+    BEGIN
+      AbortRequested := true;
+    END;
+
+    LOCAL PROCEDURE CheckAbortRequestedAndMigrateEntity@5(VAR DataMigrationStatus@1000 : Record "Data Migration Status";DestinationTableId@1001 : Integer;BaseAppCodeunitToRun@1002 : Integer;ReRun@1003 : Boolean) : Boolean;
+    BEGIN
+      if AbortRequested then begin
+        DataMigrationStatus.RESET;
+        DataMigrationStatus.SETRANGE("Migration Type",DataMigrationStatus."Migration Type");
+        SetAbortStatus(DataMigrationStatus);
+        OnAfterMigrationFinished(DataMigrationStatus,true,StartTime);
+        exit(true);
+      end;
+
+      DataMigrationStatus.SETRANGE("Destination Table ID",DestinationTableId);
+      HandleEntityMigration(DataMigrationStatus,BaseAppCodeunitToRun,ReRun);
+    END;
+
+    PROCEDURE SetStartTime@11(Value@1000 : DateTime);
+    BEGIN
+      StartTime := Value;
+    END;
+
+    PROCEDURE SetAbortStatus@3(VAR DataMigrationStatus@1000 : Record "Data Migration Status");
+    BEGIN
+      DataMigrationStatus.SETFILTER(
+        Status,STRSUBSTNO('%1|%2',DataMigrationStatus.Status::"In Progress",DataMigrationStatus.Status::Pending));
+      if DataMigrationStatus.FINDSET then
+        repeat
+          DataMigrationStatus.Status := DataMigrationStatus.Status::Stopped;
+          DataMigrationStatus.MODIFY(true);
+        until DataMigrationStatus.NEXT = 0;
+    END;
+
+    [Integration(TRUE)]
+    PROCEDURE OnBeforeMigrationStarted@2();
+    BEGIN
+    END;
+
+    [Integration]
+    PROCEDURE OnAfterMigrationFinished@12(VAR DataMigrationStatus@1000 : Record "Data Migration Status";WasAborted@1001 : Boolean;StartTime@1002 : DateTime);
+    BEGIN
+    END;
+
+    [EventSubscriber(Codeunit,1798,OnBeforeMigrationStarted,"",Skip,Skip)]
+    LOCAL PROCEDURE OnBeforeMigrationStartedSubscriber@8(VAR Sender@1000 : Codeunit "Data Migration Mgt.");
+    BEGIN
+      Sender.SetStartTime(CURRENTDATETIME);
+    END;
+
+    [EventSubscriber(Codeunit,1798,OnAfterMigrationFinished,"",Skip,Skip)]
+    LOCAL PROCEDURE OnAfterMigrationFinishedSubscriber@10(VAR DataMigrationStatus@1000 : Record "Data Migration Status";WasAborted@1001 : Boolean;StartTime@1003 : DateTime);
+    VAR
+      TotalNumberOfRecords@1002 : Integer;
+      Message@1004 : Text;
+    BEGIN
+      DataMigrationStatus.SETRANGE("Destination Table ID",DATABASE::"G/L Account");
+      if DataMigrationStatus.FINDFIRST then
+        TotalNumberOfRecords += DataMigrationStatus."Total Number";
+
+      DataMigrationStatus.SETRANGE("Destination Table ID",DATABASE::Item);
+      if DataMigrationStatus.FINDFIRST then
+        TotalNumberOfRecords += DataMigrationStatus."Total Number";
+
+      DataMigrationStatus.SETRANGE("Destination Table ID",DATABASE::Vendor);
+      if DataMigrationStatus.FINDFIRST then
+        TotalNumberOfRecords += DataMigrationStatus."Total Number";
+
+      DataMigrationStatus.SETRANGE("Destination Table ID",DATABASE::Customer);
+      if DataMigrationStatus.FINDFIRST then
+        TotalNumberOfRecords += DataMigrationStatus."Total Number";
+
+      if WasAborted then
+        Message := STRSUBSTNO('Migration aborted after %1',CURRENTDATETIME - StartTime)
+      else
+        Message := STRSUBSTNO('The migration of %1 records in total took: %2',TotalNumberOfRecords,CURRENTDATETIME - StartTime);
+
+      SENDTRACETAG(
+        '00001DA',
+        STRSUBSTNO('Data Migration (%1)',DataMigrationStatus."Migration Type"),
+        VERBOSITY::Normal,
+        Message);
+    END;
+
+    [External]
+    PROCEDURE StartMigration@4(MigrationType@1000 : Text[250];Retry@1001 : Boolean);
+    VAR
+      DataMigrationError@1006 : Record "Data Migration Error";
+      DataMigrationStatus@1004 : Record "Data Migration Status";
+      JobQueueEntry@1003 : Record "Job Queue Entry";
+      JobParameters@1005 : Text[250];
+      StartNewSession@1002 : Boolean;
+      CheckExistingData@1007 : Boolean;
+    BEGIN
+      CheckMigrationInProgress;
+
+      StartNewSession := true;
+      CheckExistingData := true;
+      OnBeforeStartMigration(StartNewSession,CheckExistingData);
+
+      if CheckExistingData then
+        CheckDataAlreadyExist(MigrationType,Retry);
+
+      DataMigrationStatus.RESET;
+      DataMigrationStatus.SETRANGE("Migration Type",MigrationType);
+      if not Retry then begin
+        DataMigrationError.SETRANGE("Migration Type",MigrationType);
+        DataMigrationError.DELETEALL;
+        COMMIT;
+      end;
+
+      if Retry then
+        JobParameters := RetryTxt;
+      DataMigrationStatus.FINDFIRST;
+      if StartNewSession then
+        // run the migration in a background session
+        JobQueueEntry.ScheduleJobQueueEntryWithParameters(CODEUNIT::"Data Migration Mgt.",
+          DataMigrationStatus.RECORDID,JobParameters)
+      else begin
+        JobQueueEntry."Record ID to Process" := DataMigrationStatus.RECORDID;
+        JobQueueEntry."Parameter String" := JobParameters;
+        CODEUNIT.RUN(CODEUNIT::"Data Migration Mgt.",JobQueueEntry);
+      end;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeStartMigration@6(VAR StartNewSession@1000 : Boolean;VAR CheckExistingData@1001 : Boolean);
+    BEGIN
+    END;
+
+    [External]
+    PROCEDURE CheckMigrationInProgress@13();
+    VAR
+      JobQueueEntry@1001 : Record "Job Queue Entry";
+      DataMigrationOverview@1003 : Page "Data Migration Overview";
+    BEGIN
+      JobQueueEntry.SETRANGE("Object Type to Run",JobQueueEntry."Object Type to Run"::Codeunit);
+      JobQueueEntry.SETRANGE("Object ID to Run",CODEUNIT::"Data Migration Mgt.");
+      JobQueueEntry.SETFILTER(Status,'%1|%2|%3',
+        JobQueueEntry.Status::"In Process",
+        JobQueueEntry.Status::"On Hold",
+        JobQueueEntry.Status::Ready);
+      if not JobQueueEntry.ISEMPTY then
+        ERROR(DataMigrationNotCompletedErr,DataMigrationOverview.CAPTION);
+    END;
+
+    LOCAL PROCEDURE CheckDataAlreadyExist@7(MigrationType@1001 : Text[250];Retry@1000 : Boolean);
+    BEGIN
+      if Retry then
+        exit;
+
+      // check tables are clear. For GL accounts, we delete them automatically
+      ThrowErrorIfTableNotEmpty(MigrationType,DATABASE::Customer,CustomerTableNotEmptyErr);
+      ThrowErrorIfTableNotEmpty(MigrationType,DATABASE::Vendor,VendorTableNotEmptyErr);
+      ThrowErrorIfTableNotEmpty(MigrationType,DATABASE::Item,ItemTableNotEmptyErr);
+    END;
+
+    LOCAL PROCEDURE ThrowErrorIfTableNotEmpty@17(MigrationType@1004 : Text[250];TableId@1000 : Integer;ErrorMessageErr@1001 : Text);
+    VAR
+      DataMigrationStatus@1002 : Record "Data Migration Status";
+      RecRef@1003 : RecordRef;
+    BEGIN
+      if DataMigrationStatus.GET(MigrationType,TableId) then begin
+        RecRef.OPEN(TableId);
+        if not RecRef.ISEMPTY then
+          ERROR(ErrorMessageErr);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

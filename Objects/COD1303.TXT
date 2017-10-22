@@ -2,9 +2,9 @@ OBJECT Codeunit 1303 Correct Posted Sales Invoice
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -16,6 +16,9 @@ OBJECT Codeunit 1303 Correct Posted Sales Invoice
           BEGIN
             UnapplyCostApplication("No.");
             CreateCopyDocument(Rec,SalesHeader,SalesHeader."Document Type"::"Credit Memo",FALSE);
+
+            IF SalesInvoiceLinesContainJob("No.") THEN
+              CreateAndProcessJobPlanningLines(SalesHeader);
 
             CODEUNIT.RUN(CODEUNIT::"Sales-Post",SalesHeader);
             SetTrackInfoForCancellation(Rec);
@@ -72,6 +75,7 @@ OBJECT Codeunit 1303 Correct Posted Sales Invoice
       CreatingCreditMemoFailedNothingCreatedErr@1022 : TextConst 'ENU=Canceling the invoice failed because of the following error: \\%1.';
       ErrorType@1024 : 'IsPaid,CustomerBlocked,ItemBlocked,AccountBlocked,IsCorrected,IsCorrective,SerieNumInv,SerieNumCM,SerieNumPostCM,ItemIsReturned,FromOrder,PostingNotAllowed,LineFromOrder,WrongItemType,LineFromJob,DimErr,DimCombErr,DimCombHeaderErr,ExtDocErr,InventoryPostClosed';
       WrongDocumentTypeForCopyDocumentErr@1043 : TextConst 'ENU=You cannot correct or cancel this type of document.';
+      CheckPrepaymentErr@1045 : TextConst 'ENU=You cannot correct or cancel a posted sales prepayment invoice.\\Open the related sales order and choose the Post Prepayment Credit Memo.';
 
     [Internal]
     PROCEDURE CancelPostedInvoice@4(VAR SalesInvoiceHeader@1000 : Record 112) : Boolean;
@@ -130,7 +134,43 @@ OBJECT Codeunit 1303 Correct Posted Sales Invoice
     PROCEDURE CreateCreditMemoCopyDocument@16(VAR SalesInvoiceHeader@1000 : Record 112;VAR SalesHeader@1001 : Record 36);
     BEGIN
       TestNoFixedAssetInSalesInvoice(SalesInvoiceHeader);
+      TestNotSalesPrepaymentlInvoice(SalesInvoiceHeader);
       CreateCopyDocument(SalesInvoiceHeader,SalesHeader,SalesHeader."Document Type"::"Credit Memo",FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateAndProcessJobPlanningLines@36(SalesHeader@1000 : Record 36);
+    VAR
+      SalesLine@1003 : Record 37;
+    BEGIN
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETFILTER("Job Contract Entry No.",'<>0');
+      IF SalesLine.FINDSET THEN
+        REPEAT
+          SalesLine."Job Contract Entry No." := CreateJobPlanningLine(SalesHeader,SalesLine);
+          SalesLine.MODIFY;
+        UNTIL SalesLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateJobPlanningLine@49(SalesHeader@1005 : Record 36;SalesLine@1000 : Record 37) : Integer;
+    VAR
+      FromJobPlanningLine@1001 : Record 1003;
+      ToJobPlanningLine@1002 : Record 1003;
+      JobPlanningLineInvoice@1004 : Record 1022;
+    BEGIN
+      FromJobPlanningLine.SETCURRENTKEY("Job Contract Entry No.");
+      FromJobPlanningLine.SETRANGE("Job Contract Entry No.",SalesLine."Job Contract Entry No.");
+      FromJobPlanningLine.FINDFIRST;
+
+      ToJobPlanningLine.InitFromJobPlanningLine(FromJobPlanningLine,-SalesLine.Quantity);
+      JobPlanningLineInvoice.InitFromJobPlanningLine(ToJobPlanningLine);
+      JobPlanningLineInvoice.InitFromSales(SalesHeader,SalesHeader."Posting Date",SalesLine."Line No.");
+      JobPlanningLineInvoice.INSERT;
+
+      ToJobPlanningLine.UpdateQtyToTransfer;
+      ToJobPlanningLine.INSERT;
+
+      EXIT(ToJobPlanningLine."Job Contract Entry No.");
     END;
 
     [Internal]
@@ -157,12 +197,14 @@ OBJECT Codeunit 1303 Correct Posted Sales Invoice
       TestIfInvoiceIsPaid(SalesInvoiceHeader);
       TestIfCustomerIsBlocked(SalesInvoiceHeader,SalesInvoiceHeader."Sell-to Customer No.");
       TestIfCustomerIsBlocked(SalesInvoiceHeader,SalesInvoiceHeader."Bill-to Customer No.");
+      TestIfJobPostingIsAllowed(SalesInvoiceHeader."No.");
       TestCustomerDimension(SalesInvoiceHeader,SalesInvoiceHeader."Bill-to Customer No.");
       TestDimensionOnHeader(SalesInvoiceHeader);
       TestSalesLines(SalesInvoiceHeader);
       TestIfAnyFreeNumberSeries(SalesInvoiceHeader);
       TestExternalDocument(SalesInvoiceHeader);
       TestInventoryPostingClosed(SalesInvoiceHeader);
+      TestNotSalesPrepaymentlInvoice(SalesInvoiceHeader);
     END;
 
     LOCAL PROCEDURE SetTrackInfoForCancellation@2(VAR SalesInvoiceHeader@1000 : Record 112);
@@ -173,6 +215,15 @@ OBJECT Codeunit 1303 Correct Posted Sales Invoice
       SalesCrMemoHeader.SETRANGE("Applies-to Doc. No.",SalesInvoiceHeader."No.");
       IF SalesCrMemoHeader.FINDLAST THEN
         CancelledDocument.InsertSalesInvToCrMemoCancelledDocument(SalesInvoiceHeader."No.",SalesCrMemoHeader."No.");
+    END;
+
+    LOCAL PROCEDURE SalesInvoiceLinesContainJob@35(InvoiceNo@1001 : Code[20]) : Boolean;
+    VAR
+      SalesInvoiceLine@1002 : Record 113;
+    BEGIN
+      SalesInvoiceLine.SETRANGE("Document No.",InvoiceNo);
+      SalesInvoiceLine.SETFILTER("Job No.",'<>%1','');
+      EXIT(NOT SalesInvoiceLine.ISEMPTY);
     END;
 
     LOCAL PROCEDURE TestDimensionOnHeader@15(SalesInvoiceHeader@1000 : Record 112);
@@ -334,6 +385,20 @@ OBJECT Codeunit 1303 Correct Posted Sales Invoice
         ErrorHelperHeader(ErrorType::SerieNumInv,SalesInvoiceHeader);
     END;
 
+    LOCAL PROCEDURE TestIfJobPostingIsAllowed@32(SalesInvoiceNo@1000 : Code[20]);
+    VAR
+      SalesInvoiceLine@1001 : Record 113;
+      Job@1002 : Record 167;
+    BEGIN
+      SalesInvoiceLine.SETFILTER("Document No.",SalesInvoiceNo);
+      SalesInvoiceLine.SETFILTER("Job No.",'<>%1','');
+      IF SalesInvoiceLine.FINDSET THEN
+        REPEAT
+          Job.GET(SalesInvoiceLine."Job No.");
+          Job.TestBlocked;
+        UNTIL SalesInvoiceLine.NEXT = 0;
+    END;
+
     LOCAL PROCEDURE TestExternalDocument@8(SalesInvoiceHeader@1000 : Record 112);
     VAR
       SalesReceivablesSetup@1001 : Record 311;
@@ -434,6 +499,12 @@ OBJECT Codeunit 1303 Correct Posted Sales Invoice
       SalesInvLine.SETRANGE(Type,SalesInvLine.Type::"Fixed Asset");
       IF NOT SalesInvLine.ISEMPTY THEN
         ERROR(FixedAssetNotPossibleToCreateCreditMemoErr);
+    END;
+
+    LOCAL PROCEDURE TestNotSalesPrepaymentlInvoice@37(SalesInvoiceHeader@1001 : Record 112);
+    BEGIN
+      IF SalesInvoiceHeader."Prepayment Invoice" THEN
+        ERROR(CheckPrepaymentErr);
     END;
 
     LOCAL PROCEDURE IsCommentLine@18(SalesInvoiceLine@1000 : Record 113) : Boolean;

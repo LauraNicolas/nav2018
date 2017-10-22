@@ -1,0 +1,310 @@
+OBJECT Table 5373 CRM Full Synch. Review Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=CRM Full Synch. Review Line;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Name                ;Code20        ;CaptionML=ENU=Name }
+    { 2   ;   ;Dependency Filter   ;Text250       ;CaptionML=ENU=Dependency Filter }
+    { 3   ;   ;Session ID          ;Integer       ;CaptionML=ENU=Session ID }
+    { 4   ;   ;To Int. Table Job ID;GUID          ;OnValidate=BEGIN
+                                                                "To Int. Table Job Status" := GetSynchJobStatus("To Int. Table Job ID");
+                                                              END;
+
+                                                   CaptionML=ENU=To Int. Table Job ID }
+    { 5   ;   ;To Int. Table Job Status;Option    ;CaptionML=ENU=To Int. Table Job Status;
+                                                   OptionCaptionML=ENU=" ,Success,In Process,Error";
+                                                   OptionString=" ",Success,"In Process",Error }
+    { 6   ;   ;From Int. Table Job ID;GUID        ;OnValidate=BEGIN
+                                                                "From Int. Table Job Status" := GetSynchJobStatus("From Int. Table Job ID");
+                                                              END;
+
+                                                   CaptionML=ENU=From Int. Table Job ID }
+    { 7   ;   ;From Int. Table Job Status;Option  ;CaptionML=ENU=From Int. Table Job Status;
+                                                   OptionCaptionML=ENU=" ,Success,In Process,Error";
+                                                   OptionString=" ",Success,"In Process",Error }
+    { 8   ;   ;Direction           ;Option        ;CaptionML=ENU=Direction;
+                                                   OptionCaptionML=ENU=Bidirectional,To Integration Table,From Integration Table;
+                                                   OptionString=Bidirectional,"To Integration Table","From Integration Table";
+                                                   Editable=false }
+    { 9   ;   ;Job Queue Entry ID  ;GUID          ;OnValidate=VAR
+                                                                JobQueueEntry@1000 : Record "Job Queue Entry";
+                                                              BEGIN
+                                                                if not ISNULLGUID("Job Queue Entry ID") then
+                                                                  if JobQueueEntry.GET("Job Queue Entry ID") then
+                                                                    SetJobQueueEntryStatus(JobQueueEntry.Status)
+                                                                  else
+                                                                    SetJobQueueEntryStatus(JobQueueEntry.Status::Error)
+                                                              END;
+
+                                                   CaptionML=ENU=Job Queue Entry ID }
+    { 10  ;   ;Job Queue Entry Status;Option      ;OnValidate=BEGIN
+                                                                if "Job Queue Entry Status" = "Job Queue Entry Status"::"In Process" then
+                                                                  "Session ID" := SESSIONID
+                                                                else
+                                                                  "Session ID" := 0;
+                                                              END;
+
+                                                   CaptionML=ENU=Job Queue Entry Status;
+                                                   OptionCaptionML=ENU=" ,Ready,In Process,Error,On Hold,Finished";
+                                                   OptionString=" ",Ready,"In Process",Error,"On Hold",Finished }
+  }
+  KEYS
+  {
+    {    ;Name                                    ;Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+
+    [External]
+    PROCEDURE Generate@1();
+    VAR
+      IntegrationTableMapping@1002 : Record "Integration Table Mapping";
+      Field@1000 : Record Field;
+    BEGIN
+      IntegrationTableMapping.SETRANGE("Synch. Codeunit ID",CODEUNIT::"CRM Integration Table Synch.");
+      IntegrationTableMapping.SETRANGE("Int. Table UID Field Type",Field.Type::GUID);
+      IntegrationTableMapping.SETRANGE("Delete After Synchronization",false);
+      if IntegrationTableMapping.FINDSET then
+        repeat
+          INIT;
+          Name := IntegrationTableMapping.Name;
+          if not FIND('=') then begin
+            VALIDATE("Dependency Filter",IntegrationTableMapping."Dependency Filter");
+            Direction := IntegrationTableMapping.Direction;
+            INSERT(true);
+          end else
+            if "Job Queue Entry Status" = "Job Queue Entry Status"::" " then begin
+              VALIDATE("Dependency Filter",IntegrationTableMapping."Dependency Filter");
+              MODIFY(true);
+            end;
+        until IntegrationTableMapping.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE Start@2();
+    VAR
+      TempCRMFullSynchReviewLine@1000 : TEMPORARY Record "CRM Full Synch. Review Line";
+      CRMIntegrationManagement@1001 : Codeunit "CRM Integration Management";
+      JobQueueEntryID@1002 : GUID;
+    BEGIN
+      if FindLinesThatCanBeStarted(TempCRMFullSynchReviewLine) then
+        repeat
+          JobQueueEntryID :=
+            CRMIntegrationManagement.EnqueueFullSyncJob(TempCRMFullSynchReviewLine.Name);
+          GET(TempCRMFullSynchReviewLine.Name);
+          VALIDATE("Job Queue Entry ID",JobQueueEntryID);
+          MODIFY(true);
+          COMMIT;
+        until TempCRMFullSynchReviewLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateAsSynchJobStarted@6(MapName@1002 : Code[20];JobID@1001 : GUID;SynchDirection@1000 : Option);
+    BEGIN
+      GET(MapName);
+      VALIDATE("Job Queue Entry ID");
+      case SynchDirection of
+        Direction::"From Integration Table":
+          VALIDATE("From Int. Table Job ID",JobID);
+        Direction::"To Integration Table":
+          VALIDATE("To Int. Table Job ID",JobID);
+      end;
+      MODIFY(true);
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE UpdateAsSynchJobFinished@7(MapName@1001 : Code[20];SynchDirection@1000 : Option);
+    BEGIN
+      GET(MapName);
+      VALIDATE("Job Queue Entry ID");
+      case SynchDirection of
+        Direction::"From Integration Table":
+          VALIDATE("From Int. Table Job ID");
+        Direction::"To Integration Table":
+          VALIDATE("To Int. Table Job ID");
+      end;
+      MODIFY(true);
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE GetSynchJobStatus@8(JobID@1000 : GUID) : Integer;
+    VAR
+      IntegrationSynchJob@1002 : Record "Integration Synch. Job";
+    BEGIN
+      if ISNULLGUID(JobID) then
+        exit("To Int. Table Job Status"::" ");
+
+      IntegrationSynchJob.GET(JobID);
+      if IntegrationSynchJob."Finish Date/Time" = 0DT then
+        exit("To Int. Table Job Status"::"In Process");
+
+      if IntegrationSynchJob.AreAllRecordsFailed then
+        exit("To Int. Table Job Status"::Error);
+
+      exit("To Int. Table Job Status"::Success);
+    END;
+
+    LOCAL PROCEDURE FindLinesThatCanBeStarted@3(VAR TempCRMFullSynchReviewLine@1000 : TEMPORARY Record "CRM Full Synch. Review Line") : Boolean;
+    VAR
+      CRMFullSynchReviewLine@1001 : Record "CRM Full Synch. Review Line";
+    BEGIN
+      TempCRMFullSynchReviewLine.RESET;
+      TempCRMFullSynchReviewLine.DELETEALL;
+
+      CRMFullSynchReviewLine.SETRANGE(
+        "Job Queue Entry Status",CRMFullSynchReviewLine."Job Queue Entry Status"::" ");
+      if CRMFullSynchReviewLine.FINDSET then
+        repeat
+          if AreAllParentalJobsFinished(CRMFullSynchReviewLine."Dependency Filter") then begin
+            TempCRMFullSynchReviewLine := CRMFullSynchReviewLine;
+            TempCRMFullSynchReviewLine.INSERT;
+          end;
+        until CRMFullSynchReviewLine.NEXT = 0;
+      exit(TempCRMFullSynchReviewLine.FINDSET);
+    END;
+
+    LOCAL PROCEDURE AreAllParentalJobsFinished@10(DependencyFilter@1000 : Text[250]) : Boolean;
+    VAR
+      CRMFullSynchReviewLine@1001 : Record "CRM Full Synch. Review Line";
+    BEGIN
+      if DependencyFilter <> '' then begin
+        CRMFullSynchReviewLine.SETFILTER(Name,DependencyFilter);
+        CRMFullSynchReviewLine.SETFILTER(
+          "Job Queue Entry Status",'<>%1',CRMFullSynchReviewLine."Job Queue Entry Status"::Finished);
+        exit(CRMFullSynchReviewLine.ISEMPTY);
+      end;
+      exit(true);
+    END;
+
+    PROCEDURE FullSynchFinished@26(IntegrationTableMapping@1002 : Record "Integration Table Mapping";SynchDirection@1001 : Option);
+    BEGIN
+      if IntegrationTableMapping.IsFullSynch then
+        UpdateAsSynchJobFinished(IntegrationTableMapping."Parent Name",SynchDirection);
+    END;
+
+    PROCEDURE FullSynchStarted@25(IntegrationTableMapping@1000 : Record "Integration Table Mapping";JobID@1001 : GUID;SynchDirection@1002 : Option);
+    BEGIN
+      if IntegrationTableMapping.IsFullSynch then
+        UpdateAsSynchJobStarted(IntegrationTableMapping."Parent Name",JobID,SynchDirection);
+    END;
+
+    PROCEDURE OnBeforeModifyJobQueueEntry@9(JobQueueEntry@1000 : Record "Job Queue Entry");
+    BEGIN
+      RESET;
+      if ISEMPTY then
+        exit;
+      if GET(GetIntTableMappingNameJobQueueEntry(JobQueueEntry)) then begin
+        SetJobQueueEntryStatus(JobQueueEntry.Status);
+        MODIFY;
+
+        if IsJobQueueEntryProcessed(JobQueueEntry) then
+          Start;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetIntTableMappingNameJobQueueEntry@20(JobQueueEntry@1001 : Record "Job Queue Entry") : Code[20];
+    VAR
+      IntegrationTableMapping@1000 : Record "Integration Table Mapping";
+      RecID@1003 : RecordID;
+      RecRef@1002 : RecordRef;
+    BEGIN
+      RecID := JobQueueEntry."Record ID to Process";
+      if RecID.TABLENO = DATABASE::"Integration Table Mapping" then begin
+        RecRef := RecID.GETRECORD;
+        RecRef.SETTABLE(IntegrationTableMapping);
+        IntegrationTableMapping.FIND;
+        if IntegrationTableMapping.IsFullSynch then
+          exit(IntegrationTableMapping."Parent Name");
+      end;
+    END;
+
+    LOCAL PROCEDURE IsJobQueueEntryProcessed@11(JobQueueEntry@1000 : Record "Job Queue Entry") : Boolean;
+    VAR
+      xJobQueueEntry@1001 : Record "Job Queue Entry";
+    BEGIN
+      xJobQueueEntry := JobQueueEntry;
+      xJobQueueEntry.FIND;
+      exit(
+        (xJobQueueEntry.Status = xJobQueueEntry.Status::"In Process") and
+        (xJobQueueEntry.Status <> JobQueueEntry.Status));
+    END;
+
+    PROCEDURE IsActiveSession@13() : Boolean;
+    BEGIN
+      exit(ISSESSIONACTIVE("Session ID"));
+    END;
+
+    PROCEDURE IsThereActiveSessionInProgress@16() : Boolean;
+    VAR
+      CRMFullSynchReviewLine@1000 : Record "CRM Full Synch. Review Line";
+    BEGIN
+      CRMFullSynchReviewLine.SETFILTER("Session ID",'<>0');
+      CRMFullSynchReviewLine.SETRANGE("Job Queue Entry Status","Job Queue Entry Status"::"In Process");
+      if CRMFullSynchReviewLine.FINDSET then
+        repeat
+          if CRMFullSynchReviewLine.IsActiveSession then
+            exit(true);
+        until CRMFullSynchReviewLine.NEXT = 0;
+      exit(false);
+    END;
+
+    PROCEDURE IsThereBlankStatusLine@14() : Boolean;
+    VAR
+      CRMFullSynchReviewLine@1000 : Record "CRM Full Synch. Review Line";
+    BEGIN
+      CRMFullSynchReviewLine.SETRANGE("Job Queue Entry Status",0);
+      exit(not CRMFullSynchReviewLine.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE SetJobQueueEntryStatus@5(Status@1000 : Option);
+    BEGIN
+      // shift the options to have an undefined state ' ' as 0.
+      VALIDATE("Job Queue Entry Status",Status + 1);
+    END;
+
+    PROCEDURE ShowJobQueueLogEntry@4();
+    VAR
+      JobQueueLogEntry@1000 : Record "Job Queue Log Entry";
+    BEGIN
+      JobQueueLogEntry.SETRANGE(ID,"Job Queue Entry ID");
+      PAGE.RUNMODAL(PAGE::"Job Queue Log Entries",JobQueueLogEntry);
+    END;
+
+    PROCEDURE ShowSynchJobLog@15(ID@1000 : GUID);
+    VAR
+      IntegrationSynchJob@1001 : Record "Integration Synch. Job";
+    BEGIN
+      IntegrationSynchJob.SETRANGE(ID,ID);
+      PAGE.RUNMODAL(PAGE::"Integration Synch. Job List",IntegrationSynchJob);
+    END;
+
+    PROCEDURE GetStatusStyleExpression@12(StatusText@1000 : Text) : Text;
+    BEGIN
+      case StatusText of
+        'Error':
+          exit('Unfavorable');
+        'Finished','Success':
+          exit('Favorable');
+        'In Process':
+          exit('Ambiguous');
+        else
+          exit('Subordinate');
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

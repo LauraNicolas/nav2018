@@ -1,0 +1,173 @@
+OBJECT Codeunit 2820 Native - Attachments
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            CleanupAttachmentEntityBuffer;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CleanupJobBufferHoursTxt@1000 : TextConst '@@@={Locked};ENU=6';
+      AttachmentKeepDaysTxt@1001 : TextConst '@@@={Locked};ENU=5';
+
+    PROCEDURE UpdateAttachments@6(DocumentId@1000 : GUID;NewAttachmentsJSON@1001 : Text;PreviousAttachmentsJSON@1009 : Text);
+    VAR
+      TempOldAttachmentEntityBuffer@1007 : TEMPORARY Record "Attachment Entity Buffer";
+      TempNewAttachmentEntityBuffer@1006 : TEMPORARY Record "Attachment Entity Buffer";
+      NativeEDMTypes@1002 : Codeunit "Native - EDM Types";
+    BEGIN
+      NativeEDMTypes.ParseAttachmentsJSON(PreviousAttachmentsJSON,TempOldAttachmentEntityBuffer,DocumentId);
+      NativeEDMTypes.ParseAttachmentsJSON(NewAttachmentsJSON,TempNewAttachmentEntityBuffer,DocumentId);
+
+      DeleteUnusedAttachments(TempOldAttachmentEntityBuffer,TempNewAttachmentEntityBuffer);
+      LinkNewAttachmentsToDocument(TempOldAttachmentEntityBuffer,TempNewAttachmentEntityBuffer,DocumentId);
+    END;
+
+    PROCEDURE GenerateAttachmentsJSON@2(DocumentIdFilter@1000 : Text) : Text;
+    VAR
+      TempAttachmentEntityBuffer@1003 : TEMPORARY Record "Attachment Entity Buffer";
+      NativeEDMTypes@1006 : Codeunit "Native - EDM Types";
+      GraphMgtAttachmentBuffer@1005 : Codeunit "Graph Mgt - Attachment Buffer";
+    BEGIN
+      TempAttachmentEntityBuffer.DELETEALL;
+      GraphMgtAttachmentBuffer.LoadAttachments(TempAttachmentEntityBuffer,DocumentIdFilter,'');
+
+      exit(NativeEDMTypes.WriteAttachmentsJSON(TempAttachmentEntityBuffer));
+    END;
+
+    PROCEDURE LinkAttachmentToDocument@4(AttachmentEntityBufferId@1000 : GUID;DocumentId@1001 : GUID);
+    VAR
+      TempFieldBuffer@1003 : TEMPORARY Record "Field Buffer";
+      TempAttachmentEntityBuffer@1002 : TEMPORARY Record "Attachment Entity Buffer";
+      UnlinkedAttachment@1004 : Record "Unlinked Attachment";
+      GraphMgtAttachmentBuffer@1005 : Codeunit "Graph Mgt - Attachment Buffer";
+    BEGIN
+      UnlinkedAttachment.GET(AttachmentEntityBufferId);
+      UnlinkedAttachment.CALCFIELDS(Content);
+      TempAttachmentEntityBuffer.TRANSFERFIELDS(UnlinkedAttachment);
+      TempAttachmentEntityBuffer."Document Id" := DocumentId;
+      RegisterFieldSet(TempAttachmentEntityBuffer.FIELDNO("Created Date-Time"),TempFieldBuffer);
+      RegisterFieldSet(TempAttachmentEntityBuffer.FIELDNO(Content),TempFieldBuffer);
+      GraphMgtAttachmentBuffer.PropagateInsertAttachment(TempAttachmentEntityBuffer,TempFieldBuffer);
+      UnlinkedAttachment.DELETE(true);
+    END;
+
+    LOCAL PROCEDURE CleanupAttachmentEntityBuffer@7();
+    VAR
+      UnlinkedAttachment@1000 : Record "Unlinked Attachment";
+    BEGIN
+      UnlinkedAttachment.SETCURRENTKEY("Created Date-Time");
+      UnlinkedAttachment.SETFILTER(
+        "Created Date-Time",'..%1',
+        CREATEDATETIME(CALCDATE(STRSUBSTNO('<-%1D>',AttachmentKeepDays),TODAY),DT2TIME(CURRENTDATETIME)));
+      UnlinkedAttachment.DELETEALL(true);
+    END;
+
+    LOCAL PROCEDURE DeleteUnusedAttachments@3(VAR TempOldAttachmentEntityBuffer@1000 : TEMPORARY Record "Attachment Entity Buffer";VAR TempNewAttachmentEntityBuffer@1001 : TEMPORARY Record "Attachment Entity Buffer");
+    VAR
+      GraphMgtAttachmentBuffer@1002 : Codeunit "Graph Mgt - Attachment Buffer";
+    BEGIN
+      if TempOldAttachmentEntityBuffer.FINDSET then
+        repeat
+          if not TempNewAttachmentEntityBuffer.GET(TempOldAttachmentEntityBuffer.Id) then
+            GraphMgtAttachmentBuffer.PropagateDeleteAttachment(TempOldAttachmentEntityBuffer);
+        until TempOldAttachmentEntityBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE LinkNewAttachmentsToDocument@8(VAR TempOldAttachmentEntityBuffer@1000 : TEMPORARY Record "Attachment Entity Buffer";VAR TempNewAttachmentEntityBuffer@1001 : TEMPORARY Record "Attachment Entity Buffer";DocumentId@1002 : GUID);
+    BEGIN
+      if TempNewAttachmentEntityBuffer.FINDSET then
+        repeat
+          if not TempOldAttachmentEntityBuffer.GET(TempNewAttachmentEntityBuffer.Id) then
+            LinkAttachmentToDocument(TempNewAttachmentEntityBuffer.Id,DocumentId);
+        until TempNewAttachmentEntityBuffer.NEXT = 0;
+    END;
+
+    PROCEDURE RegisterFieldSet@18(FieldNo@1000 : Integer;VAR TempFieldBuffer@1002 : TEMPORARY Record "Field Buffer");
+    VAR
+      LastOrderNo@1001 : Integer;
+    BEGIN
+      LastOrderNo := 1;
+      if TempFieldBuffer.FINDLAST then
+        LastOrderNo := TempFieldBuffer.Order + 1;
+
+      CLEAR(TempFieldBuffer);
+      TempFieldBuffer.Order := LastOrderNo;
+      TempFieldBuffer."Table ID" := DATABASE::"Incoming Document Attachment";
+      TempFieldBuffer."Field ID" := FieldNo;
+      TempFieldBuffer.INSERT;
+    END;
+
+    LOCAL PROCEDURE ScheduleCleanupJob@5();
+    VAR
+      JobQueueEntry@1000 : Record "Job Queue Entry";
+      JobStartTime@1001 : DateTime;
+      CleanupStartTime@1002 : DateTime;
+    BEGIN
+      CleanupStartTime := CURRENTDATETIME + AttachmentKeepDays * HoursPerDay * MillisecondsPerHour;
+      JobStartTime := CleanupStartTime + CleanupJobBufferHours * MillisecondsPerHour;
+
+      JobQueueEntry.SETRANGE("Object Type to Run",JobQueueEntry."Object Type to Run"::Codeunit);
+      JobQueueEntry.SETRANGE("Object ID to Run",CODEUNIT::"Native - Attachments");
+      JobQueueEntry.SETRANGE(Status,JobQueueEntry.Status::Ready);
+      JobQueueEntry.SETFILTER("Earliest Start Date/Time",'%1..%2',CleanupStartTime,JobStartTime);
+      if JobQueueEntry.FINDFIRST then
+        exit;
+
+      JobQueueEntry.LOCKTABLE;
+      JobQueueEntry.INIT;
+      JobQueueEntry."Object Type to Run" := JobQueueEntry."Object Type to Run"::Codeunit;
+      JobQueueEntry."Object ID to Run" := CODEUNIT::"Native - Attachments";
+      JobQueueEntry."Earliest Start Date/Time" := JobStartTime;
+      JobQueueEntry."Maximum No. of Attempts to Run" := 3;
+      CODEUNIT.RUN(CODEUNIT::"Job Queue - Enqueue",JobQueueEntry);
+    END;
+
+    LOCAL PROCEDURE CleanupJobBufferHours@10() : Integer;
+    VAR
+      Result@1000 : Integer;
+    BEGIN
+      EVALUATE(Result,CleanupJobBufferHoursTxt);
+      exit(Result);
+    END;
+
+    LOCAL PROCEDURE AttachmentKeepDays@12() : Integer;
+    VAR
+      Result@1000 : Integer;
+    BEGIN
+      EVALUATE(Result,AttachmentKeepDaysTxt);
+      exit(Result);
+    END;
+
+    LOCAL PROCEDURE HoursPerDay@11() : Integer;
+    BEGIN
+      exit(24);
+    END;
+
+    LOCAL PROCEDURE MillisecondsPerHour@9() : Integer;
+    BEGIN
+      exit(3600000);
+    END;
+
+    [EventSubscriber(Table,5509,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnAfterInsertAttachmentEntityBuffer@17(VAR Rec@1000 : Record "Attachment Entity Buffer";RunTrigger@1001 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY then
+        exit;
+      ScheduleCleanupJob;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

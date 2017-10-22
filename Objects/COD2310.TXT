@@ -2,9 +2,9 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -17,6 +17,7 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
     VAR
       ProcessDraftInvoiceOptionQst@1001 : TextConst 'ENU=Keep,Discard';
       ProcessDraftInvoiceInstructionTxt@1000 : TextConst 'ENU=Do you want to keep the new invoice?';
+      ProcessDraftEstimateInstructionTxt@1010 : TextConst 'ENU=Do you want to keep the new estimate?';
       AddDiscountTxt@1003 : TextConst 'ENU=Add discount';
       ChangeDiscountTxt@1002 : TextConst 'ENU=Change discount';
       AddAttachmentTxt@1005 : TextConst 'ENU=Add attachment';
@@ -25,6 +26,9 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
       AmountOutsideRangeMsg@1008 : TextConst 'ENU=We adjusted the discount to not exceed the line amount.';
       CouponsHasBeenCheckedForCustomer@1009 : Boolean;
       HasWarnedAboutExpiredOrClaimedCoupons@1006 : Boolean;
+      CustomerCreatedMsg@1020 : TextConst 'ENU=We added this new customer to your list.';
+      InvoiceDiscountLbl@1011 : TextConst 'ENU=Invoice Discount';
+      UndoTxt@1013 : TextConst 'ENU=Undo';
 
     [External]
     PROCEDURE GetCustomerEmail@2(CustomerNo@1001 : Code[20]) : Text[80];
@@ -41,8 +45,14 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
     PROCEDURE ProcessDraftInvoiceOnCreate@3(VAR SalesHeader@1001 : Record 36) : Boolean;
     VAR
       Response@1000 : ',Save,Discard';
+      InstructionsWithDocumentTypeTxt@1003 : Text;
     BEGIN
-      CASE STRMENU(ProcessDraftInvoiceOptionQst,Response::Save,ProcessDraftInvoiceInstructionTxt) OF
+      IF SalesHeader."Document Type" = SalesHeader."Document Type"::Quote THEN
+        InstructionsWithDocumentTypeTxt := ProcessDraftEstimateInstructionTxt
+      ELSE
+        InstructionsWithDocumentTypeTxt := ProcessDraftInvoiceInstructionTxt;
+
+      CASE STRMENU(ProcessDraftInvoiceOptionQst,Response::Save,InstructionsWithDocumentTypeTxt) OF
         Response::Save:
           EXIT(TRUE);
         Response::Discard:
@@ -85,7 +95,7 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
     END;
 
     [External]
-    PROCEDURE CalcInvoiceDiscountAmount@8(VAR SalesHeader@1001 : Record 36;VAR SubTotalAmount@1003 : Decimal;VAR DiscountTxt@1002 : Text;VAR InvDiscAmountVisible@1006 : Boolean);
+    PROCEDURE CalcInvoiceDiscountAmount@8(VAR SalesHeader@1001 : Record 36;VAR SubTotalAmount@1003 : Decimal;VAR DiscountTxt@1002 : Text;VAR InvoiceDiscountAmount@1005 : Decimal;VAR InvDiscAmountVisible@1006 : Boolean);
     VAR
       SalesLine@1000 : Record 37;
     BEGIN
@@ -93,6 +103,7 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
       SalesLine.SETRANGE("Document No.",SalesHeader."No.");
       SalesLine.CALCSUMS("Inv. Discount Amount","Line Amount");
       SubTotalAmount := SalesLine."Line Amount";
+      InvoiceDiscountAmount := SalesLine."Inv. Discount Amount";
       IF SalesHeader."Invoice Discount Value" <> 0 THEN
         DiscountTxt := ChangeDiscountTxt
       ELSE
@@ -128,8 +139,10 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
       END;
       CurrencyFormat := STRSUBSTNO('%1<precision, 2:2><standard format, 0>',CurrencySymbol);
 
-      IF TaxArea.GET(SalesHeader."Tax Area Code") THEN
-        TaxAreaDescription := TaxArea.Description;
+      TaxAreaDescription := '';
+      IF SalesHeader."Tax Area Code" <> '' THEN
+        IF TaxArea.GET(SalesHeader."Tax Area Code") THEN
+          TaxAreaDescription := TaxArea.Description;
     END;
 
     [External]
@@ -202,13 +215,26 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
     PROCEDURE ValidateCustomerName@12(VAR SalesHeader@1001 : Record 36;VAR CustomerName@1003 : Text[50];VAR CustomerEmail@1002 : Text[80]);
     VAR
       Customer@1000 : Record 18;
+      Contact@1004 : Record 5050;
     BEGIN
-      IF NOT Customer.GET(Customer.GetCustNoOpenCard(SalesHeader."Sell-to Customer Name",FALSE)) THEN BEGIN
-        IF Customer.IsLookupRequested THEN
-          IF LookupCustomerName(SalesHeader,SalesHeader."Sell-to Customer Name",CustomerName,CustomerEmail) THEN
-            EXIT;
-        ERROR('');
+      IF SalesHeader."Sell-to Customer Name" = '' THEN
+        EXIT;
+
+      IF STRLEN(SalesHeader."Sell-to Customer Name") <= MAXSTRLEN(Contact."No.") THEN
+        IF Contact.GET(COPYSTR(SalesHeader."Sell-to Customer Name",1,MAXSTRLEN(Contact."No."))) THEN BEGIN
+          IF NOT FindCustomerByContactNo(Contact."No.",Customer) THEN BEGIN
+            Customer.GET(CreateCustomerFromContact(Contact));
+            SalesHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+          END;
+          SalesHeader.VALIDATE("Sell-to Customer Name",Contact.Name);
+        END;
+
+      IF NOT Customer.GET(Customer.GetCustNoOpenCard(SalesHeader."Sell-to Customer Name",FALSE,FALSE)) THEN BEGIN
+        // When no customer is found, create a new and notify the user
+        Customer.GET(Customer.CreateNewCustomer(COPYSTR(SalesHeader."Sell-to Customer Name",1,MAXSTRLEN(Customer.Name)),FALSE));
+        SendCustomerCreatedNotification(Customer,SalesHeader);
       END;
+
       SalesHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
       CustomerName := Customer.Name;
       CustomerEmail := GetCustomerEmail(SalesHeader."Sell-to Customer No.");
@@ -223,11 +249,12 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
       IF CustomerEmail <> '' THEN BEGIN
         MailManagement.CheckValidEmailAddress(CustomerEmail);
 
+        Customer.LOCKTABLE;
         IF (SalesHeader."Sell-to Customer No." <> '') AND Customer.WRITEPERMISSION THEN
           IF Customer.GET(SalesHeader."Sell-to Customer No.") THEN
             IF CustomerEmail <> Customer."E-Mail" THEN BEGIN
               Customer."E-Mail" := CustomerEmail;
-              Customer.MODIFY;
+              Customer.MODIFY(TRUE);
             END;
       END;
     END;
@@ -236,18 +263,18 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
     PROCEDURE OnQueryCloseForSalesHeader@14(VAR SalesHeader@1001 : Record 36;ForceExit@1000 : Boolean;CustomerName@1002 : Text[50]) : Boolean;
     BEGIN
       IF ForceExit THEN
-        EXIT;
+        EXIT(TRUE);
 
       IF SalesHeader."No." = '' THEN
-        EXIT;
+        EXIT(TRUE);
 
       IF CustomerName = '' THEN BEGIN
         SalesHeader.DELETE(TRUE);
-        EXIT;
+        EXIT(TRUE);
       END;
 
       IF SalesHeader.SalesLinesExist THEN
-        EXIT;
+        EXIT(TRUE);
 
       IF GUIALLOWED THEN
         EXIT(ProcessDraftInvoiceOnCreate(SalesHeader));
@@ -332,6 +359,108 @@ OBJECT Codeunit 2310 O365 Sales Invoice Mgmt
       AmountOutOfBoundsNotification.SCOPE := NOTIFICATIONSCOPE::LocalScope;
       AmountOutOfBoundsNotification.SEND;
       AmountOutsideOfBoundsNotificationSend := TRUE;
+    END;
+
+    PROCEDURE LookupContactFromSalesHeader@143(VAR SalesHeader@1004 : Record 36) : Boolean;
+    VAR
+      Customer@1002 : Record 18;
+      Contact@1000 : Record 5050;
+      O365ContactLookup@1001 : Page 2179;
+    BEGIN
+      IF SalesHeader."Sell-to Contact No." <> '' THEN BEGIN
+        Contact.GET(SalesHeader."Sell-to Contact No.");
+        O365ContactLookup.SETRECORD(Contact);
+      END;
+      O365ContactLookup.LOOKUPMODE(TRUE);
+      IF O365ContactLookup.RUNMODAL = ACTION::LookupOK THEN BEGIN
+        O365ContactLookup.GETRECORD(Contact);
+        IF SalesHeader."Sell-to Contact No." <> Contact."No." THEN BEGIN
+          IF NOT FindCustomerByContactNo(Contact."No.",Customer) THEN
+            Customer.GET(CreateCustomerFromContact(Contact));
+          SalesHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+        END;
+        EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE FindCustomerByContactNo@144(ContactNo@1001 : Code[20];VAR Customer@1002 : Record 18) : Boolean;
+    VAR
+      ContBusRel@1000 : Record 5054;
+    BEGIN
+      IF NOT ContBusRel.FindByContact(ContBusRel."Link to Table"::Customer,ContactNo) THEN
+        EXIT(FALSE);
+
+      Customer.GET(ContBusRel."No.");
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateCustomerFromContact@146(Contact@1000 : Record 5050) : Code[20];
+    VAR
+      MarketingSetup@1003 : Record 5079;
+      Customer@1001 : Record 18;
+    BEGIN
+      MarketingSetup.GET;
+      Contact.SetHideValidationDialog(TRUE);
+      CASE Contact.Type OF
+        Contact.Type::Company:
+          BEGIN
+            MarketingSetup.TESTFIELD("Cust. Template Company Code");
+            Contact.CreateCustomer(MarketingSetup."Cust. Template Company Code");
+          END;
+        Contact.Type::Person:
+          BEGIN
+            MarketingSetup.TESTFIELD("Cust. Template Person Code");
+            Contact.CreateCustomer(MarketingSetup."Cust. Template Person Code");
+          END;
+      END;
+
+      FindCustomerByContactNo(Contact."No.",Customer);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE SendCustomerCreatedNotification@29(Customer@1000 : Record 18;SalesHeader@1001 : Record 36);
+    VAR
+      CustomerCreatedNotification@1002 : Notification;
+      Type@1003 : Integer;
+    BEGIN
+      CustomerCreatedNotification.ID := CREATEGUID;
+      CustomerCreatedNotification.MESSAGE(CustomerCreatedMsg);
+      CustomerCreatedNotification.SCOPE(NOTIFICATIONSCOPE::LocalScope);
+      CustomerCreatedNotification.ADDACTION(UndoTxt,CODEUNIT::"O365 Sales Invoice Mgmt",'UndoCustomerCreation');
+      CustomerCreatedNotification.SETDATA('CustomerNo',Customer."No.");
+      CustomerCreatedNotification.SETDATA('SalesHeaderNo',SalesHeader."No.");
+
+      Type := SalesHeader."Document Type";
+      CustomerCreatedNotification.SETDATA('SalesHeaderType',FORMAT(Type));
+      CustomerCreatedNotification.SEND;
+    END;
+
+    PROCEDURE UndoCustomerCreation@31(VAR CreateCustomerNotification@1000 : Notification);
+    VAR
+      Customer@1002 : Record 18;
+      SalesHeader@1003 : Record 36;
+      CustContUpdate@1005 : Codeunit 5056;
+      DocumentType@1001 : Option;
+    BEGIN
+      EVALUATE(DocumentType,CreateCustomerNotification.GETDATA('SalesHeaderType'));
+
+      IF SalesHeader.GET(DocumentType,CreateCustomerNotification.GETDATA('SalesHeaderNo')) THEN BEGIN
+        SalesHeader.INIT;
+        SalesHeader.MODIFY;
+      END;
+
+      IF Customer.GET(CreateCustomerNotification.GETDATA('CustomerNo')) THEN BEGIN
+        CustContUpdate.DeleteCustomerContacts(Customer);
+        Customer.DELETE(TRUE);
+      END;
+    END;
+
+    PROCEDURE GetInvoiceDiscountCaption@19(InvoiceDiscountValue@1000 : Decimal) : Text;
+    BEGIN
+      IF InvoiceDiscountValue = 0 THEN
+        EXIT(InvoiceDiscountLbl);
+      EXIT(STRSUBSTNO('%1 (%2%)',InvoiceDiscountLbl,ROUND(InvoiceDiscountValue,0.1)));
     END;
 
     BEGIN

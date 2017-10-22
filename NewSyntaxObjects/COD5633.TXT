@@ -1,0 +1,311 @@
+OBJECT Codeunit 5633 FA Jnl.-Post Batch
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="FA Journal Line";
+    Permissions=TableData "FA Journal Batch"=imd;
+    OnRun=BEGIN
+            FAJnlLine.COPY(Rec);
+            Code;
+            Rec := FAJnlLine;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=cannot exceed %1 characters';
+      Text001@1001 : TextConst 'ENU=Journal Batch Name    #1##########\\';
+      Text002@1002 : TextConst 'ENU=Checking lines        #2######\';
+      Text003@1003 : TextConst 'ENU=Posting lines         #3###### @4@@@@@@@@@@@@@\';
+      Text004@1004 : TextConst 'ENU=Updating lines        #5###### @6@@@@@@@@@@@@@';
+      Text005@1005 : TextConst 'ENU=Posting lines         #3###### @4@@@@@@@@@@@@@';
+      Text006@1006 : TextConst 'ENU=A maximum of %1 posting number series can be used in each journal.';
+      Text007@1007 : TextConst 'ENU=<Month Text>';
+      FAJnlLine@1008 : Record "FA Journal Line";
+      FAJnlLine2@1009 : Record "FA Journal Line";
+      FAJnlLine3@1010 : Record "FA Journal Line";
+      FAJnlTemplate@1011 : Record "FA Journal Template";
+      FAJnlBatch@1012 : Record "FA Journal Batch";
+      FAReg@1013 : Record "FA Register";
+      FALedgEntry@1015 : Record "FA Ledger Entry";
+      NoSeries@1016 : TEMPORARY Record "No. Series";
+      FAJnlSetup@1017 : Record "FA Journal Setup";
+      FAJnlCheckLine@1018 : Codeunit "FA Jnl.-Check Line";
+      FAJnlPostLine@1019 : Codeunit "FA Jnl.-Post Line";
+      NoSeriesMgt@1020 : Codeunit NoSeriesManagement;
+      NoSeriesMgt2@1021 : ARRAY [10] OF Codeunit NoSeriesManagement;
+      Window@1023 : Dialog;
+      LineCount@1024 : Integer;
+      StartLineNo@1025 : Integer;
+      NoOfRecords@1026 : Integer;
+      FARegNo@1027 : Integer;
+      LastDocNo@1028 : Code[20];
+      LastDocNo2@1029 : Code[20];
+      LastPostedDocNo@1030 : Code[20];
+      NoOfPostingNoSeries@1031 : Integer;
+      PostingNoSeriesNo@1032 : Integer;
+      PreviewMode@1014 : Boolean;
+
+    LOCAL PROCEDURE Code@1();
+    VAR
+      UpdateAnalysisView@1002 : Codeunit "Update Analysis View";
+      GenJnlPostPreview@1000 : Codeunit "Gen. Jnl.-Post Preview";
+    BEGIN
+      with FAJnlLine do begin
+        SETRANGE("Journal Template Name","Journal Template Name");
+        SETRANGE("Journal Batch Name","Journal Batch Name");
+        LOCKTABLE;
+
+        FAJnlTemplate.GET("Journal Template Name");
+        FAJnlBatch.GET("Journal Template Name","Journal Batch Name");
+        if STRLEN(INCSTR(FAJnlBatch.Name)) > MAXSTRLEN(FAJnlBatch.Name) then
+          FAJnlBatch.FIELDERROR(
+            Name,
+            STRSUBSTNO(
+              Text000,
+              MAXSTRLEN(FAJnlBatch.Name)));
+
+        if FAJnlTemplate.Recurring then begin
+          SETRANGE("FA Posting Date",0D,WORKDATE);
+          SETFILTER("Expiration Date",'%1 | %2..',0D,WORKDATE);
+        end;
+
+        if not FIND('=><') then begin
+          if PreviewMode then
+            GenJnlPostPreview.ThrowError;
+          "Line No." := 0;
+          COMMIT;
+          exit;
+        end;
+
+        if FAJnlTemplate.Recurring then
+          Window.OPEN(
+            Text001 +
+            Text002 +
+            Text003 +
+            Text004)
+        else
+          Window.OPEN(
+            Text001 +
+            Text002 +
+            Text005);
+        Window.UPDATE(1,"Journal Batch Name");
+
+        // Check lines
+        LineCount := 0;
+        StartLineNo := "Line No.";
+        repeat
+          LineCount := LineCount + 1;
+          Window.UPDATE(2,LineCount);
+          CheckRecurringLine(FAJnlLine);
+          FAJnlCheckLine.CheckFAJnlLine(FAJnlLine);
+          if NEXT = 0 then
+            FIND('-');
+        until "Line No." = StartLineNo;
+        NoOfRecords := LineCount;
+
+        FALedgEntry.LOCKTABLE;
+        if FALedgEntry.FINDLAST then;
+        FAReg.LOCKTABLE;
+        if FAReg.FINDLAST then
+          FARegNo := FAReg."No." + 1
+        else
+          FARegNo := 1;
+
+        // Post lines
+        PostLines;
+
+        if FAReg.FINDLAST then;
+        if FAReg."No." <> FARegNo then
+          FARegNo := 0;
+
+        INIT;
+        "Line No." := FARegNo;
+
+        // Update/delete lines
+        if FARegNo <> 0 then
+          if FAJnlTemplate.Recurring then begin
+            LineCount := 0;
+            FAJnlLine2.COPYFILTERS(FAJnlLine);
+            FAJnlLine2.FIND('-');
+            repeat
+              LineCount := LineCount + 1;
+              Window.UPDATE(5,LineCount);
+              Window.UPDATE(6,ROUND(LineCount / NoOfRecords * 10000,1));
+              if FAJnlLine2."FA Posting Date" <> 0D then
+                FAJnlLine2.VALIDATE("FA Posting Date",CALCDATE(FAJnlLine2."Recurring Frequency",FAJnlLine2."FA Posting Date"));
+              if FAJnlLine2."Recurring Method" <> FAJnlLine2."Recurring Method"::"F Fixed" then
+                ZeroAmounts(FAJnlLine2);
+              FAJnlLine2.MODIFY;
+            until FAJnlLine2.NEXT = 0;
+          end else begin
+            FAJnlLine2.COPYFILTERS(FAJnlLine);
+            FAJnlLine2.SETFILTER("FA No.",'<>%1','');
+            if FAJnlLine2.FIND('+') then; // Remember the last line
+            FAJnlLine3.COPY(FAJnlLine);
+            FAJnlLine3.DELETEALL;
+            FAJnlLine3.RESET;
+            FAJnlLine3.SETRANGE("Journal Template Name","Journal Template Name");
+            FAJnlLine3.SETRANGE("Journal Batch Name","Journal Batch Name");
+            if not FAJnlLine3.FINDLAST then
+              if INCSTR("Journal Batch Name") <> '' then begin
+                FAJnlBatch.GET("Journal Template Name","Journal Batch Name");
+                FAJnlBatch.DELETE;
+                FAJnlSetup.IncFAJnlBatchName(FAJnlBatch);
+                FAJnlBatch.Name := INCSTR("Journal Batch Name");
+                if FAJnlBatch.INSERT then;
+                "Journal Batch Name" := FAJnlBatch.Name;
+              end;
+
+            FAJnlLine3.SETRANGE("Journal Batch Name","Journal Batch Name");
+            if (FAJnlBatch."No. Series" = '') and not FAJnlLine3.FINDLAST then begin
+              FAJnlLine3.INIT;
+              FAJnlLine3."Journal Template Name" := "Journal Template Name";
+              FAJnlLine3."Journal Batch Name" := "Journal Batch Name";
+              FAJnlLine3."Line No." := 10000;
+              FAJnlLine3.INSERT;
+              FAJnlLine3.SetUpNewLine(FAJnlLine2);
+              FAJnlLine3.MODIFY;
+            end;
+          end;
+        if FAJnlBatch."No. Series" <> '' then
+          NoSeriesMgt.SaveNoSeries;
+        if NoSeries.FIND('-') then
+          repeat
+            EVALUATE(PostingNoSeriesNo,NoSeries.Description);
+            NoSeriesMgt2[PostingNoSeriesNo].SaveNoSeries;
+          until NoSeries.NEXT = 0;
+
+        if PreviewMode then
+          GenJnlPostPreview.ThrowError;
+
+        COMMIT;
+        CLEAR(FAJnlCheckLine);
+        CLEAR(FAJnlPostLine);
+      end;
+      UpdateAnalysisView.UpdateAll(0,true);
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CheckRecurringLine@2(VAR FAJnlLine2@1000 : Record "FA Journal Line");
+    VAR
+      DummyDateFormula@1001 : DateFormula;
+    BEGIN
+      with FAJnlLine2 do
+        if "FA No." <> '' then
+          if FAJnlTemplate.Recurring then begin
+            TESTFIELD("Recurring Method");
+            TESTFIELD("Recurring Frequency");
+            if "Recurring Method" = "Recurring Method"::"V Variable" then
+              TESTFIELD(Amount);
+          end else begin
+            TESTFIELD("Recurring Method",0);
+            TESTFIELD("Recurring Frequency",DummyDateFormula);
+          end;
+    END;
+
+    LOCAL PROCEDURE MakeRecurringTexts@6(VAR FAJnlLine2@1000 : Record "FA Journal Line");
+    VAR
+      AccountingPeriod@1005 : Record "Accounting Period";
+      Day@1001 : Integer;
+      Month@1002 : Integer;
+      Week@1003 : Integer;
+      MonthText@1004 : Text[30];
+    BEGIN
+      with FAJnlLine2 do
+        if ("FA No." <> '') and ("Recurring Method" <> 0) then begin
+          Day := DATE2DMY("FA Posting Date",1);
+          Week := DATE2DWY("FA Posting Date",2);
+          Month := DATE2DMY("FA Posting Date",2);
+          MonthText := FORMAT("FA Posting Date",0,Text007);
+          AccountingPeriod.SETRANGE("Starting Date",0D,"FA Posting Date");
+          if not AccountingPeriod.FINDLAST then
+            AccountingPeriod.Name := '';
+          "Document No." :=
+            DELCHR(
+              PADSTR(
+                STRSUBSTNO("Document No.",Day,Week,Month,MonthText,AccountingPeriod.Name),
+                MAXSTRLEN("Document No.")),
+              '>');
+          Description :=
+            DELCHR(
+              PADSTR(
+                STRSUBSTNO(Description,Day,Week,Month,MonthText,AccountingPeriod.Name),
+                MAXSTRLEN(Description)),
+              '>');
+        end;
+    END;
+
+    LOCAL PROCEDURE ZeroAmounts@7(VAR FAJnlLine@1000 : Record "FA Journal Line");
+    BEGIN
+      FAJnlLine.Amount := 0;
+      FAJnlLine."Debit Amount" := 0;
+      FAJnlLine."Credit Amount" := 0;
+      FAJnlLine."Salvage Value" := 0;
+    END;
+
+    [External]
+    PROCEDURE SetPreviewMode@3(NewPreviewMode@1000 : Boolean);
+    BEGIN
+      PreviewMode := NewPreviewMode;
+    END;
+
+    LOCAL PROCEDURE PostLines@4();
+    BEGIN
+      with FAJnlLine do begin
+        LineCount := 0;
+        LastDocNo := '';
+        LastDocNo2 := '';
+        LastPostedDocNo := '';
+        FIND('-');
+        repeat
+          LineCount := LineCount + 1;
+          Window.UPDATE(3,LineCount);
+          Window.UPDATE(4,ROUND(LineCount / NoOfRecords * 10000,1));
+          if not ("FA No." = '') and
+             (FAJnlBatch."No. Series" <> '') and
+             ("Document No." <> LastDocNo2)
+          then
+            TESTFIELD("Document No.",NoSeriesMgt.GetNextNo(FAJnlBatch."No. Series","FA Posting Date",false));
+          if not ("FA No." = '') then
+            LastDocNo2 := "Document No.";
+          MakeRecurringTexts(FAJnlLine);
+          if "Posting No. Series" = '' then
+            "Posting No. Series" := FAJnlBatch."No. Series"
+          else
+            if not ("FA No." = '') then
+              if "Document No." = LastDocNo then
+                "Document No." := LastPostedDocNo
+              else begin
+                if not NoSeries.GET("Posting No. Series") then begin
+                  NoOfPostingNoSeries := NoOfPostingNoSeries + 1;
+                  if NoOfPostingNoSeries > ARRAYLEN(NoSeriesMgt2) then
+                    ERROR(
+                      Text006,
+                      ARRAYLEN(NoSeriesMgt2));
+                  NoSeries.Code := "Posting No. Series";
+                  NoSeries.Description := FORMAT(NoOfPostingNoSeries);
+                  NoSeries.INSERT;
+                end;
+                LastDocNo := "Document No.";
+                EVALUATE(PostingNoSeriesNo,NoSeries.Description);
+                "Document No." := NoSeriesMgt2[PostingNoSeriesNo].GetNextNo("Posting No. Series","FA Posting Date",false);
+                LastPostedDocNo := "Document No.";
+              end;
+          FAJnlPostLine.FAJnlPostLine(FAJnlLine,false);
+        until NEXT = 0;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

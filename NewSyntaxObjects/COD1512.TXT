@@ -1,0 +1,126 @@
+OBJECT Codeunit 1512 Workflow Create Payment Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Job Queue Entry";
+    OnRun=VAR
+            WorkflowStepArgument@1000 : Record "Workflow Step Argument";
+            WorkflowStepArgumentArchive@1001 : Record "Workflow Step Argument Archive";
+          BEGIN
+            if not WorkflowStepArgument.GET("Record ID to Process") then begin
+              WorkflowStepArgumentArchive.SETRANGE("Original Record ID","Record ID to Process");
+              if not WorkflowStepArgumentArchive.FINDFIRST then
+                exit;
+
+              WorkflowStepArgument.TRANSFERFIELDS(WorkflowStepArgumentArchive);
+            end;
+            CreatePmtLine(WorkflowStepArgument);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PaymentTxt@1000 : TextConst '@@@="%1 = Document Type (Eg. Invoice) %2 = Document No. (1201); Payment for Invoice 1201";ENU=Payment for %1 %2.';
+
+    [External]
+    PROCEDURE CreatePmtLine@1(WorkflowStepArgument@1005 : Record "Workflow Step Argument");
+    VAR
+      GenJournalBatch@1013 : Record "Gen. Journal Batch";
+      GenJournalTemplate@1012 : Record "Gen. Journal Template";
+      GenJournalLine@1011 : Record "Gen. Journal Line";
+      Vendor@1010 : Record Vendor;
+      VendorLedgerEntry@1009 : Record "Vendor Ledger Entry";
+      PurchInvHeader@1008 : Record "Purch. Inv. Header";
+      WorkflowStepInstance@1000 : Record "Workflow Step Instance";
+      WorkflowStepInstanceArchive@1006 : Record "Workflow Step Instance Archive";
+      RecRef@1004 : RecordRef;
+      EmptyDateFormula@1003 : DateFormula;
+      LastLineNo@1002 : Integer;
+      LastDocNo@1001 : Code[20];
+    BEGIN
+      GenJournalTemplate.GET(WorkflowStepArgument."General Journal Template Name");
+      GenJournalBatch.GET(GenJournalTemplate.Name,WorkflowStepArgument."General Journal Batch Name");
+
+      WorkflowStepInstance.SETRANGE(Argument,WorkflowStepArgument.ID);
+      if WorkflowStepInstance.FINDFIRST then
+        RecRef.GET(WorkflowStepInstance."Record ID")
+      else begin
+        WorkflowStepInstanceArchive.SETRANGE(Argument,WorkflowStepArgument.ID);
+        if not WorkflowStepInstanceArchive.FINDFIRST then
+          exit;
+
+        RecRef.GET(WorkflowStepInstanceArchive."Record ID")
+      end;
+
+      RecRef.SETTABLE(PurchInvHeader);
+      PurchInvHeader.FIND;
+      VendorLedgerEntry.GET(PurchInvHeader."Vendor Ledger Entry No.");
+      Vendor.GET(VendorLedgerEntry."Vendor No.");
+
+      GenJournalLine.SETRANGE("Journal Template Name",GenJournalBatch."Journal Template Name");
+      GenJournalLine.SETRANGE("Journal Batch Name",GenJournalBatch.Name);
+      if GenJournalLine.FINDLAST then begin
+        LastLineNo := GenJournalLine."Line No.";
+        LastDocNo := GenJournalLine."Document No.";
+      end;
+
+      GenJournalLine.INIT;
+      GenJournalLine."Journal Template Name" := GenJournalBatch."Journal Template Name";
+      GenJournalLine."Journal Batch Name" := GenJournalBatch.Name;
+      GenJournalLine."Line No." := LastLineNo + 10000;
+      GenJournalLine."Document Type" := GenJournalLine."Document Type"::Payment;
+      GenJournalLine."Posting No. Series" := GenJournalBatch."Posting No. Series";
+
+      VendorLedgerEntry.CALCFIELDS(Amount);
+
+      GenJournalLine."Account Type" := GenJournalLine."Account Type"::Vendor;
+      GenJournalLine.VALIDATE("Account No.",VendorLedgerEntry."Vendor No.");
+      GenJournalLine."Bal. Account Type" := GenJournalBatch."Bal. Account Type";
+      GenJournalLine.VALIDATE("Bal. Account No.",GenJournalBatch."Bal. Account No.");
+      GenJournalLine.VALIDATE("Currency Code",VendorLedgerEntry."Currency Code");
+      GenJournalLine.Description := STRSUBSTNO(PaymentTxt,VendorLedgerEntry."Document Type",VendorLedgerEntry."Document No.");
+      GenJournalLine."Source Line No." := VendorLedgerEntry."Entry No.";
+      GenJournalLine."Shortcut Dimension 1 Code" := VendorLedgerEntry."Global Dimension 1 Code";
+      GenJournalLine."Shortcut Dimension 2 Code" := VendorLedgerEntry."Global Dimension 2 Code";
+      GenJournalLine."Dimension Set ID" := VendorLedgerEntry."Dimension Set ID";
+      GenJournalLine."Source Code" := GenJournalTemplate."Source Code";
+      GenJournalLine."Reason Code" := GenJournalBatch."Reason Code";
+      GenJournalLine.VALIDATE(Amount,-VendorLedgerEntry.Amount);
+      GenJournalLine."Applies-to Doc. Type" := VendorLedgerEntry."Document Type";
+      GenJournalLine."Applies-to Doc. No." := VendorLedgerEntry."Document No.";
+      GenJournalLine."Payment Method Code" := VendorLedgerEntry."Payment Method Code";
+      GenJournalLine."Creditor No." := VendorLedgerEntry."Creditor No.";
+      GenJournalLine."Payment Reference" := VendorLedgerEntry."Payment Reference";
+      GenJournalLine."Applies-to Ext. Doc. No." := VendorLedgerEntry."External Document No.";
+      EVALUATE(EmptyDateFormula,'<0D>');
+      GenJournalLine.SetPostingDateAsDueDate(GenJournalLine.GetAppliesToDocDueDate,EmptyDateFormula);
+      GenJournalLine."Document No." := GetDocumentNo(GenJournalLine,LastDocNo);
+      GenJournalLine.INSERT;
+    END;
+
+    [External]
+    PROCEDURE GetDocumentNo@86(VAR GenJournalLine@1003 : Record "Gen. Journal Line";LastDocNo@1000 : Code[20]) : Code[20];
+    VAR
+      GenJournalBatch@1002 : Record "Gen. Journal Batch";
+      NoSeriesMgt@1001 : Codeunit NoSeriesManagement;
+    BEGIN
+      GenJournalBatch.GET(GenJournalLine."Journal Template Name",GenJournalLine."Journal Batch Name");
+      if GenJournalBatch."No. Series" = '' then
+        exit(INCSTR(LastDocNo));
+
+      CLEAR(NoSeriesMgt);
+      exit(NoSeriesMgt.GetNextNo(GenJournalBatch."No. Series",GenJournalLine."Posting Date",false));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

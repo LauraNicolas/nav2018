@@ -1,0 +1,607 @@
+OBJECT Codeunit 9010 Azure AD User Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData Plan=rimd,
+                TableData "User Plan"=rimd,
+                TableData "Access Control"=rimd,
+                TableData User=rimd,
+                TableData "User Property"=rimd,
+                TableData "Membership Entitlement"=rimd;
+    OnRun=BEGIN
+            if CURRENTCLIENTTYPE = CLIENTTYPE::Background then
+              exit;
+
+            Run(USERSECURITYID);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PermissionManager@1001 : Codeunit "Permission Manager";
+      Graph@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery";
+      IsInitialized@1003 : Boolean;
+      UserDoesNotObjectIdSetErr@1004 : TextConst '@@@="%1 =  The specified User Security ID";ENU=The user with the security ID %1 does not have a valid object ID in Azure Active Directory.';
+      CouldNotFindGraphUserErr@1005 : TextConst '@@@="%1 = The specified object id";ENU=An Azure Active Directory user with the object ID %1 was not found.';
+      IsTest@1002 : Boolean;
+
+    [Internal]
+    PROCEDURE Run@3(ForUserSecurityId@1000 : GUID);
+    VAR
+      UserProperty@1002 : Record "User Property";
+      PermissionManager@1001 : Codeunit "Permission Manager";
+    BEGIN
+      // This function exists for testability
+      if not PermissionManager.SoftwareAsAService then
+        exit;
+
+      if not UserProperty.GET(ForUserSecurityId) then
+        exit;
+
+      if not PermissionManager.IsFirstLogin(ForUserSecurityId) then
+        exit;
+
+      if GetUserAuthenticationObjectId(ForUserSecurityId) = '' then
+        exit;
+
+      RefreshUserPlanAssignments(ForUserSecurityId);
+    END;
+
+    [Internal]
+    PROCEDURE RefreshUserPlanAssignments@8(ForUserSecurityId@1000 : GUID);
+    VAR
+      User@1002 : Record User;
+      GraphUser@1001 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User";
+    BEGIN
+      if not User.GET(ForUserSecurityId) then
+        exit;
+
+      if not Initialize then
+        exit;
+
+      if not GetGraphUserFromObjectId(ForUserSecurityId,GraphUser) then
+        exit;
+
+      UpdateUserFromAzureGraph(User,GraphUser);
+      UpdateUserPlansFromAzureGraph(User."User Security ID",GraphUser);
+    END;
+
+    [Internal]
+    PROCEDURE GetUserPlans@2(VAR TempPlan@1003 : TEMPORARY Record Plan;ForUserSecurityId@1000 : GUID;IncludePlansWithoutEntitlement@1001 : Boolean);
+    VAR
+      GraphUser@1004 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User";
+    BEGIN
+      if not Initialize then
+        exit;
+
+      if GetGraphUserFromObjectId(ForUserSecurityId,GraphUser) then
+        GetGraphUserPlans(TempPlan,GraphUser,IncludePlansWithoutEntitlement);
+    END;
+
+    [Internal]
+    PROCEDURE CreateNewUsersFromAzureAD@11();
+    VAR
+      User@1013 : Record User;
+      PagedUsers@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.PagedUserCollection";
+      GraphUser@1001 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.IUser";
+      IsFirstPage@1011 : Boolean;
+    BEGIN
+      if not Initialize then
+        exit;
+
+      PagedUsers := Graph.GetUsersPage(50);
+
+      IsFirstPage := true;
+      repeat
+        if not IsFirstPage then
+          PagedUsers.GetNextPage
+        else
+          IsFirstPage := false;
+        foreach GraphUser in PagedUsers.CurrentPage do
+          if GetUserFromAuthenticationObjectId(GraphUser.ObjectId,User) then begin
+            UpdateUserFromAzureGraph(User,GraphUser);
+            UpdateUserPlansFromAzureGraph(User."User Security ID",GraphUser);
+          end else
+            CreateNewUserFromGraphUser(GraphUser);
+      until (not PagedUsers.MorePagesAvailable);
+    END;
+
+    PROCEDURE CreateNewUserFromGraphUser@47(GraphUser@1003 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.IUser");
+    VAR
+      UserAccountHelper@1001 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavUserAccount.NavUserAccountHelper";
+      NewUserSecurityId@1002 : GUID;
+    BEGIN
+      if IsGraphUserEntitledFromServicePlan(GraphUser) then begin
+        EnsureAuthenticationEmailIsNotInUse(GraphUser.UserPrincipalName);
+        NewUserSecurityId := UserAccountHelper.CreateUserFromAzureADObjectId(GraphUser.ObjectId);
+        if not ISNULLGUID(NewUserSecurityId) then
+          InitializeAsNewUser(NewUserSecurityId,GraphUser);
+      end;
+    END;
+
+    LOCAL PROCEDURE RemoveUnassignedUserPlans@42(VAR TempO365Plan@1006 : TEMPORARY Record Plan;ForUserSecurityId@1003 : GUID);
+    VAR
+      NavUserPlan@1002 : Record "User Plan";
+      TempNavUserPlan@1004 : TEMPORARY Record "User Plan";
+    BEGIN
+      // Have any plans been removed from this user in O365, since last time he logged-in to NAV?
+      // Get all plans assigned to the user, in NAV
+      NavUserPlan.SETRANGE("User Security ID",ForUserSecurityId);
+      if NavUserPlan.FINDSET then
+        repeat
+          TempNavUserPlan.COPY(NavUserPlan,false);
+          TempNavUserPlan.INSERT;
+        until NavUserPlan.NEXT = 0;
+
+      // Get all plans assigned to the user in Office
+      if TempO365Plan.FINDSET then
+        // And remove them from the list of plans assigned to the user
+        repeat
+          TempNavUserPlan.SETRANGE("Plan ID",TempO365Plan."Plan ID");
+          if not TempNavUserPlan.ISEMPTY then
+            TempNavUserPlan.DELETEALL;
+        until TempO365Plan.NEXT = 0;
+
+      // If any plans belong to the user in NAV, but not in Office, de-assign them
+      TempNavUserPlan.SETRANGE("Plan ID");
+      if TempNavUserPlan.FINDSET then
+        repeat
+          NavUserPlan.SETRANGE("Plan ID",TempNavUserPlan."Plan ID");
+          if NavUserPlan.FINDFIRST then begin
+            NavUserPlan.LOCKTABLE;
+            NavUserPlan.DELETE;
+            RemoveUserGroupsForUserAndPlan(NavUserPlan);
+            if not IsTest then
+              COMMIT; // Finalize the transaction. Else any further error can rollback and create elevation of priviledge
+          end;
+        until TempNavUserPlan.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AddNewlyAssignedUserPlans@46(VAR TempO365Plan@1006 : TEMPORARY Record Plan;ForUserSecurityId@1003 : GUID);
+    VAR
+      NavUserPlan@1002 : Record "User Plan";
+      PermissionManager@1005 : Codeunit "Permission Manager";
+    BEGIN
+      // Have any plans been added to this user in O365, since last time he logged-in to NAV?
+      // For each plan assigned to the user in Office
+      if TempO365Plan.FINDSET then
+        repeat
+          // Does this assignment exist in NAV? If not, add it.
+          NavUserPlan.SETRANGE("Plan ID",TempO365Plan."Plan ID");
+          NavUserPlan.SETRANGE("User Security ID",ForUserSecurityId);
+          if NavUserPlan.ISEMPTY then begin
+            InsertFromTempPlan(TempO365Plan);
+            NavUserPlan.LOCKTABLE;
+            NavUserPlan.INIT;
+            NavUserPlan."Plan ID" := TempO365Plan."Plan ID";
+            NavUserPlan."User Security ID" := ForUserSecurityId;
+            NavUserPlan.INSERT;
+            // The SUPER role is replaced with O365 FULL ACCESS for new users.
+            // This happens only for users who are created from O365 (i.e. are added to plans)
+            PermissionManager.UpdateUserAccessForSaaS(NavUserPlan."User Security ID");
+            if not IsTest then
+              COMMIT; // Finalize the transaction. Else any further error can rollback and create elevation of priviledge
+          end;
+        until TempO365Plan.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetGraphUserPlans@13(VAR TempPlan@1008 : TEMPORARY Record Plan;VAR GraphUser@1000 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User";IncludePlansWithoutEntitlement@1001 : Boolean);
+    VAR
+      AssignedPlan@1004 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.AssignedPlan";
+      DirectoryRole@1002 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.IDirectoryRole";
+      ServicePlanIdValue@1009 : Variant;
+      IsSystemRole@1005 : Boolean;
+    BEGIN
+      TempPlan.RESET;
+      TempPlan.DELETEALL;
+
+      // Loop through assigned Azzure AD Plans
+      foreach AssignedPlan in GraphUser.AssignedPlans do
+        if AssignedPlan.CapabilityStatus = 'Enabled' then begin
+          ServicePlanIdValue := AssignedPlan.ServicePlanId;
+          if IncludePlansWithoutEntitlement or IsNavServicePlan(AssignedPlan.ServicePlanId) then
+            AddToTempPlan(ServicePlanIdValue,AssignedPlan.Service,TempPlan);
+        end;
+
+      // If there are no Azure AD Plans, loop through Azure AD Roles
+      if GraphUser.AssignedPlans.Count = 0 then
+        foreach DirectoryRole in Graph.GetUserRoles(GraphUser) do begin
+          EVALUATE(IsSystemRole,FORMAT(DirectoryRole.IsSystem));
+          if IncludePlansWithoutEntitlement or IsSystemRole then
+            AddToTempPlan(DirectoryRole.RoleTemplateId,DirectoryRole.DisplayName,TempPlan);
+        end;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE GetGraphUserFromObjectId@1(ForUserSecurityID@1000 : GUID;VAR GraphUser@1001 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User");
+    VAR
+      UserObjectID@1002 : Text;
+    BEGIN
+      if ForUserSecurityID = USERSECURITYID then begin
+        GraphUser := Graph.GetCurrentUser;
+        if not ISNULL(GraphUser) then
+          exit;
+      end;
+
+      UserObjectID := GetUserAuthenticationObjectId(ForUserSecurityID);
+      if UserObjectID = '' then
+        ERROR(CouldNotFindGraphUserErr,UserObjectID);
+
+      GraphUser := Graph.GetUserByObjectId(UserObjectID);
+      if ISNULL(GraphUser) then
+        ERROR(CouldNotFindGraphUserErr,UserObjectID);
+    END;
+
+    LOCAL PROCEDURE InsertFromTempPlan@17(VAR TempPlan@1000 : TEMPORARY Record Plan);
+    VAR
+      Plan@1001 : Record Plan;
+    BEGIN
+      if not Plan.GET(TempPlan."Plan ID") then begin
+        Plan.INIT;
+        Plan.COPY(TempPlan);
+        Plan.INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE IsGraphUserEntitledFromServicePlan@18(VAR GraphUser@1000 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.IUser") : Boolean;
+    VAR
+      AssignedPlan@1010 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.AssignedPlan";
+    BEGIN
+      foreach AssignedPlan in GraphUser.AssignedPlans do begin
+        if IsNavServicePlan(AssignedPlan.ServicePlanId) then
+          exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE IsNavServicePlan@26(ServicePlanId@1001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Guid") : Boolean;
+    VAR
+      Plan@1000 : Record Plan;
+    BEGIN
+      exit(Plan.GET(ServicePlanId.ToString('D')));
+    END;
+
+    PROCEDURE GetUserObjectId@20(ForUserSecurityId@1002 : GUID) : Text[250];
+    VAR
+      User@1001 : Record User;
+      GraphUser@1000 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User";
+    BEGIN
+      if not User.GET(ForUserSecurityId) then
+        exit('');
+
+      if not GetGraphUserFromObjectId(ForUserSecurityId,GraphUser) then
+        exit('');
+
+      exit(COPYSTR(GraphUser.ObjectId,1,250));
+    END;
+
+    LOCAL PROCEDURE GetUserAuthenticationObjectId@7(ForUserSecurityId@1000 : GUID) : Text;
+    VAR
+      UserProperty@1002 : Record "User Property";
+    BEGIN
+      if not UserProperty.GET(ForUserSecurityId) then
+        ERROR(UserDoesNotObjectIdSetErr,ForUserSecurityId);
+
+      exit(UserProperty."Authentication Object ID");
+    END;
+
+    LOCAL PROCEDURE GetUserFromAuthenticationObjectId@12(AuthenticationObjectId@1000 : Text;VAR FoundUser@1001 : Record User) : Boolean;
+    VAR
+      UserProperty@1002 : Record "User Property";
+    BEGIN
+      UserProperty.SETRANGE("Authentication Object ID",AuthenticationObjectId);
+      if UserProperty.FINDFIRST then
+        exit(FoundUser.GET(UserProperty."User Security ID"));
+      exit(false)
+    END;
+
+    [Internal]
+    PROCEDURE GetAzureUserPlanRoleCenterId@1020(ForUserSecurityId@1003 : GUID) : Integer;
+    VAR
+      TempO365Plan@1001 : TEMPORARY Record Plan;
+      User@1005 : Record User;
+      GraphUser@1006 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User";
+    BEGIN
+      if not User.GET(ForUserSecurityId) then
+        exit(0);
+
+      if not Initialize then
+        exit(0);
+
+      if not GetGraphUserFromObjectId(ForUserSecurityId,GraphUser) then
+        exit(0);
+
+      GetGraphUserPlans(TempO365Plan,GraphUser,false);
+
+      TempO365Plan.SETFILTER("Role Center ID",'<>0');
+
+      if not TempO365Plan.FINDFIRST then
+        exit(0);
+
+      exit(TempO365Plan."Role Center ID");
+    END;
+
+    [TryFunction]
+    PROCEDURE TryGetAzureUserPlanRoleCenterId@4(VAR RoleCenterID@1001 : Integer;ForUserSecurityId@1000 : GUID);
+    BEGIN
+      RoleCenterID := GetAzureUserPlanRoleCenterId(ForUserSecurityId);
+    END;
+
+    LOCAL PROCEDURE UpdateUserFromAzureGraph@15(VAR User@1001 : Record User;VAR GraphUser@1002 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User") : Boolean;
+    VAR
+      ModifyUser@1003 : Boolean;
+      TempString@1004 : Text;
+    BEGIN
+      if (UPPERCASE(FORMAT(GraphUser.AccountEnabled)) = 'TRUE') and (User.State = User.State::Disabled) then begin
+        User.State := User.State::Enabled;
+        ModifyUser := true;
+      end;
+
+      if (UPPERCASE(FORMAT(GraphUser.AccountEnabled)) = 'FALSE') and (User.State = User.State::Enabled) then begin
+        User.State := User.State::Disabled;
+        ModifyUser := true;
+      end;
+
+      TempString := GraphUser.GivenName;
+      if GraphUser.Surname <> '' then
+        TempString := TempString + ' ';
+      TempString := TempString + GraphUser.Surname;
+      TempString := COPYSTR(TempString,1,MAXSTRLEN(User."Full Name"));
+      if LOWERCASE(User."Full Name") <> LOWERCASE(TempString) then begin
+        User."Full Name" := TempString;
+        ModifyUser := true;
+      end;
+
+      TempString := FORMAT(GraphUser.Mail);
+      TempString := COPYSTR(TempString,1,MAXSTRLEN(User."Contact Email"));
+      if LOWERCASE(User."Contact Email") <> LOWERCASE(TempString) then begin
+        User."Contact Email" := TempString;
+        ModifyUser := true;
+      end;
+
+      TempString := COPYSTR(GraphUser.UserPrincipalName,1,MAXSTRLEN(User."Authentication Email"));
+      if LOWERCASE(User."Authentication Email") <> LOWERCASE(TempString) then begin
+        // Clear current authentication mail
+        User."Authentication Email" := '';
+        User.MODIFY;
+        ModifyUser := false;
+
+        EnsureAuthenticationEmailIsNotInUse(TempString);
+        UpdateAuthenticationEmail(User,GraphUser);
+      end;
+
+      if ModifyUser then
+        User.MODIFY;
+
+      SetUserLanguage(GraphUser.PreferredLanguage);
+
+      exit(ModifyUser);
+    END;
+
+    LOCAL PROCEDURE UpdateUserPlansFromAzureGraph@23(ForUserSecurityId@1003 : GUID;VAR GraphUser@1000 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User");
+    VAR
+      TempO365Plan@1001 : TEMPORARY Record Plan;
+    BEGIN
+      GetGraphUserPlans(TempO365Plan,GraphUser,false);
+
+      // Have any plans been removed from this user in O365, since last time he logged-in to NAV?
+      RemoveUnassignedUserPlans(TempO365Plan,ForUserSecurityId);
+
+      // Have any plans been added to this user in O365, since last time he logged-in to NAV?
+      AddNewlyAssignedUserPlans(TempO365Plan,ForUserSecurityId);
+    END;
+
+    [Internal]
+    PROCEDURE UpdateUserPlansFromAzureGraphAllUsers@22();
+    VAR
+      User@1000 : Record User;
+      GraphUser@1002 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User";
+    BEGIN
+      if not Initialize then
+        exit;
+
+      User.SETFILTER("License Type",'<>%1',User."License Type"::"External User");
+      User.SETFILTER("Windows Security ID",'=''''');
+
+      if not User.FINDSET then
+        exit;
+
+      repeat
+        if GetGraphUserFromObjectId(User."User Security ID",GraphUser) then
+          UpdateUserPlansFromAzureGraph(User."User Security ID",GraphUser);
+      until User.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AddToTempPlan@16(ServicePlanId@1000 : GUID;ServicePlanName@1001 : Text;VAR TempPlan@1002 : TEMPORARY Record Plan);
+    VAR
+      Plan@1003 : Record Plan;
+    BEGIN
+      with TempPlan do begin
+        if GET(ServicePlanId) then
+          exit;
+
+        if Plan.GET(ServicePlanId) then;
+
+        INIT;
+        "Plan ID" := ServicePlanId;
+        Name := COPYSTR(ServicePlanName,1,MAXSTRLEN(Name));
+        "Role Center ID" := Plan."Role Center ID";
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE EnsureAuthenticationEmailIsNotInUse@37(AuthenticationEmail@1000 : Text);
+    VAR
+      User@1001 : Record User;
+      ModifiedUser@1002 : Record User;
+      GraphUser@1003 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User";
+      UserSecurityId@1005 : GUID;
+    BEGIN
+      // Clear all duplicate authentication email.
+      User.SETRANGE("Authentication Email",COPYSTR(AuthenticationEmail,1,MAXSTRLEN(User."Authentication Email")));
+      if not User.FINDFIRST then
+        exit;
+      repeat
+        UserSecurityId := User."User Security ID";
+        // Modifying the user authentication email breaks the connection to AD by clearing the Authentication Object Id
+        User."Authentication Email" := '';
+        User.MODIFY;
+
+        // Cascade changes to authentication email, terminates at the first time an authentication email is not found.
+        if GetGraphUserFromObjectId(User."User Security ID",GraphUser) then begin
+          EnsureAuthenticationEmailIsNotInUse(GraphUser.UserPrincipalName);
+          if ModifiedUser.GET(UserSecurityId) then
+            UpdateAuthenticationEmail(ModifiedUser,GraphUser);
+        end;
+      until not User.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdateAuthenticationEmail@38(VAR User@1000 : Record User;VAR GraphUser@1001 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User");
+    VAR
+      NavUserAuthenticationHelper@1002 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavUserAccount.NavUserAccountHelper";
+    BEGIN
+      User."Authentication Email" := COPYSTR(GraphUser.UserPrincipalName,1,MAXSTRLEN(User."Authentication Email"));
+      User.MODIFY;
+      NavUserAuthenticationHelper.SetAuthenticationObjectId(User."User Security ID",GraphUser.ObjectId);
+    END;
+
+    LOCAL PROCEDURE SetUserLanguage@24(PreferredLanguage@1000 : Text);
+    VAR
+      Language@1002 : Record Language;
+      UserPersonalization@1004 : Record "User Personalization";
+      ApplicationManagement@1005 : Codeunit ApplicationManagement;
+      IdentityManagement@1006 : Codeunit "Identity Management";
+      LanguageCode@1003 : Code[10];
+      LanguageId@1001 : Integer;
+    BEGIN
+      if not IdentityManagement.IsInvAppId then
+        exit;
+
+      LanguageId := ApplicationManagement.ApplicationLanguage;
+
+      // We will use default application language if the PreferredLanguage is blank or en-us
+      // (i.e. don't spend time trying to lookup the code)
+      if not (LOWERCASE(PreferredLanguage) in ['','en-us']) then
+        if TryGetLanguageCode(PreferredLanguage,LanguageCode) then ;
+
+      // If we support the language, get the language id
+      // If we don't, we keep the current value (default application language)
+      if LanguageCode <> '' then
+        if Language.GET(LanguageCode) then
+          LanguageId := Language."Windows Language ID";
+
+      if not UserPersonalization.GET(USERSECURITYID) then
+        exit;
+
+      // Only lock the table if there is a change
+      if UserPersonalization."Language ID" = LanguageId then
+        exit; // No changes required
+
+      UserPersonalization.LOCKTABLE;
+      UserPersonalization.GET(USERSECURITYID);
+      UserPersonalization.VALIDATE("Language ID",LanguageId);
+      UserPersonalization.MODIFY(true);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryGetLanguageCode@25(CultureName@1000 : Text;VAR CultureCode@1002 : Code[10]);
+    VAR
+      CultureInfo@1001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Globalization.CultureInfo";
+    BEGIN
+      CultureInfo := CultureInfo.CultureInfo(CultureName);
+      CultureCode := CultureInfo.ThreeLetterWindowsLanguageName;
+    END;
+
+    LOCAL PROCEDURE InitializeAsNewUser@5(NewUserSecurityId@1000 : GUID;VAR GraphUser@1001 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.IUser");
+    VAR
+      User@1003 : Record User;
+    BEGIN
+      User.GET(NewUserSecurityId);
+
+      UpdateUserFromAzureGraph(User,GraphUser);
+      UpdateUserPlansFromAzureGraph(User."User Security ID",GraphUser);
+    END;
+
+    LOCAL PROCEDURE Initialize@9() : Boolean;
+    BEGIN
+      if not PermissionManager.SoftwareAsAService then
+        exit(false);
+
+      if IsInitialized then
+        exit(true);
+
+      if CanHandle then begin
+        if not TryCreateGraph(Graph) then
+          exit(false)
+      end else
+        OnInitialize(Graph);
+
+      IsInitialized := not ISNULL(Graph);
+      exit(IsInitialized);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryCreateGraph@10(VAR GraphQuery@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery");
+    BEGIN
+      GraphQuery := GraphQuery.GraphQuery
+    END;
+
+    LOCAL PROCEDURE CanHandle@6() : Boolean;
+    VAR
+      AzureADMgtSetup@1000 : Record "Azure AD Mgt. Setup";
+    BEGIN
+      if AzureADMgtSetup.GET then
+        exit(AzureADMgtSetup."Azure AD User Mgt. Codeunit ID" = CODEUNIT::"Azure AD User Management");
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE RemoveUserGroupsForUserAndPlan@19(UserPlan@1002 : Record "User Plan");
+    VAR
+      UserGroupMember@1000 : Record "User Group Member";
+      UserGroupPlan@1001 : Record "User Group Plan";
+    BEGIN
+      // Remove related user groups from the user
+      UserGroupPlan.SETRANGE("Plan ID",UserPlan."Plan ID");
+      if not UserGroupPlan.FINDSET then
+        exit; // no user groups to remove from this user
+
+      UserGroupMember.SETRANGE("User Security ID",UserPlan."User Security ID");
+      repeat
+        UserGroupMember.SETRANGE("User Group Code",UserGroupPlan."User Group Code");
+        UserGroupMember.DELETEALL;
+      until UserGroupPlan.NEXT = 0;
+    END;
+
+    [Integration(DEFAULT,TRUE)]
+    [External]
+    LOCAL PROCEDURE OnInitialize@21(VAR GraphQuery@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery");
+    BEGIN
+    END;
+
+    [External]
+    PROCEDURE GetTenantDetail@14(VAR TenantDetail@1000 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.TenantDetail") : Boolean;
+    BEGIN
+      if ISNULL(TenantDetail) then;
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE SetTestability@140(EnableTestability@1000 : Boolean);
+    BEGIN
+      IsTest := EnableTestability;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

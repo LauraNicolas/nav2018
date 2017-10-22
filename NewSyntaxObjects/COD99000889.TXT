@@ -1,0 +1,493 @@
+OBJECT Codeunit 99000889 AvailabilityManagement
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Sales Line"=r,
+                TableData "Purchase Line"=r,
+                TableData "Order Promising Line"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Sales Order';
+      Text002@1011 : TextConst 'ENU=Service Order';
+      Text003@1012 : TextConst 'ENU=Job Order';
+      Text001@1001 : TextConst 'ENU=The Check-Avail. Period Calc. field cannot be empty in the Company Information card.';
+      CompanyInfo@1002 : Record "Company Information";
+      InvtSetup@1005 : Record "Inventory Setup";
+      Item@1003 : Record Item;
+      SalesLine@1004 : Record "Sales Line";
+      ServLine@1009 : Record "Service Line";
+      JobPlanningLine@1010 : Record "Job Planning Line";
+      AvailToPromise@1006 : Codeunit "Available to Promise";
+      CaptionText@1007 : Text[80];
+      HasGotCompanyInfo@1008 : Boolean;
+
+    [External]
+    PROCEDURE GetCaption@7() : Text[80];
+    BEGIN
+      exit(CaptionText);
+    END;
+
+    [External]
+    PROCEDURE SetSalesHeader@24(VAR OrderPromisingLine@1001 : Record "Order Promising Line";VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+      CaptionText := Text000;
+      OrderPromisingLine.DELETEALL;
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+      SalesLine.SETFILTER("Outstanding Quantity",'>0');
+      if SalesLine.FINDSET then
+        repeat
+          if not SalesLine.IsServiceItem then begin
+            OrderPromisingLine.INIT;
+            OrderPromisingLine."Entry No." := OrderPromisingLine.GetLastEntryNo + 10000;
+            OrderPromisingLine.TransferFromSalesLine(SalesLine);
+            SalesLine.CALCFIELDS("Reserved Qty. (Base)");
+            InsertPromisingLine(OrderPromisingLine,SalesLine."Outstanding Qty. (Base)" - SalesLine."Reserved Qty. (Base)");
+          end;
+        until SalesLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE SetServHeader@8(VAR OrderPromisingLine@1001 : Record "Order Promising Line";VAR ServHeader@1000 : Record "Service Header");
+    BEGIN
+      CaptionText := Text002;
+      OrderPromisingLine.DELETEALL;
+      ServLine.SETRANGE("Document Type",ServHeader."Document Type");
+      ServLine.SETRANGE("Document No.",ServHeader."No.");
+      ServLine.SETRANGE(Type,ServLine.Type::Item);
+      ServLine.SETFILTER("Outstanding Quantity",'>0');
+      if ServLine.FIND('-') then
+        repeat
+          OrderPromisingLine."Entry No." := OrderPromisingLine.GetLastEntryNo + 10000;
+          OrderPromisingLine.TransferFromServLine(ServLine);
+          ServLine.CALCFIELDS("Reserved Qty. (Base)");
+          InsertPromisingLine(OrderPromisingLine,ServLine."Outstanding Qty. (Base)" - ServLine."Reserved Qty. (Base)");
+        until ServLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE SetJob@2(VAR OrderPromisingLine@1001 : Record "Order Promising Line";VAR Job@1000 : Record Job);
+    BEGIN
+      CaptionText := Text003;
+      OrderPromisingLine.DELETEALL;
+      JobPlanningLine.SETRANGE("Job No.",Job."No.");
+      JobPlanningLine.SETRANGE(Status,Job.Status);
+      JobPlanningLine.SETRANGE(Type,JobPlanningLine.Type::Item);
+      JobPlanningLine.SETFILTER("Remaining Qty.",'>0');
+      if JobPlanningLine.FIND('-') then
+        repeat
+          if JobPlanningLineIsInventoryItem then begin
+            OrderPromisingLine."Entry No." := OrderPromisingLine.GetLastEntryNo + 10000;
+            OrderPromisingLine.TransferFromJobPlanningLine(JobPlanningLine);
+            JobPlanningLine.CALCFIELDS("Reserved Qty. (Base)");
+            InsertPromisingLine(OrderPromisingLine,JobPlanningLine."Remaining Qty. (Base)" - JobPlanningLine."Reserved Qty. (Base)");
+          end;
+        until JobPlanningLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertPromisingLine@9(VAR OrderPromisingLine@1000 : Record "Order Promising Line";UnavailableQty@1001 : Decimal);
+    BEGIN
+      with OrderPromisingLine do begin
+        "Unavailable Quantity (Base)" := UnavailableQty;
+        if "Unavailable Quantity (Base)" > 0 then begin
+          "Required Quantity (Base)" := "Unavailable Quantity (Base)";
+          GetCompanyInfo;
+          if FORMAT(CompanyInfo."Check-Avail. Period Calc.") <> '' then
+            "Unavailable Quantity (Base)" := -CalcAvailableQty(OrderPromisingLine)
+          else
+            ERROR(Text001);
+          if InvtSetup."Location Mandatory" then
+            TESTFIELD("Location Code");
+          if "Unavailable Quantity (Base)" < 0 then
+            "Unavailable Quantity (Base)" := 0;
+          if "Unavailable Quantity (Base)" > "Required Quantity (Base)" then
+            "Unavailable Quantity (Base)" := "Required Quantity (Base)";
+        end else
+          "Unavailable Quantity (Base)" := 0;
+        if "Qty. per Unit of Measure" = 0 then
+          "Qty. per Unit of Measure" := 1;
+        "Unavailable Quantity" :=
+          ROUND("Unavailable Quantity (Base)" / "Qty. per Unit of Measure",0.00001);
+        "Required Quantity" :=
+          ROUND("Required Quantity (Base)" / "Qty. per Unit of Measure",0.00001);
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcAvailableQty@12(VAR OrderPromisingLine@1003 : Record "Order Promising Line") : Decimal;
+    VAR
+      GrossRequirement@1000 : Decimal;
+      ScheduledReceipt@1001 : Decimal;
+      AvailabilityDate@1004 : Date;
+    BEGIN
+      Item.GET(OrderPromisingLine."Item No.");
+      Item.SETRANGE("Variant Filter",OrderPromisingLine."Variant Code");
+      Item.SETRANGE("Location Filter",OrderPromisingLine."Location Code");
+      Item.SETRANGE("Date Filter",0D,OrderPromisingLine."Original Shipment Date");
+
+      if OrderPromisingLine."Original Shipment Date" <> 0D then
+        AvailabilityDate := OrderPromisingLine."Original Shipment Date"
+      else
+        AvailabilityDate := WORKDATE;
+
+      OrderPromisingLine."Unavailability Date" :=
+        AvailToPromise.AdjustedEndingDate(
+          CALCDATE(CompanyInfo."Check-Avail. Period Calc.",AvailabilityDate),CompanyInfo."Check-Avail. Time Bucket");
+
+      AvailToPromise.SetPromisingReqShipDate(OrderPromisingLine);
+      exit(
+        AvailToPromise.QtyAvailabletoPromise(
+          Item,GrossRequirement,ScheduledReceipt,AvailabilityDate,
+          CompanyInfo."Check-Avail. Time Bucket",CompanyInfo."Check-Avail. Period Calc."));
+    END;
+
+    [Internal]
+    PROCEDURE CalcCapableToPromise@3(VAR OrderPromisingLine@1003 : Record "Order Promising Line";VAR OrderPromisingID@1000 : Code[20]);
+    VAR
+      SalesLine@1005 : Record "Sales Line";
+      ServLine@1008 : Record "Service Line";
+      JobPlanningLine@1009 : Record "Job Planning Line";
+      CapableToPromise@1001 : Codeunit "Capable to Promise";
+      QtyReservedTotal@1006 : Decimal;
+      OldCTPQty@1007 : Decimal;
+      FeasibleDate@1002 : Date;
+      LastValidLine@1004 : Integer;
+    BEGIN
+      LastValidLine := 1;
+      with OrderPromisingLine do begin
+        if FIND('-') then
+          repeat
+            case "Source Type" of
+              "Source Type"::Sales:
+                begin
+                  CLEAR("Earliest Shipment Date");
+                  CLEAR("Planned Delivery Date");
+                  SalesLine.GET("Source Subtype","Source ID","Source Line No.");
+                  SalesLine.CALCFIELDS("Reserved Quantity");
+                  QtyReservedTotal := SalesLine."Reserved Quantity";
+                  CapableToPromise.RemoveReqLines(SalesLine."Document No.",SalesLine."Line No.",0,false);
+                  SalesLine.CALCFIELDS("Reserved Quantity");
+                  OldCTPQty := QtyReservedTotal - SalesLine."Reserved Quantity";
+                  FeasibleDate :=
+                    CapableToPromise.CalcCapableToPromise(
+                      "Item No.","Variant Code","Location Code",
+                      "Original Shipment Date",
+                      "Unavailable Quantity" + OldCTPQty,"Unit of Measure Code",
+                      OrderPromisingID,"Source Line No.",
+                      LastValidLine,CompanyInfo."Check-Avail. Time Bucket",
+                      CompanyInfo."Check-Avail. Period Calc.");
+                  if FeasibleDate <> "Original Shipment Date" then
+                    VALIDATE("Earliest Shipment Date",FeasibleDate)
+                  else
+                    VALIDATE("Earliest Shipment Date","Original Shipment Date");
+                end;
+              "Source Type"::"Service Order":
+                begin
+                  CLEAR("Earliest Shipment Date");
+                  CLEAR("Planned Delivery Date");
+                  ServLine.GET("Source Subtype","Source ID","Source Line No.");
+                  ServLine.CALCFIELDS("Reserved Quantity");
+                  QtyReservedTotal := ServLine."Reserved Quantity";
+                  CapableToPromise.RemoveReqLines(ServLine."Document No.",ServLine."Line No.",0,false);
+                  ServLine.CALCFIELDS("Reserved Quantity");
+                  OldCTPQty := QtyReservedTotal - ServLine."Reserved Quantity";
+                  FeasibleDate :=
+                    CapableToPromise.CalcCapableToPromise(
+                      "Item No.","Variant Code","Location Code",
+                      "Original Shipment Date",
+                      "Unavailable Quantity" + OldCTPQty,"Unit of Measure Code",
+                      OrderPromisingID,"Source Line No.",
+                      LastValidLine,CompanyInfo."Check-Avail. Time Bucket",
+                      CompanyInfo."Check-Avail. Period Calc.");
+                  if FeasibleDate <> "Original Shipment Date" then
+                    VALIDATE("Earliest Shipment Date",FeasibleDate)
+                  else
+                    VALIDATE("Earliest Shipment Date","Original Shipment Date");
+                end;
+              "Source Type"::Job:
+                begin
+                  CLEAR("Earliest Shipment Date");
+                  CLEAR("Planned Delivery Date");
+                  JobPlanningLine.RESET;
+                  JobPlanningLine.SETRANGE(Status,"Source Subtype");
+                  JobPlanningLine.SETRANGE("Job No.","Source ID");
+                  JobPlanningLine.SETRANGE("Job Contract Entry No.","Source Line No.");
+                  JobPlanningLine.CALCFIELDS("Reserved Quantity");
+                  QtyReservedTotal := JobPlanningLine."Reserved Quantity";
+                  CapableToPromise.RemoveReqLines(JobPlanningLine."Job No.",JobPlanningLine."Job Contract Entry No.",0,false);
+                  JobPlanningLine.CALCFIELDS("Reserved Quantity");
+                  OldCTPQty := QtyReservedTotal - JobPlanningLine."Reserved Quantity";
+                  FeasibleDate :=
+                    CapableToPromise.CalcCapableToPromise(
+                      "Item No.","Variant Code","Location Code",
+                      "Original Shipment Date",
+                      "Unavailable Quantity" + OldCTPQty,"Unit of Measure Code",
+                      OrderPromisingID,"Source Line No.",
+                      LastValidLine,CompanyInfo."Check-Avail. Time Bucket",
+                      CompanyInfo."Check-Avail. Period Calc.");
+                  if FeasibleDate <> "Original Shipment Date" then
+                    VALIDATE("Earliest Shipment Date",FeasibleDate)
+                  else
+                    VALIDATE("Earliest Shipment Date","Original Shipment Date");
+                end;
+            end;
+            MODIFY;
+            CreateReservations(OrderPromisingLine);
+          until NEXT = 0;
+
+        CapableToPromise.ReassignRefOrderNos(OrderPromisingID);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CalcAvailableToPromise@4(VAR OrderPromisingLine@1000 : Record "Order Promising Line");
+    BEGIN
+      GetCompanyInfo;
+      with OrderPromisingLine do begin
+        SETCURRENTKEY("Requested Shipment Date");
+        if FIND('-') then
+          repeat
+            CLEAR("Earliest Shipment Date");
+            CLEAR("Planned Delivery Date");
+            CalcAvailableToPromiseLine(OrderPromisingLine);
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcAvailableToPromiseLine@1(VAR OrderPromisingLine@1000 : Record "Order Promising Line");
+    VAR
+      NeededDate@1001 : Date;
+      FeasibleDate@1002 : Date;
+      AvailQty@1003 : Decimal;
+    BEGIN
+      with OrderPromisingLine do begin
+        Item.GET("Item No.");
+        Item.SETRANGE("Variant Filter","Variant Code");
+        Item.SETRANGE("Location Filter","Location Code");
+        case "Source Type" of
+          "Source Type"::Sales,
+          "Source Type"::"Service Order",
+          "Source Type"::Job:
+            begin
+              if "Requested Shipment Date" <> 0D then
+                NeededDate := "Requested Shipment Date"
+              else
+                NeededDate := WORKDATE;
+              AvailToPromise.SetPromisingReqShipDate(OrderPromisingLine);
+              FeasibleDate :=
+                AvailToPromise.EarliestAvailabilityDate(
+                  Item,Quantity,NeededDate,Quantity,"Requested Shipment Date",AvailQty,
+                  CompanyInfo."Check-Avail. Time Bucket",CompanyInfo."Check-Avail. Period Calc.");
+              VALIDATE("Earliest Shipment Date",FeasibleDate);
+            end;
+        end;
+        MODIFY;
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdateSource@5(VAR OrderPromisingLine@1000 : Record "Order Promising Line");
+    BEGIN
+      if OrderPromisingLine.FIND('-') then
+        repeat
+          UpdateSourceLine(OrderPromisingLine);
+        until OrderPromisingLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateSourceLine@10(VAR OrderPromisingLine2@1000 : Record "Order Promising Line");
+    VAR
+      ReservMgt@1003 : Codeunit "Reservation Management";
+      SalesLineReserve@1004 : Codeunit "Sales Line-Reserve";
+      ServLineReserve@1007 : Codeunit "Service Line-Reserve";
+      JobPlanningLineReserve@1008 : Codeunit "Job Planning Line-Reserve";
+      FullAutoReservation@1006 : Boolean;
+      QtyToReserve@1001 : Decimal;
+      QtyToReserveBase@1002 : Decimal;
+    BEGIN
+      case OrderPromisingLine2."Source Type" of
+        OrderPromisingLine2."Source Type"::Sales:
+          begin
+            SalesLine.GET(
+              OrderPromisingLine2."Source Subtype",
+              OrderPromisingLine2."Source ID",OrderPromisingLine2."Source Line No.");
+            if OrderPromisingLine2."Earliest Shipment Date" <> 0D then
+              SalesLine.VALIDATE("Shipment Date",OrderPromisingLine2."Earliest Shipment Date");
+
+            SalesLineReserve.ReservQuantity(SalesLine,QtyToReserve,QtyToReserveBase);
+            if (SalesLine."Shipment Date" <> 0D) and
+               (SalesLine.Reserve = SalesLine.Reserve::Always) and
+               (QtyToReserveBase <> 0)
+            then begin
+              ReservMgt.SetSalesLine(SalesLine);
+              ReservMgt.AutoReserve(
+                FullAutoReservation,'',SalesLine."Shipment Date",QtyToReserve,QtyToReserveBase);
+              SalesLine.CALCFIELDS("Reserved Quantity");
+            end;
+
+            SalesLine.MODIFY;
+          end;
+        OrderPromisingLine2."Source Type"::"Service Order":
+          begin
+            ServLine.GET(
+              OrderPromisingLine2."Source Subtype",
+              OrderPromisingLine2."Source ID",OrderPromisingLine2."Source Line No.");
+            if OrderPromisingLine2."Earliest Shipment Date" <> 0D then
+              ServLine.VALIDATE("Needed by Date",OrderPromisingLine2."Earliest Shipment Date");
+
+            ServLineReserve.ReservQuantity(ServLine,QtyToReserve,QtyToReserveBase);
+            if (ServLine."Needed by Date" <> 0D) and
+               (ServLine.Reserve = ServLine.Reserve::Always) and
+               (QtyToReserveBase <> 0)
+            then begin
+              ReservMgt.SetServLine(ServLine);
+              ReservMgt.AutoReserve(
+                FullAutoReservation,'',ServLine."Needed by Date",QtyToReserve,QtyToReserveBase);
+              ServLine.CALCFIELDS("Reserved Quantity");
+            end;
+
+            ServLine.MODIFY;
+          end;
+        OrderPromisingLine2."Source Type"::Job:
+          begin
+            JobPlanningLine.SETRANGE(Status,OrderPromisingLine2."Source Subtype");
+            JobPlanningLine.SETRANGE("Job No.",OrderPromisingLine2."Source ID");
+            JobPlanningLine.SETRANGE("Job Contract Entry No.",OrderPromisingLine2."Source Line No.");
+            JobPlanningLine.FINDFIRST;
+            if OrderPromisingLine2."Earliest Shipment Date" <> 0D then
+              JobPlanningLine.VALIDATE("Planning Date",OrderPromisingLine2."Earliest Shipment Date");
+
+            JobPlanningLineReserve.ReservQuantity(JobPlanningLine,QtyToReserve,QtyToReserveBase);
+            if (JobPlanningLine."Planning Date" <> 0D) and
+               (JobPlanningLine.Reserve = JobPlanningLine.Reserve::Always) and
+               (QtyToReserveBase <> 0)
+            then begin
+              ReservMgt.SetJobPlanningLine(JobPlanningLine);
+              ReservMgt.AutoReserve(
+                FullAutoReservation,'',JobPlanningLine."Planning Date",QtyToReserve,QtyToReserveBase);
+              JobPlanningLine.CALCFIELDS("Reserved Quantity");
+            end;
+
+            JobPlanningLine.MODIFY;
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetCompanyInfo@11();
+    BEGIN
+      if HasGotCompanyInfo then
+        exit;
+      HasGotCompanyInfo := CompanyInfo.GET and InvtSetup.GET;
+    END;
+
+    LOCAL PROCEDURE CreateReservations@6(VAR OrderPromisingLine@1006 : Record "Order Promising Line");
+    VAR
+      ReqLine@1004 : Record "Requisition Line";
+      SalesLine2@1005 : Record "Sales Line";
+      ServLine2@1009 : Record "Service Line";
+      JobPlanningLine2@1010 : Record "Job Planning Line";
+      SalesLineReserve@1001 : Codeunit "Sales Line-Reserve";
+      ServLineReserve@1007 : Codeunit "Service Line-Reserve";
+      JobPlanningLineReserve@1008 : Codeunit "Job Planning Line-Reserve";
+      ReservQty@1013 : Decimal;
+      ReservQtyBase@1000 : Decimal;
+      NeededQty@1012 : Decimal;
+      NeededQtyBase@1011 : Decimal;
+    BEGIN
+      case OrderPromisingLine."Source Type" of
+        OrderPromisingLine."Source Type"::Sales:
+          begin
+            SalesLine2.GET(OrderPromisingLine."Source Subtype",
+              OrderPromisingLine."Source ID",OrderPromisingLine."Source Line No.");
+
+            SalesLine2.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            NeededQty := SalesLine2."Outstanding Quantity" - SalesLine2."Reserved Quantity";
+            NeededQtyBase := SalesLine2."Outstanding Qty. (Base)" - SalesLine2."Reserved Qty. (Base)";
+          end;
+        OrderPromisingLine."Source Type"::"Service Order":
+          begin
+            ServLine2.GET(OrderPromisingLine."Source Subtype",
+              OrderPromisingLine."Source ID",OrderPromisingLine."Source Line No.");
+
+            ServLine2.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            NeededQty := ServLine2."Outstanding Quantity" - ServLine2."Reserved Quantity";
+            NeededQtyBase := ServLine2."Outstanding Qty. (Base)" - ServLine2."Reserved Qty. (Base)";
+          end;
+        OrderPromisingLine."Source Type"::Job:
+          begin
+            JobPlanningLine2.SETRANGE(Status,OrderPromisingLine."Source Subtype");
+            JobPlanningLine2.SETRANGE("Job No.",OrderPromisingLine."Source ID");
+            JobPlanningLine2.SETRANGE("Job Contract Entry No.",OrderPromisingLine."Source Line No.");
+            JobPlanningLine2.FINDFIRST;
+
+            JobPlanningLine2.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            NeededQty := JobPlanningLine2."Remaining Qty." - JobPlanningLine2."Reserved Quantity";
+            NeededQtyBase := JobPlanningLine2."Remaining Qty. (Base)" - JobPlanningLine2."Reserved Qty. (Base)";
+          end;
+      end;
+
+      ReqLine.SETCURRENTKEY("Order Promising ID","Order Promising Line ID","Order Promising Line No.");
+      ReqLine.SETRANGE("Order Promising ID",OrderPromisingLine."Source ID");
+      ReqLine.SETRANGE("Order Promising Line ID",OrderPromisingLine."Source Line No.");
+      ReqLine.SETRANGE(Type,ReqLine.Type::Item);
+      ReqLine.SETRANGE("No.",OrderPromisingLine."Item No.");
+      if ReqLine.FINDFIRST then begin
+        if ReqLine."Quantity (Base)" > NeededQtyBase then begin
+          ReservQty := NeededQty;
+          ReservQtyBase := NeededQtyBase
+        end else begin
+          ReservQty := ReqLine.Quantity;
+          ReservQtyBase := ReqLine."Quantity (Base)";
+        end;
+
+        case OrderPromisingLine."Source Type" of
+          OrderPromisingLine."Source Type"::Sales:
+            begin
+              SalesLineReserve.BindToRequisition(SalesLine2,ReqLine,ReservQty,ReservQtyBase);
+              if SalesLine2.Reserve = SalesLine.Reserve::Never then begin
+                SalesLine2.Reserve := SalesLine.Reserve::Optional;
+                SalesLine2.MODIFY;
+              end;
+            end;
+          OrderPromisingLine."Source Type"::"Service Order":
+            begin
+              ServLineReserve.BindToRequisition(ServLine2,ReqLine,ReservQty,ReservQtyBase);
+              if ServLine2.Reserve = ServLine.Reserve::Never then begin
+                ServLine2.Reserve := ServLine.Reserve::Optional;
+                ServLine2.MODIFY;
+              end;
+            end;
+          OrderPromisingLine."Source Type"::Job:
+            begin
+              JobPlanningLineReserve.BindToRequisition(JobPlanningLine2,ReqLine,ReservQty,ReservQtyBase);
+              if JobPlanningLine2.Reserve = JobPlanningLine2.Reserve::Never then begin
+                JobPlanningLine2.Reserve := JobPlanningLine2.Reserve::Optional;
+                JobPlanningLine2.MODIFY;
+              end;
+            end;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE JobPlanningLineIsInventoryItem@15() : Boolean;
+    BEGIN
+      Item.GET(JobPlanningLine."No.");
+      exit(Item.Type = Item.Type::Inventory);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

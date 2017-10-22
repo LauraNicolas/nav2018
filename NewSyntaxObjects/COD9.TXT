@@ -1,0 +1,895 @@
+OBJECT Codeunit 9 Acc. Sched. KPI Dimensions
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Acc. Schedule Line";
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      IllegalValErr@1006 : TextConst 'ENU=You have entered an illegal value or a nonexistent row number.';
+      GeneralErr@1003 : TextConst '@@@={Locked};ENU=%1\\ %2 %3 %4';
+      ErrorOccurredErr@1011 : TextConst 'ENU=The error occurred when the program tried to calculate:\';
+      AccSchedLineErr@1012 : TextConst '@@@="%1 = Row No., %2= Line No., %3 = Totaling";ENU="Acc. Sched. Line: Row No. = %1, Line No. = %2, Totaling = %3\"';
+      ColumnErr@1013 : TextConst '@@@="%1 = Column No., %2= Line No., %3 = Formula";ENU="Acc. Sched. Column: Column No. = %1, Line No. = %2, Formula  = %3"';
+      CircularRefErr@1014 : TextConst 'ENU=Because of circular references, the program cannot calculate a formula.';
+      AccSchedName@1015 : Record "Acc. Schedule Name";
+      AccScheduleLine@1016 : Record "Acc. Schedule Line";
+      TempAccSchedKPIBuffer@1032 : TEMPORARY Record "Acc. Sched. KPI Buffer";
+      AccSchedManagement@1009 : Codeunit AccSchedManagement;
+      StartDate@1020 : Date;
+      EndDate@1021 : Date;
+      CallLevel@1024 : Integer;
+      CallingAccSchedLineID@1025 : Integer;
+      CallingColumnLayoutID@1026 : Integer;
+
+    [External]
+    PROCEDURE GetCellDataWithDimensions@46(VAR AccSchedLine@1000 : Record "Acc. Schedule Line";VAR ColumnLayout@1001 : Record "Column Layout";VAR TempAccSchedKPIBuffer2@1002 : TEMPORARY Record "Acc. Sched. KPI Buffer");
+    VAR
+      LastDataLineNo@1003 : Integer;
+    BEGIN
+      with TempAccSchedKPIBuffer do begin
+        INIT;
+        TRANSFERFIELDS(TempAccSchedKPIBuffer2,false);
+        if not INSERT then
+          MODIFY;
+      end;
+
+      TempAccSchedKPIBuffer2.RESET;
+      if TempAccSchedKPIBuffer2.FINDLAST then;
+      LastDataLineNo := TempAccSchedKPIBuffer2."No.";
+
+      AccScheduleLine.COPYFILTERS(AccSchedLine);
+      StartDate := AccScheduleLine.GETRANGEMIN("Date Filter");
+      if EndDate <> AccScheduleLine.GETRANGEMAX("Date Filter") then
+        EndDate := AccScheduleLine.GETRANGEMAX("Date Filter");
+
+      CallLevel := 0;
+      CallingAccSchedLineID := AccSchedLine."Line No.";
+      CallingColumnLayoutID := ColumnLayout."Line No.";
+
+      ColumnLayout.FINDSET;
+      repeat
+        AddCellValueDimensions(AccSchedLine,ColumnLayout,TempAccSchedKPIBuffer2);
+      until ColumnLayout.NEXT = 0;
+
+      with TempAccSchedKPIBuffer2 do begin
+        RESET;
+        if FINDLAST then;
+        if "No." = LastDataLineNo then begin
+          INIT;
+          "No." += 1;
+          Date := TempAccSchedKPIBuffer.Date;
+          "Closed Period" := TempAccSchedKPIBuffer."Closed Period";
+          "Account Schedule Name" := TempAccSchedKPIBuffer."Account Schedule Name";
+          "KPI Code" := TempAccSchedKPIBuffer."KPI Code";
+          "KPI Name" := TempAccSchedKPIBuffer."KPI Name";
+          INSERT;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE AddCellValueDimensions@56(AccSchedLine@1000 : Record "Acc. Schedule Line";ColumnLayout@1001 : Record "Column Layout";VAR AccSchedKPIBuffer@1002 : Record "Acc. Sched. KPI Buffer");
+    VAR
+      GLAcc@1004 : Record "G/L Account";
+      CostType@1005 : Record "Cost Type";
+      CFAccount@1003 : Record "Cash Flow Account";
+      IsExpression@1006 : Boolean;
+    BEGIN
+      if AccSchedLine.Totaling = '' then
+        exit;
+
+      if AccSchedName.Name <> AccSchedLine."Schedule Name" then
+        AccSchedName.GET(AccSchedLine."Schedule Name");
+
+      IsExpression :=
+        AccSchedLine."Totaling Type" in
+        [AccSchedLine."Totaling Type"::Formula,AccSchedLine."Totaling Type"::"Set Base For Percent"];
+
+      if IsExpression then
+        EvalExprWithDimensions(AccSchedLine.Totaling,AccSchedLine,ColumnLayout,AccSchedKPIBuffer)
+      else begin
+        if (StartDate = 0D) or (EndDate = 0D) or (EndDate = DMY2DATE(31,12,9999)) then // Period Error
+          exit;
+
+        AccSchedManagement.SetStartDateEndDate(StartDate,EndDate);
+
+        if AccSchedLine."Totaling Type" in
+           [AccSchedLine."Totaling Type"::"Posting Accounts",
+            AccSchedLine."Totaling Type"::"Total Accounts"]
+        then begin
+          AccSchedLine.COPYFILTERS(AccScheduleLine);
+          AccSchedManagement.SetGLAccRowFilters(GLAcc,AccSchedLine);
+          AccSchedManagement.SetGLAccColumnFilters(GLAcc,AccSchedLine,ColumnLayout);
+
+          if (AccSchedLine."Totaling Type" = AccSchedLine."Totaling Type"::"Posting Accounts") and
+             (STRLEN(AccSchedLine.Totaling) <= MAXSTRLEN(GLAcc.Totaling)) and (STRPOS(AccSchedLine.Totaling,'*') = 0)
+          then begin
+            GLAcc."Account Type" := GLAcc."Account Type"::Total;
+            GLAcc.Totaling := AccSchedLine.Totaling;
+            AddGLAccDimensions(GLAcc,AccSchedLine,ColumnLayout,AccSchedKPIBuffer);
+          end else
+            if GLAcc.FIND('-') then
+              repeat
+                AddGLAccDimensions(GLAcc,AccSchedLine,ColumnLayout,AccSchedKPIBuffer);
+              until GLAcc.NEXT = 0;
+        end;
+
+        if AccSchedLine."Totaling Type" in
+           [AccSchedLine."Totaling Type"::"Cost Type",
+            AccSchedLine."Totaling Type"::"Cost Type Total"]
+        then begin
+          AccSchedLine.COPYFILTERS(AccScheduleLine);
+          AccSchedManagement.SetCostTypeRowFilters(CostType,AccSchedLine,ColumnLayout);
+          AccSchedManagement.SetCostTypeColumnFilters(CostType,AccSchedLine,ColumnLayout);
+
+          if (AccSchedLine."Totaling Type" = AccSchedLine."Totaling Type"::"Cost Type") and
+             (STRLEN(AccSchedLine.Totaling) <= MAXSTRLEN(GLAcc.Totaling)) and (STRPOS(AccSchedLine.Totaling,'*') = 0)
+          then begin
+            CostType.Type := CostType.Type::Total;
+            CostType.Totaling := AccSchedLine.Totaling;
+            AddCostTypeDimensions(CostType,AccSchedLine,ColumnLayout,AccSchedKPIBuffer);
+          end else begin
+            if CostType.FIND('-') then
+              repeat
+                AddCostTypeDimensions(CostType,AccSchedLine,ColumnLayout,AccSchedKPIBuffer);
+              until CostType.NEXT = 0;
+          end;
+        end;
+
+        if AccSchedLine."Totaling Type" in
+           [AccSchedLine."Totaling Type"::"Cash Flow Entry Accounts",
+            AccSchedLine."Totaling Type"::"Cash Flow Total Accounts"]
+        then begin
+          AccSchedLine.COPYFILTERS(AccScheduleLine);
+          AccSchedManagement.SetCFAccRowFilter(CFAccount,AccSchedLine);
+          AccSchedManagement.SetCFAccColumnFilter(CFAccount,AccSchedLine,ColumnLayout);
+          if (AccSchedLine."Totaling Type" = AccSchedLine."Totaling Type"::"Cash Flow Entry Accounts") and
+             (STRLEN(AccSchedLine.Totaling) <= 30)
+          then begin
+            CFAccount."Account Type" := CFAccount."Account Type"::Total;
+            CFAccount.Totaling := AccSchedLine.Totaling;
+            AddCFAccountDimensions(CFAccount,AccSchedLine,ColumnLayout,AccSchedKPIBuffer);
+          end else
+            if CFAccount.FIND('-') then
+              repeat
+                AddCFAccountDimensions(CFAccount,AccSchedLine,ColumnLayout,AccSchedKPIBuffer);
+              until CFAccount.NEXT = 0;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE AddGLAccDimensions@74(VAR GLAcc@1001 : Record "G/L Account";VAR AccSchedLine@1002 : Record "Acc. Schedule Line";ColumnLayout@1003 : Record "Column Layout";VAR AccSchedKPIBuffer@1004 : Record "Acc. Sched. KPI Buffer");
+    VAR
+      AnalysisViewEntry@1007 : Record "Analysis View Entry";
+      GLEntryDimensions@1000 : Query "G/L Entry Dimensions";
+      GLBudgetEntryDimensions@1014 : Query "G/L Budget Entry Dimensions";
+      AnalysisViewEntryDimensions@1012 : Query "Analysis View Entry Dimensions";
+      AnalysisViewBudgEntryDims@1005 : Query "Analysis View Budg. Entry Dims";
+      Filter@1013 : Text;
+      AmountType@1009 : '"Net Amount","Debit Amount","Credit Amount"';
+      AmountToAdd@1015 : Decimal;
+    BEGIN
+      if ConflictAmountType(AccSchedLine,ColumnLayout."Amount Type",AmountType) then
+        exit;
+
+      case ColumnLayout."Ledger Entry Type" of
+        ColumnLayout."Ledger Entry Type"::Entries:
+          if AccSchedName."Analysis View Name" = '' then begin
+            GLEntryDimensions.SETFILTER(Posting_Date,GLAcc.GETFILTER("Date Filter"));
+            if GLAcc.Totaling = '' then
+              GLEntryDimensions.SETRANGE(G_L_Account_No,GLAcc."No.")
+            else
+              GLEntryDimensions.SETFILTER(G_L_Account_No,GLAcc.Totaling);
+            GLEntryDimensions.SETFILTER(
+              Business_Unit_Code,AccSchedLine.GETFILTER("Business Unit Filter"));
+
+            Filter := CombineFilters(
+                AccSchedLine.GETFILTER("Dimension 1 Filter"),
+                AccSchedManagement.GetDimTotalingFilter(1,AccSchedLine."Dimension 1 Totaling"),'&');
+            GLEntryDimensions.SETFILTER(Global_Dimension_1_Code,Filter);
+
+            Filter := CombineFilters(
+                AccSchedLine.GETFILTER("Dimension 2 Filter"),
+                AccSchedManagement.GetDimTotalingFilter(2,AccSchedLine."Dimension 2 Totaling"),'&');
+            GLEntryDimensions.SETFILTER(Global_Dimension_2_Code,Filter);
+
+            GLEntryDimensions.OPEN;
+            while GLEntryDimensions.READ do begin
+              case AmountType of
+                AmountType::"Net Amount":
+                  AmountToAdd := GLEntryDimensions.Sum_Amount;
+                AmountType::"Debit Amount":
+                  AmountToAdd := GLEntryDimensions.Sum_Debit_Amount;
+                AmountType::"Credit Amount":
+                  AmountToAdd := GLEntryDimensions.Sum_Credit_Amount;
+              end;
+              if PassToResult(AccSchedLine.Show,GLEntryDimensions.Sum_Amount) then
+                CheckAddDimsToResult(
+                  AccSchedKPIBuffer,ColumnLayout,GLEntryDimensions.Dimension_Set_ID,AmountToAdd);
+            end;
+            GLEntryDimensions.CLOSE;
+          end else begin
+            if GLAcc.Totaling = '' then
+              Filter := GLAcc."No."
+            else
+              Filter := GLAcc.Totaling;
+
+            FilterAnalysisViewEntriesDim(
+              AnalysisViewEntryDimensions,AccSchedName."Analysis View Name",
+              AnalysisViewEntry."Account Source"::"G/L Account",Filter,
+              GLAcc.GETFILTER("Date Filter"),AccSchedLine);
+
+            AnalysisViewEntryDimensions.OPEN;
+            while AnalysisViewEntryDimensions.READ do begin
+              case AmountType of
+                AmountType::"Net Amount":
+                  AmountToAdd := AnalysisViewEntryDimensions.Sum_Amount;
+                AmountType::"Debit Amount":
+                  AmountToAdd := AnalysisViewEntryDimensions.Sum_Debit_Amount;
+                AmountType::"Credit Amount":
+                  AmountToAdd := AnalysisViewEntryDimensions.Sum_Credit_Amount;
+              end;
+              if PassToResult(AccSchedLine.Show,AnalysisViewEntryDimensions.Sum_Amount) then
+                CheckAddDimsToResult(AccSchedKPIBuffer,ColumnLayout,0,AmountToAdd);
+            end;
+            AnalysisViewEntryDimensions.CLOSE;
+          end;
+        ColumnLayout."Ledger Entry Type"::"Budget Entries":
+          if AccSchedName."Analysis View Name" = '' then begin
+            GLBudgetEntryDimensions.SETFILTER(Budget_Name,AccSchedLine.GETFILTER("G/L Budget Filter"));
+            GLBudgetEntryDimensions.SETFILTER(Date,GLAcc.GETFILTER("Date Filter"));
+
+            if GLAcc.Totaling = '' then
+              GLBudgetEntryDimensions.SETRANGE(G_L_Account_No,GLAcc."No.")
+            else
+              GLBudgetEntryDimensions.SETFILTER(G_L_Account_No,GLAcc.Totaling);
+            GLBudgetEntryDimensions.SETFILTER(
+              Business_Unit_Code,AccSchedLine.GETFILTER("Business Unit Filter"));
+
+            Filter := CombineFilters(
+                AccSchedLine.GETFILTER("Dimension 1 Filter"),
+                AccSchedManagement.GetDimTotalingFilter(1,AccSchedLine."Dimension 1 Totaling"),'&');
+            GLBudgetEntryDimensions.SETFILTER(Global_Dimension_1_Code,Filter);
+
+            Filter := CombineFilters(
+                AccSchedLine.GETFILTER("Dimension 2 Filter"),
+                AccSchedManagement.GetDimTotalingFilter(2,AccSchedLine."Dimension 2 Totaling"),'&');
+            GLBudgetEntryDimensions.SETFILTER(Global_Dimension_2_Code,Filter);
+
+            GLBudgetEntryDimensions.OPEN;
+            while GLBudgetEntryDimensions.READ do begin
+              case AmountType of
+                AmountType::"Net Amount":
+                  AmountToAdd := GLBudgetEntryDimensions.Sum_Amount;
+                AmountType::"Debit Amount":
+                  begin
+                    AmountToAdd := GLBudgetEntryDimensions.Sum_Amount;
+                    if AmountToAdd < 0 then
+                      AmountToAdd := 0;
+                  end;
+                AmountType::"Credit Amount":
+                  begin
+                    AmountToAdd := -GLBudgetEntryDimensions.Sum_Amount;
+                    if AmountToAdd < 0 then
+                      AmountToAdd := 0;
+                  end;
+              end;
+              if PassToResult(AccSchedLine.Show,GLBudgetEntryDimensions.Sum_Amount) then
+                CheckAddDimsToResult(
+                  AccSchedKPIBuffer,ColumnLayout,GLBudgetEntryDimensions.Dimension_Set_ID,AmountToAdd);
+            end;
+            GLBudgetEntryDimensions.CLOSE;
+          end else begin
+            if GLAcc.Totaling = '' then
+              AnalysisViewBudgEntryDims.SETRANGE(G_L_Account_No,GLAcc."No.")
+            else
+              AnalysisViewBudgEntryDims.SETFILTER(G_L_Account_No,GLAcc.Totaling);
+            AnalysisViewBudgEntryDims.SETRANGE(Analysis_View_Code,AccSchedName."Analysis View Name");
+            AnalysisViewBudgEntryDims.SETFILTER(Budget_Name,AccSchedLine.GETFILTER("G/L Budget Filter"));
+            AnalysisViewBudgEntryDims.SETFILTER(Posting_Date,GLAcc.GETFILTER("Date Filter"));
+            AnalysisViewBudgEntryDims.SETFILTER(
+              Business_Unit_Code,AccSchedLine.GETFILTER("Business Unit Filter"));
+
+            Filter := CombineFilters(
+                AccSchedLine.GETFILTER("Dimension 1 Filter"),
+                AccSchedManagement.GetDimTotalingFilter(1,AccSchedLine."Dimension 1 Totaling"),'&');
+            AnalysisViewBudgEntryDims.SETFILTER(Dimension_1_Value_Code,Filter);
+
+            Filter := CombineFilters(
+                AccSchedLine.GETFILTER("Dimension 2 Filter"),
+                AccSchedManagement.GetDimTotalingFilter(2,AccSchedLine."Dimension 2 Totaling"),'&');
+            AnalysisViewBudgEntryDims.SETFILTER(Dimension_2_Value_Code,Filter);
+
+            Filter := CombineFilters(
+                AccSchedLine.GETFILTER("Dimension 3 Filter"),
+                AccSchedManagement.GetDimTotalingFilter(3,AccSchedLine."Dimension 3 Totaling"),'&');
+            AnalysisViewBudgEntryDims.SETFILTER(Dimension_3_Value_Code,Filter);
+
+            Filter := CombineFilters(
+                AccSchedLine.GETFILTER("Dimension 4 Filter"),
+                AccSchedManagement.GetDimTotalingFilter(4,AccSchedLine."Dimension 4 Totaling"),'&');
+            AnalysisViewBudgEntryDims.SETFILTER(Dimension_4_Value_Code,Filter);
+
+            AnalysisViewBudgEntryDims.OPEN;
+            while AnalysisViewBudgEntryDims.READ do begin
+              case AmountType of
+                AmountType::"Net Amount":
+                  AmountToAdd := AnalysisViewBudgEntryDims.Sum_Amount;
+                AmountType::"Debit Amount":
+                  begin
+                    AmountToAdd := AnalysisViewBudgEntryDims.Sum_Amount;
+                    if AmountToAdd < 0 then
+                      AmountToAdd := 0;
+                  end;
+                AmountType::"Credit Amount":
+                  begin
+                    AmountToAdd := -AnalysisViewBudgEntryDims.Sum_Amount;
+                    if AmountToAdd < 0 then
+                      AmountToAdd := 0;
+                  end;
+              end;
+              if PassToResult(AccSchedLine.Show,AnalysisViewBudgEntryDims.Sum_Amount) then
+                CheckAddDimsToResult(AccSchedKPIBuffer,ColumnLayout,0,AmountToAdd);
+            end;
+            AnalysisViewBudgEntryDims.CLOSE;
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE AddCostTypeDimensions@57(VAR CostType@1001 : Record "Cost Type";VAR AccSchedLine@1002 : Record "Acc. Schedule Line";ColumnLayout@1003 : Record "Column Layout";VAR AccSchedKPIBuffer@1004 : Record "Acc. Sched. KPI Buffer");
+    VAR
+      CostEntry@1005 : Record "Cost Entry";
+      CostBudgetEntry@1006 : Record "Cost Budget Entry";
+      AmountType@1009 : '"Net Amount","Debit Amount","Credit Amount"';
+      TestBalance@1010 : Boolean;
+      Balance@1011 : Decimal;
+      AmountToAdd@1000 : Decimal;
+    BEGIN
+      if ConflictAmountType(AccSchedLine,ColumnLayout."Amount Type",AmountType) then
+        exit;
+
+      TestBalance := AccSchedLine.Show in
+        [AccSchedLine.Show::"When Negative Balance",AccSchedLine.Show::"When Positive Balance"];
+      if ColumnLayout."Ledger Entry Type" = ColumnLayout."Ledger Entry Type"::Entries then begin
+        with CostEntry do begin
+          if CostType.Totaling = '' then
+            SETRANGE("Cost Type No.",CostType."No.")
+          else
+            SETFILTER("Cost Type No.",CostType.Totaling);
+          CostType.COPYFILTER("Date Filter","Posting Date");
+          AccSchedLine.COPYFILTER("Cost Center Filter","Cost Center Code");
+          AccSchedLine.COPYFILTER("Cost Object Filter","Cost Object Code");
+          FILTERGROUP(2);
+          SETFILTER(
+            "Cost Center Code",
+            AccSchedManagement.GetDimTotalingFilter(5,AccSchedLine."Cost Center Totaling"));
+          SETFILTER(
+            "Cost Object Code",
+            AccSchedManagement.GetDimTotalingFilter(6,AccSchedLine."Cost Object Totaling"));
+          FILTERGROUP(0);
+        end;
+
+        case AmountType of
+          AmountType::"Net Amount":
+            begin
+              CostEntry.CALCSUMS(Amount);
+              AmountToAdd := CostEntry.Amount;
+              Balance := AmountToAdd;
+            end;
+          AmountType::"Debit Amount":
+            begin
+              if TestBalance then begin
+                CostEntry.CALCSUMS("Debit Amount",Amount);
+                Balance := CostEntry.Amount;
+              end else
+                CostEntry.CALCSUMS("Debit Amount");
+              AmountToAdd := CostEntry."Debit Amount";
+            end;
+          AmountType::"Credit Amount":
+            begin
+              if TestBalance then begin
+                CostEntry.CALCSUMS("Credit Amount",Amount);
+                Balance := CostEntry.Amount;
+              end else
+                CostEntry.CALCSUMS("Credit Amount");
+              AmountToAdd := CostEntry."Credit Amount";
+            end;
+        end;
+        if not TestBalance then
+          CheckAddDimsToResult(AccSchedKPIBuffer,ColumnLayout,0,AmountToAdd)
+        else
+          if PassToResult(AccSchedLine.Show,Balance) then
+            CheckAddDimsToResult(AccSchedKPIBuffer,ColumnLayout,0,AmountToAdd);
+      end;
+
+      if ColumnLayout."Ledger Entry Type" = ColumnLayout."Ledger Entry Type"::"Budget Entries" then begin
+        with CostBudgetEntry do begin
+          SETCURRENTKEY("Budget Name","Cost Type No.","Cost Center Code","Cost Object Code",Date);
+          if CostType.Totaling = '' then
+            SETRANGE("Cost Type No.",CostType."No.")
+          else
+            SETFILTER("Cost Type No.",CostType.Totaling);
+          CostType.COPYFILTER("Date Filter",Date);
+          AccSchedLine.COPYFILTER("Cost Budget Filter","Budget Name");
+          AccSchedLine.COPYFILTER("Cost Center Filter","Cost Center Code");
+          AccSchedLine.COPYFILTER("Cost Object Filter","Cost Object Code");
+          FILTERGROUP(2);
+          SETFILTER(
+            "Cost Center Code",
+            AccSchedManagement.GetDimTotalingFilter(5,AccSchedLine."Cost Center Totaling"));
+          SETFILTER(
+            "Cost Object Code",
+            AccSchedManagement.GetDimTotalingFilter(6,AccSchedLine."Cost Object Totaling"));
+          FILTERGROUP(0);
+        end;
+
+        CostBudgetEntry.CALCSUMS(Amount);
+        case AmountType of
+          AmountType::"Net Amount":
+            AmountToAdd := CostBudgetEntry.Amount;
+          AmountType::"Debit Amount":
+            if CostBudgetEntry.Amount > 0 then
+              AmountToAdd := CostBudgetEntry.Amount;
+          AmountType::"Credit Amount":
+            if CostBudgetEntry.Amount < 0 then
+              AmountToAdd := CostBudgetEntry.Amount;
+        end;
+        if not TestBalance then
+          CheckAddDimsToResult(AccSchedKPIBuffer,ColumnLayout,0,AmountToAdd)
+        else
+          if PassToResult(AccSchedLine.Show,CostBudgetEntry.Amount) then
+            CheckAddDimsToResult(AccSchedKPIBuffer,ColumnLayout,0,AmountToAdd);
+      end;
+    END;
+
+    LOCAL PROCEDURE AddCFAccountDimensions@62(VAR CFAccount@1001 : Record "Cash Flow Account";VAR AccSchedLine@1002 : Record "Acc. Schedule Line";ColumnLayout@1003 : Record "Column Layout";VAR AccSchedKPIBuffer@1004 : Record "Acc. Sched. KPI Buffer");
+    VAR
+      AnalysisViewEntry@1006 : Record "Analysis View Entry";
+      CFForecastEntryDimensions@1014 : Query "CF Forecast Entry Dimensions";
+      AnalysisViewEntryDimensions@1005 : Query "Analysis View Entry Dimensions";
+      Filter@1013 : Text;
+      AmountType@1000 : '"Net Amount","Debit Amount","Credit Amount"';
+      AmountToAdd@1007 : Decimal;
+    BEGIN
+      if ConflictAmountType(AccSchedLine,ColumnLayout."Amount Type",AmountType) then
+        exit;
+
+      if ColumnLayout."Ledger Entry Type" = ColumnLayout."Ledger Entry Type"::Entries then
+        if AccSchedName."Analysis View Name" = '' then begin
+          if CFAccount.Totaling = '' then
+            CFForecastEntryDimensions.SETRANGE(Cash_Flow_Account_No,CFAccount."No.")
+          else
+            CFForecastEntryDimensions.SETFILTER(Cash_Flow_Account_No,CFAccount.Totaling);
+
+          CFForecastEntryDimensions.SETFILTER(Cash_Flow_Date,CFAccount.GETFILTER("Date Filter"));
+          CFForecastEntryDimensions.SETFILTER(
+            Cash_Flow_Forecast_No,AccSchedLine.GETFILTER("Cash Flow Forecast Filter"));
+
+          Filter := CombineFilters(
+              AccSchedLine.GETFILTER("Dimension 1 Filter"),AccSchedLine."Dimension 1 Totaling",'&');
+          CFForecastEntryDimensions.SETFILTER(Global_Dimension_1_Code,Filter);
+
+          Filter := CombineFilters(
+              AccSchedLine.GETFILTER("Dimension 2 Filter"),AccSchedLine."Dimension 2 Totaling",'&');
+          CFForecastEntryDimensions.SETFILTER(Global_Dimension_2_Code,Filter);
+
+          CFForecastEntryDimensions.OPEN;
+          while CFForecastEntryDimensions.READ do begin
+            if AmountType = AmountType::"Net Amount" then
+              AmountToAdd := CFForecastEntryDimensions.Sum_Amount_LCY
+            else
+              AmountToAdd := 0;
+            CheckAddDimsToResult(
+              AccSchedKPIBuffer,ColumnLayout,CFForecastEntryDimensions.Dimension_Set_ID,
+              AmountToAdd);
+          end;
+          CFForecastEntryDimensions.CLOSE;
+        end else begin
+          if CFAccount.Totaling = '' then
+            Filter := CFAccount."No."
+          else
+            Filter := CFAccount.Totaling;
+
+          FilterAnalysisViewEntriesDim(
+            AnalysisViewEntryDimensions,AccSchedName."Analysis View Name",
+            AnalysisViewEntry."Account Source"::"Cash Flow Account",Filter,
+            CFAccount.GETFILTER("Date Filter"),AccSchedLine);
+          AnalysisViewEntryDimensions.SETFILTER(
+            Cash_Flow_Forecast_No,AccSchedLine.GETFILTER("Cash Flow Forecast Filter"));
+
+          AnalysisViewEntryDimensions.OPEN;
+          while AnalysisViewEntryDimensions.READ do begin
+            if AmountType = AmountType::"Net Amount" then
+              AmountToAdd := AnalysisViewEntryDimensions.Sum_Amount
+            else
+              AmountToAdd := 0;
+            CheckAddDimsToResult(AccSchedKPIBuffer,ColumnLayout,0,AmountToAdd);
+          end;
+          AnalysisViewEntryDimensions.CLOSE;
+        end;
+    END;
+
+    LOCAL PROCEDURE EvalExprWithDimensions@84(Expression@1001 : Text[250];AccSchedLine@1002 : Record "Acc. Schedule Line";ColumnLayout@1003 : Record "Column Layout";VAR AccSchedKPIBuffer@1004 : Record "Acc. Sched. KPI Buffer");
+    VAR
+      TempAccSchedKPIBufferDim@1019 : TEMPORARY Record "Acc. Sched. KPI Buffer";
+      SrcAccSchedLineFilter@1005 : Text;
+      Value@1020 : Decimal;
+    BEGIN
+      SrcAccSchedLineFilter := GetAccSchedLineFormulaFilter(Expression,AccSchedLine);
+      GetExpressionDimensions(AccSchedKPIBuffer,TempAccSchedKPIBufferDim,SrcAccSchedLineFilter);
+      with TempAccSchedKPIBufferDim do
+        if FINDSET then
+          repeat
+            Value :=
+              EvalExprWithDimFilter("Dimension Set ID",Expression,AccSchedLine,ColumnLayout,AccSchedKPIBuffer);
+            CheckAddDimsToResult(
+              AccSchedKPIBuffer,ColumnLayout,"Dimension Set ID",Value);
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetExpressionDimensions@59(VAR TempAccSchedKPIBufferExisting@1002 : TEMPORARY Record "Acc. Sched. KPI Buffer";VAR TempAccSchedKPIBufferResulting@1000 : TEMPORARY Record "Acc. Sched. KPI Buffer";LineFilter@1001 : Text);
+    BEGIN
+      with TempAccSchedKPIBufferExisting do begin
+        SETFILTER("KPI Code",LineFilter);
+        if FINDSET then
+          repeat
+            if ("Net Change Actual" <> 0) or ("Balance at Date Actual" <> 0) or
+               ("Net Change Budget" <> 0) or ("Balance at Date Budget" <> 0) or
+               ("Net Change Actual Last Year" <> 0) or ("Balance at Date Act. Last Year" <> 0) or
+               ("Net Change Budget Last Year" <> 0) or ("Balance at Date Bud. Last Year" <> 0)
+            then
+              AddDimsToBuffer(TempAccSchedKPIBufferResulting,"Dimension Set ID")
+          until NEXT = 0;
+        SETRANGE("KPI Code");
+      end;
+    END;
+
+    LOCAL PROCEDURE GetCellValueWithDimFilter@87(VAR TempAccSchedKPIBufferExisting@1000 : TEMPORARY Record "Acc. Sched. KPI Buffer";AccSchedLine@1001 : Record "Acc. Schedule Line";ColumnLayout@1002 : Record "Column Layout";DimSetID@1003 : Integer) Result : Decimal;
+    BEGIN
+      with TempAccSchedKPIBufferExisting do begin
+        SETRANGE("Account Schedule Name",AccSchedLine."Schedule Name");
+        SETRANGE("KPI Code",AccSchedLine."Row No.");
+        SETRANGE("Dimension Set ID",DimSetID);
+        if FINDFIRST then
+          Result := GetColumnValue(ColumnLayout);
+
+        SETRANGE("Account Schedule Name");
+        SETRANGE("KPI Code");
+        SETRANGE("Dimension Set ID");
+      end;
+    END;
+
+    LOCAL PROCEDURE GetAccSchedLineFormulaFilter@58(Expression@1001 : Text;AccSchedLine@1002 : Record "Acc. Schedule Line") ResultingFilter : Text;
+    VAR
+      FilterPart@1004 : Text;
+      i@1012 : Integer;
+      j@1000 : Integer;
+      IsFilter@1003 : Boolean;
+      FoundFilterPart@1006 : Boolean;
+    BEGIN
+      Expression := DELCHR(Expression,'<>',' ');
+      if STRLEN(Expression) > 0 then begin
+        Expression := CONVERTSTR(Expression,'+-*/^%()',';;;;;;;;');
+        i := STRLEN(Expression);
+        while i > 0 do begin
+          if Expression[i] <> ';' then begin
+            FoundFilterPart := false;
+            j := i - 1;
+            repeat
+              if j = 0 then
+                FoundFilterPart := true;
+              if not FoundFilterPart then
+                FoundFilterPart := Expression[j] = ';';
+
+              if FoundFilterPart then begin
+                FilterPart := COPYSTR(Expression,j + 1,i - j);
+                AccSchedLine.SETRANGE("Schedule Name",AccSchedLine."Schedule Name");
+                AccSchedLine.SETFILTER("Row No.",FilterPart);
+                IsFilter :=
+                  (STRPOS(FilterPart,'..') +
+                   STRPOS(FilterPart,'|') +
+                   STRPOS(FilterPart,'<') +
+                   STRPOS(FilterPart,'>') +
+                   STRPOS(FilterPart,'&') +
+                   STRPOS(FilterPart,'=') > 0);
+                if (STRLEN(FilterPart) <= 10) or IsFilter then
+                  if AccSchedLine.FINDFIRST then
+                    ResultingFilter := CombineFilters(ResultingFilter,FilterPart,'|');
+                i := j;
+              end else
+                j -= 1;
+            until FoundFilterPart;
+          end;
+          i -= 1;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE EvalExprWithDimFilter@79(DimSetID@1019 : Integer;Expression@1001 : Text[250];AccSchedLine@1002 : Record "Acc. Schedule Line";ColumnLayout@1003 : Record "Column Layout";VAR ExistingAccSchedKPIBuffer@1004 : Record "Acc. Sched. KPI Buffer") : Decimal;
+    VAR
+      Result@1005 : Decimal;
+      Parantheses@1006 : Integer;
+      Operator@1007 : Char;
+      LeftOperand@1008 : Text[250];
+      RightOperand@1009 : Text[250];
+      LeftResult@1010 : Decimal;
+      RightResult@1011 : Decimal;
+      i@1012 : Integer;
+      IsExpression@1013 : Boolean;
+      IsFilter@1014 : Boolean;
+      Operators@1015 : Text[8];
+      OperatorNo@1016 : Integer;
+      AccSchedLineID@1017 : Integer;
+    BEGIN
+      Result := 0;
+
+      CallLevel := CallLevel + 1;
+      if CallLevel > 25 then
+        ShowError(CircularRefErr,AccSchedLine,ColumnLayout);
+
+      Expression := DELCHR(Expression,'<>',' ');
+      if STRLEN(Expression) > 0 then begin
+        Parantheses := 0;
+        IsExpression := false;
+        Operators := '+-*/^%';
+        OperatorNo := 1;
+        repeat
+          i := STRLEN(Expression);
+          repeat
+            if Expression[i] = '(' then
+              Parantheses := Parantheses + 1
+            else
+              if Expression[i] = ')' then
+                Parantheses := Parantheses - 1;
+            if (Parantheses = 0) and (Expression[i] = Operators[OperatorNo]) then
+              IsExpression := true
+            else
+              i := i - 1;
+          until IsExpression or (i <= 0);
+          if not IsExpression then
+            OperatorNo := OperatorNo + 1;
+        until (OperatorNo > STRLEN(Operators)) or IsExpression;
+        if IsExpression then begin
+          if i > 1 then
+            LeftOperand := COPYSTR(Expression,1,i - 1)
+          else
+            LeftOperand := '';
+          if i < STRLEN(Expression) then
+            RightOperand := COPYSTR(Expression,i + 1)
+          else
+            RightOperand := '';
+          Operator := Expression[i];
+          LeftResult :=
+            EvalExprWithDimFilter(
+              DimSetID,LeftOperand,AccSchedLine,ColumnLayout,ExistingAccSchedKPIBuffer);
+          RightResult :=
+            EvalExprWithDimFilter(
+              DimSetID,RightOperand,AccSchedLine,ColumnLayout,ExistingAccSchedKPIBuffer);
+          case Operator of
+            '^':
+              Result := POWER(LeftResult,RightResult);
+            '%':
+              if RightResult = 0 then // Division Error
+                Result := 0
+              else
+                Result := 100 * LeftResult / RightResult;
+            '*':
+              Result := LeftResult * RightResult;
+            '/':
+              if RightResult = 0 then // Division Error
+                Result := 0
+              else
+                Result := LeftResult / RightResult;
+            '+':
+              Result := LeftResult + RightResult;
+            '-':
+              Result := LeftResult - RightResult;
+          end;
+        end else
+          if (Expression[1] = '(') and (Expression[STRLEN(Expression)] = ')') then
+            Result :=
+              EvalExprWithDimFilter(
+                DimSetID,COPYSTR(Expression,2,STRLEN(Expression) - 2),
+                AccSchedLine,ColumnLayout,ExistingAccSchedKPIBuffer)
+          else begin
+            IsFilter :=
+              (STRPOS(Expression,'..') +
+               STRPOS(Expression,'|') +
+               STRPOS(Expression,'<') +
+               STRPOS(Expression,'>') +
+               STRPOS(Expression,'&') +
+               STRPOS(Expression,'=') > 0);
+            if (STRLEN(Expression) > 10) and (not IsFilter) then
+              EVALUATE(Result,Expression)
+            else begin
+              AccSchedLine.SETRANGE("Schedule Name",AccSchedLine."Schedule Name");
+              AccSchedLine.SETFILTER("Row No.",Expression);
+              AccSchedLineID := AccSchedLine."Line No.";
+              if AccSchedLine.FIND('-') then
+                repeat
+                  if AccSchedLine."Line No." <> AccSchedLineID then
+                    Result +=
+                      GetCellValueWithDimFilter(ExistingAccSchedKPIBuffer,AccSchedLine,ColumnLayout,DimSetID);
+                until AccSchedLine.NEXT = 0
+              else
+                if IsFilter or (not EVALUATE(Result,Expression)) then
+                  ShowError(IllegalValErr,AccSchedLine,ColumnLayout);
+            end;
+          end;
+      end;
+      CallLevel := CallLevel - 1;
+      exit(Result);
+    END;
+
+    LOCAL PROCEDURE ShowError@19(MessageLine@1000 : Text[100];VAR AccSchedLine@1001 : Record "Acc. Schedule Line";VAR ColumnLayout@1002 : Record "Column Layout");
+    BEGIN
+      AccSchedLine.SETRANGE("Schedule Name",AccSchedLine."Schedule Name");
+      AccSchedLine.SETRANGE("Line No.",CallingAccSchedLineID);
+      if AccSchedLine.FINDFIRST then;
+      ColumnLayout.SETRANGE("Column Layout Name",ColumnLayout."Column Layout Name");
+      ColumnLayout.SETRANGE("Line No.",CallingColumnLayoutID);
+      if ColumnLayout.FINDFIRST then;
+      ERROR(
+        STRSUBSTNO(
+          GeneralErr,
+          MessageLine,
+          ErrorOccurredErr,
+          STRSUBSTNO(AccSchedLineErr,AccSchedLine."Row No.",AccSchedLine."Line No.",AccSchedLine.Totaling),
+          STRSUBSTNO(ColumnErr,ColumnLayout."Column No.",ColumnLayout."Line No.",ColumnLayout.Formula)));
+    END;
+
+    LOCAL PROCEDURE ConflictAmountType@45(AccSchedLine@1000 : Record "Acc. Schedule Line";ColumnLayoutAmtType@1001 : '"Net Amount","Debit Amount","Credit Amount"';VAR AmountType@1002 : Option) : Boolean;
+    BEGIN
+      if (ColumnLayoutAmtType = AccSchedLine."Amount Type") or
+         (AccSchedLine."Amount Type" = AccSchedLine."Amount Type"::"Net Amount")
+      then
+        AmountType := ColumnLayoutAmtType
+      else
+        if ColumnLayoutAmtType = ColumnLayoutAmtType::"Net Amount" then
+          AmountType := AccSchedLine."Amount Type"
+        else
+          exit(true);
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE CombineFilters@61(FilterPart1@1000 : Text;FilterPart2@1001 : Text;CombineSymbol@1002 : Text[1]) : Text;
+    BEGIN
+      PrepareFilterPart(FilterPart1);
+      PrepareFilterPart(FilterPart2);
+
+      if (FilterPart1 <> '') and (FilterPart2 <> '') then
+        exit(STRSUBSTNO('%1%2%3',FilterPart1,CombineSymbol,FilterPart2));
+
+      if FilterPart1 <> '' then
+        exit(FilterPart1);
+
+      if FilterPart2 <> '' then
+        exit(FilterPart2);
+
+      exit('');
+    END;
+
+    LOCAL PROCEDURE PrepareFilterPart@75(VAR FilterText@1000 : Text);
+    BEGIN
+      FilterText := DELCHR(FilterText,'<>',' ');
+      if FilterText <> '' then
+        if (FilterText[1] <> '(') and (FilterText[STRLEN(FilterText)] <> ')') then
+          FilterText := STRSUBSTNO('(%1)',FilterText);
+    END;
+
+    LOCAL PROCEDURE CheckAddDimsToResult@94(VAR AccSchedKPIBuffer@1000 : Record "Acc. Sched. KPI Buffer";ColumnLayout@1001 : Record "Column Layout";DimensionSetID@1002 : Integer;Amount@1004 : Decimal);
+    BEGIN
+      if Amount = 0 then
+        exit;
+
+      with AccSchedKPIBuffer do begin
+        SETRANGE("Account Schedule Name",TempAccSchedKPIBuffer."Account Schedule Name");
+        SETRANGE("KPI Code",TempAccSchedKPIBuffer."KPI Code");
+        SETRANGE("Dimension Set ID",DimensionSetID);
+        if not FINDFIRST then begin
+          RESET;
+          if FINDLAST then;
+          INIT;
+          "No." += 1;
+          Date := TempAccSchedKPIBuffer.Date;
+          "Closed Period" := TempAccSchedKPIBuffer."Closed Period";
+          "Account Schedule Name" := TempAccSchedKPIBuffer."Account Schedule Name";
+          "KPI Code" := TempAccSchedKPIBuffer."KPI Code";
+          "KPI Name" := TempAccSchedKPIBuffer."KPI Name";
+          "Dimension Set ID" := DimensionSetID;
+          AddColumnValue(ColumnLayout,Amount);
+          INSERT;
+        end else begin
+          AddColumnValue(ColumnLayout,Amount);
+          MODIFY;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE AddDimsToBuffer@80(VAR TempAccSchedKPIBufferResulting@1000 : TEMPORARY Record "Acc. Sched. KPI Buffer";DimensionSetID@1002 : Integer);
+    BEGIN
+      with TempAccSchedKPIBufferResulting do begin
+        SETRANGE("Dimension Set ID",DimensionSetID);
+        if not FINDFIRST then begin
+          RESET;
+          if FINDLAST then;
+          "No." += 1;
+          "Dimension Set ID" := DimensionSetID;
+          INSERT;
+        end;
+        SETRANGE("Dimension Set ID");
+      end;
+    END;
+
+    [External]
+    PROCEDURE PostProcessAmount@73(AccSchedLine@1001 : Record "Acc. Schedule Line";Amount@1000 : Decimal) : Decimal;
+    BEGIN
+      if AccSchedLine."Show Opposite Sign" then
+        exit(-Amount);
+      exit(Amount);
+    END;
+
+    LOCAL PROCEDURE PassToResult@96(AccSchedLineShow@1000 : Option;Balance@1001 : Decimal) BalanceIsOK : Boolean;
+    VAR
+      AccScheduleLine@1002 : Record "Acc. Schedule Line";
+    BEGIN
+      case AccSchedLineShow of
+        AccScheduleLine.Show::"When Positive Balance":
+          if Balance > 0 then
+            BalanceIsOK := true
+          else
+            BalanceIsOK := false;
+        AccScheduleLine.Show::"When Negative Balance":
+          if Balance < 0 then
+            BalanceIsOK := true
+          else
+            BalanceIsOK := false;
+        else
+          BalanceIsOK := true;
+      end;
+      exit(BalanceIsOK);
+    END;
+
+    LOCAL PROCEDURE FilterAnalysisViewEntriesDim@15(VAR AnalysisViewEntryDimensions@1000 : Query "Analysis View Entry Dimensions";AnalysisViewName@1001 : Code[10];AccountSource@1002 : Option;AccountFilter@1003 : Text;DateFilter@1004 : Text;AccScheduleLine2@1005 : Record "Acc. Schedule Line");
+    BEGIN
+      with AnalysisViewEntryDimensions do begin
+        SETRANGE(Analysis_View_Code,AnalysisViewName);
+        SETRANGE(Account_Source,AccountSource);
+        SETFILTER(Account_No,AccountFilter);
+        SETFILTER(Business_Unit_Code,AccScheduleLine2.GETFILTER("Business Unit Filter"));
+        SETFILTER(Posting_Date,DateFilter);
+
+        SETFILTER(Dimension_1_Value_Code,
+          CombineFilters(
+            AccScheduleLine2.GETFILTER("Dimension 1 Filter"),
+            AccSchedManagement.GetDimTotalingFilter(1,AccScheduleLine2."Dimension 1 Totaling"),'&'));
+        SETFILTER(Dimension_2_Value_Code,
+          CombineFilters(
+            AccScheduleLine2.GETFILTER("Dimension 2 Filter"),
+            AccSchedManagement.GetDimTotalingFilter(2,AccScheduleLine2."Dimension 2 Totaling"),'&'));
+        SETFILTER(Dimension_3_Value_Code,
+          CombineFilters(
+            AccScheduleLine2.GETFILTER("Dimension 3 Filter"),
+            AccSchedManagement.GetDimTotalingFilter(3,AccScheduleLine2."Dimension 3 Totaling"),'&'));
+        SETFILTER(Dimension_4_Value_Code,
+          CombineFilters(
+            AccScheduleLine2.GETFILTER("Dimension 4 Filter"),
+            AccSchedManagement.GetDimTotalingFilter(4,AccScheduleLine2."Dimension 4 Totaling"),'&'));
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

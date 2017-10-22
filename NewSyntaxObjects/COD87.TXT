@@ -1,0 +1,324 @@
+OBJECT Codeunit 87 Blanket Sales Order to Order
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Sales Header";
+    OnRun=VAR
+            Cust@1001 : Record Customer;
+            TempSalesLine@1002 : TEMPORARY Record "Sales Line";
+            SalesCommentLine@1011 : Record "Sales Comment Line";
+            ATOLink@1000 : Record "Assemble-to-Order Link";
+            PrepmtMgt@1004 : Codeunit "Prepayment Mgt.";
+            RecordLinkManagement@1009 : Codeunit "Record Link Management";
+            SalesCalcDiscountByType@1003 : Codeunit "Sales - Calc Discount By Type";
+            SalesLineReserve@1010 : Codeunit "Sales Line-Reserve";
+            Reservation@1005 : Page Reservation;
+            ShouldRedistributeInvoiceAmount@1006 : Boolean;
+            CreditLimitExceeded@1008 : Boolean;
+          BEGIN
+            TESTFIELD("Document Type","Document Type"::"Blanket Order");
+            ShouldRedistributeInvoiceAmount := SalesCalcDiscountByType.ShouldRedistributeInvoiceDiscountAmount(Rec);
+
+            Cust.GET("Sell-to Customer No.");
+            Cust.CheckBlockedCustOnDocs(Cust,"Document Type"::Order,true,false);
+
+            if QtyToShipIsZero then
+              ERROR(Text002);
+
+            SalesSetup.GET;
+
+            CheckAvailability(Rec);
+
+            CreditLimitExceeded := CreateSalesHeader(Rec,Cust."Prepayment %");
+
+            BlanketOrderSalesLine.RESET;
+            BlanketOrderSalesLine.SETRANGE("Document Type","Document Type");
+            BlanketOrderSalesLine.SETRANGE("Document No.","No.");
+            if BlanketOrderSalesLine.FINDSET then begin
+              TempSalesLine.DELETEALL;
+              repeat
+                if (BlanketOrderSalesLine.Type = BlanketOrderSalesLine.Type::" ") or (BlanketOrderSalesLine."Qty. to Ship" <> 0) then begin
+                  SalesLine.SETCURRENTKEY("Document Type","Blanket Order No.","Blanket Order Line No.");
+                  SalesLine.SETRANGE("Blanket Order No.",BlanketOrderSalesLine."Document No.");
+                  SalesLine.SETRANGE("Blanket Order Line No.",BlanketOrderSalesLine."Line No.");
+                  QuantityOnOrders := 0;
+                  if SalesLine.FINDSET then
+                    repeat
+                      if (SalesLine."Document Type" = SalesLine."Document Type"::"Return Order") or
+                         ((SalesLine."Document Type" = SalesLine."Document Type"::"Credit Memo") and
+                          (SalesLine."Return Receipt No." = ''))
+                      then
+                        QuantityOnOrders := QuantityOnOrders - SalesLine."Outstanding Qty. (Base)"
+                      else
+                        if (SalesLine."Document Type" = SalesLine."Document Type"::Order) or
+                           ((SalesLine."Document Type" = SalesLine."Document Type"::Invoice) and
+                            (SalesLine."Shipment No." = ''))
+                        then
+                          QuantityOnOrders := QuantityOnOrders + SalesLine."Outstanding Qty. (Base)";
+                    until SalesLine.NEXT = 0;
+                  if (ABS(BlanketOrderSalesLine."Qty. to Ship (Base)" + QuantityOnOrders +
+                        BlanketOrderSalesLine."Qty. Shipped (Base)") >
+                      ABS(BlanketOrderSalesLine."Quantity (Base)")) or
+                     (BlanketOrderSalesLine."Quantity (Base)" * BlanketOrderSalesLine."Outstanding Qty. (Base)" < 0)
+                  then
+                    ERROR(
+                      QuantityCheckErr,
+                      BlanketOrderSalesLine.FIELDCAPTION("Qty. to Ship (Base)"),
+                      BlanketOrderSalesLine.Type,BlanketOrderSalesLine."No.",
+                      BlanketOrderSalesLine.FIELDCAPTION("Line No."),BlanketOrderSalesLine."Line No.",
+                      BlanketOrderSalesLine."Outstanding Qty. (Base)" - QuantityOnOrders,
+                      STRSUBSTNO(
+                        Text001,
+                        BlanketOrderSalesLine.FIELDCAPTION("Outstanding Qty. (Base)"),
+                        BlanketOrderSalesLine.FIELDCAPTION("Qty. to Ship (Base)")),
+                      BlanketOrderSalesLine."Outstanding Qty. (Base)",QuantityOnOrders);
+                  SalesOrderLine := BlanketOrderSalesLine;
+                  ResetQuantityFields(SalesOrderLine);
+                  SalesOrderLine."Document Type" := SalesOrderHeader."Document Type";
+                  SalesOrderLine."Document No." := SalesOrderHeader."No.";
+                  SalesOrderLine."Blanket Order No." := "No.";
+                  SalesOrderLine."Blanket Order Line No." := BlanketOrderSalesLine."Line No.";
+                  if (SalesOrderLine."No." <> '') and (SalesOrderLine.Type <> 0) then begin
+                    SalesOrderLine.Amount := 0;
+                    SalesOrderLine."Amount Including VAT" := 0;
+                    SalesOrderLine.VALIDATE(Quantity,BlanketOrderSalesLine."Qty. to Ship");
+                    SalesOrderLine.VALIDATE("Shipment Date",BlanketOrderSalesLine."Shipment Date");
+                    SalesOrderLine.VALIDATE("Unit Price",BlanketOrderSalesLine."Unit Price");
+                    SalesOrderLine."Allow Invoice Disc." := BlanketOrderSalesLine."Allow Invoice Disc.";
+                    SalesOrderLine."Allow Line Disc." := BlanketOrderSalesLine."Allow Line Disc.";
+                    SalesOrderLine.VALIDATE("Line Discount %",BlanketOrderSalesLine."Line Discount %");
+                    if SalesOrderLine.Quantity <> 0 then
+                      SalesOrderLine.VALIDATE("Inv. Discount Amount",BlanketOrderSalesLine."Inv. Discount Amount");
+                    SalesLineReserve.TransferSaleLineToSalesLine(
+                      BlanketOrderSalesLine,SalesOrderLine,BlanketOrderSalesLine."Outstanding Qty. (Base)");
+                  end;
+
+                  if Cust."Prepayment %" <> 0 then
+                    SalesOrderLine."Prepayment %" := Cust."Prepayment %";
+                  PrepmtMgt.SetSalesPrepaymentPct(SalesOrderLine,SalesOrderHeader."Posting Date");
+                  SalesOrderLine.VALIDATE("Prepayment %");
+
+                  SalesOrderLine."Shortcut Dimension 1 Code" := BlanketOrderSalesLine."Shortcut Dimension 1 Code";
+                  SalesOrderLine."Shortcut Dimension 2 Code" := BlanketOrderSalesLine."Shortcut Dimension 2 Code";
+                  SalesOrderLine."Dimension Set ID" := BlanketOrderSalesLine."Dimension Set ID";
+                  if ATOLink.AsmExistsForSalesLine(BlanketOrderSalesLine) then begin
+                    SalesOrderLine."Qty. to Assemble to Order" := SalesOrderLine.Quantity;
+                    SalesOrderLine."Qty. to Asm. to Order (Base)" := SalesOrderLine."Quantity (Base)";
+                  end;
+                  SalesOrderLine.DefaultDeferralCode;
+                  if IsSalesOrderLineToBeInserted(SalesOrderLine) then begin
+                    OnBeforeInsertSalesOrderLine(SalesOrderLine,SalesOrderHeader,BlanketOrderSalesLine,Rec);
+                    SalesOrderLine.INSERT;
+                  end;
+
+                  if ATOLink.AsmExistsForSalesLine(BlanketOrderSalesLine) then
+                    ATOLink.MakeAsmOrderLinkedToSalesOrderLine(BlanketOrderSalesLine,SalesOrderLine);
+
+                  if BlanketOrderSalesLine."Qty. to Ship" <> 0 then begin
+                    BlanketOrderSalesLine.VALIDATE("Qty. to Ship",0);
+                    BlanketOrderSalesLine.MODIFY;
+                    AutoReserve(SalesOrderLine,TempSalesLine);
+                  end;
+                end;
+              until BlanketOrderSalesLine.NEXT = 0;
+            end;
+
+            if SalesSetup."Default Posting Date" = SalesSetup."Default Posting Date"::"No Date" then begin
+              SalesOrderHeader."Posting Date" := 0D;
+              SalesOrderHeader.MODIFY;
+            end;
+
+            if SalesSetup."Copy Comments Blanket to Order" then begin
+              SalesCommentLine.CopyComments(
+                SalesCommentLine."Document Type"::"Blanket Order",SalesOrderHeader."Document Type","No.",SalesOrderHeader."No.");
+              RecordLinkManagement.CopyLinks(Rec,SalesOrderHeader);
+            end;
+
+            if not ShouldRedistributeInvoiceAmount then
+              SalesCalcDiscountByType.ResetRecalculateInvoiceDisc(SalesOrderHeader);
+
+            if (not HideValidationDialog) and (not CreditLimitExceeded) then
+              CustCheckCreditLimit.BlanketSalesOrderToOrderCheck(SalesOrderHeader);
+
+            COMMIT;
+
+            if TempSalesLine.FIND('-') then
+              if CONFIRM(Text003,true) then
+                repeat
+                  CLEAR(Reservation);
+                  Reservation.SetSalesLine(TempSalesLine);
+                  Reservation.RUNMODAL;
+                  FIND;
+                until TempSalesLine.NEXT = 0;
+
+            CLEAR(CustCheckCreditLimit);
+            CLEAR(ItemCheckAvail);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      QuantityCheckErr@1000 : TextConst '@@@="%1: FIELDCAPTION(""Qty. to Ship (Base)""); %2: Field(Type); %3: Field(No.); %4: FIELDCAPTION(""Line No.""); %5: Field(Line No.); %6: Decimal Qty Difference; %7: Text001; %8: Field(Outstanding Qty. (Base)); %9: Decimal Quantity On Orders";ENU="%1 of %2 %3 in %4 %5 cannot be more than %6.\%7\%8 - %9 = %6."';
+      Text001@1001 : TextConst 'ENU="%1 - Unposted %1 = Possible %2"';
+      BlanketOrderSalesLine@1003 : Record "Sales Line";
+      SalesLine@1004 : Record "Sales Line";
+      SalesOrderHeader@1005 : Record "Sales Header";
+      SalesOrderLine@1006 : Record "Sales Line";
+      SalesSetup@1009 : Record "Sales & Receivables Setup";
+      CustCheckCreditLimit@1010 : Codeunit "Cust-Check Cr. Limit";
+      ItemCheckAvail@1011 : Codeunit "Item-Check Avail.";
+      HideValidationDialog@1014 : Boolean;
+      QuantityOnOrders@1015 : Decimal;
+      Text002@1002 : TextConst 'ENU=There is nothing to create.';
+      Text003@1017 : TextConst 'ENU=Full automatic reservation was not possible.\Reserve items manually?';
+
+    LOCAL PROCEDURE CreateSalesHeader@4(SalesHeader@1000 : Record "Sales Header";PrepmtPercent@1001 : Decimal) CreditLimitExceeded : Boolean;
+    BEGIN
+      with SalesHeader do begin
+        SalesOrderHeader := SalesHeader;
+        SalesOrderHeader."Document Type" := SalesOrderHeader."Document Type"::Order;
+        if not HideValidationDialog then
+          CreditLimitExceeded := CustCheckCreditLimit.SalesHeaderCheck(SalesOrderHeader);
+
+        SalesOrderHeader."No. Printed" := 0;
+        SalesOrderHeader.Status := SalesOrderHeader.Status::Open;
+        SalesOrderHeader."No." := '';
+
+        SalesOrderLine.LOCKTABLE;
+        SalesOrderHeader.INSERT(true);
+
+        if "Order Date" = 0D then
+          SalesOrderHeader."Order Date" := WORKDATE
+        else
+          SalesOrderHeader."Order Date" := "Order Date";
+        if "Posting Date" <> 0D then
+          SalesOrderHeader."Posting Date" := "Posting Date";
+        if SalesOrderHeader."Posting Date" = 0D then
+          SalesOrderHeader."Posting Date" := WORKDATE;
+
+        SalesOrderHeader.InitFromSalesHeader(SalesHeader);
+        SalesOrderHeader.VALIDATE("Posting Date");
+        SalesOrderHeader."Outbound Whse. Handling Time" := "Outbound Whse. Handling Time";
+        SalesOrderHeader.Reserve := Reserve;
+
+        SalesOrderHeader."Prepayment %" := PrepmtPercent;
+
+        OnBeforeInsertSalesOrderHeader(SalesOrderHeader,SalesHeader);
+        SalesOrderHeader.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE ResetQuantityFields@1(VAR TempSalesLine@1000 : Record "Sales Line");
+    BEGIN
+      TempSalesLine.Quantity := 0;
+      TempSalesLine."Quantity (Base)" := 0;
+      TempSalesLine."Qty. Shipped Not Invoiced" := 0;
+      TempSalesLine."Quantity Shipped" := 0;
+      TempSalesLine."Quantity Invoiced" := 0;
+      TempSalesLine."Qty. Shipped Not Invd. (Base)" := 0;
+      TempSalesLine."Qty. Shipped (Base)" := 0;
+      TempSalesLine."Qty. Invoiced (Base)" := 0;
+      TempSalesLine."Outstanding Quantity" := 0;
+      TempSalesLine."Outstanding Qty. (Base)" := 0;
+    END;
+
+    [External]
+    PROCEDURE GetSalesOrderHeader@2(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+      SalesHeader := SalesOrderHeader;
+    END;
+
+    [External]
+    PROCEDURE SetHideValidationDialog@14(NewHideValidationDialog@1000 : Boolean);
+    BEGIN
+      HideValidationDialog := NewHideValidationDialog;
+    END;
+
+    LOCAL PROCEDURE AutoReserve@11(VAR SalesLine@1000 : Record "Sales Line";VAR TempSalesLine@1003 : TEMPORARY Record "Sales Line");
+    VAR
+      ReservMgt@1001 : Codeunit "Reservation Management";
+      FullAutoReservation@1002 : Boolean;
+    BEGIN
+      with SalesLine do
+        if (Type = Type::Item) and
+           (Reserve = Reserve::Always) and
+           ("No." <> '')
+        then begin
+          TESTFIELD("Shipment Date");
+          ReservMgt.SetSalesLine(SalesLine);
+          ReservMgt.AutoReserve(FullAutoReservation,'',"Shipment Date","Qty. to Ship","Qty. to Ship (Base)");
+          FIND;
+          if not FullAutoReservation then begin
+            TempSalesLine.TRANSFERFIELDS(SalesLine);
+            TempSalesLine.INSERT;
+          end;
+        end;
+    END;
+
+    LOCAL PROCEDURE CheckAvailability@3(BlanketOrderSalesHeader@1000 : Record "Sales Header");
+    VAR
+      ATOLink@1001 : Record "Assemble-to-Order Link";
+    BEGIN
+      with BlanketOrderSalesLine do begin
+        SETRANGE("Document Type",BlanketOrderSalesHeader."Document Type");
+        SETRANGE("Document No.",BlanketOrderSalesHeader."No.");
+        SETRANGE(Type,Type::Item);
+        SETFILTER("No.",'<>%1','');
+        if FINDSET then
+          repeat
+            if "Qty. to Ship" > 0 then begin
+              SalesLine := BlanketOrderSalesLine;
+              ResetQuantityFields(SalesLine);
+              SalesLine.Quantity := "Qty. to Ship";
+              SalesLine."Quantity (Base)" := ROUND(SalesLine.Quantity * SalesLine."Qty. per Unit of Measure",0.00001);
+              SalesLine."Qty. to Ship" := SalesLine.Quantity;
+              SalesLine."Qty. to Ship (Base)" := SalesLine."Quantity (Base)";
+              SalesLine.InitOutstanding;
+              if ATOLink.AsmExistsForSalesLine(BlanketOrderSalesLine) then begin
+                SalesLine."Qty. to Assemble to Order" := SalesLine.Quantity;
+                SalesLine."Qty. to Asm. to Order (Base)" := SalesLine."Quantity (Base)";
+                SalesLine."Outstanding Quantity" -= SalesLine."Qty. to Assemble to Order";
+                SalesLine."Outstanding Qty. (Base)" -= SalesLine."Qty. to Asm. to Order (Base)";
+              end;
+              if SalesLine.Reserve <> SalesLine.Reserve::Always then
+                if not HideValidationDialog then
+                  if ItemCheckAvail.SalesLineCheck(SalesLine) then
+                    ItemCheckAvail.RaiseUpdateInterruptedError;
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE IsSalesOrderLineToBeInserted@5(SalesOrderLine@1000 : Record "Sales Line") : Boolean;
+    VAR
+      AttachedToSalesLine@1001 : Record "Sales Line";
+    BEGIN
+      if SalesOrderLine."Attached to Line No." = 0 then
+        exit(true);
+      exit(
+        AttachedToSalesLine.GET(
+          SalesOrderLine."Document Type",SalesOrderLine."Document No.",SalesOrderLine."Attached to Line No."));
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeInsertSalesOrderHeader@6(VAR SalesOrderHeader@1000 : Record "Sales Header";BlanketOrderSalesHeader@1001 : Record "Sales Header");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeInsertSalesOrderLine@7(VAR SalesOrderLine@1000 : Record "Sales Line";SalesOrderHeader@1001 : Record "Sales Header";BlanketOrderSalesLine@1002 : Record "Sales Line";BlanketOrderSalesHeader@1003 : Record "Sales Header");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

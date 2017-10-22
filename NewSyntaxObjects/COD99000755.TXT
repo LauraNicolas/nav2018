@@ -1,0 +1,164 @@
+OBJECT Codeunit 99000755 CalendarManagement
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ShopCalendarHoliday@1000 : Record "Shop Calendar Holiday";
+      CalendarMgt@1001 : Codeunit "Calendar Management";
+
+    [External]
+    PROCEDURE QtyperTimeUnitofMeasure@4(WorkCenterNo@1000 : Code[20];UnitOfMeasureCode@1001 : Code[10]) : Decimal;
+    VAR
+      WorkCenter@1002 : Record "Work Center";
+    BEGIN
+      WorkCenter.GET(WorkCenterNo);
+
+      exit(TimeFactor(UnitOfMeasureCode) / TimeFactor(WorkCenter."Unit of Measure Code"));
+    END;
+
+    [External]
+    PROCEDURE TimeFactor@2(UnitOfMeasureCode@1000 : Code[10]) : Decimal;
+    VAR
+      CapUnitOfMeasure@1001 : Record "Capacity Unit of Measure";
+    BEGIN
+      if UnitOfMeasureCode = '' then
+        exit(1);
+
+      CapUnitOfMeasure.GET(UnitOfMeasureCode);
+
+      case CapUnitOfMeasure.Type of
+        CapUnitOfMeasure.Type::Minutes:
+          exit(60000);
+        CapUnitOfMeasure.Type::"100/Hour":
+          exit(36000);
+        CapUnitOfMeasure.Type::Hours:
+          exit(3600000);
+        CapUnitOfMeasure.Type::Days:
+          exit(86400000);
+      end;
+      exit(1);
+    END;
+
+    LOCAL PROCEDURE ShopCalHoliday@3(ShopCalendarCode@1000 : Code[10];Date@1001 : Date;StartingTime@1002 : Time;EndingTime@1003 : Time) : Boolean;
+    BEGIN
+      if not ShopCalendarHoliday.GET(ShopCalendarCode,Date) then
+        exit(false);
+      if (ShopCalendarHoliday."Ending Time" <= StartingTime) or (EndingTime <= ShopCalendarHoliday."Starting Time") then
+        exit(false);
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE CalculateSchedule@6(CapacityType@1000 : '"Work Center","Machine Center"';No@1001 : Code[20];WorkCenterNo@1002 : Code[20];StartingDate@1003 : Date;EndingDate@1004 : Date);
+    VAR
+      WorkCenter@1005 : Record "Work Center";
+      CalendarEntry@1006 : Record "Calendar Entry";
+      CalAbsentEntry@1007 : Record "Calendar Absence Entry";
+      ShopCalendar@1008 : Record "Shop Calendar Working Days";
+      CalAbsenceMgt@1009 : Codeunit "Calendar Absence Management";
+      PeriodDate@1010 : Date;
+      CalAbsEntryExists@1012 : Boolean;
+    BEGIN
+      WorkCenter.GET(WorkCenterNo);
+
+      WorkCenter.TESTFIELD("Shop Calendar Code");
+
+      CalendarEntry.LOCKTABLE;
+      CalendarEntry.SETRANGE("Capacity Type",CapacityType);
+      CalendarEntry.SETRANGE("No.",No);
+      CalendarEntry.SETRANGE(Date,StartingDate,EndingDate);
+      CalendarEntry.DELETEALL;
+      CalAbsentEntry.SETRANGE("Capacity Type",CapacityType);
+      CalAbsentEntry.SETRANGE("No.",No);
+      CalAbsentEntry.SETRANGE(Date,StartingDate,EndingDate);
+      CalAbsentEntry.MODIFYALL(Updated,false);
+
+      ShopCalendar.SETRANGE("Shop Calendar Code",WorkCenter."Shop Calendar Code");
+      PeriodDate := StartingDate;
+      while PeriodDate <= EndingDate do begin
+        ShopCalendar.SETRANGE(Day,DATE2DWY(PeriodDate,1) - 1);
+        if ShopCalendar.FIND('-') then
+          repeat
+            ShopCalendar.TESTFIELD("Starting Time");
+            ShopCalendar.TESTFIELD("Ending Time");
+            ShopCalendar.TESTFIELD("Work Shift Code");
+
+            CalendarEntry.INIT;
+            CalendarEntry."Capacity Type" := CapacityType;
+            CalendarEntry."Work Shift Code" := ShopCalendar."Work Shift Code";
+            CalendarEntry.Date := PeriodDate;
+            CalendarEntry."Starting Time" := 000000T;
+            CalendarEntry."Ending Time" := 000000T;
+            CalendarEntry.VALIDATE("No.",No);
+
+            if not ShopCalHoliday(
+                 WorkCenter."Shop Calendar Code",
+                 CalendarEntry.Date,
+                 ShopCalendar."Starting Time",
+                 ShopCalendar."Ending Time")
+            then begin
+              InsertCalendarEntry(CalendarEntry,ShopCalendar."Starting Time",ShopCalendar."Ending Time");
+            end else
+              if ShopCalendarHoliday."Starting Time" <= ShopCalendar."Starting Time" then begin
+                if ShopCalendarHoliday."Ending Time" < ShopCalendar."Ending Time" then
+                  InsertCalendarEntry(CalendarEntry,ShopCalendarHoliday."Ending Time",ShopCalendar."Ending Time");
+              end else begin
+                InsertCalendarEntry(CalendarEntry,ShopCalendar."Starting Time",ShopCalendarHoliday."Starting Time");
+                if ShopCalendarHoliday."Ending Time" < ShopCalendar."Ending Time" then
+                  InsertCalendarEntry(CalendarEntry,ShopCalendarHoliday."Ending Time",ShopCalendar."Ending Time");
+              end;
+          until ShopCalendar.NEXT = 0;
+        CalAbsentEntry.SETRANGE(Updated,false);
+        if PeriodDate = StartingDate then
+          CalAbsEntryExists := not CalAbsentEntry.ISEMPTY;
+        CalAbsentEntry.SETRANGE(Date,PeriodDate);
+        if CalAbsEntryExists then
+          while CalAbsentEntry.FINDFIRST do
+            CalAbsenceMgt.UpdateAbsence(CalAbsentEntry);
+        CalAbsentEntry.SETRANGE(Updated);
+        PeriodDate := PeriodDate + 1;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertCalendarEntry@5(VAR CalEntry@1000 : Record "Calendar Entry";StartingTime@1001 : Time;EndingTime@1002 : Time);
+    BEGIN
+      CalEntry."Starting Time" := StartingTime;
+      CalEntry.VALIDATE("Ending Time",EndingTime);
+      CalEntry.INSERT;
+    END;
+
+    [External]
+    PROCEDURE CalcTimeDelta@1(EndingTime@1001 : Time;StartingTime@1000 : Time) : Integer;
+    BEGIN
+      exit(CalendarMgt.CalcTimeDelta(EndingTime,StartingTime));
+    END;
+
+    [External]
+    PROCEDURE CalcTimeSubtract@14(Time@1000 : Time;Value@1001 : Integer) : Time;
+    BEGIN
+      exit(CalendarMgt.CalcTimeSubtract(Time,Value));
+    END;
+
+    [External]
+    PROCEDURE GetMaxDate@7() : Date;
+    BEGIN
+      exit(99991230D);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

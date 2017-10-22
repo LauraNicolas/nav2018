@@ -1,0 +1,584 @@
+OBJECT Codeunit 99000772 Prod. Order Route Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CannotCalculateRoutingNumberErr@1000 : TextConst '@@@="%1: Status Text; %2: Field(Prod. Order No.); %3: Field(Routing No.); %4: Direction Text; %5: Field(Actual Sequence); %6: Field (Max. Sequences)";ENU=Cannot calculate routing number %3 %4 in %1 production order %2, because sequence number %5 is higher than the maximum sequence number, %6.';
+      Text001@1001 : TextConst 'ENU=Back';
+      Text002@1002 : TextConst 'ENU=back';
+      Text003@1003 : TextConst 'ENU=Actual number of termination processes in prod. order %1 route %2  is %3. They should be 1. Check %4.';
+      Text004@1004 : TextConst 'ENU=Actual Number of start processes in prod. order %1 route %2 is %3. They should be 1. Check %4.';
+      Text005@1005 : TextConst 'ENU=Not all routing lines are sequenced backwards on routing %1. Check %2.';
+      Text006@1006 : TextConst 'ENU=Not all routing lines are sequenced forward on routing %1. Check %2.';
+      Text007@1007 : TextConst 'ENU=Previous operations for %1 cannot be found.';
+      Text008@1008 : TextConst 'ENU=Next operations for %1 cannot be found.';
+      ErrList@1009 : Text[50];
+      Text009@1010 : TextConst 'ENU=This change may have caused bin codes on some production order component lines to be different from those on the production order routing line. Do you want to automatically align all of these unmatched bin codes?';
+
+    [External]
+    PROCEDURE NeedsCalculation@8(Status@1000 : 'Simulated,Planned,"Firm Planned",Released';ProdOrderNo@1001 : Code[20];RoutingRefNo@1002 : Integer;RoutingNo@1003 : Code[20]) : Boolean;
+    VAR
+      ProdOrderRtngLine@1004 : Record "Prod. Order Routing Line";
+    BEGIN
+      SetRoutingFilter(ProdOrderRtngLine,Status,ProdOrderNo,RoutingNo,RoutingRefNo);
+      ProdOrderRtngLine.SETRANGE(Recalculate,true);
+      ProdOrderRtngLine.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine."Routing Status"::Finished);
+
+      exit(ProdOrderRtngLine.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE ErrorInRouting@1(Status@1000 : 'Simulated,Planned,"Firm Planned",Released';ProdOrderNo@1001 : Code[20];RoutingNo@1002 : Code[20];Direction@1003 : Text[20];ActualSequence@1004 : Integer;MaxSequences@1005 : Integer);
+    VAR
+      LocalText000@1006 : TextConst 'ENU=Simulated,Planned,Firm Planned,Released';
+    BEGIN
+      ERROR(
+        CannotCalculateRoutingNumberErr,
+        SELECTSTR(Status + 1,LocalText000),
+        ProdOrderNo,
+        RoutingNo,
+        Direction,
+        ActualSequence,
+        MaxSequences);
+    END;
+
+    LOCAL PROCEDURE InsertInErrList@10(ProdOrderRtngLine@1000 : Record "Prod. Order Routing Line");
+    BEGIN
+      if (STRLEN(ErrList) + STRLEN(ProdOrderRtngLine."Operation No.") + 1) > MAXSTRLEN(ErrList) then
+        exit;
+
+      if STRLEN(ErrList) > 0 then
+        ErrList := ErrList + ',' + ProdOrderRtngLine."Operation No."
+      else
+        ErrList := ProdOrderRtngLine."Operation No.";
+    END;
+
+    [External]
+    PROCEDURE SetNextOperations@12(ProdOrderLine@1000 : Record "Prod. Order Line");
+    VAR
+      ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";
+      ProdOrderRtngLine2@1002 : Record "Prod. Order Routing Line";
+    BEGIN
+      SetRoutingFilter(
+        ProdOrderRtngLine,ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",
+        ProdOrderLine."Routing No.",ProdOrderLine."Routing Reference No.");
+      ProdOrderRtngLine.MODIFYALL("Next Operation No.",'');
+      ProdOrderRtngLine.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine."Routing Status"::Finished);
+
+      if ProdOrderRtngLine.FIND('-') then
+        repeat
+          ProdOrderRtngLine2 := ProdOrderRtngLine;
+          ProdOrderRtngLine2.SETRANGE(Status,ProdOrderLine.Status);
+          ProdOrderRtngLine2.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+          ProdOrderRtngLine2.SETRANGE("Routing No.",ProdOrderLine."Routing No.");
+          ProdOrderRtngLine2.SETRANGE("Routing Reference No.",ProdOrderLine."Routing Reference No.");
+          ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+          if ProdOrderRtngLine2.FIND('>') then begin
+            ProdOrderRtngLine."Next Operation No." := ProdOrderRtngLine2."Operation No.";
+            ProdOrderRtngLine.MODIFY;
+          end;
+        until ProdOrderRtngLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CalcPreviousOperations@11(ProdOrderLine@1000 : Record "Prod. Order Line");
+    VAR
+      ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";
+      ProdOrderRtngLine2@1002 : Record "Prod. Order Routing Line";
+    BEGIN
+      SetRoutingFilter(
+        ProdOrderRtngLine,ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",
+        ProdOrderLine."Routing No.",ProdOrderLine."Routing Reference No.");
+      ProdOrderRtngLine.MODIFYALL("Previous Operation No.",'');
+      ProdOrderRtngLine.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine."Routing Status"::Finished);
+
+      if ProdOrderRtngLine.FIND('-') then
+        repeat
+          if ProdOrderRtngLine."Next Operation No." <> '' then begin
+            SetRoutingFilter(
+              ProdOrderRtngLine2,ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",
+              ProdOrderLine."Routing No.",ProdOrderLine."Routing Reference No.");
+            ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+            ProdOrderRtngLine2.SETFILTER("Operation No.",ProdOrderRtngLine."Next Operation No.");
+            if ProdOrderRtngLine2.FIND('-') then
+              repeat
+                if ProdOrderRtngLine2."Previous Operation No." <> '' then
+                  ProdOrderRtngLine2."Previous Operation No." :=
+                    ProdOrderRtngLine2."Previous Operation No." + '|';
+                ProdOrderRtngLine2."Previous Operation No." :=
+                  ProdOrderRtngLine2."Previous Operation No." +
+                  ProdOrderRtngLine."Operation No.";
+                ProdOrderRtngLine2.MODIFY;
+              until ProdOrderRtngLine2.NEXT = 0;
+          end;
+        until ProdOrderRtngLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SetRtngLineSequenceBack@6(RoutingType@1000 : 'Serial,Parallel';ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";Maxsequences@1002 : Integer;Actsequences@1003 : Integer;TotalCalculation@1004 : Boolean);
+    VAR
+      ProdOrderRtngLine2@1005 : Record "Prod. Order Routing Line";
+      SequenceNo@1006 : Integer;
+    BEGIN
+      if RoutingType = RoutingType::Parallel then begin
+        if (Actsequences - 1) > Maxsequences then
+          ErrorInRouting(
+            ProdOrderRtngLine.Status,
+            ProdOrderRtngLine."Prod. Order No.",
+            ProdOrderRtngLine."Routing No.",
+            Text001,
+            Actsequences,
+            Maxsequences);
+
+        if TotalCalculation then
+          ProdOrderRtngLine."Sequence No. (Backward)" := 1
+        else
+          ProdOrderRtngLine."Sequence No. (Actual)" := 1;
+
+        SetRoutingFilter(
+          ProdOrderRtngLine2,ProdOrderRtngLine.Status,ProdOrderRtngLine."Prod. Order No.",
+          ProdOrderRtngLine."Routing No.",ProdOrderRtngLine."Routing Reference No.");
+        ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+        if ProdOrderRtngLine."Next Operation No." <> '' then begin
+          ProdOrderRtngLine2.SETFILTER("Operation No.",ProdOrderRtngLine."Next Operation No.");
+          if ProdOrderRtngLine2.FIND('-') then
+            repeat
+              if TotalCalculation then begin
+                if (ProdOrderRtngLine2."Sequence No. (Backward)" + 1) > ProdOrderRtngLine."Sequence No. (Backward)" then
+                  ProdOrderRtngLine."Sequence No. (Backward)" := ProdOrderRtngLine2."Sequence No. (Backward)" + 1;
+              end else begin
+                if (ProdOrderRtngLine2."Sequence No. (Actual)" + 1) > ProdOrderRtngLine."Sequence No. (Actual)" then
+                  ProdOrderRtngLine."Sequence No. (Actual)" := ProdOrderRtngLine2."Sequence No. (Actual)" + 1;
+              end;
+            until ProdOrderRtngLine2.NEXT = 0;
+        end;
+        ProdOrderRtngLine.MODIFY;
+
+        if ProdOrderRtngLine."Previous Operation No." <> '' then begin
+          ProdOrderRtngLine2.SETFILTER("Operation No.",ProdOrderRtngLine."Previous Operation No.");
+          if ProdOrderRtngLine2.FIND('-') then
+            repeat
+              SetRtngLineSequenceBack(
+                RoutingType,
+                ProdOrderRtngLine2,
+                Maxsequences,
+                Actsequences + 1,
+                TotalCalculation);
+            until ProdOrderRtngLine2.NEXT = 0;
+        end;
+      end else begin
+        SequenceNo := 1;
+        ProdOrderRtngLine2 := ProdOrderRtngLine;
+        SetRoutingFilter(
+          ProdOrderRtngLine2,ProdOrderRtngLine.Status,ProdOrderRtngLine."Prod. Order No.",
+          ProdOrderRtngLine."Routing No.",ProdOrderRtngLine."Routing Reference No.");
+        ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+        if ProdOrderRtngLine2.FIND then
+          repeat
+            if TotalCalculation then
+              ProdOrderRtngLine2."Sequence No. (Backward)" := SequenceNo
+            else
+              ProdOrderRtngLine2."Sequence No. (Actual)" := SequenceNo;
+            ProdOrderRtngLine2.MODIFY;
+            SequenceNo := SequenceNo + 1;
+          until ProdOrderRtngLine2.NEXT(-1) = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetRtngLineSequenceForward@7(RoutingType@1000 : 'Serial,Parallel';ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";MaxSequences@1002 : Integer;ActSequences@1003 : Integer;TotalCalculation@1004 : Boolean);
+    VAR
+      ProdOrderRtngLine2@1005 : Record "Prod. Order Routing Line";
+      SequenceNo@1006 : Integer;
+    BEGIN
+      if RoutingType = RoutingType::Parallel then begin
+        if ActSequences > MaxSequences then
+          ErrorInRouting(
+            ProdOrderRtngLine.Status,
+            ProdOrderRtngLine."Prod. Order No.",
+            ProdOrderRtngLine."Routing No.",
+            Text002,
+            ActSequences,
+            MaxSequences);
+
+        if TotalCalculation then
+          ProdOrderRtngLine."Sequence No. (Forward)" := 1
+        else
+          ProdOrderRtngLine."Sequence No. (Actual)" := 1;
+
+        SetRoutingFilter(
+          ProdOrderRtngLine2,ProdOrderRtngLine.Status,ProdOrderRtngLine."Prod. Order No.",
+          ProdOrderRtngLine."Routing No.",ProdOrderRtngLine."Routing Reference No.");
+        ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+        if ProdOrderRtngLine."Previous Operation No." <> '' then begin
+          ProdOrderRtngLine2.SETFILTER("Operation No.",ProdOrderRtngLine."Previous Operation No.");
+          if ProdOrderRtngLine2.FIND('-') then
+            repeat
+              if TotalCalculation then begin
+                if (ProdOrderRtngLine2."Sequence No. (Forward)" + 1) > ProdOrderRtngLine."Sequence No. (Forward)" then
+                  ProdOrderRtngLine."Sequence No. (Forward)" := ProdOrderRtngLine2."Sequence No. (Forward)" + 1;
+              end else begin
+                if (ProdOrderRtngLine2."Sequence No. (Actual)" + 1) > ProdOrderRtngLine."Sequence No. (Actual)" then
+                  ProdOrderRtngLine."Sequence No. (Actual)" :=
+                    ProdOrderRtngLine."Sequence No. (Actual)" + 1;
+              end;
+            until ProdOrderRtngLine2.NEXT = 0;
+        end;
+        ProdOrderRtngLine.MODIFY;
+
+        if ProdOrderRtngLine."Next Operation No." <> '' then begin
+          ProdOrderRtngLine2.SETFILTER("Operation No.",ProdOrderRtngLine."Next Operation No.");
+          if ProdOrderRtngLine2.FIND('-') then
+            repeat
+              SetRtngLineSequenceForward(
+                RoutingType,
+                ProdOrderRtngLine2,
+                MaxSequences,
+                ActSequences + 1,
+                TotalCalculation);
+            until ProdOrderRtngLine2.NEXT = 0;
+        end;
+      end else begin
+        SequenceNo := 1;
+        ProdOrderRtngLine2 := ProdOrderRtngLine;
+        SetRoutingFilter(
+          ProdOrderRtngLine2,ProdOrderRtngLine.Status,ProdOrderRtngLine."Prod. Order No.",
+          ProdOrderRtngLine."Routing No.",ProdOrderRtngLine."Routing Reference No.");
+        ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+        if ProdOrderRtngLine2.FIND then
+          repeat
+            if TotalCalculation then
+              ProdOrderRtngLine2."Sequence No. (Forward)" := SequenceNo
+            else
+              ProdOrderRtngLine2."Sequence No. (Actual)" := SequenceNo;
+            ProdOrderRtngLine2.MODIFY;
+            SequenceNo := SequenceNo + 1;
+          until ProdOrderRtngLine2.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcSequenceBack@2(ProdOrderLine@1000 : Record "Prod. Order Line");
+    VAR
+      ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";
+      MaxSeq@1002 : Integer;
+    BEGIN
+      SetRoutingFilter(
+        ProdOrderRtngLine,ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",
+        ProdOrderLine."Routing No.",ProdOrderLine."Routing Reference No.");
+      ProdOrderRtngLine.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine."Routing Status"::Finished);
+
+      if ProdOrderRtngLine.FIND('-') then
+        repeat
+          ProdOrderRtngLine."Sequence No. (Backward)" := 0;
+          ProdOrderRtngLine."Fixed Scrap Qty. (Accum.)" := 0;
+          ProdOrderRtngLine."Scrap Factor % (Accumulated)" := 0;
+          ProdOrderRtngLine.MODIFY;
+        until ProdOrderRtngLine.NEXT = 0;
+
+      MaxSeq := ProdOrderRtngLine.COUNT;
+
+      ProdOrderRtngLine.SETFILTER("Next Operation No.",'%1','');
+      ProdOrderRtngLine.FIND('-');
+      SetRtngLineSequenceBack(ProdOrderLine."Routing Type",ProdOrderRtngLine,MaxSeq,1,true);
+    END;
+
+    LOCAL PROCEDURE CalcSequenceForward@3(ProdOrderLine@1000 : Record "Prod. Order Line");
+    VAR
+      ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";
+      MaxSeq@1002 : Integer;
+    BEGIN
+      SetRoutingFilter(
+        ProdOrderRtngLine,ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",
+        ProdOrderLine."Routing No.",ProdOrderLine."Routing Reference No.");
+      ProdOrderRtngLine.MODIFYALL("Sequence No. (Forward)",0);
+      ProdOrderRtngLine.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine."Routing Status"::Finished);
+
+      MaxSeq := ProdOrderRtngLine.COUNT;
+
+      ProdOrderRtngLine.SETFILTER("Previous Operation No.",'%1','');
+      ProdOrderRtngLine.FINDFIRST;
+      SetRtngLineSequenceForward(ProdOrderLine."Routing Type",ProdOrderRtngLine,MaxSeq,1,true);
+    END;
+
+    [External]
+    PROCEDURE CalcSequenceFromActual@9(ProdOrderRtngLine@1000 : Record "Prod. Order Routing Line";Direction@1001 : 'Forward,Backward');
+    VAR
+      ProdOrderLine@1002 : Record "Prod. Order Line";
+      ProdOrderRtngLine2@1003 : Record "Prod. Order Routing Line";
+      MaxSeq@1004 : Integer;
+    BEGIN
+      if NeedsCalculation(
+           ProdOrderRtngLine.Status,
+           ProdOrderRtngLine."Prod. Order No.",
+           ProdOrderRtngLine."Routing Reference No.",
+           ProdOrderRtngLine."Routing No.")
+      then begin
+        SetOrderLineRoutingFilter(
+          ProdOrderLine,ProdOrderRtngLine.Status,ProdOrderRtngLine."Prod. Order No.",
+          ProdOrderRtngLine."Routing No.",ProdOrderRtngLine."Routing Reference No.");
+        ProdOrderLine.FINDFIRST;
+
+        Calculate(ProdOrderLine);
+      end;
+      SetRoutingFilter(
+        ProdOrderRtngLine2,ProdOrderRtngLine.Status,ProdOrderRtngLine."Prod. Order No.",
+        ProdOrderRtngLine."Routing No.",ProdOrderRtngLine."Routing Reference No.");
+      ProdOrderRtngLine2.MODIFYALL("Sequence No. (Actual)",0);
+      ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+
+      MaxSeq := ProdOrderRtngLine2.COUNT;
+
+      case Direction of
+        Direction::Forward:
+          SetRtngLineSequenceForward(ProdOrderLine."Routing Type",ProdOrderRtngLine,MaxSeq,1,false);
+        Direction::Backward:
+          SetRtngLineSequenceBack(ProdOrderLine."Routing Type",ProdOrderRtngLine,MaxSeq,1,false);
+      end;
+    END;
+
+    [External]
+    PROCEDURE Calculate@4(ProdOrderLine@1000 : Record "Prod. Order Line");
+    VAR
+      ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";
+      ProdOrderRtngLine2@1002 : Record "Prod. Order Routing Line";
+      CalcScrapFactor@1003 : Decimal;
+      CalcScrapQty@1004 : Decimal;
+      ScrapFactorThis@1005 : Decimal;
+      ScrapQtyThis@1006 : Decimal;
+    BEGIN
+      if ProdOrderLine."Routing Type" = ProdOrderLine."Routing Type"::Serial then
+        SetNextOperations(ProdOrderLine);
+
+      CalcPreviousOperations(ProdOrderLine);
+      CalcSequenceBack(ProdOrderLine);
+      CalcSequenceForward(ProdOrderLine);
+
+      ProdOrderRtngLine.SETCURRENTKEY(
+        Status,"Prod. Order No.","Routing Reference No.","Routing No.","Sequence No. (Backward)");
+      SetRoutingFilter(
+        ProdOrderRtngLine,ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",
+        ProdOrderLine."Routing No.",ProdOrderLine."Routing Reference No.");
+      ProdOrderRtngLine.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine."Routing Status"::Finished);
+
+      if ProdOrderRtngLine.FIND('-') then
+        repeat
+          if ProdOrderRtngLine."Next Operation No." <> '' then begin
+            SetRoutingFilter(
+              ProdOrderRtngLine2,ProdOrderRtngLine.Status,ProdOrderRtngLine."Prod. Order No.",
+              ProdOrderRtngLine."Routing No.",ProdOrderRtngLine."Routing Reference No.");
+            ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+            ProdOrderRtngLine2.SETFILTER("Operation No.",ProdOrderRtngLine."Next Operation No.");
+            CalcScrapFactor := 0;
+            CalcScrapQty := 0;
+            if ProdOrderRtngLine2.FIND('-') then
+              repeat
+                ScrapFactorThis :=
+                  ProdOrderRtngLine2."Scrap Factor % (Accumulated)";
+                ScrapQtyThis :=
+                  ProdOrderRtngLine2."Fixed Scrap Qty. (Accum.)";
+                if CalcScrapFactor < ScrapFactorThis then
+                  CalcScrapFactor := ScrapFactorThis;
+                if CalcScrapQty < ScrapQtyThis then
+                  CalcScrapQty := ScrapQtyThis;
+              until ProdOrderRtngLine2.NEXT = 0;
+          end;
+          if CalcScrapFactor <> 0 then begin
+            if ProdOrderRtngLine."Scrap Factor %" <> 0 then
+              CalcScrapFactor :=
+                ROUND(
+                  (1 + CalcScrapFactor) *
+                  (1 + ProdOrderRtngLine."Scrap Factor %" / 100),0.00001) - 1;
+          end else
+            CalcScrapFactor :=
+              ROUND(1 + ProdOrderRtngLine."Scrap Factor %" / 100,0.00001) - 1;
+          CalcScrapQty := CalcScrapQty +
+            ProdOrderRtngLine."Fixed Scrap Quantity";
+          ProdOrderRtngLine."Fixed Scrap Qty. (Accum.)" := CalcScrapQty;
+          ProdOrderRtngLine."Scrap Factor % (Accumulated)" := CalcScrapFactor;
+          ProdOrderRtngLine.MODIFY;
+        until ProdOrderRtngLine.NEXT = 0;
+
+      if ProdOrderRtngLine.FINDSET(true) then
+        repeat
+          ProdOrderRtngLine.Recalculate := false;
+          ProdOrderRtngLine.UpdateComponentsBin(1); // modify option
+          ProdOrderRtngLine.MODIFY(false);
+        until ProdOrderRtngLine.NEXT = 0;
+      Check(ProdOrderLine,true);
+    END;
+
+    [External]
+    PROCEDURE Check@5(ProdOrderLine@1000 : Record "Prod. Order Line";ExcludeFinishedLines@1004 : Boolean);
+    VAR
+      ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";
+      ProdOrderRtngLine2@1002 : Record "Prod. Order Routing Line";
+      NoOfProcesses@1003 : Integer;
+    BEGIN
+      SetRoutingFilter(
+        ProdOrderRtngLine,ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",
+        ProdOrderLine."Routing No.",ProdOrderLine."Routing Reference No.");
+      if ExcludeFinishedLines then
+        ProdOrderRtngLine.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine."Routing Status"::Finished);
+
+      ProdOrderRtngLine.SETFILTER("Next Operation No.",'%1','');
+
+      NoOfProcesses := ProdOrderRtngLine.COUNT;
+      if NoOfProcesses <> 1 then begin
+        repeat
+          InsertInErrList(ProdOrderRtngLine);
+        until ProdOrderRtngLine.NEXT = 0;
+        ERROR(
+          Text003,
+          ProdOrderLine."Prod. Order No.",
+          ProdOrderLine."Routing No.",
+          NoOfProcesses,
+          ErrList);
+      end;
+
+      ProdOrderRtngLine.SETFILTER("Previous Operation No.",'%1','');
+      ProdOrderRtngLine.SETRANGE("Next Operation No.");
+      NoOfProcesses := ProdOrderRtngLine.COUNT;
+      if NoOfProcesses <> 1 then begin
+        repeat
+          InsertInErrList(ProdOrderRtngLine);
+        until ProdOrderRtngLine.NEXT = 0;
+        ERROR(
+          Text004,
+          ProdOrderLine."Prod. Order No.",
+          ProdOrderLine."Routing No.",
+          NoOfProcesses,
+          ErrList);
+      end;
+      ProdOrderRtngLine.SETRANGE("Previous Operation No.");
+
+      ProdOrderRtngLine.SETRANGE("Sequence No. (Backward)",0);
+      if ProdOrderRtngLine.FIND('-') then begin
+        repeat
+          InsertInErrList(ProdOrderRtngLine);
+        until ProdOrderRtngLine.NEXT = 0;
+        ERROR(
+          Text005,
+          ProdOrderRtngLine."Routing No.",
+          ErrList);
+      end;
+      ProdOrderRtngLine.SETRANGE("Sequence No. (Backward)");
+
+      ProdOrderRtngLine.SETRANGE("Sequence No. (Forward)",0);
+      if ProdOrderRtngLine.FIND('-') then begin
+        repeat
+          InsertInErrList(ProdOrderRtngLine);
+        until ProdOrderRtngLine.NEXT = 0;
+        ERROR(
+          Text006,
+          ProdOrderRtngLine."Routing No.",
+          ErrList);
+      end;
+      ProdOrderRtngLine.SETRANGE("Sequence No. (Forward)");
+
+      ProdOrderRtngLine.SETCURRENTKEY(Status,"Prod. Order No.","Routing Reference No.",
+        "Routing No.","Sequence No. (Backward)");
+      ProdOrderRtngLine.SETFILTER("Previous Operation No.",'<>%1','');
+
+      if ProdOrderRtngLine.FIND('-') then
+        repeat
+          SetRoutingFilter(
+            ProdOrderRtngLine2,ProdOrderRtngLine.Status,ProdOrderRtngLine."Prod. Order No.",
+            ProdOrderRtngLine."Routing No.",ProdOrderRtngLine."Routing Reference No.");
+          if ExcludeFinishedLines then
+            ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+          ProdOrderRtngLine2.SETFILTER("Operation No.",ProdOrderRtngLine."Previous Operation No.");
+          if ProdOrderRtngLine2.ISEMPTY then
+            ERROR(
+              Text007,
+              ProdOrderRtngLine."Routing No.");
+        until ProdOrderRtngLine.NEXT = 0;
+
+      ProdOrderRtngLine.SETCURRENTKEY(Status,"Prod. Order No.","Routing Reference No.",
+        "Routing No.","Sequence No. (Forward)");
+      ProdOrderRtngLine.SETFILTER("Next Operation No.",'<>%1','');
+      ProdOrderRtngLine.SETRANGE("Operation No.");
+
+      if ProdOrderRtngLine.FIND('-') then
+        repeat
+          SetRoutingFilter(
+            ProdOrderRtngLine2,ProdOrderRtngLine.Status,ProdOrderRtngLine."Prod. Order No.",
+            ProdOrderRtngLine."Routing No.",ProdOrderRtngLine."Routing Reference No.");
+          if ExcludeFinishedLines then
+            ProdOrderRtngLine2.SETFILTER("Routing Status",'<>%1',ProdOrderRtngLine2."Routing Status"::Finished);
+          ProdOrderRtngLine2.SETFILTER("Operation No.",ProdOrderRtngLine."Next Operation No.");
+          if ProdOrderRtngLine2.ISEMPTY then
+            ERROR(Text008,ProdOrderRtngLine."Routing No.");
+        until ProdOrderRtngLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE UpdateComponentsBin@13(VAR FilteredProdOrderRtngLineSet@1000 : Record "Prod. Order Routing Line";IgnoreErrors@1005 : Boolean) : Boolean;
+    VAR
+      ProdOrderComponent@1001 : Record "Prod. Order Component";
+      ProdOrderLine@1002 : Record "Prod. Order Line";
+      BinCode@1003 : Code[20];
+      AutoUpdateCompBinCode@1004 : Boolean;
+      ErrorOccured@1006 : Boolean;
+    BEGIN
+      with FilteredProdOrderRtngLineSet do begin
+        if not FINDFIRST then
+          exit;
+        SetOrderLineRoutingFilter(ProdOrderLine,Status,"Prod. Order No.","Routing No.","Routing Reference No.");
+        if ProdOrderLine.FINDSET(false) then
+          repeat
+            ProdOrderComponent.SETCURRENTKEY(Status,"Prod. Order No.","Prod. Order Line No.","Line No.");
+            ProdOrderComponent.SETRANGE(Status,Status);
+            ProdOrderComponent.SETRANGE("Prod. Order No.","Prod. Order No.");
+            ProdOrderComponent.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+            ProdOrderComponent.SETRANGE("Location Code",ProdOrderLine."Location Code");
+            if ProdOrderComponent.FINDSET(true) then
+              repeat
+                if IgnoreErrors then
+                  ProdOrderComponent.SetIgnoreErrors;
+                BinCode := ProdOrderComponent.GetDefaultConsumptionBin(FilteredProdOrderRtngLineSet);
+                if BinCode <> ProdOrderComponent."Bin Code" then begin
+                  if not AutoUpdateCompBinCode then
+                    if CONFIRM(Text009,false) then
+                      AutoUpdateCompBinCode := true
+                    else
+                      exit;
+                  ProdOrderComponent.VALIDATE("Bin Code",BinCode);
+                  ProdOrderComponent.MODIFY;
+                  if ProdOrderComponent.HasErrorOccured then
+                    ErrorOccured := true;
+                end;
+              until ProdOrderComponent.NEXT = 0;
+          until ProdOrderLine.NEXT = 0;
+      end;
+      exit(not ErrorOccured);
+    END;
+
+    LOCAL PROCEDURE SetRoutingFilter@15(VAR ProdOrderRtngLine@1000 : Record "Prod. Order Routing Line";Status@1001 : Option;ProdOrderNo@1002 : Code[20];RoutingNo@1004 : Code[20];RoutingRefNo@1003 : Integer);
+    BEGIN
+      ProdOrderRtngLine.SETRANGE(Status,Status);
+      ProdOrderRtngLine.SETRANGE("Prod. Order No.",ProdOrderNo);
+      ProdOrderRtngLine.SETRANGE("Routing Reference No.",RoutingRefNo);
+      ProdOrderRtngLine.SETRANGE("Routing No.",RoutingNo);
+    END;
+
+    LOCAL PROCEDURE SetOrderLineRoutingFilter@17(VAR ProdOrderLine@1004 : Record "Prod. Order Line";Status@1003 : Option;ProdOrderNo@1002 : Code[20];RoutingNo@1001 : Code[20];RoutingRefNo@1000 : Integer);
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrderNo);
+      ProdOrderLine.SETRANGE("Routing Reference No.",RoutingRefNo);
+      ProdOrderLine.SETRANGE("Routing No.",RoutingNo);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

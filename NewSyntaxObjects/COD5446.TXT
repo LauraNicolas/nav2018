@@ -1,0 +1,139 @@
+OBJECT Codeunit 5446 Graph Webhook Sync To NAV
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Webhook Notification";
+    OnRun=VAR
+            IntegrationSynchJobErrors@1011 : Record "Integration Synch. Job Errors";
+            IntegrationTableMapping@1010 : Record "Integration Table Mapping";
+            WebhookSubscription@1006 : Record "Webhook Subscription";
+            GraphDataSetup@1009 : Codeunit "Graph Data Setup";
+            GraphConnectionSetup@1008 : Codeunit "Graph Connection Setup";
+            GraphIntegrationTableSync@1007 : Codeunit "Graph Integration Table Sync";
+            GraphSubscriptionManagement@1013 : Codeunit "Graph Subscription Management";
+            SourceRecordRef@1005 : RecordRef;
+            DestinationRecordRef@1004 : RecordRef;
+            InboundConnectionName@1003 : Text;
+            EmptyGuid@1002 : GUID;
+            IntegrationMappingCode@1001 : Code[20];
+            TableID@1000 : Integer;
+          BEGIN
+            OnFindWebhookSubscription(WebhookSubscription,"Subscription ID",IntegrationMappingCode);
+            if IntegrationMappingCode = '' then
+              exit;
+
+            SENDTRACETAG('000016Z',GraphSubscriptionManagement.TraceCategory,VERBOSITY::Verbose,
+              STRSUBSTNO(ReceivedNotificationTxt,"Change Type",IntegrationMappingCode,"Resource ID"));
+
+            GraphConnectionSetup.RegisterConnections;
+            GraphDataSetup.GetIntegrationTableMapping(IntegrationTableMapping,IntegrationMappingCode);
+            TableID := GraphDataSetup.GetInboundTableID(IntegrationMappingCode);
+            InboundConnectionName := GraphConnectionSetup.GetInboundConnectionName(TableID);
+            SETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph,InboundConnectionName,true);
+
+            case DELCHR("Change Type",'=',' ') of
+              GetGraphSubscriptionCreatedChangeType,
+              GetGraphSubscriptionUpdatedChangeType:
+                if GraphSubscriptionManagement.GetSourceRecordRef(SourceRecordRef,Rec,IntegrationTableMapping."Integration Table ID") then
+                  GraphIntegrationTableSync.PerformRecordSynchFromIntegrationTable(IntegrationTableMapping,SourceRecordRef);
+              GetGraphSubscriptionDeletedChangeType:
+                if GraphSubscriptionManagement.GetDestinationRecordRef(DestinationRecordRef,Rec,IntegrationTableMapping."Table ID") then begin
+                  GraphIntegrationTableSync.PerformRecordDeleteFromIntegrationTable(IntegrationTableMapping,DestinationRecordRef);
+                  ArchiveIntegrationRecords(Rec,DestinationRecordRef.NUMBER);
+                end;
+              GetGraphSubscriptionMissedChangeType:
+                IntegrationSynchJobErrors.LogSynchError(EmptyGuid,RECORDID,RECORDID,
+                  STRSUBSTNO(WebhookNotificationTxt,"Change Type","Resource ID"));
+              else
+                IntegrationSynchJobErrors.LogSynchError(EmptyGuid,RECORDID,RECORDID,
+                  STRSUBSTNO(UnsupportedChangeTypeErr,"Change Type"));
+            end;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ChangeType@1000 : 'Created,Updated,Deleted,Missed';
+      UnsupportedChangeTypeErr@1002 : TextConst '@@@=The Missed change type is not supported.;ENU=The %1 change type is not supported.';
+      WebhookNotificationTxt@1001 : TextConst '@@@="Change Type = Missed, Resource ID = ABC.";ENU="Change Type = %1, Resource ID = %2."';
+      ReceivedNotificationTxt@1003 : TextConst '@@@="{Locked}; %1 - Change type; %2 - table mapping code; %3 - Graph ID";ENU=Received %1 notification for the %2 table mapping. Graph ID: %3.';
+
+    [External]
+    PROCEDURE GetGraphSubscriptionChangeTypes@11() : Text[250];
+    BEGIN
+      // Created,Updated,Deleted
+      exit(STRSUBSTNO('%1,%2,%3',
+          GetGraphSubscriptionCreatedChangeType,GetGraphSubscriptionUpdatedChangeType,GetGraphSubscriptionDeletedChangeType));
+    END;
+
+    [External]
+    PROCEDURE GetGraphSubscriptionCreatedChangeType@13() : Text[50];
+    BEGIN
+      exit(FORMAT(ChangeType::Created,0,0));
+    END;
+
+    [External]
+    PROCEDURE GetGraphSubscriptionUpdatedChangeType@14() : Text[50];
+    BEGIN
+      exit(FORMAT(ChangeType::Updated,0,0));
+    END;
+
+    [External]
+    PROCEDURE GetGraphSubscriptionDeletedChangeType@15() : Text[50];
+    BEGIN
+      exit(FORMAT(ChangeType::Deleted,0,0));
+    END;
+
+    [External]
+    PROCEDURE GetGraphSubscriptionMissedChangeType@30() : Text[50];
+    BEGIN
+      exit(FORMAT(ChangeType::Missed,0,0));
+    END;
+
+    LOCAL PROCEDURE ArchiveIntegrationRecords@20(WebhookNotification@1000 : Record "Webhook Notification";TableId@1001 : Integer);
+    VAR
+      GraphIntegrationRecord@1002 : Record "Graph Integration Record";
+      GraphIntegrationRecArchive@1004 : Record "Graph Integration Rec. Archive";
+      OutputStream@1003 : OutStream;
+    BEGIN
+      GraphIntegrationRecord.SETRANGE("Graph ID",WebhookNotification."Resource ID");
+      GraphIntegrationRecord.SETRANGE("Table ID",TableId);
+      if GraphIntegrationRecord.FINDFIRST then begin
+        GraphIntegrationRecArchive.TRANSFERFIELDS(GraphIntegrationRecord);
+        GraphIntegrationRecArchive."Webhook Notification".CREATEOUTSTREAM(OutputStream);
+        OutputStream.WRITE(ReadWebhookNotificationDetails(WebhookNotification));
+        if GraphIntegrationRecArchive.INSERT then
+          GraphIntegrationRecord.DELETE;
+      end;
+    END;
+
+    LOCAL PROCEDURE ReadWebhookNotificationDetails@9(WebhookNotification@1000 : Record "Webhook Notification") WebhookNotificationDetails : Text;
+    VAR
+      InputStream@1001 : InStream;
+    BEGIN
+      if WebhookNotification.Notification.HASVALUE then begin
+        WebhookNotification.CALCFIELDS(Notification);
+        WebhookNotification.Notification.CREATEINSTREAM(InputStream);
+        InputStream.READ(WebhookNotificationDetails);
+      end else
+        WebhookNotificationDetails :=
+          STRSUBSTNO(WebhookNotificationTxt,WebhookNotification."Change Type",WebhookNotification."Resource ID");
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnFindWebhookSubscription@27(VAR WebhookSubscription@1001 : Record "Webhook Subscription";SubscriptionID@1000 : Text[150];VAR IntegrationMappingCode@1002 : Code[20]);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

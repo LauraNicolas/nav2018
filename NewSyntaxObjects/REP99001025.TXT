@@ -1,0 +1,371 @@
+OBJECT Report 99001025 Refresh Production Order
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TransactionType=Update;
+    CaptionML=ENU=Refresh Production Order;
+    ProcessingOnly=true;
+    OnInitReport=BEGIN
+                   Direction := Direction::Backward;
+                 END;
+
+  }
+  DATASET
+  {
+    { 4824;    ;DataItem;Production Order    ;
+               DataItemTable="Production Order";
+               DataItemTableView=SORTING(Status,"No.");
+               OnPreDataItem=BEGIN
+                               Window.OPEN(
+                                 Text000 +
+                                 Text001 +
+                                 Text002);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  Item@1004 : Record Item;
+                                  ProdOrderLine@1000 : Record "Prod. Order Line";
+                                  ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";
+                                  ProdOrderComp@1002 : Record "Prod. Order Component";
+                                  Family@1005 : Record Family;
+                                  ProdOrder@1008 : Record "Production Order";
+                                  ProdOrderStatusMgt@1003 : Codeunit "Prod. Order Status Management";
+                                  RoutingNo@1006 : Code[20];
+                                  ErrorOccured@1007 : Boolean;
+                                BEGIN
+                                  if Status = Status::Finished then
+                                    CurrReport.SKIP;
+                                  if Direction = Direction::Backward then
+                                    TESTFIELD("Due Date");
+
+                                  if CalcLines and IsComponentPicked("Production Order") then
+                                    if not CONFIRM(STRSUBSTNO(DeletePickedLinesQst,"No.")) then
+                                      CurrReport.SKIP;
+
+                                  Window.UPDATE(1,Status);
+                                  Window.UPDATE(2,"No.");
+
+                                  RoutingNo := "Routing No.";
+                                  case "Source Type" of
+                                    "Source Type"::Item:
+                                      if Item.GET("Source No.") then
+                                        RoutingNo := Item."Routing No.";
+                                    "Source Type"::Family:
+                                      if Family.GET("Source No.") then
+                                        RoutingNo := Family."Routing No.";
+                                  end;
+                                  if RoutingNo <> "Routing No." then begin
+                                    "Routing No." := RoutingNo;
+                                    MODIFY;
+                                  end;
+
+                                  ProdOrderLine.LOCKTABLE;
+
+                                  CheckReservationExist;
+
+                                  if CalcLines then begin
+                                    if not CreateProdOrderLines.Copy("Production Order",Direction,'',false) then
+                                      ErrorOccured := true;
+                                  end else begin
+                                    ProdOrderLine.SETRANGE(Status,Status);
+                                    ProdOrderLine.SETRANGE("Prod. Order No.","No.");
+                                    if CalcRoutings or CalcComponents then begin
+                                      if ProdOrderLine.FIND('-') then
+                                        repeat
+                                          if CalcRoutings then begin
+                                            ProdOrderRtngLine.SETRANGE(Status,Status);
+                                            ProdOrderRtngLine.SETRANGE("Prod. Order No.","No.");
+                                            ProdOrderRtngLine.SETRANGE("Routing Reference No.",ProdOrderLine."Routing Reference No.");
+                                            ProdOrderRtngLine.SETRANGE("Routing No.",ProdOrderLine."Routing No.");
+                                            if ProdOrderRtngLine.FINDSET(true) then
+                                              repeat
+                                                ProdOrderRtngLine.SetSkipUpdateOfCompBinCodes(true);
+                                                ProdOrderRtngLine.DELETE(true);
+                                              until ProdOrderRtngLine.NEXT = 0;
+                                          end;
+                                          if CalcComponents then begin
+                                            ProdOrderComp.SETRANGE(Status,Status);
+                                            ProdOrderComp.SETRANGE("Prod. Order No.","No.");
+                                            ProdOrderComp.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+                                            ProdOrderComp.DELETEALL(true);
+                                          end;
+                                        until ProdOrderLine.NEXT = 0;
+                                      if ProdOrderLine.FIND('-') then
+                                        repeat
+                                          if CalcComponents then
+                                            CheckProductionBOMStatus(ProdOrderLine."Production BOM No.",ProdOrderLine."Production BOM Version Code");
+                                          if CalcRoutings then
+                                            CheckRoutingStatus(ProdOrderLine."Routing No.",ProdOrderLine."Routing Version Code");
+                                          ProdOrderLine."Due Date" := "Due Date";
+                                          if not CalcProdOrder.Calculate(ProdOrderLine,Direction,CalcRoutings,CalcComponents,false,false) then
+                                            ErrorOccured := true;
+                                        until ProdOrderLine.NEXT = 0;
+                                    end;
+                                  end;
+                                  if (Direction = Direction::Backward) and
+                                     ("Source Type" = "Source Type"::Family)
+                                  then begin
+                                    SetUpdateEndDate;
+                                    VALIDATE("Due Date","Due Date");
+                                  end;
+
+                                  if Status = Status::Released then begin
+                                    ProdOrderStatusMgt.FlushProdOrder("Production Order",Status,WORKDATE);
+                                    WhseProdRelease.Release("Production Order");
+                                    if CreateInbRqst then
+                                      WhseOutputProdRelease.Release("Production Order");
+                                  end;
+
+                                  if ErrorOccured then
+                                    MESSAGE(Text005,ProdOrder.TABLECAPTION,ProdOrderLine.FIELDCAPTION("Bin Code"));
+                                END;
+
+               ReqFilterFields=Status,"No." }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      OnInit=BEGIN
+               CalcLines := true;
+               CalcRoutings := true;
+               CalcComponents := true;
+             END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  Name=Container1900000001;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  Name=Options;
+                  CaptionML=ENU=Options }
+
+      { 6   ;2   ;Field     ;
+                  Name=Scheduling direction;
+                  CaptionML=ENU=Scheduling direction;
+                  ToolTipML=ENU=Specifies whether you want the scheduling to be refreshed forward or backward.;
+                  OptionCaptionML=ENU=Forward,Back;
+                  ApplicationArea=#Manufacturing;
+                  SourceExpr=Direction }
+
+      { 3   ;2   ;Group     ;
+                  Name=Calculate;
+                  CaptionML=ENU=Calculate }
+
+      { 4   ;3   ;Field     ;
+                  Name=Lines;
+                  CaptionML=ENU=Lines;
+                  ToolTipML=ENU=Specifies if you want the program to calculate the production order lines.;
+                  ApplicationArea=#Manufacturing;
+                  SourceExpr=CalcLines;
+                  OnValidate=BEGIN
+                               if CalcLines then begin
+                                 CalcRoutings := true;
+                                 CalcComponents := true;
+                               end;
+                             END;
+                              }
+
+      { 13  ;3   ;Field     ;
+                  Name=Routings;
+                  CaptionML=ENU=Routings;
+                  ToolTipML=ENU=Specifies if you want the program to calculate the routing.;
+                  ApplicationArea=#Manufacturing;
+                  SourceExpr=CalcRoutings;
+                  OnValidate=BEGIN
+                               if not CalcRoutings then
+                                 if CalcLines then
+                                   ERROR(Text003);
+                             END;
+                              }
+
+      { 15  ;3   ;Field     ;
+                  Name=Component Need;
+                  CaptionML=ENU=Component Need;
+                  ToolTipML=ENU=Specifies if you want the program to calculate the component requirement.;
+                  ApplicationArea=#Manufacturing;
+                  SourceExpr=CalcComponents;
+                  OnValidate=BEGIN
+                               if not CalcComponents then
+                                 if CalcLines then
+                                   ERROR(Text004);
+                             END;
+                              }
+
+      { 2   ;2   ;Group     ;
+                  Name=Warehouse;
+                  CaptionML=ENU=Warehouse }
+
+      { 18  ;3   ;Field     ;
+                  Name=Create Inbound Request;
+                  CaptionML=ENU=Create Inbound Request;
+                  ToolTipML=ENU=Specifies if you want to create an inbound request when calculating and updating a production order.;
+                  ApplicationArea=#Manufacturing;
+                  SourceExpr=CreateInbRqst }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Refreshing Production Orders...\\';
+      Text001@1001 : TextConst 'ENU=Status         #1##########\';
+      Text002@1002 : TextConst 'ENU=No.            #2##########';
+      Text003@1003 : TextConst 'ENU=Routings must be calculated, when lines are calculated.';
+      Text004@1004 : TextConst 'ENU=Component Need must be calculated, when lines are calculated.';
+      CalcProdOrder@1005 : Codeunit "Calculate Prod. Order";
+      CreateProdOrderLines@1006 : Codeunit "Create Prod. Order Lines";
+      WhseProdRelease@1007 : Codeunit "Whse.-Production Release";
+      WhseOutputProdRelease@1015 : Codeunit "Whse.-Output Prod. Release";
+      Window@1008 : Dialog;
+      Direction@1009 : 'Forward,Backward';
+      CalcLines@1010 : Boolean;
+      CalcRoutings@1011 : Boolean;
+      CalcComponents@1012 : Boolean;
+      CreateInbRqst@1013 : Boolean;
+      Text005@1014 : TextConst 'ENU=One or more of the lines on this %1 require special warehouse handling. The %2 for these lines has been set to blank.';
+      DeletePickedLinesQst@1016 : TextConst '@@@=Production order no.: Components for production order 101001 have already been picked. Do you want to continue?;ENU=Components for production order %1 have already been picked. Do you want to continue?';
+
+    LOCAL PROCEDURE CheckReservationExist@2();
+    VAR
+      ProdOrderLine2@1002 : Record "Prod. Order Line";
+      ProdOrderComp2@1000 : Record "Prod. Order Component";
+    BEGIN
+      // Not allowed to refresh if reservations exist
+      if not (CalcLines or CalcComponents) then
+        exit;
+
+      ProdOrderLine2.SETRANGE(Status,"Production Order".Status);
+      ProdOrderLine2.SETRANGE("Prod. Order No.","Production Order"."No.");
+      if ProdOrderLine2.FIND('-') then
+        repeat
+          if CalcLines then begin
+            ProdOrderLine2.CALCFIELDS("Reserved Qty. (Base)");
+            if ProdOrderLine2."Reserved Qty. (Base)" <> 0 then
+              if ShouldCheckReservedQty(
+                   ProdOrderLine2."Prod. Order No.",0,DATABASE::"Prod. Order Line",
+                   ProdOrderLine2.Status,ProdOrderLine2."Line No.",DATABASE::"Prod. Order Component")
+              then
+                ProdOrderLine2.TESTFIELD("Reserved Qty. (Base)",0);
+          end;
+
+          if CalcComponents then begin
+            ProdOrderComp2.SETRANGE(Status,ProdOrderLine2.Status);
+            ProdOrderComp2.SETRANGE("Prod. Order No.",ProdOrderLine2."Prod. Order No.");
+            ProdOrderComp2.SETRANGE("Prod. Order Line No.",ProdOrderLine2."Line No.");
+            ProdOrderComp2.SETAUTOCALCFIELDS("Reserved Qty. (Base)");
+            if ProdOrderComp2.FIND('-') then begin
+              repeat
+                if ProdOrderComp2."Reserved Qty. (Base)" <> 0 then
+                  if ShouldCheckReservedQty(
+                       ProdOrderComp2."Prod. Order No.",ProdOrderComp2."Line No.",
+                       DATABASE::"Prod. Order Component",ProdOrderComp2.Status,
+                       ProdOrderComp2."Prod. Order Line No.",DATABASE::"Prod. Order Line")
+                  then
+                    ProdOrderComp2.TESTFIELD("Reserved Qty. (Base)",0);
+              until ProdOrderComp2.NEXT = 0;
+            end;
+          end;
+        until ProdOrderLine2.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ShouldCheckReservedQty@13(ProdOrderNo@1001 : Code[20];LineNo@1002 : Integer;SourceType@1003 : Integer;Status@1004 : Option;ProdOrderLineNo@1005 : Integer;SourceType2@1006 : Integer) : Boolean;
+    VAR
+      ReservEntry@1007 : Record "Reservation Entry";
+    BEGIN
+      with ReservEntry do begin
+        SETCURRENTKEY("Source ID","Source Ref. No.","Source Type","Source Subtype","Source Batch Name");
+        SETRANGE("Source Batch Name",'');
+        SETRANGE("Reservation Status","Reservation Status"::Reservation);
+        SETRANGE("Source ID",ProdOrderNo);
+        SETRANGE("Source Ref. No.",LineNo);
+        SETRANGE("Source Type",SourceType);
+        SETRANGE("Source Subtype",Status);
+        SETRANGE("Source Prod. Order Line",ProdOrderLineNo);
+
+        if FINDFIRST then begin
+          GET("Entry No.",not Positive);
+          exit(
+            not (("Source Type" = SourceType2) and
+                 ("Source ID" = ProdOrderNo) and ("Source Subtype" = Status)));
+        end;
+      end;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE CheckProductionBOMStatus@1(ProdBOMNo@1000 : Code[20];ProdBOMVersionNo@1001 : Code[20]);
+    VAR
+      ProductionBOMHeader@1003 : Record "Production BOM Header";
+      ProductionBOMVersion@1002 : Record "Production BOM Version";
+    BEGIN
+      if ProdBOMNo = '' then
+        exit;
+
+      if ProdBOMVersionNo = '' then begin
+        ProductionBOMHeader.GET(ProdBOMNo);
+        ProductionBOMHeader.TESTFIELD(Status,ProductionBOMHeader.Status::Certified);
+      end else begin
+        ProductionBOMVersion.GET(ProdBOMNo,ProdBOMVersionNo);
+        ProductionBOMVersion.TESTFIELD(Status,ProductionBOMVersion.Status::Certified);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckRoutingStatus@3(RoutingNo@1000 : Code[20];RoutingVersionNo@1001 : Code[20]);
+    VAR
+      RoutingHeader@1002 : Record "Routing Header";
+      RoutingVersion@1003 : Record "Routing Version";
+    BEGIN
+      if RoutingNo = '' then
+        exit;
+
+      if RoutingVersionNo = '' then begin
+        RoutingHeader.GET(RoutingNo);
+        RoutingHeader.TESTFIELD(Status,RoutingHeader.Status::Certified);
+      end else begin
+        RoutingVersion.GET(RoutingNo,RoutingVersionNo);
+        RoutingVersion.TESTFIELD(Status,RoutingVersion.Status::Certified);
+      end;
+    END;
+
+    [External]
+    PROCEDURE InitializeRequest@4(Direction2@1004 : 'Forward,Backward';CalcLines2@1003 : Boolean;CalcRoutings2@1002 : Boolean;CalcComponents2@1001 : Boolean;CreateInbRqst2@1000 : Boolean);
+    BEGIN
+      Direction := Direction2;
+      CalcLines := CalcLines2;
+      CalcRoutings := CalcRoutings2;
+      CalcComponents := CalcComponents2;
+      CreateInbRqst := CreateInbRqst2;
+    END;
+
+    LOCAL PROCEDURE IsComponentPicked@5(ProdOrder@1001 : Record "Production Order") : Boolean;
+    VAR
+      ProdOrderComp@1000 : Record "Prod. Order Component";
+    BEGIN
+      ProdOrderComp.SETRANGE(Status,ProdOrder.Status);
+      ProdOrderComp.SETRANGE("Prod. Order No.",ProdOrder."No.");
+      ProdOrderComp.SETFILTER("Qty. Picked",'<>0');
+      exit(not ProdOrderComp.ISEMPTY);
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

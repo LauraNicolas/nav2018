@@ -2,9 +2,9 @@ OBJECT Codeunit 9010 Azure AD User Management
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -26,7 +26,7 @@ OBJECT Codeunit 9010 Azure AD User Management
   {
     VAR
       PermissionManager@1001 : Codeunit 9002;
-      Graph@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=10.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery";
+      Graph@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery";
       IsInitialized@1003 : Boolean;
       UserDoesNotObjectIdSetErr@1004 : TextConst '@@@="%1 =  The specified User Security ID";ENU=The user with the security ID %1 does not have a valid object ID in Azure Active Directory.';
       CouldNotFindGraphUserErr@1005 : TextConst '@@@="%1 = The specified object id";ENU=An Azure Active Directory user with the object ID %1 was not found.';
@@ -89,10 +89,8 @@ OBJECT Codeunit 9010 Azure AD User Management
     PROCEDURE CreateNewUsersFromAzureAD@11();
     VAR
       User@1013 : Record 2000000120;
-      PagedUsers@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=10.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.PagedUserCollection";
+      PagedUsers@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.PagedUserCollection";
       GraphUser@1001 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.IUser";
-      UserAccountHelper@1002 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=10.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavUserAccount.NavUserAccountHelper";
-      NewUserSecurityId@1007 : GUID;
       IsFirstPage@1011 : Boolean;
     BEGIN
       IF NOT Initialize THEN
@@ -111,13 +109,21 @@ OBJECT Codeunit 9010 Azure AD User Management
             UpdateUserFromAzureGraph(User,GraphUser);
             UpdateUserPlansFromAzureGraph(User."User Security ID",GraphUser);
           END ELSE
-            IF IsGraphUserEntitledFromServicePlan(GraphUser) THEN BEGIN
-              EnsureAuthenticationEmailIsNotInUse(GraphUser.UserPrincipalName);
-              NewUserSecurityId := UserAccountHelper.CreateUserFromAzureADObjectId(GraphUser.ObjectId);
-              IF NOT ISNULLGUID(NewUserSecurityId) THEN
-                InitializeAsNewUser(NewUserSecurityId,GraphUser);
-            END;
+            CreateNewUserFromGraphUser(GraphUser);
       UNTIL (NOT PagedUsers.MorePagesAvailable);
+    END;
+
+    PROCEDURE CreateNewUserFromGraphUser@47(GraphUser@1003 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.IUser");
+    VAR
+      UserAccountHelper@1001 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavUserAccount.NavUserAccountHelper";
+      NewUserSecurityId@1002 : GUID;
+    BEGIN
+      IF IsGraphUserEntitledFromServicePlan(GraphUser) THEN BEGIN
+        EnsureAuthenticationEmailIsNotInUse(GraphUser.UserPrincipalName);
+        NewUserSecurityId := UserAccountHelper.CreateUserFromAzureADObjectId(GraphUser.ObjectId);
+        IF NOT ISNULLGUID(NewUserSecurityId) THEN
+          InitializeAsNewUser(NewUserSecurityId,GraphUser);
+      END;
     END;
 
     LOCAL PROCEDURE RemoveUnassignedUserPlans@42(VAR TempO365Plan@1006 : TEMPORARY Record 9004;ForUserSecurityId@1003 : GUID);
@@ -375,6 +381,8 @@ OBJECT Codeunit 9010 Azure AD User Management
       IF ModifyUser THEN
         User.MODIFY;
 
+      SetUserLanguage(GraphUser.PreferredLanguage);
+
       EXIT(ModifyUser);
     END;
 
@@ -458,11 +466,58 @@ OBJECT Codeunit 9010 Azure AD User Management
 
     LOCAL PROCEDURE UpdateAuthenticationEmail@38(VAR User@1000 : Record 2000000120;VAR GraphUser@1001 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.User");
     VAR
-      NavUserAuthenticationHelper@1002 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=10.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavUserAccount.NavUserAccountHelper";
+      NavUserAuthenticationHelper@1002 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavUserAccount.NavUserAccountHelper";
     BEGIN
       User."Authentication Email" := COPYSTR(GraphUser.UserPrincipalName,1,MAXSTRLEN(User."Authentication Email"));
       User.MODIFY;
       NavUserAuthenticationHelper.SetAuthenticationObjectId(User."User Security ID",GraphUser.ObjectId);
+    END;
+
+    LOCAL PROCEDURE SetUserLanguage@24(PreferredLanguage@1000 : Text);
+    VAR
+      Language@1002 : Record 8;
+      UserPersonalization@1004 : Record 2000000073;
+      ApplicationManagement@1005 : Codeunit 1;
+      IdentityManagement@1006 : Codeunit 9801;
+      LanguageCode@1003 : Code[10];
+      LanguageId@1001 : Integer;
+    BEGIN
+      IF NOT IdentityManagement.IsInvAppId THEN
+        EXIT;
+
+      LanguageId := ApplicationManagement.ApplicationLanguage;
+
+      // We will use default application language if the PreferredLanguage is blank or en-us
+      // (i.e. don't spend time trying to lookup the code)
+      IF NOT (LOWERCASE(PreferredLanguage) IN ['','en-us']) THEN
+        IF TryGetLanguageCode(PreferredLanguage,LanguageCode) THEN ;
+
+      // If we support the language, get the language id
+      // If we don't, we keep the current value (default application language)
+      IF LanguageCode <> '' THEN
+        IF Language.GET(LanguageCode) THEN
+          LanguageId := Language."Windows Language ID";
+
+      IF NOT UserPersonalization.GET(USERSECURITYID) THEN
+        EXIT;
+
+      // Only lock the table if there is a change
+      IF UserPersonalization."Language ID" = LanguageId THEN
+        EXIT; // No changes required
+
+      UserPersonalization.LOCKTABLE;
+      UserPersonalization.GET(USERSECURITYID);
+      UserPersonalization.VALIDATE("Language ID",LanguageId);
+      UserPersonalization.MODIFY(TRUE);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryGetLanguageCode@25(CultureName@1000 : Text;VAR CultureCode@1002 : Code[10]);
+    VAR
+      CultureInfo@1001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Globalization.CultureInfo";
+    BEGIN
+      CultureInfo := CultureInfo.CultureInfo(CultureName);
+      CultureCode := CultureInfo.ThreeLetterWindowsLanguageName;
     END;
 
     LOCAL PROCEDURE InitializeAsNewUser@5(NewUserSecurityId@1000 : GUID;VAR GraphUser@1001 : DotNet "'Microsoft.Azure.ActiveDirectory.GraphClient, Version=1.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Azure.ActiveDirectory.GraphClient.IUser");
@@ -494,7 +549,7 @@ OBJECT Codeunit 9010 Azure AD User Management
     END;
 
     [TryFunction]
-    LOCAL PROCEDURE TryCreateGraph@10(VAR GraphQuery@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=10.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery");
+    LOCAL PROCEDURE TryCreateGraph@10(VAR GraphQuery@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery");
     BEGIN
       GraphQuery := GraphQuery.GraphQuery
     END;
@@ -528,7 +583,7 @@ OBJECT Codeunit 9010 Azure AD User Management
 
     [Integration(DEFAULT,TRUE)]
     [External]
-    LOCAL PROCEDURE OnInitialize@21(VAR GraphQuery@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=10.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery");
+    LOCAL PROCEDURE OnInitialize@21(VAR GraphQuery@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureADGraphClient, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureADGraphClient.GraphQuery");
     BEGIN
     END;
 

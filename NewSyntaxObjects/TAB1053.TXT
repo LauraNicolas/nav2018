@@ -1,0 +1,150 @@
+OBJECT Table 1053 Line Fee Note on Report Hist.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Line Fee Note on Report Hist."=rimd;
+    CaptionML=ENU=Line Fee Note on Report Hist.;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Cust. Ledger Entry No;Integer      ;TableRelation="Cust. Ledger Entry"."Entry No." WHERE ("Entry No."=FIELD("Cust. Ledger Entry No"));
+                                                   CaptionML=ENU=Cust. Ledger Entry No;
+                                                   Editable=false }
+    { 2   ;   ;Due Date            ;Date          ;CaptionML=ENU=Due Date;
+                                                   Editable=false }
+    { 3   ;   ;Language Code       ;Code10        ;TableRelation=Language;
+                                                   CaptionML=ENU=Language Code;
+                                                   NotBlank=true;
+                                                   Editable=false }
+    { 4   ;   ;Reminder Terms Code ;Code10        ;CaptionML=ENU=Reminder Terms Code }
+    { 5   ;   ;Reminder Level No   ;Integer       ;CaptionML=ENU=Reminder Level No }
+    { 6   ;   ;ReportText          ;Text200       ;CaptionML=ENU=ReportText;
+                                                   NotBlank=true;
+                                                   Editable=false }
+  }
+  KEYS
+  {
+    {    ;"Cust. Ledger Entry No","Due Date","Language Code","Reminder Terms Code","Reminder Level No";
+                                                   Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+
+    LOCAL PROCEDURE GetLineFeeNoteOnReport@120(CustLedgerEntry@1001 : Record "Cust. Ledger Entry";ReminderLevel@1012 : Record "Reminder Level";LineFeeNoteOnReport@1000 : Text[150];DueDate@1004 : Date) : Text[200];
+    VAR
+      GeneralLedgerSetup@1006 : Record "General Ledger Setup";
+      AdditionalFeePerLine@1003 : Decimal;
+      CurrencyCode@1007 : Code[10];
+      MarginalPerc@1002 : Decimal;
+    BEGIN
+      CustLedgerEntry.CALCFIELDS("Original Amount");
+      AdditionalFeePerLine :=
+        ReminderLevel.GetAdditionalFee(
+          CustLedgerEntry."Original Amount",CustLedgerEntry."Currency Code",true,CustLedgerEntry."Posting Date");
+      if AdditionalFeePerLine = 0 then
+        exit;
+
+      if CustLedgerEntry."Currency Code" = '' then begin
+        GeneralLedgerSetup.GET;
+        CurrencyCode := GeneralLedgerSetup."LCY Code";
+      end else
+        CurrencyCode := CustLedgerEntry."Currency Code";
+
+      if CustLedgerEntry."Original Amount" > 0 then
+        MarginalPerc := ROUND(AdditionalFeePerLine * 100 / CustLedgerEntry."Original Amount",0.01);
+
+      exit(STRSUBSTNO(LineFeeNoteOnReport,FORMAT(ROUND(AdditionalFeePerLine,0.01),0,9),CurrencyCode,DueDate,FORMAT(MarginalPerc,0,9)));
+    END;
+
+    LOCAL PROCEDURE InsertRec@1(ReminderLevel@1003 : Record "Reminder Level";CustLedgerEntryNo@1001 : Integer;DueDate@1002 : Date;LanguageCode@1004 : Code[10];LineFeeNoteOnReport@1005 : Text[200]);
+    VAR
+      LineFeeNoteOnReportHist@1000 : Record "Line Fee Note on Report Hist.";
+    BEGIN
+      if LineFeeNoteOnReport <> '' then begin
+        LineFeeNoteOnReportHist.INIT;
+        LineFeeNoteOnReportHist."Cust. Ledger Entry No" := CustLedgerEntryNo;
+        LineFeeNoteOnReportHist."Due Date" := DueDate;
+        LineFeeNoteOnReportHist."Language Code" := LanguageCode;
+        LineFeeNoteOnReportHist."Reminder Terms Code" := ReminderLevel."Reminder Terms Code";
+        LineFeeNoteOnReportHist."Reminder Level No" := ReminderLevel."No.";
+        LineFeeNoteOnReportHist.ReportText := LineFeeNoteOnReport;
+        LineFeeNoteOnReportHist.INSERT(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertTransLineFeeNoteOnReport@5(CustLedgerEntry@1004 : Record "Cust. Ledger Entry";ReminderTerms@1000 : Record "Reminder Terms";ReminderLevel@1001 : Record "Reminder Level";DueDate@1005 : Date);
+    VAR
+      Language@1006 : Record Language;
+      ReminderTermsTranslation@1007 : Record "Reminder Terms Translation";
+      AddTextOnReport@1003 : Text[200];
+      AddTextOnReportDefault@1002 : Text[200];
+      DefaultLanguageCode@1014 : Code[10];
+    BEGIN
+      // insert default language
+      if ReminderTerms."Note About Line Fee on Report" <> '' then begin
+        DefaultLanguageCode := Language.GetUserLanguage;
+        if not ReminderTermsTranslation.GET(ReminderTerms.Code,DefaultLanguageCode) then begin
+          AddTextOnReportDefault := GetLineFeeNoteOnReport(CustLedgerEntry,ReminderLevel,
+              ReminderTerms."Note About Line Fee on Report",DueDate);
+          InsertRec(ReminderLevel,CustLedgerEntry."Entry No.",DueDate,Language.GetUserLanguage,AddTextOnReportDefault);
+        end;
+      end;
+
+      // insert Reminder Terms Translation records
+      ReminderTermsTranslation.SETRANGE("Reminder Terms Code",ReminderLevel."Reminder Terms Code");
+      if ReminderTermsTranslation.FINDSET then
+        repeat
+          AddTextOnReport :=
+            GetLineFeeNoteOnReport(CustLedgerEntry,ReminderLevel,ReminderTermsTranslation."Note About Line Fee on Report",DueDate);
+          InsertRec(ReminderLevel,
+            CustLedgerEntry."Entry No.",
+            DueDate,
+            ReminderTermsTranslation."Language Code",
+            AddTextOnReport);
+
+        until ReminderTermsTranslation.NEXT = 0;
+    END;
+
+    [Internal]
+    PROCEDURE Save@36(CustLedgerEntry@1003 : Record "Cust. Ledger Entry");
+    VAR
+      Customer@1004 : Record Customer;
+      ReminderTerms@1001 : Record "Reminder Terms";
+      ReminderLevel@1002 : Record "Reminder Level";
+      DueDate@1007 : Date;
+    BEGIN
+      if not Customer.GET(CustLedgerEntry."Customer No.") then
+        exit;
+
+      if Customer."Reminder Terms Code" = '' then
+        exit;
+
+      ReminderTerms.GET(Customer."Reminder Terms Code");
+      if not ReminderTerms."Post Add. Fee per Line" then
+        exit;
+
+      ReminderLevel.SETRANGE("Reminder Terms Code",ReminderTerms.Code);
+      if ReminderLevel.FINDSET then begin
+        DueDate := CALCDATE(ReminderLevel."Grace Period",CustLedgerEntry."Due Date");
+        InsertTransLineFeeNoteOnReport(CustLedgerEntry,ReminderTerms,ReminderLevel,DueDate);
+        while ReminderLevel.NEXT <> 0 do begin
+          DueDate := CALCDATE(ReminderLevel."Grace Period",DueDate);
+          InsertTransLineFeeNoteOnReport(CustLedgerEntry,ReminderTerms,ReminderLevel,DueDate);
+        end;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

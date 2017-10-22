@@ -1,0 +1,288 @@
+OBJECT Codeunit 213 Res. Jnl.-Post Batch
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20161025D;
+    Time=120000T;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Res. Journal Line";
+    Permissions=TableData "Res. Journal Batch"=imd;
+    OnRun=BEGIN
+            ResJnlLine.COPY(Rec);
+            Code;
+            Rec := ResJnlLine;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=cannot exceed %1 characters';
+      Text001@1001 : TextConst 'ENU=Journal Batch Name    #1##########\\';
+      Text002@1002 : TextConst 'ENU=Checking lines        #2######\';
+      Text003@1003 : TextConst 'ENU=Posting lines         #3###### @4@@@@@@@@@@@@@\';
+      Text004@1004 : TextConst 'ENU=Updating lines        #5###### @6@@@@@@@@@@@@@';
+      Text005@1005 : TextConst 'ENU=Posting lines         #3###### @4@@@@@@@@@@@@@';
+      Text006@1006 : TextConst 'ENU=A maximum of %1 posting number series can be used in each journal.';
+      Text007@1007 : TextConst 'ENU=<Month Text>';
+      AccountingPeriod@1013 : Record "Accounting Period";
+      ResJnlTemplate@1008 : Record "Res. Journal Template";
+      ResJnlBatch@1009 : Record "Res. Journal Batch";
+      ResJnlLine@1010 : Record "Res. Journal Line";
+      ResJnlLine2@1011 : Record "Res. Journal Line";
+      ResJnlLine3@1012 : Record "Res. Journal Line";
+      ResLedgEntry@1014 : Record "Res. Ledger Entry";
+      ResReg@1015 : Record "Resource Register";
+      NoSeries@1016 : TEMPORARY Record "No. Series";
+      ResJnlCheckLine@1017 : Codeunit "Res. Jnl.-Check Line";
+      ResJnlPostLine@1018 : Codeunit "Res. Jnl.-Post Line";
+      NoSeriesMgt@1019 : Codeunit NoSeriesManagement;
+      NoSeriesMgt2@1020 : ARRAY [10] OF Codeunit NoSeriesManagement;
+      Window@1022 : Dialog;
+      ResRegNo@1023 : Integer;
+      StartLineNo@1024 : Integer;
+      Day@1025 : Integer;
+      Week@1026 : Integer;
+      Month@1027 : Integer;
+      MonthText@1028 : Text[30];
+      LineCount@1030 : Integer;
+      NoOfRecords@1031 : Integer;
+      LastDocNo@1032 : Code[20];
+      LastDocNo2@1033 : Code[20];
+      LastPostedDocNo@1034 : Code[20];
+      NoOfPostingNoSeries@1035 : Integer;
+      PostingNoSeriesNo@1036 : Integer;
+
+    LOCAL PROCEDURE Code@1();
+    VAR
+      UpdateAnalysisView@1002 : Codeunit "Update Analysis View";
+    BEGIN
+      with ResJnlLine do begin
+        SETRANGE("Journal Template Name","Journal Template Name");
+        SETRANGE("Journal Batch Name","Journal Batch Name");
+        LOCKTABLE;
+
+        ResJnlTemplate.GET("Journal Template Name");
+        ResJnlBatch.GET("Journal Template Name","Journal Batch Name");
+        if STRLEN(INCSTR(ResJnlBatch.Name)) > MAXSTRLEN(ResJnlBatch.Name) then
+          ResJnlBatch.FIELDERROR(
+            Name,
+            STRSUBSTNO(
+              Text000,
+              MAXSTRLEN(ResJnlBatch.Name)));
+
+        if ResJnlTemplate.Recurring then begin
+          SETRANGE("Posting Date",0D,WORKDATE);
+          SETFILTER("Expiration Date",'%1 | %2..',0D,WORKDATE);
+        end;
+
+        if not FIND('=><') then begin
+          "Line No." := 0;
+          COMMIT;
+          exit;
+        end;
+
+        if ResJnlTemplate.Recurring then
+          Window.OPEN(
+            Text001 +
+            Text002 +
+            Text003 +
+            Text004)
+        else
+          Window.OPEN(
+            Text001 +
+            Text002 +
+            Text005);
+        Window.UPDATE(1,"Journal Batch Name");
+
+        // Check lines
+        LineCount := 0;
+        StartLineNo := "Line No.";
+        repeat
+          LineCount := LineCount + 1;
+          Window.UPDATE(2,LineCount);
+          CheckRecurringLine(ResJnlLine);
+          ResJnlCheckLine.RunCheck(ResJnlLine);
+          if NEXT = 0 then
+            FIND('-');
+        until "Line No." = StartLineNo;
+        NoOfRecords := LineCount;
+
+        // Find next register no.
+        ResLedgEntry.LOCKTABLE;
+        if ResLedgEntry.FINDLAST then;
+        ResReg.LOCKTABLE;
+        if ResReg.FINDLAST and (ResReg."To Entry No." = 0) then
+          ResRegNo := ResReg."No."
+        else
+          ResRegNo := ResReg."No." + 1;
+
+        // Post lines
+        LineCount := 0;
+        LastDocNo := '';
+        LastDocNo2 := '';
+        LastPostedDocNo := '';
+        FIND('-');
+        repeat
+          LineCount := LineCount + 1;
+          Window.UPDATE(3,LineCount);
+          Window.UPDATE(4,ROUND(LineCount / NoOfRecords * 10000,1));
+          if not EmptyLine and
+             (ResJnlBatch."No. Series" <> '') and
+             ("Document No." <> LastDocNo2)
+          then
+            TESTFIELD("Document No.",NoSeriesMgt.GetNextNo(ResJnlBatch."No. Series","Posting Date",false));
+          if not EmptyLine then
+            LastDocNo2 := "Document No.";
+          MakeRecurringTexts(ResJnlLine);
+          if "Posting No. Series" = '' then
+            "Posting No. Series" := ResJnlBatch."No. Series"
+          else
+            if not EmptyLine then
+              if "Document No." = LastDocNo then
+                "Document No." := LastPostedDocNo
+              else begin
+                if not NoSeries.GET("Posting No. Series") then begin
+                  NoOfPostingNoSeries := NoOfPostingNoSeries + 1;
+                  if NoOfPostingNoSeries > ARRAYLEN(NoSeriesMgt2) then
+                    ERROR(
+                      Text006,
+                      ARRAYLEN(NoSeriesMgt2));
+                  NoSeries.Code := "Posting No. Series";
+                  NoSeries.Description := FORMAT(NoOfPostingNoSeries);
+                  NoSeries.INSERT;
+                end;
+                LastDocNo := "Document No.";
+                EVALUATE(PostingNoSeriesNo,NoSeries.Description);
+                "Document No." := NoSeriesMgt2[PostingNoSeriesNo].GetNextNo("Posting No. Series","Posting Date",false);
+                LastPostedDocNo := "Document No.";
+              end;
+          ResJnlPostLine.RunWithCheck(ResJnlLine);
+        until NEXT = 0;
+
+        // Copy register no. and current journal batch name to the res. journal
+        if not ResReg.FINDLAST or (ResReg."No." <> ResRegNo) then
+          ResRegNo := 0;
+
+        INIT;
+        "Line No." := ResRegNo;
+
+        // Update/delete lines
+        if ResRegNo <> 0 then begin
+          if ResJnlTemplate.Recurring then begin
+            // Recurring journal
+            LineCount := 0;
+            ResJnlLine2.COPYFILTERS(ResJnlLine);
+            ResJnlLine2.FIND('-');
+            repeat
+              LineCount := LineCount + 1;
+              Window.UPDATE(5,LineCount);
+              Window.UPDATE(6,ROUND(LineCount / NoOfRecords * 10000,1));
+              if ResJnlLine2."Posting Date" <> 0D then
+                ResJnlLine2.VALIDATE("Posting Date",CALCDATE(ResJnlLine2."Recurring Frequency",ResJnlLine2."Posting Date"));
+              if (ResJnlLine2."Recurring Method" = ResJnlLine2."Recurring Method"::Variable) and
+                 (ResJnlLine2."Resource No." <> '')
+              then begin
+                ResJnlLine2.Quantity := 0;
+                ResJnlLine2."Total Cost" := 0;
+                ResJnlLine2."Total Price" := 0;
+              end;
+              ResJnlLine2.MODIFY;
+            until ResJnlLine2.NEXT = 0;
+          end else begin
+            // Not a recurring journal
+            ResJnlLine2.COPYFILTERS(ResJnlLine);
+            ResJnlLine2.SETFILTER("Resource No.",'<>%1','');
+            if ResJnlLine2.FIND('+') then; // Remember the last line
+            ResJnlLine3.COPY(ResJnlLine);
+            ResJnlLine3.DELETEALL;
+            ResJnlLine3.RESET;
+            ResJnlLine3.SETRANGE("Journal Template Name","Journal Template Name");
+            ResJnlLine3.SETRANGE("Journal Batch Name","Journal Batch Name");
+            if not ResJnlLine3.FINDLAST then
+              if INCSTR("Journal Batch Name") <> '' then begin
+                ResJnlBatch.DELETE;
+                ResJnlBatch.Name := INCSTR("Journal Batch Name");
+                if ResJnlBatch.INSERT then;
+                "Journal Batch Name" := ResJnlBatch.Name;
+              end;
+
+            ResJnlLine3.SETRANGE("Journal Batch Name","Journal Batch Name");
+            if (ResJnlBatch."No. Series" = '') and not ResJnlLine3.FINDLAST then begin
+              ResJnlLine3.INIT;
+              ResJnlLine3."Journal Template Name" := "Journal Template Name";
+              ResJnlLine3."Journal Batch Name" := "Journal Batch Name";
+              ResJnlLine3."Line No." := 10000;
+              ResJnlLine3.INSERT;
+              ResJnlLine3.SetUpNewLine(ResJnlLine2);
+              ResJnlLine3.MODIFY;
+            end;
+          end;
+        end;
+        if ResJnlBatch."No. Series" <> '' then
+          NoSeriesMgt.SaveNoSeries;
+        if NoSeries.FIND('-') then
+          repeat
+            EVALUATE(PostingNoSeriesNo,NoSeries.Description);
+            NoSeriesMgt2[PostingNoSeriesNo].SaveNoSeries;
+          until NoSeries.NEXT = 0;
+
+        COMMIT;
+      end;
+      UpdateAnalysisView.UpdateAll(0,true);
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CheckRecurringLine@2(VAR ResJnlLine2@1000 : Record "Res. Journal Line");
+    VAR
+      DummyDateFormula@1001 : DateFormula;
+    BEGIN
+      with ResJnlLine2 do begin
+        if "Resource No." <> '' then
+          if ResJnlTemplate.Recurring then begin
+            TESTFIELD("Recurring Method");
+            TESTFIELD("Recurring Frequency");
+            if "Recurring Method" = "Recurring Method"::Variable then
+              TESTFIELD(Quantity);
+          end else begin
+            TESTFIELD("Recurring Method",0);
+            TESTFIELD("Recurring Frequency",DummyDateFormula);
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE MakeRecurringTexts@3(VAR ResJnlLine2@1000 : Record "Res. Journal Line");
+    BEGIN
+      with ResJnlLine2 do begin
+        if ("Resource No." <> '') and ("Recurring Method" <> 0) then begin // Not recurring
+          Day := DATE2DMY("Posting Date",1);
+          Week := DATE2DWY("Posting Date",2);
+          Month := DATE2DMY("Posting Date",2);
+          MonthText := FORMAT("Posting Date",0,Text007);
+          AccountingPeriod.SETRANGE("Starting Date",0D,"Posting Date");
+          if not AccountingPeriod.FINDLAST then
+            AccountingPeriod.Name := '';
+          "Document No." :=
+            DELCHR(
+              PADSTR(
+                STRSUBSTNO("Document No.",Day,Week,Month,MonthText,AccountingPeriod.Name),
+                MAXSTRLEN("Document No.")),
+              '>');
+          Description :=
+            DELCHR(
+              PADSTR(
+                STRSUBSTNO(Description,Day,Week,Month,MonthText,AccountingPeriod.Name),
+                MAXSTRLEN(Description)),
+              '>');
+        end;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -2,27 +2,17 @@ OBJECT Codeunit 431 IC Outbox Export
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
     TableNo=414;
-    OnRun=VAR
-            ICOutBoxTrans@1005 : Record 414;
-          BEGIN
+    OnRun=BEGIN
             IF NOT CONFIRM(Text003,FALSE) THEN
               EXIT;
-            CompanyInfo.GET;
-            ICOutBoxTrans.COPY(Rec);
-            ICOutBoxTrans.SETRANGE("Line Action","Line Action"::"Send to IC Partner");
-            UpdateICStatus(ICOutBoxTrans);
-            SendToExternalPartner(ICOutBoxTrans);
-            SendToInternalPartner(ICOutBoxTrans);
-            ICOutBoxTrans.SETRANGE("Line Action","Line Action"::"Return to Inbox");
-            ReturnToInbox(ICOutBoxTrans);
-            CancelTrans(ICOutBoxTrans);
+            RunOutboxTransactions(Rec);
           END;
 
   }
@@ -35,12 +25,35 @@ OBJECT Codeunit 431 IC Outbox Export
       CompanyInfo@1003 : Record 79;
       ICInboxOutboxMgt@1004 : Codeunit 427;
       FileMgt@1005 : Codeunit 419;
+      FolderPathMissingErr@1006 : TextConst '@@@="%1=Intercompany Code";ENU="Folder Path must have a value in IC Partner: Code=%1. It cannot be zero or empty."';
+      EmailAddressMissingErr@1007 : TextConst '@@@="%1=Intercompany Code";ENU="Email Address must have a value in IC Partner: Code=%1. It cannot be zero or empty."';
+
+    PROCEDURE RunOutboxTransactions@6(VAR ICOutboxTransaction@1002 : Record 414);
+    VAR
+      CopyICOutboxTransaction@1001 : Record 414;
+    BEGIN
+      CompanyInfo.GET;
+      CopyICOutboxTransaction.COPY(ICOutboxTransaction);
+      CopyICOutboxTransaction.SETRANGE("Line Action",
+        CopyICOutboxTransaction."Line Action"::"Send to IC Partner");
+      UpdateICStatus(CopyICOutboxTransaction);
+      SendToExternalPartner(CopyICOutboxTransaction);
+      SendToInternalPartner(CopyICOutboxTransaction);
+      CopyICOutboxTransaction.SETRANGE("Line Action",
+        CopyICOutboxTransaction."Line Action"::"Return to Inbox");
+      ReturnToInbox(CopyICOutboxTransaction);
+      CancelTrans(CopyICOutboxTransaction);
+    END;
 
     LOCAL PROCEDURE SendToExternalPartner@1(VAR ICOutboxTrans@1000 : Record 414);
     VAR
       ICPartner@1006 : Record 413;
+      EmailItem@1013 : Record 9500;
       MailHandler@1005 : Codeunit 397;
+      DocumentMailing@1012 : Codeunit 260;
+      PermissionManager@1011 : Codeunit 9002;
       ICOutboxExportXML@1004 : XMLport 12;
+      EmailDialog@1014 : Page 9700;
       Ostr@1001 : OutStream;
       OFile@1003 : File;
       FileName@1002 : Text;
@@ -48,6 +61,7 @@ OBJECT Codeunit 431 IC Outbox Export
       i@1008 : Integer;
       ToName@1009 : Text[100];
       CcName@1010 : Text[100];
+      OutFileName@1015 : Text;
     BEGIN
       ICPartner.SETFILTER("Inbox Type",'<>%1',ICPartner."Inbox Type"::Database);
       ICPartnerFilter := ICOutboxTrans.GETFILTER("IC Partner Code");
@@ -57,9 +71,12 @@ OBJECT Codeunit 431 IC Outbox Export
         REPEAT
           ICOutboxTrans.SETRANGE("IC Partner Code",ICPartner.Code);
           IF ICOutboxTrans.FIND('-') THEN BEGIN
-            IF ICPartner."Inbox Type" = ICPartner."Inbox Type"::"File Location" THEN BEGIN
+            IF (ICPartner."Inbox Type" = ICPartner."Inbox Type"::"File Location") AND
+               NOT PermissionManager.SoftwareAsAService
+            THEN BEGIN
               ICPartner.TESTFIELD(Blocked,FALSE);
-              ICPartner.TESTFIELD("Inbox Details");
+              IF ICPartner."Inbox Details" = '' THEN
+                ERROR(FolderPathMissingErr,ICPartner.Code);
               i := 1;
               WHILE i <> 0 DO BEGIN
                 FileName :=
@@ -82,10 +99,16 @@ OBJECT Codeunit 431 IC Outbox Export
             OFile.CLOSE;
             CLEAR(Ostr);
             CLEAR(ICOutboxExportXML);
-            FileName := FileMgt.DownloadTempFile(FileName);
+            IF PermissionManager.SoftwareAsAService THEN BEGIN
+              OutFileName := STRSUBSTNO('%1_%2.xml',ICPartner.Code,ICOutboxTrans."Transaction No.");
+              DOWNLOAD(FileName,'','','',OutFileName)
+            END ELSE
+              FileName := FileMgt.DownloadTempFile(FileName);
+
             IF ICPartner."Inbox Type" = ICPartner."Inbox Type"::Email THEN BEGIN
               ICPartner.TESTFIELD(Blocked,FALSE);
-              ICPartner.TESTFIELD("Inbox Details");
+              IF ICPartner."Inbox Details" = '' THEN
+                ERROR(EmailAddressMissingErr,ICPartner.Code);
               ToName := ICPartner."Inbox Details";
               IF STRPOS(ToName,';') > 0 THEN BEGIN
                 CcName := COPYSTR(ToName,STRPOS(ToName,';') + 1);
@@ -93,12 +116,37 @@ OBJECT Codeunit 431 IC Outbox Export
                 IF STRPOS(CcName,';') > 0 THEN
                   CcName := COPYSTR(CcName,1,STRPOS(CcName,';') - 1);
               END;
-              MailHandler.NewMessage(
-                ToName,CcName,'',
-                STRSUBSTNO(Text001,CompanyInfo.Name),
-                STRSUBSTNO(
-                  Text002,CompanyInfo.Name,CompanyInfo.FIELDCAPTION("IC Partner Code"),CompanyInfo."IC Partner Code"),
-                FileName,FALSE);
+
+              IF PermissionManager.SoftwareAsAService THEN BEGIN
+                CreateEmailItem(
+                  EmailItem,
+                  ICPartner."Inbox Details",
+                  STRSUBSTNO('%1 %2',ICOutboxTrans."Document Type",ICOutboxTrans."Document No."),
+                  FORMAT(FileName,-MAXSTRLEN(EmailItem."Attachment File Path")),
+                  STRSUBSTNO('%1.xml',ICPartner.Code));
+                COMMIT;
+
+                EmailDialog.SetValues(EmailItem,FALSE,TRUE);
+                IF EmailDialog.RUNMODAL = ACTION::Cancel THEN
+                  EXIT;
+
+                EmailDialog.GETRECORD(EmailItem);
+                DocumentMailing.EmailFile(
+                  EmailItem."Attachment File Path",
+                  EmailItem."Attachment Name",
+                  '',
+                  ICOutboxTrans."Document No.",
+                  EmailItem."Send to",
+                  EmailItem.Subject,
+                  TRUE,
+                  5); // S.Test
+              END ELSE
+                MailHandler.NewMessage(
+                  ToName,CcName,'',
+                  STRSUBSTNO(Text001,CompanyInfo.Name),
+                  STRSUBSTNO(
+                    Text002,CompanyInfo.Name,CompanyInfo.FIELDCAPTION("IC Partner Code"),CompanyInfo."IC Partner Code"),
+                  FileName,FALSE);
             END;
             ICOutboxTrans.FIND('-');
             REPEAT
@@ -193,6 +241,20 @@ OBJECT Codeunit 431 IC Outbox Export
                   END;
               END;
         UNTIL ICOutboxTransaction.NEXT = 0
+    END;
+
+    LOCAL PROCEDURE CreateEmailItem@8(VAR EmailItem@1000 : Record 9500;SendTo@1001 : Text[250];Subject@1002 : Text[250];AttachmentFilePath@1003 : Text[250];AttachmentFileName@1004 : Text[250]);
+    BEGIN
+      EmailItem.Init;
+      EmailItem.INSERT;
+      EmailItem."Send to" := SendTo;
+      EmailItem.Subject := Subject;
+
+      IF AttachmentFilePath <> '' THEN BEGIN
+        EmailItem."Attachment File Path" := AttachmentFilePath;
+        EmailItem."Attachment Name" := AttachmentFileName;
+      END;
+      EmailItem.MODIFY(TRUE);
     END;
 
     BEGIN

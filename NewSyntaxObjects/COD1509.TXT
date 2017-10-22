@@ -1,0 +1,271 @@
+OBJECT Codeunit 1509 Notification Entry Dispatcher
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Job Queue Entry";
+    Permissions=TableData "User Setup"=r,
+                TableData "Notification Entry"=rimd,
+                TableData "Sent Notification Entry"=rimd,
+                TableData "Email Item"=rimd;
+    OnRun=BEGIN
+            if "Parameter String" = '' then
+              DispatchInstantNotifications
+            else
+              DispatchNotificationTypeForUser("Parameter String");
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      NotificationManagement@1002 : Codeunit "Notification Management";
+      NotificationMailSubjectTxt@1000 : TextConst 'ENU=Notification overview';
+      HtmlBodyFilePath@1001 : Text;
+
+    LOCAL PROCEDURE DispatchInstantNotifications@2();
+    VAR
+      UserSetup@1000 : Record "User Setup";
+      UserIDsbyNotificationType@1001 : Query "User IDs by Notification Type";
+    BEGIN
+      UserIDsbyNotificationType.OPEN;
+      while UserIDsbyNotificationType.READ do begin
+        UserSetup.GET(UserIDsbyNotificationType.Recipient_User_ID);
+        if ScheduledInstantly(UserSetup."User ID",UserIDsbyNotificationType.Type) then
+          DispatchForNotificationType(UserIDsbyNotificationType.Type,UserSetup);
+      end;
+    END;
+
+    LOCAL PROCEDURE DispatchNotificationTypeForUser@5(Parameter@1003 : Text);
+    VAR
+      UserSetup@1000 : Record "User Setup";
+      NotificationEntry@1001 : Record "Notification Entry";
+    BEGIN
+      NotificationEntry.SETVIEW(Parameter);
+      UserSetup.GET(NotificationEntry.GETRANGEMAX("Recipient User ID"));
+      DispatchForNotificationType(NotificationEntry.GETRANGEMAX(Type),UserSetup);
+    END;
+
+    LOCAL PROCEDURE DispatchForNotificationType@30(NotificationType@1007 : '"New Record",Approval,Overdue';UserSetup@1000 : Record "User Setup");
+    VAR
+      NotificationEntry@1002 : Record "Notification Entry";
+      NotificationSetup@1004 : Record "Notification Setup";
+    BEGIN
+      NotificationEntry.SETRANGE("Recipient User ID",UserSetup."User ID");
+      NotificationEntry.SETRANGE(Type,NotificationType);
+
+      DeleteOutdatedApprovalNotificationEntires(NotificationEntry);
+
+      if not NotificationEntry.FINDFIRST then
+        exit;
+
+      FilterToActiveNotificationEntries(NotificationEntry);
+
+      NotificationSetup.GetNotificationSetup(NotificationType);
+
+      case NotificationSetup."Notification Method" of
+        NotificationSetup."Notification Method"::Email:
+          CreateMailAndDispatch(NotificationEntry,UserSetup."E-Mail");
+        NotificationSetup."Notification Method"::Note:
+          CreateNoteAndDispatch(NotificationEntry);
+      end;
+    END;
+
+    LOCAL PROCEDURE ScheduledInstantly@3(RecipientUserID@1000 : Code[50];NotificationType@1002 : Option) : Boolean;
+    VAR
+      NotificationSchedule@1001 : Record "Notification Schedule";
+    BEGIN
+      if not NotificationSchedule.GET(RecipientUserID,NotificationType) then
+        exit(true); // No rules are set up, send immediately
+
+      exit(NotificationSchedule.Recurrence = NotificationSchedule.Recurrence::Instantly);
+    END;
+
+    LOCAL PROCEDURE CreateMailAndDispatch@13(VAR NotificationEntry@1005 : Record "Notification Entry";Email@1003 : Text);
+    VAR
+      NotificationSetup@1004 : Record "Notification Setup";
+      DocumentMailing@1002 : Codeunit "Document-Mailing";
+      BodyText@1007 : Text;
+    BEGIN
+      if GetHTMLBodyText(NotificationEntry,BodyText) then
+        if DocumentMailing.EmailFileWithSubject('','',HtmlBodyFilePath,NotificationMailSubjectTxt,Email,true) then
+          NotificationManagement.MoveNotificationEntryToSentNotificationEntries(
+            NotificationEntry,BodyText,true,NotificationSetup."Notification Method"::Email)
+        else begin
+          NotificationEntry.VALIDATE("Error Message",GETLASTERRORTEXT);
+          CLEARLASTERROR;
+          NotificationEntry.MODIFY(true);
+        end;
+    END;
+
+    LOCAL PROCEDURE CreateNoteAndDispatch@8(VAR NotificationEntry@1003 : Record "Notification Entry");
+    VAR
+      NotificationSetup@1001 : Record "Notification Setup";
+      BodyText@1000 : Text;
+    BEGIN
+      repeat
+        if AddNote(NotificationEntry,BodyText) then
+          NotificationManagement.MoveNotificationEntryToSentNotificationEntries(
+            NotificationEntry,BodyText,false,
+            NotificationSetup."Notification Method"::Note);
+      until NotificationEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AddNote@6(VAR NotificationEntry@1008 : Record "Notification Entry";VAR Body@1002 : Text) : Boolean;
+    VAR
+      RecordLink@1001 : Record "Record Link";
+      PageManagement@1005 : Codeunit "Page Management";
+      TypeHelper@1004 : Codeunit "Type Helper";
+      RecRefLink@1003 : RecordRef;
+      Link@1000 : Text;
+    BEGIN
+      with RecordLink do begin
+        INIT;
+        "Link ID" := 0;
+        GetTargetRecRef(NotificationEntry,RecRefLink);
+        if not RecRefLink.HASFILTER then
+          RecRefLink.SETRECFILTER;
+        "Record ID" := RecRefLink.RECORDID;
+        Link := GETURL(DEFAULTCLIENTTYPE,COMPANYNAME,OBJECTTYPE::Page,PageManagement.GetPageID(RecRefLink),RecRefLink,true);
+        URL1 := COPYSTR(Link,1,MAXSTRLEN(URL1));
+        if STRLEN(Link) > MAXSTRLEN(URL1) then
+          URL2 := COPYSTR(Link,MAXSTRLEN(URL1) + 1,MAXSTRLEN(URL2));
+        Description := COPYSTR(FORMAT(NotificationEntry."Triggered By Record"),1,250);
+        Type := Type::Note;
+        CreateNoteBody(NotificationEntry,Body);
+        TypeHelper.WriteRecordLinkNote(RecordLink,Body);
+        Created := CURRENTDATETIME;
+        "User ID" := NotificationEntry."Created By";
+        Company := COMPANYNAME;
+        Notify := true;
+        "To User ID" := NotificationEntry."Recipient User ID";
+        exit(INSERT(true));
+      end;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE FilterToActiveNotificationEntries@22(VAR NotificationEntry@1000 : Record "Notification Entry");
+    BEGIN
+      repeat
+        NotificationEntry.MARK(true);
+      until NotificationEntry.NEXT = 0;
+      NotificationEntry.MARKEDONLY(true);
+      NotificationEntry.FINDSET;
+    END;
+
+    LOCAL PROCEDURE ConvertHtmlFileToText@17(HtmlBodyFilePath@1000 : Text;VAR BodyText@1001 : Text);
+    VAR
+      TempBlob@1002 : TEMPORARY Record TempBlob;
+      FileManagement@1003 : Codeunit "File Management";
+      BlobInStream@1004 : InStream;
+    BEGIN
+      TempBlob.INIT;
+      FileManagement.BLOBImportFromServerFile(TempBlob,HtmlBodyFilePath);
+      TempBlob.Blob.CREATEINSTREAM(BlobInStream);
+      BlobInStream.READTEXT(BodyText);
+    END;
+
+    LOCAL PROCEDURE CreateNoteBody@28(VAR NotificationEntry@1000 : Record "Notification Entry";VAR Body@1001 : Text);
+    VAR
+      RecRef@1004 : RecordRef;
+      DocumentType@1002 : Text;
+      DocumentNo@1003 : Text;
+      DocumentName@1006 : Text;
+      ActionText@1007 : Text;
+    BEGIN
+      GetTargetRecRef(NotificationEntry,RecRef);
+      NotificationManagement.GetDocumentTypeAndNumber(RecRef,DocumentType,DocumentNo);
+      DocumentName := DocumentType + ' ' + DocumentNo;
+      ActionText := NotificationManagement.GetActionTextFor(NotificationEntry);
+      Body := DocumentName + ' ' + ActionText;
+    END;
+
+    [Internal]
+    PROCEDURE GetHTMLBodyText@11(VAR NotificationEntry@1001 : Record "Notification Entry";VAR BodyTextOut@1003 : Text) : Boolean;
+    VAR
+      ReportLayoutSelection@1000 : Record "Report Layout Selection";
+      FileManagement@1002 : Codeunit "File Management";
+    BEGIN
+      HtmlBodyFilePath := FileManagement.ServerTempFileName('html');
+      ReportLayoutSelection.SetTempLayoutSelected('');
+      if not REPORT.SAVEASHTML(REPORT::"Notification Email",HtmlBodyFilePath,NotificationEntry) then begin
+        NotificationEntry.VALIDATE("Error Message",GETLASTERRORTEXT);
+        CLEARLASTERROR;
+        NotificationEntry.MODIFY(true);
+        exit(false);
+      end;
+
+      ConvertHtmlFileToText(HtmlBodyFilePath,BodyTextOut);
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE GetTargetRecRef@4(VAR NotificationEntry@1004 : Record "Notification Entry";VAR TargetRecRefOut@1001 : RecordRef);
+    VAR
+      ApprovalEntry@1003 : Record "Approval Entry";
+      OverdueApprovalEntry@1000 : Record "Overdue Approval Entry";
+      DataTypeManagement@1005 : Codeunit "Data Type Management";
+      RecRef@1002 : RecordRef;
+    BEGIN
+      DataTypeManagement.GetRecordRef(NotificationEntry."Triggered By Record",RecRef);
+
+      case NotificationEntry.Type of
+        NotificationEntry.Type::"New Record":
+          TargetRecRefOut := RecRef;
+        NotificationEntry.Type::Approval:
+          begin
+            RecRef.SETTABLE(ApprovalEntry);
+            TargetRecRefOut.GET(ApprovalEntry."Record ID to Approve");
+          end;
+        NotificationEntry.Type::Overdue:
+          begin
+            RecRef.SETTABLE(OverdueApprovalEntry);
+            TargetRecRefOut.GET(OverdueApprovalEntry."Record ID to Approve");
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE DeleteOutdatedApprovalNotificationEntires@1(VAR NotificationEntry@1000 : Record "Notification Entry");
+    BEGIN
+      if NotificationEntry.FINDFIRST then
+        repeat
+          if ApprovalNotificationEntryIsOutdated(NotificationEntry) then
+            NotificationEntry.DELETE;
+        until NotificationEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ApprovalNotificationEntryIsOutdated@9(VAR NotificationEntry@1000 : Record "Notification Entry") : Boolean;
+    VAR
+      ApprovalEntry@1003 : Record "Approval Entry";
+      OverdueApprovalEntry@1002 : Record "Overdue Approval Entry";
+      DataTypeManagement@1004 : Codeunit "Data Type Management";
+      RecRef@1001 : RecordRef;
+    BEGIN
+      DataTypeManagement.GetRecordRef(NotificationEntry."Triggered By Record",RecRef);
+
+      case NotificationEntry.Type of
+        NotificationEntry.Type::Approval:
+          begin
+            RecRef.SETTABLE(ApprovalEntry);
+            if not RecRef.GET(ApprovalEntry."Record ID to Approve") then
+              exit(true);
+          end;
+        NotificationEntry.Type::Overdue:
+          begin
+            RecRef.SETTABLE(OverdueApprovalEntry);
+            if not RecRef.GET(OverdueApprovalEntry."Record ID to Approve") then
+              exit(true);
+          end;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

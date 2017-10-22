@@ -1,0 +1,257 @@
+OBJECT Codeunit 5465 Graph Mgt - General Tools
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Sales Invoice Header"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CannotChangeIDErr@1002 : TextConst '@@@={Locked};ENU=Value of Id is immutable.';
+      CannotChangeLastDateTimeModifiedErr@1001 : TextConst '@@@={Locked};ENU=Value of LastDateTimeModified is immutable.';
+      MissingFieldValueErr@1000 : TextConst '@@@={Locked};ENU=%1 must be specified.';
+
+    PROCEDURE GetMandatoryStringPropertyFromJObject@51(VAR JsonObject@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";PropertyName@1003 : Text;VAR PropertyValue@1004 : Text);
+    VAR
+      JSONManagement@1001 : Codeunit "JSON Management";
+      Found@1002 : Boolean;
+    BEGIN
+      Found := JSONManagement.GetStringPropertyValueFromJObjectByName(JsonObject,PropertyName,PropertyValue);
+      if not Found then
+        ERROR(MissingFieldValueErr,PropertyName);
+    END;
+
+    PROCEDURE UpdateIntegrationRecords@3(VAR SourceRecordRef@1000 : RecordRef;FieldNumber@1008 : Integer;OnlyRecordsWithoutID@1009 : Boolean);
+    VAR
+      IntegrationRecord@1007 : Record "Integration Record";
+      UpdatedIntegrationRecord@1006 : Record "Integration Record";
+      IntegrationManagement@1005 : Codeunit "Integration Management";
+      FilterFieldRef@1010 : FieldRef;
+      IDFieldRef@1003 : FieldRef;
+      NullGuid@1004 : GUID;
+    BEGIN
+      if OnlyRecordsWithoutID then begin
+        FilterFieldRef := SourceRecordRef.FIELD(FieldNumber);
+        FilterFieldRef.SETRANGE(NullGuid);
+      end;
+
+      if SourceRecordRef.FINDSET then
+        repeat
+          IDFieldRef := SourceRecordRef.FIELD(FieldNumber);
+          if not IntegrationRecord.GET(IDFieldRef.VALUE) then begin
+            IntegrationManagement.InsertUpdateIntegrationRecord(SourceRecordRef,CURRENTDATETIME);
+            if ISNULLGUID(FORMAT(IDFieldRef.VALUE)) then begin
+              UpdatedIntegrationRecord.SETRANGE("Record ID",SourceRecordRef.RECORDID);
+              UpdatedIntegrationRecord.FINDFIRST;
+              IDFieldRef.VALUE := IntegrationManagement.GetIdWithoutBrackets(UpdatedIntegrationRecord."Integration ID");
+            end;
+
+            SourceRecordRef.MODIFY(false);
+          end;
+        until SourceRecordRef.NEXT = 0;
+    END;
+
+    PROCEDURE HandleUpdateReferencedIdFieldOnItem@19(VAR RecRef@1000 : RecordRef;NewId@1001 : GUID;VAR Handled@1002 : Boolean;DatabaseNumber@1006 : Integer;RecordFieldNumber@1007 : Integer);
+    VAR
+      IdFieldRef@1003 : FieldRef;
+    BEGIN
+      if Handled then
+        exit;
+
+      if RecRef.NUMBER <> DatabaseNumber then
+        exit;
+
+      IdFieldRef := RecRef.FIELD(RecordFieldNumber);
+      IdFieldRef.VALUE(NewId);
+
+      Handled := true;
+    END;
+
+    PROCEDURE HandleGetPredefinedIdValue@21(VAR Id@1000 : GUID;VAR RecRef@1001 : RecordRef;VAR Handled@1002 : Boolean;DatabaseNumber@1007 : Integer;RecordFieldNumber@1008 : Integer);
+    VAR
+      IntegrationRecord@1006 : Record "Integration Record";
+      IdFieldRef@1003 : FieldRef;
+      FieldValue@1005 : GUID;
+    BEGIN
+      if Handled then
+        exit;
+
+      if RecRef.NUMBER <> DatabaseNumber then
+        exit;
+
+      IdFieldRef := RecRef.FIELD(RecordFieldNumber);
+      FieldValue := FORMAT(IdFieldRef.VALUE);
+
+      if ISNULLGUID(FieldValue) then
+        exit;
+
+      EVALUATE(Id,FieldValue);
+      if IntegrationRecord.GET(Id) then begin
+        CLEAR(Id);
+        exit;
+      end;
+
+      Handled := true;
+    END;
+
+    PROCEDURE InsertOrUpdateODataType@17(NewKey@1001 : Code[50];NewDescription@1002 : Text[250];OdmDefinition@1004 : Text);
+    VAR
+      ODataEdmType@1000 : Record "OData Edm Type";
+      ODataOutStream@1003 : OutStream;
+      RecordExist@1005 : Boolean;
+    BEGIN
+      if not ODataEdmType.WRITEPERMISSION then
+        exit;
+
+      RecordExist := ODataEdmType.GET(NewKey);
+
+      if not RecordExist then begin
+        CLEAR(ODataEdmType);
+        ODataEdmType.Key := NewKey;
+      end;
+
+      ODataEdmType.VALIDATE(Description,NewDescription);
+      ODataEdmType."Edm Xml".CREATEOUTSTREAM(ODataOutStream,TEXTENCODING::UTF8);
+      ODataOutStream.WRITETEXT(OdmDefinition);
+
+      if RecordExist then
+        ODataEdmType.MODIFY(true)
+      else
+        ODataEdmType.INSERT(true);
+    END;
+
+    PROCEDURE ProcessNewRecordFromAPI@5(VAR InsertedRecordRef@1000 : RecordRef;VAR TempFieldSet@1003 : Record Field;ModifiedDateTime@1002 : DateTime);
+    VAR
+      IntegrationManagement@1004 : Codeunit "Integration Management";
+      ConfigTemplateManagement@1005 : Codeunit "Config. Template Management";
+      UpdatedRecRef@1001 : RecordRef;
+    BEGIN
+      if ConfigTemplateManagement.ApplyTemplate(InsertedRecordRef,TempFieldSet,UpdatedRecRef) then
+        InsertedRecordRef := UpdatedRecRef.DUPLICATE;
+
+      IntegrationManagement.InsertUpdateIntegrationRecord(InsertedRecordRef,ModifiedDateTime);
+    END;
+
+    PROCEDURE ErrorIdImmutable@2();
+    BEGIN
+      ERROR(CannotChangeIDErr);
+    END;
+
+    PROCEDURE ErrorLastDateTimeModifiedImmutable@4();
+    BEGIN
+      ERROR(CannotChangeLastDateTimeModifiedErr);
+    END;
+
+    [Integration]
+    PROCEDURE ApiSetup@1();
+    BEGIN
+    END;
+
+    PROCEDURE IsApiEnabled@34() : Boolean;
+    VAR
+      ODataEdmType@1001 : Record "OData Edm Type";
+    BEGIN
+      if not ODataEdmType.READPERMISSION then
+        exit(false);
+      exit(not ODataEdmType.ISEMPTY);
+    END;
+
+    [EventSubscriber(Codeunit,5150,OnGetIntegrationActivated)]
+    LOCAL PROCEDURE OnGetIntegrationActivated@12(VAR IsSyncEnabled@1000 : Boolean);
+    VAR
+      ApiWebService@1001 : Record "Api Web Service";
+      ODataEdmType@1003 : Record "OData Edm Type";
+    BEGIN
+      if IsSyncEnabled then
+        exit;
+
+      if not ApiWebService.READPERMISSION then
+        exit;
+
+      ApiWebService.SETRANGE("Object Type",ApiWebService."Object Type"::Page);
+      ApiWebService.SETRANGE(Published,true);
+      if ApiWebService.ISEMPTY then
+        exit;
+      if not ODataEdmType.READPERMISSION then
+        exit;
+
+      IsSyncEnabled := not ODataEdmType.ISEMPTY;
+    END;
+
+    PROCEDURE TranslateNAVCurrencyCodeToCurrencyCode@8(VAR CachedLCYCurrencyCode@1001 : Code[10];CurrencyCode@1000 : Code[10]) : Code[10];
+    VAR
+      GeneralLedgerSetup@1002 : Record "General Ledger Setup";
+    BEGIN
+      if CurrencyCode <> '' then
+        exit(CurrencyCode);
+
+      if CachedLCYCurrencyCode = '' then begin
+        GeneralLedgerSetup.GET;
+        CachedLCYCurrencyCode := GeneralLedgerSetup."LCY Code";
+      end;
+
+      exit(CachedLCYCurrencyCode);
+    END;
+
+    PROCEDURE TranslateCurrencyCodeToNAVCurrencyCode@7(VAR CachedLCYCurrencyCode@1000 : Code[10];CurrentCurrencyCode@1001 : Code[10]) : Code[10];
+    VAR
+      GeneralLedgerSetup@1002 : Record "General Ledger Setup";
+    BEGIN
+      if CurrentCurrencyCode = '' then
+        exit('');
+
+      // Update LCY cache
+      if CachedLCYCurrencyCode = '' then begin
+        GeneralLedgerSetup.GET;
+        CachedLCYCurrencyCode := GeneralLedgerSetup."LCY Code";
+      end;
+
+      if CachedLCYCurrencyCode = CurrentCurrencyCode then
+        exit('');
+
+      exit(CurrentCurrencyCode);
+    END;
+
+    [EventSubscriber(Codeunit,2,OnCompanyInitialize,"",Skip,Skip)]
+    LOCAL PROCEDURE InitDemoCompanyApisForSaaS@10();
+    VAR
+      CompanyInformation@1001 : Record "Company Information";
+      APIEntitiesSetup@1003 : Record "API Entities Setup";
+      PermissionManager@1000 : Codeunit "Permission Manager";
+      GraphMgtGeneralTools@1002 : Codeunit "Graph Mgt - General Tools";
+    BEGIN
+      if not PermissionManager.SoftwareAsAService then
+        exit;
+
+      if not CompanyInformation.GET then
+        exit;
+
+      if not CompanyInformation."Demo Company" then
+        exit;
+
+      APIEntitiesSetup.SafeGet;
+
+      if APIEntitiesSetup."Demo Company API Initialized" then
+        exit;
+
+      GraphMgtGeneralTools.ApiSetup;
+
+      APIEntitiesSetup.SafeGet;
+      APIEntitiesSetup.VALIDATE("Demo Company API Initialized",true);
+      APIEntitiesSetup.MODIFY(true);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

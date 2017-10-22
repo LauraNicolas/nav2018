@@ -1,0 +1,170 @@
+OBJECT Table 175 Standard Vendor Purchase Code
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Standard Vendor Purchase Code;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Vendor No.          ;Code20        ;TableRelation=Vendor;
+                                                   CaptionML=ENU=Vendor No.;
+                                                   NotBlank=true }
+    { 2   ;   ;Code                ;Code10        ;TableRelation="Standard Purchase Code";
+                                                   OnValidate=VAR
+                                                                StdPurchCode@1000 : Record "Standard Purchase Code";
+                                                              BEGIN
+                                                                if Code = '' then
+                                                                  exit;
+                                                                StdPurchCode.GET(Code);
+                                                                Description := StdPurchCode.Description;
+                                                              END;
+
+                                                   CaptionML=ENU=Code;
+                                                   NotBlank=true }
+    { 3   ;   ;Description         ;Text50        ;CaptionML=ENU=Description }
+  }
+  KEYS
+  {
+    {    ;"Vendor No.",Code                       ;Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+
+    [External]
+    PROCEDURE InsertPurchLines@1(PurchHeader@1000 : Record "Purchase Header");
+    VAR
+      StdVendPurchCode@1002 : Record "Standard Vendor Purchase Code";
+      StdVendPurchCodes@1001 : Page "Standard Vendor Purchase Codes";
+    BEGIN
+      PurchHeader.TESTFIELD("No.");
+      PurchHeader.TESTFIELD("Buy-from Vendor No.");
+
+      StdVendPurchCode.FILTERGROUP := 2;
+      StdVendPurchCode.SETRANGE("Vendor No.",PurchHeader."Buy-from Vendor No.");
+      StdVendPurchCode.FILTERGROUP := 0;
+
+      StdVendPurchCodes.SETTABLEVIEW(StdVendPurchCode);
+      StdVendPurchCodes.LOOKUPMODE(true);
+      if StdVendPurchCodes.RUNMODAL = ACTION::LookupOK then begin
+        StdVendPurchCodes.GetSelected(StdVendPurchCode);
+        if StdVendPurchCode.FINDSET then
+          repeat
+            ApplyStdCodesToPurchaseLines(PurchHeader,StdVendPurchCode);
+          until StdVendPurchCode.NEXT = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ApplyStdCodesToPurchaseLines@2(PurchHeader@1000 : Record "Purchase Header";StdVendPurchCode@1005 : Record "Standard Vendor Purchase Code");
+    VAR
+      Currency@1007 : Record Currency;
+      PurchLine@1006 : Record "Purchase Line";
+      StdPurchLine@1004 : Record "Standard Purchase Line";
+      StdPurchCode@1003 : Record "Standard Purchase Code";
+      Factor@1002 : Integer;
+    BEGIN
+      if PurchHeader."Currency Code" = '' then
+        Currency.InitRoundingPrecision
+      else
+        Currency.GET(PurchHeader."Currency Code");
+
+      StdVendPurchCode.TESTFIELD(Code);
+      StdVendPurchCode.TESTFIELD("Vendor No.",PurchHeader."Buy-from Vendor No.");
+      StdPurchCode.GET(StdVendPurchCode.Code);
+      StdPurchCode.TESTFIELD("Currency Code",PurchHeader."Currency Code");
+      StdPurchLine.SETRANGE("Standard Purchase Code",StdVendPurchCode.Code);
+      PurchLine."Document Type" := PurchHeader."Document Type";
+      PurchLine."Document No." := PurchHeader."No.";
+      PurchLine.SETRANGE("Document Type",PurchHeader."Document Type");
+      PurchLine.SETRANGE("Document No.",PurchHeader."No.");
+      if PurchHeader."Prices Including VAT" then
+        Factor := 1
+      else
+        Factor := 0;
+      PurchLine.LOCKTABLE;
+      StdPurchLine.LOCKTABLE;
+      if StdPurchLine.FIND('-') then
+        repeat
+          PurchLine.INIT;
+          PurchLine."Line No." := 0;
+          PurchLine.VALIDATE(Type,StdPurchLine.Type);
+          if StdPurchLine.Type = StdPurchLine.Type::" " then begin
+            PurchLine.VALIDATE("No.",StdPurchLine."No.");
+            PurchLine.Description := StdPurchLine.Description
+          end else
+            if not StdPurchLine.EmptyLine then begin
+              StdPurchLine.TESTFIELD("No.");
+              PurchLine.VALIDATE("No.",StdPurchLine."No.");
+              if StdPurchLine."Variant Code" <> '' then
+                PurchLine.VALIDATE("Variant Code",StdPurchLine."Variant Code");
+              PurchLine.VALIDATE(Quantity,StdPurchLine.Quantity);
+              if StdPurchLine."Unit of Measure Code" <> '' then
+                PurchLine.VALIDATE("Unit of Measure Code",StdPurchLine."Unit of Measure Code");
+              PurchLine.Description := StdPurchLine.Description;
+              if (StdPurchLine.Type = StdPurchLine.Type::"G/L Account") or
+                 (StdPurchLine.Type = StdPurchLine.Type::"Charge (Item)")
+              then
+                PurchLine.VALIDATE(
+                  "Direct Unit Cost",
+                  ROUND(StdPurchLine."Amount Excl. VAT" *
+                    (PurchLine."VAT %" / 100 * Factor + 1),Currency."Unit-Amount Rounding Precision"));
+            end;
+
+          PurchLine."Shortcut Dimension 1 Code" := StdPurchLine."Shortcut Dimension 1 Code";
+          PurchLine."Shortcut Dimension 2 Code" := StdPurchLine."Shortcut Dimension 2 Code";
+
+          CombineDimensions(PurchLine,StdPurchLine);
+
+          if StdPurchLine.InsertLine then begin
+            PurchLine."Line No." := GetNextLineNo(PurchLine);
+            PurchLine.INSERT(true);
+            InsertExtendedText(PurchLine);
+          end;
+        until StdPurchLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CombineDimensions@5(VAR PurchaseLine@1001 : Record "Purchase Line";StdPurchaseLine@1002 : Record "Standard Purchase Line");
+    VAR
+      DimensionManagement@1000 : Codeunit DimensionManagement;
+      DimensionSetIDArr@1005 : ARRAY [10] OF Integer;
+    BEGIN
+      DimensionSetIDArr[1] := PurchaseLine."Dimension Set ID";
+      DimensionSetIDArr[2] := StdPurchaseLine."Dimension Set ID";
+
+      PurchaseLine."Dimension Set ID" :=
+        DimensionManagement.GetCombinedDimensionSetID(
+          DimensionSetIDArr,PurchaseLine."Shortcut Dimension 1 Code",PurchaseLine."Shortcut Dimension 2 Code");
+    END;
+
+    LOCAL PROCEDURE InsertExtendedText@3(PurchLine@1000 : Record "Purchase Line");
+    VAR
+      TransferExtendedText@1001 : Codeunit "Transfer Extended Text";
+    BEGIN
+      if TransferExtendedText.PurchCheckIfAnyExtText(PurchLine,false) then
+        TransferExtendedText.InsertPurchExtText(PurchLine);
+    END;
+
+    LOCAL PROCEDURE GetNextLineNo@4(PurchLine@1001 : Record "Purchase Line") : Integer;
+    BEGIN
+      PurchLine.SETRANGE("Document Type",PurchLine."Document Type");
+      PurchLine.SETRANGE("Document No.",PurchLine."Document No.");
+      if PurchLine.FINDLAST then
+        exit(PurchLine."Line No." + 10000);
+
+      exit(10000);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

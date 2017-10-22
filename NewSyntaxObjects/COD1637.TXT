@@ -1,0 +1,435 @@
+OBJECT Codeunit 1637 Office Document Handler
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Office Add-in Context";
+    OnRun=BEGIN
+            RedirectToDocument(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      DocDoesNotExistMsg@1000 : TextConst '@@@="%1=The document number the hyperlink is attempting to open.";ENU=Cannot find a document with the number %1.';
+
+    [External]
+    PROCEDURE RedirectToDocument@1012(TempOfficeAddinContext@1005 : TEMPORARY Record "Office Add-in Context");
+    VAR
+      TempOfficeDocumentSelection@1002 : TEMPORARY Record "Office Document Selection";
+      DocNos@1006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      Separator@1004 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      DocNo@1000 : Code[20];
+    BEGIN
+      Separator := '|';
+      DocNos := TempOfficeAddinContext."Regular Expression Match";
+      foreach DocNo in DocNos.Split(Separator.ToCharArray) do begin
+        TempOfficeAddinContext."Regular Expression Match" := DocNo;
+        CollectDocumentMatches(TempOfficeDocumentSelection,DocNo,TempOfficeAddinContext);
+      end;
+
+      case TempOfficeDocumentSelection.COUNT of
+        0:
+          begin
+            TempOfficeAddinContext."Document No." := DocNo;
+            PAGE.RUN(PAGE::"Office Doc Selection Dlg");
+          end;
+        1:
+          OpenIndividualDocument(TempOfficeAddinContext,TempOfficeDocumentSelection);
+        else // More than one document match, must have user pick
+          PAGE.RUN(PAGE::"Office Document Selection",TempOfficeDocumentSelection);
+      end;
+    END;
+
+    [External]
+    PROCEDURE ShowDocumentSelection@1001(DocSeries@1000 : Integer;DocType@1001 : Integer);
+    VAR
+      TempOfficeDocumentSelection@1002 : TEMPORARY Record "Office Document Selection";
+    BEGIN
+      with TempOfficeDocumentSelection do
+        case DocSeries of
+          Series::Sales:
+            GetSalesDocuments(TempOfficeDocumentSelection,DocSeries,DocType);
+          Series::Purchase:
+            GetPurchaseDocuments(TempOfficeDocumentSelection,DocSeries,DocType);
+        end;
+      PAGE.RUN(PAGE::"Office Document Selection",TempOfficeDocumentSelection);
+    END;
+
+    [External]
+    PROCEDURE HandleSalesCommand@1049(Customer@1000 : Record Customer;TempOfficeAddinContext@1003 : TEMPORARY Record "Office Add-in Context");
+    VAR
+      OfficeMgt@1002 : Codeunit "Office Management";
+      OutlookCommand@1001 : DotNet "'Microsoft.Dynamics.Nav.ClientExtensions, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Client.Hosts.OutlookCommand";
+    BEGIN
+      case TempOfficeAddinContext.Command of
+        OutlookCommand.NewSalesCreditMemo:
+          Customer.CreateAndShowNewCreditMemo;
+        OutlookCommand.NewSalesInvoice:
+          if not OfficeMgt.CheckForExistingInvoice(Customer."No.") then
+            Customer.CreateAndShowNewInvoice;
+        OutlookCommand.NewSalesQuote:
+          Customer.CreateAndShowNewQuote;
+        OutlookCommand.NewSalesOrder:
+          Customer.CreateAndShowNewOrder;
+      end;
+    END;
+
+    [External]
+    PROCEDURE HandlePurchaseCommand@1050(Vendor@1000 : Record Vendor;TempOfficeAddinContext@1003 : TEMPORARY Record "Office Add-in Context");
+    VAR
+      OutlookCommand@1001 : DotNet "'Microsoft.Dynamics.Nav.ClientExtensions, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Client.Hosts.OutlookCommand";
+    BEGIN
+      case TempOfficeAddinContext.Command of
+        OutlookCommand.NewPurchaseCreditMemo:
+          Vendor.CreateAndShowNewCreditMemo;
+        OutlookCommand.NewPurchaseInvoice:
+          Vendor.CreateAndShowNewInvoice;
+        OutlookCommand.NewPurchaseOrder:
+          Vendor.CreateAndShowNewPurchaseOrder;
+      end;
+    END;
+
+    [External]
+    PROCEDURE OpenIndividualDocument@1026(TempOfficeAddinContext@1001 : TEMPORARY Record "Office Add-in Context";TempOfficeDocumentSelection@1000 : TEMPORARY Record "Office Document Selection");
+    BEGIN
+      case TempOfficeDocumentSelection.Series of
+        TempOfficeDocumentSelection.Series::Sales:
+          OpenIndividualSalesDocument(TempOfficeAddinContext,TempOfficeDocumentSelection);
+        TempOfficeDocumentSelection.Series::Purchase:
+          OpenIndividualPurchaseDocument(TempOfficeAddinContext,TempOfficeDocumentSelection);
+      end;
+    END;
+
+    LOCAL PROCEDURE CollectDocumentMatches@1018(VAR TempOfficeDocumentSelection@1009 : TEMPORARY Record "Office Document Selection";VAR DocNo@1010 : Code[20];TempOfficeAddinContext@1001 : TEMPORARY Record "Office Add-in Context");
+    VAR
+      DocNos@1000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      Separator@1002 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+    BEGIN
+      // We'll either have a document number already, or we'll need to process the RegularExpressionMatch
+      // to derive the document number.
+      if (TempOfficeAddinContext."Document No." = '') and (TempOfficeAddinContext."Regular Expression Match" <> '') then begin
+        // Try to set DocNo by checking Expression for Window Title Key Words
+        if not ExpressionContainsSeriesTitle(TempOfficeAddinContext."Regular Expression Match",DocNo,TempOfficeDocumentSelection) then
+          // Last attempt, look for key English terms:  Quote, Order, Invoice, and Credit Memo
+          ExpressionContainsKeyWords(TempOfficeAddinContext."Regular Expression Match",DocNo,TempOfficeDocumentSelection)
+      end else
+        if TempOfficeAddinContext."Document No." <> '' then begin
+          DocNos := TempOfficeAddinContext."Document No.";
+          Separator := '|';
+          foreach DocNo in DocNos.Split(Separator.ToCharArray) do
+            with TempOfficeDocumentSelection do begin
+              SetSalesDocumentMatchRecord(DocNo,"Document Type"::Order,TempOfficeDocumentSelection);
+              SetSalesDocumentMatchRecord(DocNo,"Document Type"::Quote,TempOfficeDocumentSelection);
+              SetSalesDocumentMatchRecord(DocNo,"Document Type"::Invoice,TempOfficeDocumentSelection);
+              SetSalesDocumentMatchRecord(DocNo,"Document Type"::"Credit Memo",TempOfficeDocumentSelection);
+
+              SetPurchDocumentMatchRecord(DocNo,"Document Type"::Invoice,TempOfficeDocumentSelection);
+              SetPurchDocumentMatchRecord(DocNo,"Document Type"::"Credit Memo",TempOfficeDocumentSelection);
+              SetPurchDocumentMatchRecord(DocNo,"Document Type"::Order,TempOfficeDocumentSelection);
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE CreateDocumentMatchRecord@1022(VAR TempOfficeDocumentSelection@1000 : TEMPORARY Record "Office Document Selection";Series@1001 : Option;DocType@1002 : Option;DocNo@1003 : Code[20];Posted@1004 : Boolean;DocDate@1005 : Date);
+    BEGIN
+      TempOfficeDocumentSelection.INIT;
+      TempOfficeDocumentSelection.VALIDATE("Document No.",DocNo);
+      TempOfficeDocumentSelection.VALIDATE("Document Date",DocDate);
+      TempOfficeDocumentSelection.VALIDATE("Document Type",DocType);
+      TempOfficeDocumentSelection.VALIDATE(Series,Series);
+      TempOfficeDocumentSelection.VALIDATE(Posted,Posted);
+      if not TempOfficeDocumentSelection.INSERT then;
+    END;
+
+    LOCAL PROCEDURE DocumentDoesNotExist@1017(DocumentNo@1001 : Text[250]);
+    BEGIN
+      MESSAGE(DocDoesNotExistMsg,DocumentNo);
+    END;
+
+    LOCAL PROCEDURE ExpressionContainsKeyWords@1025(Expression@1000 : Text[250];VAR DocNo@1001 : Code[20];VAR TempOfficeDocumentSelection@1004 : TEMPORARY Record "Office Document Selection") : Boolean;
+    VAR
+      DummySalesHeader@1005 : Record "Sales Header";
+      HyperlinkManifest@1002 : Codeunit "Hyperlink Manifest";
+    BEGIN
+      with DummySalesHeader do
+        case true of
+          GetDocumentNumber(Expression,FORMAT("Document Type"::Quote),DocNo):
+            SetSalesDocumentMatchRecord(DocNo,"Document Type"::Quote,TempOfficeDocumentSelection);
+          GetDocumentNumber(Expression,FORMAT("Document Type"::Order),DocNo):
+            begin
+              SetSalesDocumentMatchRecord(DocNo,"Document Type"::Order,TempOfficeDocumentSelection);
+              SetPurchDocumentMatchRecord(DocNo,"Document Type"::Order,TempOfficeDocumentSelection);
+            end;
+          GetDocumentNumber(Expression,FORMAT("Document Type"::Invoice),DocNo):
+            begin
+              SetSalesDocumentMatchRecord(DocNo,"Document Type"::Invoice,TempOfficeDocumentSelection);
+              SetPurchDocumentMatchRecord(DocNo,"Document Type"::Invoice,TempOfficeDocumentSelection);
+            end;
+          GetDocumentNumber(Expression,FORMAT("Document Type"::"Credit Memo"),DocNo):
+            begin
+              SetSalesDocumentMatchRecord(DocNo,"Document Type"::"Credit Memo",TempOfficeDocumentSelection);
+              SetPurchDocumentMatchRecord(DocNo,"Document Type"::"Credit Memo",TempOfficeDocumentSelection);
+            end;
+          GetDocumentNumber(Expression,HyperlinkManifest.GetAcronymForPurchaseOrder,DocNo):
+            SetPurchDocumentMatchRecord(DocNo,TempOfficeDocumentSelection."Document Type"::Order,TempOfficeDocumentSelection);
+          else
+            exit(false);
+        end;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE ExpressionContainsSeriesTitle@1023(Expression@1000 : Text[250];VAR DocNo@1001 : Code[20];VAR TempOfficeDocumentSelection@1003 : TEMPORARY Record "Office Document Selection") : Boolean;
+    VAR
+      HyperlinkManifest@1002 : Codeunit "Hyperlink Manifest";
+    BEGIN
+      with HyperlinkManifest do
+        case true of
+          GetDocumentNumber(Expression,GetNameForPurchaseCrMemo,DocNo):
+            SetPurchDocumentMatchRecord(DocNo,TempOfficeDocumentSelection."Document Type"::"Credit Memo",TempOfficeDocumentSelection);
+          GetDocumentNumber(Expression,GetNameForPurchaseInvoice,DocNo):
+            SetPurchDocumentMatchRecord(DocNo,TempOfficeDocumentSelection."Document Type"::Invoice,TempOfficeDocumentSelection);
+          GetDocumentNumber(Expression,GetNameForPurchaseOrder,DocNo):
+            SetPurchDocumentMatchRecord(DocNo,TempOfficeDocumentSelection."Document Type"::Order,TempOfficeDocumentSelection);
+          GetDocumentNumber(Expression,GetNameForSalesCrMemo,DocNo):
+            SetSalesDocumentMatchRecord(DocNo,TempOfficeDocumentSelection."Document Type"::"Credit Memo",TempOfficeDocumentSelection);
+          GetDocumentNumber(Expression,GetNameForSalesInvoice,DocNo):
+            SetSalesDocumentMatchRecord(DocNo,TempOfficeDocumentSelection."Document Type"::Invoice,TempOfficeDocumentSelection);
+          GetDocumentNumber(Expression,GetNameForSalesOrder,DocNo):
+            SetSalesDocumentMatchRecord(DocNo,TempOfficeDocumentSelection."Document Type"::Order,TempOfficeDocumentSelection);
+          GetDocumentNumber(Expression,GetNameForSalesQuote,DocNo):
+            SetSalesDocumentMatchRecord(DocNo,TempOfficeDocumentSelection."Document Type"::Quote,TempOfficeDocumentSelection);
+          else
+            exit(false);
+        end;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE GetDocumentNumber@1028(Expression@1001 : Text[250];Keyword@1002 : Text;VAR DocNo@1009 : Code[20]) IsMatch : Boolean;
+    VAR
+      HyperlinkManifest@1003 : Codeunit "Hyperlink Manifest";
+      DocNoRegEx@1010 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.RegularExpressions.Regex";
+    BEGIN
+      DocNoRegEx := DocNoRegEx.Regex(STRSUBSTNO('(?i)(%1)[\#:\s]*(%2)',Keyword,HyperlinkManifest.GetNumberSeriesRegex));
+      IsMatch := DocNoRegEx.IsMatch(Expression);
+      if IsMatch then
+        DocNo := DocNoRegEx.Replace(Expression,'$2');
+    END;
+
+    LOCAL PROCEDURE GetSalesDocuments@1008(VAR TempOfficeDocumentSelection@1000 : TEMPORARY Record "Office Document Selection";Series@1001 : Integer;DocType@1002 : Integer);
+    VAR
+      SalesHeader@1005 : Record "Sales Header";
+      SalesInvoiceHeader@1004 : Record "Sales Invoice Header";
+      SalesCrMemoHeader@1003 : Record "Sales Cr.Memo Header";
+    BEGIN
+      // Unposted
+      SalesHeader.SETRANGE("Document Type",DocType);
+      if SalesHeader.FINDSET then
+        repeat
+          CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series,DocType,
+            SalesHeader."No.",false,SalesHeader."Document Date");
+        until SalesHeader.NEXT = 0;
+
+      // Posted Invoices
+      if DocType = TempOfficeDocumentSelection."Document Type"::Invoice then
+        if SalesInvoiceHeader.FINDSET then
+          repeat
+            CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series,DocType,
+              SalesInvoiceHeader."No.",true,SalesInvoiceHeader."Document Date");
+          until SalesInvoiceHeader.NEXT = 0;
+
+      // Posted Credit Memos
+      if DocType = TempOfficeDocumentSelection."Document Type"::"Credit Memo" then
+        if SalesCrMemoHeader.FINDSET then
+          repeat
+            CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series,DocType,
+              SalesCrMemoHeader."No.",true,SalesCrMemoHeader."Document Date");
+          until SalesCrMemoHeader.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetPurchaseDocuments@1009(VAR TempOfficeDocumentSelection@1002 : TEMPORARY Record "Office Document Selection";Series@1001 : Integer;DocType@1000 : Integer);
+    VAR
+      PurchaseHeader@1005 : Record "Purchase Header";
+      PurchInvHeader@1004 : Record "Purch. Inv. Header";
+      PurchCrMemoHdr@1003 : Record "Purch. Cr. Memo Hdr.";
+    BEGIN
+      // Unposted
+      PurchaseHeader.SETRANGE("Document Type",DocType);
+      if PurchaseHeader.FINDSET then
+        repeat
+          CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series,DocType,
+            PurchaseHeader."No.",false,PurchaseHeader."Document Date");
+        until PurchaseHeader.NEXT = 0;
+
+      // Posted Invoices
+      if DocType = TempOfficeDocumentSelection."Document Type"::Invoice then
+        if PurchInvHeader.FINDSET then
+          repeat
+            CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series,DocType,
+              PurchInvHeader."No.",true,PurchInvHeader."Document Date");
+          until PurchInvHeader.NEXT = 0;
+
+      // Posted Credit Memos
+      if DocType = TempOfficeDocumentSelection."Document Type"::"Credit Memo" then
+        if PurchCrMemoHdr.FINDSET then
+          repeat
+            CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series,DocType,
+              PurchCrMemoHdr."No.",true,PurchCrMemoHdr."Document Date");
+          until PurchCrMemoHdr.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE OpenIndividualSalesDocument@1013(TempOfficeAddinContext@1001 : TEMPORARY Record "Office Add-in Context";TempOfficeDocumentSelection@1000 : TEMPORARY Record "Office Document Selection");
+    VAR
+      SalesHeader@1008 : Record "Sales Header";
+      SalesInvoiceHeader@1007 : Record "Sales Invoice Header";
+      SalesCrMemoHeader@1006 : Record "Sales Cr.Memo Header";
+    BEGIN
+      with TempOfficeDocumentSelection do
+        if not Posted then
+          if SalesHeader.GET("Document Type","Document No.") then
+            case SalesHeader."Document Type" of
+              SalesHeader."Document Type"::Quote:
+                PAGE.RUN(PAGE::"Sales Quote",SalesHeader);
+              SalesHeader."Document Type"::Order:
+                PAGE.RUN(PAGE::"Sales Order",SalesHeader);
+              SalesHeader."Document Type"::Invoice:
+                PAGE.RUN(PAGE::"Sales Invoice",SalesHeader);
+              SalesHeader."Document Type"::"Credit Memo":
+                PAGE.RUN(PAGE::"Sales Credit Memo",SalesHeader);
+            end else // No SalesHeader record found
+            DocumentDoesNotExist(TempOfficeAddinContext."Document No.")
+        else begin
+          if "Document Type" = "Document Type"::Invoice then
+            if SalesInvoiceHeader.GET("Document No.") then
+              PAGE.RUN(PAGE::"Posted Sales Invoice",SalesInvoiceHeader);
+          if "Document Type" = "Document Type"::"Credit Memo" then
+            if SalesCrMemoHeader.GET("Document No.") then
+              PAGE.RUN(PAGE::"Posted Sales Credit Memo",SalesCrMemoHeader);
+        end;
+    END;
+
+    LOCAL PROCEDURE OpenIndividualPurchaseDocument@1021(TempOfficeAddinContext@1001 : TEMPORARY Record "Office Add-in Context";TempOfficeDocumentSelection@1000 : TEMPORARY Record "Office Document Selection");
+    VAR
+      PurchaseHeader@1005 : Record "Purchase Header";
+      PurchInvHeader@1004 : Record "Purch. Inv. Header";
+      PurchCrMemoHdr@1003 : Record "Purch. Cr. Memo Hdr.";
+    BEGIN
+      with TempOfficeDocumentSelection do
+        if not Posted then
+          if PurchaseHeader.GET("Document Type","Document No.") then
+            case PurchaseHeader."Document Type" of
+              PurchaseHeader."Document Type"::Invoice:
+                PAGE.RUN(PAGE::"Purchase Invoice",PurchaseHeader);
+              PurchaseHeader."Document Type"::"Credit Memo":
+                PAGE.RUN(PAGE::"Purchase Credit Memo",PurchaseHeader);
+              PurchaseHeader."Document Type"::Order:
+                PAGE.RUN(PAGE::"Purchase Order",PurchaseHeader);
+            end else // No PurchaseHeader record found
+            DocumentDoesNotExist(TempOfficeAddinContext."Document No.")
+        else begin
+          if "Document Type" = "Document Type"::Invoice then
+            if PurchInvHeader.GET("Document No.") then
+              PAGE.RUN(PAGE::"Posted Purchase Invoice",PurchInvHeader);
+          if "Document Type" = "Document Type"::"Credit Memo" then
+            if PurchCrMemoHdr.GET("Document No.") then
+              PAGE.RUN(PAGE::"Posted Purchase Credit Memo",PurchCrMemoHdr);
+        end;
+    END;
+
+    LOCAL PROCEDURE SetSalesDocumentMatchRecord@1029(DocNo@1000 : Code[20];DocType@1003 : Integer;VAR TempOfficeDocumentSelection@1001 : TEMPORARY Record "Office Document Selection");
+    VAR
+      SalesHeader@1002 : Record "Sales Header";
+      SalesInvoiceHeader@1004 : Record "Sales Invoice Header";
+      SalesCrMemoHeader@1005 : Record "Sales Cr.Memo Header";
+    BEGIN
+      with TempOfficeDocumentSelection do begin
+        if SalesHeader.GET(DocType,DocNo) then
+          CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series::Sales,DocType,DocNo,false,SalesHeader."Document Date");
+        if SalesInvoiceHeader.GET(DocNo) and (DocType = "Document Type"::Invoice) then
+          CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series::Sales,DocType,DocNo,true,SalesInvoiceHeader."Document Date");
+        if SalesCrMemoHeader.GET(DocNo) and (DocType = "Document Type"::"Credit Memo") then
+          CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series::Sales,DocType,DocNo,true,SalesCrMemoHeader."Document Date");
+      end;
+    END;
+
+    LOCAL PROCEDURE SetPurchDocumentMatchRecord@1006(DocNo@1001 : Code[20];DocType@1003 : Integer;VAR TempOfficeDocumentSelection@1000 : TEMPORARY Record "Office Document Selection");
+    VAR
+      PurchaseHeader@1002 : Record "Purchase Header";
+      PurchInvHeader@1004 : Record "Purch. Inv. Header";
+      PurchCrMemoHdr@1005 : Record "Purch. Cr. Memo Hdr.";
+    BEGIN
+      with TempOfficeDocumentSelection do begin
+        if PurchaseHeader.GET(DocType,DocNo) then
+          CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series::Purchase,DocType,DocNo,false,PurchaseHeader."Document Date");
+        if PurchInvHeader.GET(DocNo) and (DocType = "Document Type"::Invoice) then
+          CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series::Purchase,DocType,DocNo,true,PurchInvHeader."Document Date");
+        if PurchCrMemoHdr.GET(DocNo) and (DocType = "Document Type"::"Credit Memo") then
+          CreateDocumentMatchRecord(TempOfficeDocumentSelection,Series::Purchase,DocType,DocNo,true,PurchCrMemoHdr."Document Date");
+      end;
+    END;
+
+    [EventSubscriber(Table,36,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnNewInvoice@1007(VAR Rec@1000 : Record "Sales Header";RunTrigger@1001 : Boolean);
+    VAR
+      TempOfficeAddinContext@1002 : TEMPORARY Record "Office Add-in Context";
+      OfficeMgt@1004 : Codeunit "Office Management";
+    BEGIN
+      if OfficeMgt.IsAvailable and (Rec."Document Type" = Rec."Document Type"::Invoice) then begin
+        OfficeMgt.GetContext(TempOfficeAddinContext);
+        if TempOfficeAddinContext.IsAppointment then
+          CreateOfficeInvoiceRecord(TempOfficeAddinContext."Item ID",Rec."No.",false);
+      end;
+    END;
+
+    [EventSubscriber(Table,112,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnPostInvoice@1011(VAR Rec@1000 : Record "Sales Invoice Header";RunTrigger@1001 : Boolean);
+    VAR
+      TempOfficeAddinContext@1002 : TEMPORARY Record "Office Add-in Context";
+      OfficeMgt@1004 : Codeunit "Office Management";
+    BEGIN
+      if OfficeMgt.IsAvailable then begin
+        OfficeMgt.GetContext(TempOfficeAddinContext);
+        if TempOfficeAddinContext.IsAppointment then
+          CreateOfficeInvoiceRecord(TempOfficeAddinContext."Item ID",Rec."No.",true);
+      end;
+    END;
+
+    [EventSubscriber(Table,36,OnAfterDeleteEvent)]
+    LOCAL PROCEDURE OnDeleteInvoice@1002(VAR Rec@1000 : Record "Sales Header";RunTrigger@1001 : Boolean);
+    VAR
+      TempOfficeAddinContext@1002 : TEMPORARY Record "Office Add-in Context";
+      OfficeInvoice@1003 : Record "Office Invoice";
+      OfficeMgt@1004 : Codeunit "Office Management";
+    BEGIN
+      if OfficeMgt.IsAvailable and (Rec."Document Type" = Rec."Document Type"::Invoice) then begin
+        OfficeMgt.GetContext(TempOfficeAddinContext);
+        if TempOfficeAddinContext.IsAppointment then begin
+          if OfficeInvoice.GET(TempOfficeAddinContext."Item ID",Rec."No.",false) then
+            OfficeInvoice.DELETE;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateOfficeInvoiceRecord@1005(ItemID@1003 : Text[250];DocNo@1001 : Code[20];Posted@1002 : Boolean);
+    VAR
+      OfficeInvoice@1000 : Record "Office Invoice";
+    BEGIN
+      OfficeInvoice.INIT;
+      OfficeInvoice."Item ID" := ItemID;
+      OfficeInvoice."Document No." := DocNo;
+      OfficeInvoice.Posted := Posted;
+      if not OfficeInvoice.INSERT then
+        OfficeInvoice.MODIFY;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

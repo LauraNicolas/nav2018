@@ -1,0 +1,427 @@
+OBJECT Codeunit 1250 Match General Journal Lines
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Gen. Journal Line";
+    OnRun=VAR
+            GenJnlLine@1000 : Record "Gen. Journal Line";
+          BEGIN
+            GenJnlLine.COPY(Rec);
+            Code(GenJnlLine."Journal Template Name",GenJnlLine."Journal Batch Name");
+            Rec := GenJnlLine;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      MatchSummaryMsg@1000 : TextConst 'ENU=%1 payment lines out of %2 are matched.\\';
+      MissingMatchMsg@1001 : TextConst 'ENU=Text shorter than %1 characters cannot be matched.';
+      ProgressBarMsg@1002 : TextConst 'ENU=Please wait while the operation is being completed.';
+      MatchLengthTreshold@1061 : Integer;
+      NormalizingFactor@1062 : Integer;
+
+    [External]
+    PROCEDURE Code@1(TemplateName@1000 : Code[10];BatchName@1003 : Code[10]);
+    VAR
+      TempBankStatementMatchingBuffer@1004 : TEMPORARY Record "Bank Statement Matching Buffer";
+      GenJournalBatch@1001 : Record "Gen. Journal Batch";
+      TempGenJournalLine@1002 : TEMPORARY Record "Gen. Journal Line";
+      Window@1005 : Dialog;
+    BEGIN
+      GenJournalBatch.GET(TemplateName,BatchName);
+      Window.OPEN(ProgressBarMsg);
+      SetMatchLengthThreshold(4);
+      SetNormalizingFactor(10);
+      FillTempGenJournalLine(GenJournalBatch,TempGenJournalLine);
+      FindMatchingCustEntries(TempBankStatementMatchingBuffer,TempGenJournalLine);
+      FindMatchingVendorEntries(TempBankStatementMatchingBuffer,TempGenJournalLine);
+      SaveOneToOneMatching(TempBankStatementMatchingBuffer,GenJournalBatch);
+
+      FillTempGenJournalLine(GenJournalBatch,TempGenJournalLine);
+      FindAccountMappings(TempGenJournalLine);
+
+      Window.CLOSE;
+      ShowMatchSummary(GenJournalBatch);
+    END;
+
+    LOCAL PROCEDURE FindMatchingCustEntries@8(VAR TempBankStatementMatchingBuffer@1000 : TEMPORARY Record "Bank Statement Matching Buffer";VAR TempGenJournalLine@1001 : TEMPORARY Record "Gen. Journal Line");
+    VAR
+      CustLedgerEntry@1002 : Record "Cust. Ledger Entry";
+    BEGIN
+      CustLedgerEntry.SETRANGE(Open,true);
+      CustLedgerEntry.SETFILTER("Document Type",'<>%1&<>%2',
+        CustLedgerEntry."Document Type"::Payment,CustLedgerEntry."Document Type"::Refund);
+      CustLedgerEntry.SETRANGE("Applies-to ID",'');
+      CustLedgerEntry.SETAUTOCALCFIELDS("Remaining Amt. (LCY)");
+      if CustLedgerEntry.FINDSET then
+        repeat
+          FindMatchingCustEntry(TempBankStatementMatchingBuffer,CustLedgerEntry,TempGenJournalLine);
+        until CustLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindMatchingCustEntry@10(VAR TempBankStatementMatchingBuffer@1001 : TEMPORARY Record "Bank Statement Matching Buffer";VAR CustLedgerEntry@1004 : Record "Cust. Ledger Entry";VAR GenJournalLine@1000 : Record "Gen. Journal Line");
+    VAR
+      Customer@1005 : Record Customer;
+      Score@1003 : Integer;
+    BEGIN
+      Customer.GET(CustLedgerEntry."Customer No.");
+      if GenJournalLine.FINDSET then
+        repeat
+          Score := GetMatchScore(GenJournalLine,CustLedgerEntry."Document No.",Customer."No.",CustLedgerEntry."External Document No.",
+              Customer.Name,CustLedgerEntry."Remaining Amt. (LCY)",1,CustLedgerEntry."Posting Date");
+          if Score > 5 then
+            TempBankStatementMatchingBuffer.AddMatchCandidate(GenJournalLine."Line No.",CustLedgerEntry."Entry No.",Score,
+              TempBankStatementMatchingBuffer."Account Type"::Customer,CustLedgerEntry."Customer No.");
+        until GenJournalLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindMatchingVendorEntries@7(VAR TempBankStatementMatchingBuffer@1000 : TEMPORARY Record "Bank Statement Matching Buffer";VAR TempGenJournalLine@1001 : TEMPORARY Record "Gen. Journal Line");
+    VAR
+      VendorLedgerEntry@1002 : Record "Vendor Ledger Entry";
+    BEGIN
+      VendorLedgerEntry.SETRANGE(Open,true);
+      VendorLedgerEntry.SETFILTER("Document Type",'<>%1&<>%2',
+        VendorLedgerEntry."Document Type"::Payment,VendorLedgerEntry."Document Type"::Refund);
+      VendorLedgerEntry.SETRANGE("Applies-to ID",'');
+      VendorLedgerEntry.SETAUTOCALCFIELDS("Remaining Amt. (LCY)");
+      if VendorLedgerEntry.FINDSET then
+        repeat
+          FindMatchingVendorEntry(TempBankStatementMatchingBuffer,VendorLedgerEntry,TempGenJournalLine);
+        until VendorLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindMatchingVendorEntry@2(VAR TempBankStatementMatchingBuffer@1001 : TEMPORARY Record "Bank Statement Matching Buffer";VAR VendorLedgerEntry@1004 : Record "Vendor Ledger Entry";VAR GenJournalLine@1000 : Record "Gen. Journal Line");
+    VAR
+      Vendor@1002 : Record Vendor;
+      Score@1003 : Integer;
+    BEGIN
+      Vendor.GET(VendorLedgerEntry."Vendor No.");
+      if GenJournalLine.FINDSET then
+        repeat
+          Score := GetMatchScore(GenJournalLine,VendorLedgerEntry."Document No.",Vendor."No.",
+              VendorLedgerEntry."External Document No.",Vendor.Name,VendorLedgerEntry."Remaining Amt. (LCY)",-1,
+              VendorLedgerEntry."Posting Date");
+          if Score > 5 then
+            TempBankStatementMatchingBuffer.AddMatchCandidate(GenJournalLine."Line No.",VendorLedgerEntry."Entry No.",Score,
+              TempBankStatementMatchingBuffer."Account Type"::Vendor,VendorLedgerEntry."Vendor No.");
+        until GenJournalLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindAccountMappings@9(VAR TempGenJournalLine@1000 : TEMPORARY Record "Gen. Journal Line");
+    VAR
+      TextToAccMapping@1002 : Record "Text-to-Account Mapping";
+      GenJournalLine@1003 : Record "Gen. Journal Line";
+      PaymentDocType@1001 : Option;
+      InvoiceDocType@1005 : Option;
+    BEGIN
+      with TempGenJournalLine do
+        if FINDSET then
+          repeat
+            if GetAccountMapping(TextToAccMapping,Description) then begin
+              GenJournalLine.GET("Journal Template Name","Journal Batch Name","Line No.");
+              case TextToAccMapping."Bal. Source Type" of
+                TextToAccMapping."Bal. Source Type"::"G/L Account":
+                  UpdateGenJnlLine(
+                    GenJournalLine,GenJournalLine."Document Type",
+                    GenJournalLine."Account Type"::"G/L Account",
+                    TextToAccMapping.GetAccountNo(GenJournalLine.Amount),'');
+                TextToAccMapping."Bal. Source Type"::Customer,
+                TextToAccMapping."Bal. Source Type"::Vendor:
+                  if TextToAccMapping."Bal. Source No." <> '' then begin
+                    TextToAccMapping.GetPaymentDocType(PaymentDocType,TextToAccMapping."Bal. Source Type",GenJournalLine.Amount);
+                    TextToAccMapping.GetDocTypeForPmt(InvoiceDocType,PaymentDocType);
+                    UpdateGenJnlLine(
+                      GenJournalLine,PaymentDocType,
+                      TextToAccMapping."Bal. Source Type",TextToAccMapping."Bal. Source No.",'');
+                    CreateInvoiceLineFromPayment(
+                      GenJournalLine,InvoiceDocType,
+                      PaymentDocType,TextToAccMapping.GetAccountNo(GenJournalLine.Amount));
+                  end;
+              end;
+            end;
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetAccountMapping@11(VAR TextToAccMapping@1000 : Record "Text-to-Account Mapping";Description@1001 : Text) : Boolean;
+    VAR
+      RecordMatchMgt@1002 : Codeunit "Record Match Mgt.";
+      MaxNearness@1004 : Integer;
+      Nearness@1005 : Integer;
+      MatchLineNo@1006 : Integer;
+    BEGIN
+      Description := RecordMatchMgt.Trim(Description);
+      TextToAccMapping.SETFILTER("Mapping Text",'%1','@' + Description);
+      if TextToAccMapping.FINDFIRST then
+        exit(true);
+
+      TextToAccMapping.RESET;
+      MaxNearness := 0;
+      if TextToAccMapping.FINDSET then
+        repeat
+          if Description = RecordMatchMgt.Trim(TextToAccMapping."Mapping Text") then
+            exit(true);
+
+          Nearness := RecordMatchMgt.CalculateStringNearness(' ' + RecordMatchMgt.Trim(TextToAccMapping."Mapping Text") + ' ',
+              Description,STRLEN(TextToAccMapping."Mapping Text") + 1,10);
+          if Nearness > MaxNearness then begin
+            MaxNearness := Nearness;
+            MatchLineNo := TextToAccMapping."Line No.";
+          end;
+        until TextToAccMapping.NEXT = 0;
+
+      if TextToAccMapping.GET(MatchLineNo) then
+        exit(true);
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE GetNextAvailableLineNo@36(GenJournalLine@1001 : Record "Gen. Journal Line") : Integer;
+    VAR
+      GenJournalLine2@1000 : Record "Gen. Journal Line";
+    BEGIN
+      with GenJournalLine2 do begin
+        SETRANGE("Journal Template Name",GenJournalLine."Journal Template Name");
+        SETRANGE("Journal Batch Name",GenJournalLine."Journal Batch Name");
+        SETFILTER("Line No.",'>%1',GenJournalLine."Line No.");
+        if FINDFIRST then
+          exit(GenJournalLine."Line No." + ("Line No." - GenJournalLine."Line No.") div 2);
+      end;
+
+      exit(GenJournalLine."Line No." + 10000);
+    END;
+
+    LOCAL PROCEDURE SaveOneToOneMatching@28(VAR TempBankStatementMatchingBuffer@1000 : TEMPORARY Record "Bank Statement Matching Buffer";VAR GenJournalBatch@1001 : Record "Gen. Journal Batch");
+    VAR
+      GenJournalLine@1003 : Record "Gen. Journal Line";
+    BEGIN
+      TempBankStatementMatchingBuffer.RESET;
+      TempBankStatementMatchingBuffer.SETCURRENTKEY(Quality);
+      TempBankStatementMatchingBuffer.ASCENDING(false);
+
+      if TempBankStatementMatchingBuffer.FINDSET then
+        repeat
+          GenJournalLine.GET(GenJournalBatch."Journal Template Name",
+            GenJournalBatch.Name,TempBankStatementMatchingBuffer."Line No.");
+          ApplyRecords(GenJournalLine,TempBankStatementMatchingBuffer);
+        until TempBankStatementMatchingBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ApplyRecords@30(VAR GenJournalLine@1000 : Record "Gen. Journal Line";VAR TempBankStatementMatchingBuffer@1003 : TEMPORARY Record "Bank Statement Matching Buffer");
+    VAR
+      CustLedgerEntry@1002 : Record "Cust. Ledger Entry";
+      VendorLedgerEntry@1001 : Record "Vendor Ledger Entry";
+    BEGIN
+      case TempBankStatementMatchingBuffer."Account Type" of
+        TempBankStatementMatchingBuffer."Account Type"::Customer:
+          if CustLedgerEntry.GET(TempBankStatementMatchingBuffer."Entry No.") then
+            if (GenJournalLine."Applies-to ID" = '') and (CustLedgerEntry."Applies-to ID" = '') then begin
+              UpdateGenJnlLine(GenJournalLine,GenJournalLine."Document Type"::Payment,
+                GenJournalLine."Account Type"::Customer,CustLedgerEntry."Customer No.",GenJournalLine."Document No.");
+              PrepareCustLedgerEntryForApplication(CustLedgerEntry,GenJournalLine);
+            end;
+        TempBankStatementMatchingBuffer."Account Type"::Vendor:
+          if VendorLedgerEntry.GET(TempBankStatementMatchingBuffer."Entry No.") then
+            if (GenJournalLine."Applies-to ID" = '') and (VendorLedgerEntry."Applies-to ID" = '') then begin
+              UpdateGenJnlLine(GenJournalLine,GenJournalLine."Document Type"::Payment,
+                GenJournalLine."Account Type"::Vendor,VendorLedgerEntry."Vendor No.",GenJournalLine."Document No.");
+              PrepareVendorLedgerEntryForApplication(VendorLedgerEntry,GenJournalLine);
+            end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateInvoiceLineFromPayment@17(VAR GenJournalLine@1000 : Record "Gen. Journal Line";DocType@1004 : Option;AppliesToDocType@1001 : Option;BalAccountNo@1002 : Code[20]);
+    VAR
+      GenJournalLine2@1003 : Record "Gen. Journal Line";
+    BEGIN
+      with GenJournalLine2 do begin
+        COPY(GenJournalLine);
+        "Line No." := GetNextAvailableLineNo(GenJournalLine);
+        if "Line No." = GenJournalLine."Line No." then
+          exit;
+        VALIDATE(Amount,-Amount);
+        VALIDATE("Document Type",DocType);
+        VALIDATE("Applies-to Doc. Type",AppliesToDocType);
+        VALIDATE("Applies-to Doc. No.",GenJournalLine."Document No.");
+        VALIDATE("Bal. Account Type","Bal. Account Type"::"G/L Account");
+        VALIDATE("Bal. Account No.",BalAccountNo);
+        INSERT(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateGenJnlLine@3(VAR GenJournalLine@1000 : Record "Gen. Journal Line";DocType@1005 : Option;AccountType@1001 : Option;AccountNo@1002 : Code[20];AppliesToDocID@1004 : Code[50]);
+    VAR
+      OrigCurrencyCode@1060 : Code[10];
+    BEGIN
+      OrigCurrencyCode := GenJournalLine."Currency Code";
+      GenJournalLine.VALIDATE("Document Type",DocType);
+      GenJournalLine.VALIDATE("Account Type",AccountType);
+      GenJournalLine.VALIDATE("Account No.",AccountNo);
+      GenJournalLine.VALIDATE("Applies-to ID",AppliesToDocID);
+      if OrigCurrencyCode <> GenJournalLine."Currency Code" then
+        GenJournalLine.VALIDATE("Currency Code",OrigCurrencyCode);
+      GenJournalLine.VALIDATE("Applied Automatically",true);
+      GenJournalLine.MODIFY(true);
+    END;
+
+    [External]
+    PROCEDURE PrepareCustLedgerEntryForApplication@4(VAR CustLedgerEntry@1000 : Record "Cust. Ledger Entry";VAR GenJournalLine@1001 : Record "Gen. Journal Line");
+    BEGIN
+      CustLedgerEntry.CALCFIELDS("Remaining Amount","Remaining Amt. (LCY)");
+      CustLedgerEntry."Applies-to ID" := GenJournalLine."Document No.";
+      if ABS(CustLedgerEntry."Remaining Amt. (LCY)") < ABS(GenJournalLine."Amount (LCY)") then
+        CustLedgerEntry."Amount to Apply" := CustLedgerEntry."Remaining Amount"
+      else
+        CustLedgerEntry."Amount to Apply" := -GenJournalLine.Amount;
+
+      CODEUNIT.RUN(CODEUNIT::"Cust. Entry-Edit",CustLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE PrepareVendorLedgerEntryForApplication@5(VAR VendorLedgerEntry@1000 : Record "Vendor Ledger Entry";VAR GenJournalLine@1001 : Record "Gen. Journal Line");
+    BEGIN
+      VendorLedgerEntry.CALCFIELDS("Remaining Amount","Remaining Amt. (LCY)");
+      VendorLedgerEntry."Applies-to ID" := GenJournalLine."Document No.";
+      if ABS(VendorLedgerEntry."Remaining Amt. (LCY)") < ABS(GenJournalLine."Amount (LCY)") then
+        VendorLedgerEntry."Amount to Apply" := VendorLedgerEntry."Remaining Amount"
+      else
+        VendorLedgerEntry."Amount to Apply" := -GenJournalLine.Amount;
+
+      CODEUNIT.RUN(CODEUNIT::"Vend. Entry-Edit",VendorLedgerEntry);
+    END;
+
+    [External]
+    PROCEDURE FillTempGenJournalLine@6(VAR GenJournalBatch@1000 : Record "Gen. Journal Batch";VAR TempGenJournalLine@1001 : TEMPORARY Record "Gen. Journal Line");
+    VAR
+      GenJournalLine@1002 : Record "Gen. Journal Line";
+    BEGIN
+      TempGenJournalLine.DELETEALL;
+      GenJournalLine.SETRANGE("Journal Template Name",GenJournalBatch."Journal Template Name");
+      GenJournalLine.SETRANGE("Journal Batch Name",GenJournalBatch.Name);
+      GenJournalLine.SETRANGE("Applies-to ID",'');
+      GenJournalLine.SETRANGE("Account No.",'');
+      GenJournalLine.SETRANGE("Applied Automatically",false);
+      GenJournalLine.SETFILTER("Document Type",'%1|%2',
+        GenJournalLine."Document Type"::" ",
+        GenJournalLine."Document Type"::Payment);
+      if GenJournalLine.FINDSET then
+        repeat
+          TempGenJournalLine := GenJournalLine;
+          TempGenJournalLine.INSERT;
+        until GenJournalLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ShowMatchSummary@13(GenJournalBatch@1000 : Record "Gen. Journal Batch");
+    VAR
+      GenJournalLine@1001 : Record "Gen. Journal Line";
+      FinalText@1006 : Text;
+      AdditionalText@1005 : Text;
+      TotalCount@1002 : Integer;
+      MatchedCount@1003 : Integer;
+    BEGIN
+      GenJournalLine.SETRANGE("Journal Template Name",GenJournalBatch."Journal Template Name");
+      GenJournalLine.SETRANGE("Journal Batch Name",GenJournalBatch.Name);
+      GenJournalLine.SETFILTER("Document Type",'%1|%2|%3',
+        GenJournalLine."Document Type"::" ",GenJournalLine."Document Type"::Payment,GenJournalLine."Document Type"::Refund);
+      TotalCount := GenJournalLine.COUNT;
+
+      GenJournalLine.SETRANGE("Applied Automatically",true);
+      MatchedCount := GenJournalLine.COUNT;
+
+      if MatchedCount < TotalCount then
+        AdditionalText := STRSUBSTNO(MissingMatchMsg,FORMAT(GetMatchLengthTreshold));
+      FinalText := STRSUBSTNO(MatchSummaryMsg,MatchedCount,TotalCount) + AdditionalText;
+      MESSAGE(FinalText);
+    END;
+
+    LOCAL PROCEDURE GetMatchScore@14(GenJournalLine@1001 : Record "Gen. Journal Line";DocumentNo@1003 : Code[20];CustVendorNo@1009 : Code[20];ExternalDocNo@1007 : Code[35];CustVendorName@1004 : Text[50];RemainingAmountLCY@1005 : Decimal;PreferredSign@1006 : Integer;EntryPostingDate@1060 : Date) : Integer;
+    VAR
+      Score@1000 : Integer;
+    BEGIN
+      if GenJournalLine."Amount (LCY)" * RemainingAmountLCY > 0 then
+        exit(0);
+
+      if GenJournalLine."Posting Date" < EntryPostingDate then
+        exit(0);
+
+      Score += GetDescriptionMatchScore(GenJournalLine.Description,DocumentNo,CustVendorNo,ExternalDocNo,CustVendorName);
+
+      Score += GetDescriptionMatchScore(GenJournalLine."Payer Information",DocumentNo,CustVendorNo,ExternalDocNo,CustVendorName);
+
+      Score += GetDescriptionMatchScore(GenJournalLine."Transaction Information",DocumentNo,CustVendorNo,ExternalDocNo,CustVendorName);
+
+      if GenJournalLine."Amount (LCY)" = -RemainingAmountLCY then
+        Score += 4;
+
+      if PreferredSign * GenJournalLine.Amount < 0 then
+        Score += 2;
+
+      exit(Score);
+    END;
+
+    LOCAL PROCEDURE GetDescriptionMatchScore@12(Description@1002 : Text;DocumentNo@1003 : Code[20];CustVendorNo@1006 : Code[20];ExternalDocNo@1004 : Code[35];CustVendorName@1005 : Text[50]) : Integer;
+    VAR
+      RecordMatchMgt@1007 : Codeunit "Record Match Mgt.";
+      Score@1000 : Integer;
+      Nearness@1001 : Integer;
+      MatchLengthTreshold@1061 : Integer;
+      NormalizingFactor@1060 : Integer;
+    BEGIN
+      Description := RecordMatchMgt.Trim(Description);
+      MatchLengthTreshold := GetMatchLengthTreshold;
+      NormalizingFactor := GetNormalizingFactor;
+      Score := 0;
+
+      Nearness := RecordMatchMgt.CalculateStringNearness(DocumentNo,Description,MatchLengthTreshold,NormalizingFactor);
+      if Nearness = NormalizingFactor then
+        Score += 13;
+
+      Nearness := RecordMatchMgt.CalculateStringNearness(CustVendorNo,Description,MatchLengthTreshold,NormalizingFactor);
+      if Nearness = NormalizingFactor then
+        Score += Nearness;
+
+      Nearness := RecordMatchMgt.CalculateStringNearness(ExternalDocNo,Description,MatchLengthTreshold,NormalizingFactor);
+      if Nearness = NormalizingFactor then
+        Score += Nearness;
+
+      Nearness := RecordMatchMgt.CalculateStringNearness(CustVendorName,Description,MatchLengthTreshold,NormalizingFactor);
+      if Nearness >= 0.8 * NormalizingFactor then
+        Score += Nearness;
+
+      exit(Score)
+    END;
+
+    [External]
+    PROCEDURE SetMatchLengthThreshold@1060(NewMatchLengthThreshold@1060 : Integer);
+    BEGIN
+      MatchLengthTreshold := NewMatchLengthThreshold;
+    END;
+
+    [External]
+    PROCEDURE SetNormalizingFactor@15(NewNormalizingFactor@1061 : Integer);
+    BEGIN
+      NormalizingFactor := NewNormalizingFactor;
+    END;
+
+    [External]
+    PROCEDURE GetMatchLengthTreshold@1062() : Integer;
+    BEGIN
+      exit(MatchLengthTreshold);
+    END;
+
+    [External]
+    PROCEDURE GetNormalizingFactor@1063() : Integer;
+    BEGIN
+      exit(NormalizingFactor);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

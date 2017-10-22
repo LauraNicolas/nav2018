@@ -1,0 +1,147 @@
+OBJECT Codeunit 98 Purchase Post via Job Queue
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Job Queue Entry";
+    OnRun=VAR
+            PurchHeader@1000 : Record "Purchase Header";
+            PurchPostPrint@1002 : Codeunit "Purch.-Post + Print";
+            RecRef@1001 : RecordRef;
+          BEGIN
+            TESTFIELD("Record ID to Process");
+            RecRef.GET("Record ID to Process");
+            RecRef.SETTABLE(PurchHeader);
+            PurchHeader.FIND;
+            SetJobQueueStatus(PurchHeader,PurchHeader."Job Queue Status"::Posting);
+            if not CODEUNIT.RUN(CODEUNIT::"Purch.-Post",PurchHeader) then begin
+              SetJobQueueStatus(PurchHeader,PurchHeader."Job Queue Status"::Error);
+              ERROR(GETLASTERRORTEXT);
+            end;
+            if PurchHeader."Print Posted Documents" then
+              PurchPostPrint.GetReport(PurchHeader);
+            SetJobQueueStatus(PurchHeader,PurchHeader."Job Queue Status"::" ");
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PostDescription@1000 : TextConst '@@@="%1 = document type, %2 = document number. Example: Post Purchase Order 1234.";ENU=Post Purchase %1 %2.';
+      PostAndPrintDescription@1002 : TextConst '@@@="%1 = document type, %2 = document number. Example: Post Purchase Order 1234.";ENU=Post and Print Purchase %1 %2.';
+      Confirmation@1001 : TextConst '@@@="%1=document type, %2=number, e.g. Order 123  or Invoice 234.";ENU=%1 %2 has been scheduled for posting.';
+      WrongJobQueueStatus@1003 : TextConst '@@@="%1 = document type, %2 = document number. Example: Purchase Order 1234 or Invoice 1234.";ENU=%1 %2 cannot be posted because it has already been scheduled for posting. Choose the Remove from Job Queue action to reset the job queue status and then post again.';
+
+    LOCAL PROCEDURE SetJobQueueStatus@5(VAR PurchHeader@1001 : Record "Purchase Header";NewStatus@1000 : Option);
+    BEGIN
+      PurchHeader.LOCKTABLE;
+      if PurchHeader.FIND then begin
+        PurchHeader."Job Queue Status" := NewStatus;
+        PurchHeader.MODIFY;
+        COMMIT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE EnqueuePurchDoc@1(VAR PurchHeader@1000 : Record "Purchase Header");
+    VAR
+      TempInvoice@1004 : Boolean;
+      TempRcpt@1005 : Boolean;
+      TempShip@1006 : Boolean;
+    BEGIN
+      with PurchHeader do begin
+        if not ("Job Queue Status" in ["Job Queue Status"::" ","Job Queue Status"::Error]) then
+          ERROR(WrongJobQueueStatus,"Document Type","No.");
+        TempInvoice := Invoice;
+        TempRcpt := Receive;
+        TempShip := Ship;
+        if Status = Status::Open then
+          CODEUNIT.RUN(CODEUNIT::"Release Purchase Document",PurchHeader);
+        Invoice := TempInvoice;
+        Receive := TempRcpt;
+        Ship := TempShip;
+        "Job Queue Status" := "Job Queue Status"::"Scheduled for Posting";
+        "Job Queue Entry ID" := EnqueueJobEntry(PurchHeader);
+        MODIFY;
+
+        MESSAGE(Confirmation,"Document Type","No.");
+      end;
+    END;
+
+    LOCAL PROCEDURE EnqueueJobEntry@3(PurchHeader@1000 : Record "Purchase Header") : GUID;
+    VAR
+      JobQueueEntry@1001 : Record "Job Queue Entry";
+    BEGIN
+      with JobQueueEntry do begin
+        CLEAR(ID);
+        "Object Type to Run" := "Object Type to Run"::Codeunit;
+        "Object ID to Run" := CODEUNIT::"Purchase Post via Job Queue";
+        "Record ID to Process" := PurchHeader.RECORDID;
+        FillJobEntryFromPurchSetup(JobQueueEntry,PurchHeader."Print Posted Documents");
+        FillJobEntryPurchDescription(JobQueueEntry,PurchHeader);
+        CODEUNIT.RUN(CODEUNIT::"Job Queue - Enqueue",JobQueueEntry);
+        exit(ID);
+      end;
+    END;
+
+    LOCAL PROCEDURE FillJobEntryFromPurchSetup@4(VAR JobQueueEntry@1001 : Record "Job Queue Entry";PostAndPrint@1000 : Boolean);
+    VAR
+      PurchSetup@1002 : Record "Purchases & Payables Setup";
+    BEGIN
+      PurchSetup.GET;
+      with JobQueueEntry do begin
+        "Notify On Success" := PurchSetup."Notify On Success";
+        "Job Queue Category Code" := PurchSetup."Job Queue Category Code";
+        if PostAndPrint then
+          Priority := PurchSetup."Job Q. Prio. for Post & Print"
+        else
+          Priority := PurchSetup."Job Queue Priority for Post";
+      end;
+    END;
+
+    LOCAL PROCEDURE FillJobEntryPurchDescription@6(VAR JobQueueEntry@1001 : Record "Job Queue Entry";PurchHeader@1000 : Record "Purchase Header");
+    BEGIN
+      with JobQueueEntry do begin
+        if PurchHeader."Print Posted Documents" then
+          Description := PostAndPrintDescription
+        else
+          Description := PostDescription;
+        Description :=
+          COPYSTR(STRSUBSTNO(Description,PurchHeader."Document Type",PurchHeader."No."),1,MAXSTRLEN(Description));
+      end;
+    END;
+
+    [External]
+    PROCEDURE CancelQueueEntry@2(VAR PurchHeader@1000 : Record "Purchase Header");
+    BEGIN
+      with PurchHeader do
+        if "Job Queue Status" <> "Job Queue Status"::" " then begin
+          DeleteJobs(PurchHeader);
+          "Job Queue Status" := "Job Queue Status"::" ";
+          MODIFY;
+        end;
+    END;
+
+    LOCAL PROCEDURE DeleteJobs@9(PurchHeader@1001 : Record "Purchase Header");
+    VAR
+      JobQueueEntry@1000 : Record "Job Queue Entry";
+    BEGIN
+      with PurchHeader do begin
+        if not ISNULLGUID("Job Queue Entry ID") then
+          JobQueueEntry.SETRANGE(ID,"Job Queue Entry ID");
+        JobQueueEntry.SETRANGE("Record ID to Process",RECORDID);
+        if not JobQueueEntry.ISEMPTY then
+          JobQueueEntry.DELETEALL(true);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

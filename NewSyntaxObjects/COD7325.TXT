@@ -1,0 +1,197 @@
+OBJECT Codeunit 7325 Whse.-Output Prod. Release
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Location@1000 : Record Location;
+      WhseRqst@1003 : Record "Warehouse Request";
+      ProdOrderLine@1002 : Record "Prod. Order Line";
+      WhseRqstCreated@1001 : Boolean;
+
+    [External]
+    PROCEDURE Release@1(ProdHeader@1000 : Record "Production Order") : Boolean;
+    VAR
+      LocationCode2@1001 : Code[10];
+    BEGIN
+      WhseRqstCreated := false;
+      if ProdHeader.Status <> ProdHeader.Status::Released then
+        exit;
+
+      with ProdHeader do begin
+        ProdOrderLine.SETCURRENTKEY(Status,"Prod. Order No.");
+        ProdOrderLine.SETRANGE(Status,Status);
+        ProdOrderLine.SETRANGE("Prod. Order No.","No.");
+        if ProdOrderLine.FIND('-') then
+          repeat
+            if ProdOrderLine."Location Code" <> LocationCode2 then
+              CreateWhseRqst(ProdOrderLine,ProdHeader);
+            LocationCode2 := ProdOrderLine."Location Code";
+          until ProdOrderLine.NEXT = 0;
+      end;
+      exit(WhseRqstCreated);
+    END;
+
+    LOCAL PROCEDURE CreateWhseRqst@3(VAR ProdOrderLine@1000 : Record "Prod. Order Line";VAR ProdHeader@1001 : Record "Production Order");
+    VAR
+      ProdOrderLine2@1002 : Record "Prod. Order Line";
+    BEGIN
+      GetLocation(ProdOrderLine."Location Code");
+      if not Location."Require Put-away" or Location."Directed Put-away and Pick" then
+        exit;
+
+      ProdOrderLine2.COPY(ProdOrderLine);
+      ProdOrderLine2.SETRANGE("Location Code",ProdOrderLine."Location Code");
+      ProdOrderLine2.SETRANGE("Unit of Measure Code",'');
+      if ProdOrderLine2.FINDFIRST then
+        ProdOrderLine2.TESTFIELD("Unit of Measure Code");
+
+      WhseRqst.INIT;
+      WhseRqst.Type := WhseRqst.Type::Inbound;
+      WhseRqst."Location Code" := ProdOrderLine."Location Code";
+      WhseRqst."Source Type" := DATABASE::"Prod. Order Line";
+      WhseRqst."Source No." := ProdOrderLine."Prod. Order No.";
+      WhseRqst."Source Subtype" := ProdOrderLine.Status;
+      WhseRqst."Source Document" := WhseRqst."Source Document"::"Prod. Output";
+      WhseRqst."Document Status" := WhseRqst."Document Status"::Released;
+      WhseRqst."Completely Handled" :=
+        ProdOrderCompletelyHandled(ProdHeader,ProdOrderLine."Location Code");
+      case ProdHeader."Source Type" of
+        ProdHeader."Source Type"::Item:
+          WhseRqst."Destination Type" := WhseRqst."Destination Type"::Item;
+        ProdHeader."Source Type"::Family:
+          WhseRqst."Destination Type" := WhseRqst."Destination Type"::Family;
+        ProdHeader."Source Type"::"Sales Header":
+          WhseRqst."Destination Type" := WhseRqst."Destination Type"::"Sales Order";
+      end;
+      if not WhseRqst.INSERT then
+        WhseRqst.MODIFY;
+
+      WhseRqstCreated := true;
+    END;
+
+    [External]
+    PROCEDURE DeleteLine@4(ProdOrderLine@1000 : Record "Prod. Order Line");
+    VAR
+      ProdOrderLine2@1001 : Record "Prod. Order Line";
+      KeepWhseRqst@1002 : Boolean;
+    BEGIN
+      with ProdOrderLine do begin
+        KeepWhseRqst := false;
+        GetLocation(ProdOrderLine2."Location Code");
+        if Location."Require Put-away" and (not Location."Directed Put-away and Pick") then begin
+          ProdOrderLine2.RESET;
+          ProdOrderLine2.SETRANGE(Status,Status);
+          ProdOrderLine2.SETRANGE("Prod. Order No.","Prod. Order No.");
+          ProdOrderLine2.SETRANGE("Location Code","Location Code");
+          if ProdOrderLine2.FIND('-') then
+            repeat
+              if ((ProdOrderLine2.Status <> Status) or
+                  (ProdOrderLine2."Prod. Order No." <> "Prod. Order No.") or
+                  (ProdOrderLine2."Line No." <> "Line No.")) and
+                 (ProdOrderLine2."Remaining Quantity" <> 0)
+              then
+                KeepWhseRqst := true;
+            until (ProdOrderLine2.NEXT = 0) or KeepWhseRqst;
+        end;
+
+        if not KeepWhseRqst then
+          DeleteWhseRqst(ProdOrderLine,false);
+      end;
+    END;
+
+    LOCAL PROCEDURE DeleteWhseRqst@10(ProdOrderLine@1000 : Record "Prod. Order Line";DeleteAllWhseRqst@1003 : Boolean);
+    VAR
+      WhseRqst@1005 : Record "Warehouse Request";
+    BEGIN
+      with ProdOrderLine do begin
+        WhseRqst.SETRANGE(Type,WhseRqst.Type::Inbound);
+        WhseRqst.SETRANGE("Source Type",DATABASE::"Prod. Order Line");
+        WhseRqst.SETRANGE("Source No.","Prod. Order No.");
+        if not DeleteAllWhseRqst then begin
+          WhseRqst.SETRANGE("Source Subtype",Status);
+          WhseRqst.SETRANGE("Location Code","Location Code");
+        end;
+        WhseRqst.DELETEALL(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE FinishedDelete@6(VAR ProdHeader@1000 : Record "Production Order");
+    BEGIN
+      with ProdHeader do begin
+        ProdOrderLine.SETCURRENTKEY(Status,"Prod. Order No.");
+        ProdOrderLine.SETRANGE(Status,Status);
+        ProdOrderLine.SETRANGE("Prod. Order No.","No.");
+        if ProdOrderLine.FIND('-') then
+          DeleteWhseRqst(ProdOrderLine,true);
+      end;
+    END;
+
+    LOCAL PROCEDURE ProdOrderCompletelyHandled@9(ProdOrder@1000 : Record "Production Order";LocationCode@1001 : Code[10]) : Boolean;
+    VAR
+      ProdOrderLine@1002 : Record "Prod. Order Line";
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,ProdOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrder."No.");
+      ProdOrderLine.SETRANGE("Location Code",LocationCode);
+      ProdOrderLine.SETFILTER("Remaining Quantity",'<>0');
+      exit(ProdOrderLine.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE GetLocation@8(LocationCode@1000 : Code[10]);
+    BEGIN
+      if LocationCode <> Location.Code then begin
+        if LocationCode = '' then
+          Location.GetLocationSetup(LocationCode,Location)
+        else
+          Location.GET(LocationCode);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckWhseRqst@2(ProdHeader@1000 : Record "Production Order") : Boolean;
+    VAR
+      ProdOrderLine2@1001 : Record "Prod. Order Line";
+    BEGIN
+      WhseRqstCreated := true;
+      with ProdHeader do begin
+        ProdOrderLine2.SETCURRENTKEY(Status,"Prod. Order No.");
+        ProdOrderLine2.SETRANGE(Status,Status);
+        ProdOrderLine2.SETRANGE("Prod. Order No.","No.");
+        if ProdOrderLine2.FIND('-') then
+          repeat
+            GetLocation(ProdOrderLine2."Location Code");
+            if not Location."Require Put-away" or Location."Directed Put-away and Pick" then
+              WhseRqstCreated := false;
+            if Location."Require Put-away" then begin
+              if not WhseRqst.GET(
+                   WhseRqst.Type::Inbound,
+                   ProdOrderLine2."Location Code",
+                   DATABASE::"Prod. Order Line",
+                   ProdOrderLine2.Status,
+                   ProdOrderLine2."Prod. Order No.")
+              then
+                WhseRqstCreated := false;
+            end;
+          until (ProdOrderLine2.NEXT = 0) or not WhseRqstCreated;
+      end;
+      exit(WhseRqstCreated);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

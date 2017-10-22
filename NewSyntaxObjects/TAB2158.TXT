@@ -1,0 +1,198 @@
+OBJECT Table 2158 O365 Document Sent History
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "O365 Document Sent History"=rimd;
+    CaptionML=ENU=O365 Document Sent History;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Document Type       ;Option        ;CaptionML=ENU=Document Type;
+                                                   OptionCaptionML=ENU=Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order;
+                                                   OptionString=Quote,Order,Invoice,"Credit Memo","Blanket Order","Return Order" }
+    { 2   ;   ;Document No.        ;Code20        ;CaptionML=ENU=Document No. }
+    { 3   ;   ;Posted              ;Boolean       ;CaptionML=ENU=Posted }
+    { 4   ;   ;Created Date-Time   ;DateTime      ;CaptionML=ENU=Created Date-Time }
+    { 7   ;   ;Source Type         ;Option        ;CaptionML=ENU=Source Type;
+                                                   OptionCaptionML=ENU=" ,Customer,Vendor";
+                                                   OptionString=" ",Customer,Vendor }
+    { 8   ;   ;Source No.          ;Code20        ;TableRelation=IF ("Source Type"=CONST(Customer)) Customer
+                                                                 ELSE IF ("Source Type"=CONST(Vendor)) Vendor;
+                                                   CaptionML=ENU=Source No. }
+    { 11  ;   ;Job Queue Entry ID  ;GUID          ;CaptionML=ENU=Job Queue Entry ID }
+    { 12  ;   ;Job Last Status     ;Option        ;OnValidate=VAR
+                                                                JobQueueLogEntry@1000 : Record "Job Queue Log Entry";
+                                                              BEGIN
+                                                                if "Job Last Status" = "Job Last Status"::"In Process" then
+                                                                  CLEAR("Job Completed")
+                                                                else
+                                                                  if ISNULLGUID("Job Queue Entry ID") then
+                                                                    "Job Completed" := CURRENTDATETIME
+                                                                  else begin
+                                                                    JobQueueLogEntry.SETRANGE(ID,"Job Queue Entry ID");
+                                                                    JobQueueLogEntry.SETCURRENTKEY("Entry No.");
+
+                                                                    if JobQueueLogEntry.FINDLAST then
+                                                                      "Job Completed" := JobQueueLogEntry."End Date/Time"
+                                                                    else
+                                                                      "Job Completed" := CURRENTDATETIME;
+                                                                  end;
+                                                              END;
+
+                                                   CaptionML=ENU=Job Last Status;
+                                                   OptionCaptionML=ENU=,In Process,Finished,Error;
+                                                   OptionString=,"In Process",Finished,Error }
+    { 13  ;   ;Job Completed       ;DateTime      ;CaptionML=ENU=Job Completed }
+    { 14  ;   ;Notified            ;Boolean       ;CaptionML=ENU=Notified }
+    { 15  ;   ;NotificationCleared ;Boolean       ;CaptionML=ENU=NotificationCleared }
+  }
+  KEYS
+  {
+    {    ;"Document Type","Document No.",Posted,"Created Date-Time";
+                                                   Clustered=true }
+    {    ;"Job Queue Entry ID"                     }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+
+    PROCEDURE NewInProgressFromJobQueue@2(VAR JobQueueEntry@1000 : Record "Job Queue Entry") : Boolean;
+    VAR
+      ReportSelections@1005 : Record "Report Selections";
+      ReportUsage@1001 : Integer;
+      DocNo@1002 : Code[20];
+      DocName@1003 : Text[150];
+      CustNo@1004 : Code[20];
+      ParamString@1007 : Text[250];
+    BEGIN
+      ParamString := JobQueueEntry."Parameter String";
+
+      if not ReportSelections.GetJobQueueParameters(ParamString,ReportUsage,DocNo,DocName,CustNo) then
+        exit(false);
+
+      if not (DocName in ['Invoice','Estimate','Quote']) then
+        exit(false);
+
+      SETRANGE("Job Queue Entry ID",JobQueueEntry.ID);
+      if FINDFIRST then begin
+        VALIDATE("Job Last Status","Job Last Status"::"In Process");
+        exit(MODIFY(true));
+      end;
+      SETRANGE("Job Queue Entry ID");
+
+      INIT;
+      "Created Date-Time" := CURRENTDATETIME;
+      Posted := (DocName = 'Invoice');
+      "Document No." := DocNo;
+      case DocName of
+        'Invoice':
+          "Document Type" := "Document Type"::Invoice;
+        'Quote','Estimate':
+          "Document Type" := "Document Type"::Quote;
+      end;
+      "Source No." := CustNo;
+
+      // Logic about residual ParamString is present in table 77
+      case ParamString of
+        'Vendor':
+          "Source Type" := "Source Type"::Vendor;
+        else
+          "Source Type" := "Source Type"::Customer;
+      end;
+
+      "Job Queue Entry ID" := JobQueueEntry.ID;
+      "Job Last Status" := "Job Last Status"::"In Process";
+
+      SetHistoryForDocumentAsNotified("Document Type","Document No.",Posted);
+
+      exit(INSERT(true));
+    END;
+
+    PROCEDURE DeleteSentHistoryForDocument@1(DocType@1000 : 'Quote,Order,Invoice,"Credit Memo","Blanket Order","Return Order"';DocNo@1001 : Code[20];DocPosted@1002 : Boolean);
+    VAR
+      O365DocumentSentHistory@1003 : Record "O365 Document Sent History";
+    BEGIN
+      O365DocumentSentHistory.SETRANGE("Document Type",DocType);
+      O365DocumentSentHistory.SETRANGE("Document No.",DocNo);
+      O365DocumentSentHistory.SETRANGE(Posted,DocPosted);
+
+      O365DocumentSentHistory.DELETEALL;
+    END;
+
+    PROCEDURE ShowJobQueueErrorMessage@3();
+    VAR
+      JobQueueLogEntry@1000 : Record "Job Queue Log Entry";
+    BEGIN
+      JobQueueLogEntry.SETRANGE(ID,"Job Queue Entry ID");
+      if not JobQueueLogEntry.FINDFIRST then
+        exit;
+
+      JobQueueLogEntry.ShowErrorMessage;
+    END;
+
+    PROCEDURE GetJobQueueErrorMessage@4() : Text;
+    VAR
+      JobQueueLogEntry@1000 : Record "Job Queue Log Entry";
+    BEGIN
+      JobQueueLogEntry.SETRANGE(ID,"Job Queue Entry ID");
+      if not JobQueueLogEntry.FINDFIRST then
+        exit;
+
+      exit(JobQueueLogEntry.GetErrorMessage);
+    END;
+
+    PROCEDURE NewFailedFromQuote@5(SalesHeader@1000 : Record "Sales Header") : Boolean;
+    BEGIN
+      SetHistoryForDocumentAsNotified(SalesHeader."Document Type",SalesHeader."No.",false);
+
+      "Document Type" := "Document Type"::Quote;
+      "Document No." := SalesHeader."No.";
+      Posted := false;
+      "Created Date-Time" := CURRENTDATETIME;
+      "Source Type" := "Source Type"::Customer;
+      "Source No." := SalesHeader."Bill-to Customer No.";
+      VALIDATE("Job Last Status","Job Last Status"::Error);
+
+      exit(INSERT(true));
+    END;
+
+    PROCEDURE NewFailedFromPostedinvoice@6(SalesInvoiceHeader@1000 : Record "Sales Invoice Header") : Boolean;
+    BEGIN
+      SetHistoryForDocumentAsNotified("Document Type"::Invoice,SalesInvoiceHeader."No.",true);
+
+      "Document Type" := "Document Type"::Invoice;
+      "Document No." := SalesInvoiceHeader."No.";
+      Posted := true;
+      "Created Date-Time" := CURRENTDATETIME;
+      "Source Type" := "Source Type"::Customer;
+      "Source No." := SalesInvoiceHeader."Bill-to Customer No.";
+      VALIDATE("Job Last Status","Job Last Status"::Error);
+
+      exit(INSERT(true));
+    END;
+
+    LOCAL PROCEDURE SetHistoryForDocumentAsNotified@7(DocumentType@1000 : Integer;DocumentNo@1001 : Code[20];IsPosted@1002 : Boolean);
+    VAR
+      O365DocumentSentHistory@1003 : Record "O365 Document Sent History";
+    BEGIN
+      O365DocumentSentHistory.SETRANGE("Document Type",DocumentType);
+      O365DocumentSentHistory.SETRANGE("Document No.",DocumentNo);
+      O365DocumentSentHistory.SETRANGE(Posted,IsPosted);
+
+      O365DocumentSentHistory.MODIFYALL(Notified,true);
+      O365DocumentSentHistory.MODIFYALL(NotificationCleared,true);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

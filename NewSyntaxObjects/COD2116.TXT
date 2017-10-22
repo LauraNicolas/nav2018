@@ -1,0 +1,280 @@
+OBJECT Codeunit 2116 Coupons Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      HttpWebRequestMgt@1000 : Codeunit "Http Web Request Mgt.";
+      GraphIntContact@1001 : Codeunit "Graph Int. - Contact";
+      CustomerHasACouponTxt@1002 : TextConst '@@@="%1 = the name of the customer, ex. Stan";ENU=%1 has a coupon.';
+      CouponExpiredOrInvalidMsg@1003 : TextConst 'ENU=One or more coupons are no longer valid.';
+      CouponsResourceUrlTxt@1004 : TextConst '@@@={Locked};ENU=https://api.connections.ms';
+      TypeHelper@1005 : Codeunit "Type Helper";
+      CouponsContextTxt@1006 : TextConst 'ENU=Coupons webcall';
+      GetCouponsDescriptionTxt@1007 : TextConst '@@@="%1 = the GUID of a contact";ENU=Retrieving coupons for contact ID %1.';
+      RedeemCouponsDescriptionTxt@1009 : TextConst '@@@="%1 = the GUID of a contact, %1 = the guid of a coupon id";ENU=Redeeming coupons for contact ID %1, coupon ID %2.';
+      CouponsErrorTxt@1008 : TextConst '@@@="%1 = a system error message, %2 = a number (ex. 200), %3 = the response received from the server";ENU="Failed with error %1; received status code %2 and response %3."';
+
+    PROCEDURE GetCouponsForGraphContactId@5(GraphContactID@1002 : Text[250]);
+    VAR
+      DummyO365CouponClaim@1006 : Record "O365 Coupon Claim";
+      TempJSONBuffer@1003 : TEMPORARY Record "JSON Buffer";
+      TempCouponsJSONBuffer@1004 : TEMPORARY Record "JSON Buffer";
+      ActivityLog@1005 : Record "Activity Log";
+      Response@1001 : Text;
+      OriginalGraphContactID@1007 : Text[250];
+      StatusCode@1000 : Integer;
+    BEGIN
+      if GraphContactID = '' then
+        exit;
+
+      OriginalGraphContactID := GraphContactID;
+      if not Initialize(STRSUBSTNO('api/v1/contacts/%1/claims',TypeHelper.UrlEncode(GraphContactID)),'GET') then
+        exit;
+
+      CLEARLASTERROR;
+      if (not ExecuteWebServiceRequest(Response,StatusCode)) or (StatusCode <> 200) then begin
+        ActivityLog.LogActivity(DummyO365CouponClaim,ActivityLog.Status::Failed,CouponsContextTxt,
+          STRSUBSTNO(GetCouponsDescriptionTxt,OriginalGraphContactID),
+          STRSUBSTNO(CouponsErrorTxt,GETLASTERRORTEXT,StatusCode,Response));
+        COMMIT; // Make sure we log this success no matter what fails afterwards
+        exit;
+      end;
+      ActivityLog.LogActivity(DummyO365CouponClaim,ActivityLog.Status::Success,CouponsContextTxt,
+        STRSUBSTNO(GetCouponsDescriptionTxt,OriginalGraphContactID),'');
+      COMMIT; // Make sure we log this success no matter what fails afterwards
+      TempJSONBuffer.ReadFromText(Response);
+
+      if TempJSONBuffer.FindArray(TempCouponsJSONBuffer,'result') then
+        repeat
+          CreateOrUpdateCouponClaimFromJSONBuffer(TempCouponsJSONBuffer,OriginalGraphContactID);
+        until TempCouponsJSONBuffer.NEXT = 0;
+    END;
+
+    PROCEDURE RedeemClaim@1(CustomerNo@1005 : Code[20];ClaimID@1000 : Text[250]) : Boolean;
+    VAR
+      ActivityLog@1002 : Record "Activity Log";
+      DummyO365CouponClaim@1003 : Record "O365 Coupon Claim";
+      Response@1001 : Text;
+      GraphContactID@1006 : Text[250];
+      StatusCode@1004 : Integer;
+    BEGIN
+      if not GraphIntContact.FindGraphContactIdFromCustomerNo(GraphContactID,CustomerNo) then
+        exit;
+
+      if (GraphContactID = '') or (ClaimID = '') then
+        exit;
+
+      if not Initialize(
+           STRSUBSTNO('api/v1/contacts/%1/claims/%2/redeem',TypeHelper.UrlEncode(GraphContactID),TypeHelper.UrlEncode(ClaimID)),'POST')
+      then
+        exit;
+      HttpWebRequestMgt.AddBodyAsText('"": ""'); // Add empty content
+
+      CLEARLASTERROR;
+      if (not ExecuteWebServiceRequest(Response,StatusCode)) or (StatusCode <> 200) then begin
+        ActivityLog.LogActivity(DummyO365CouponClaim,ActivityLog.Status::Failed,CouponsContextTxt,
+          STRSUBSTNO(RedeemCouponsDescriptionTxt,GraphContactID,ClaimID),
+          STRSUBSTNO(CouponsErrorTxt,GETLASTERRORTEXT,StatusCode,Response));
+        COMMIT; // Make sure we log this success no matter what fails afterwards
+        exit;
+      end;
+      ActivityLog.LogActivity(DummyO365CouponClaim,ActivityLog.Status::Success,CouponsContextTxt,
+        STRSUBSTNO(RedeemCouponsDescriptionTxt,GraphContactID,ClaimID),'');
+      COMMIT; // Make sure we log this success no matter what fails afterwards
+
+      exit(true);
+    END;
+
+    PROCEDURE ShowNotificationIfAnyNotApplied@26(SalesHeader@1000 : Record "Sales Header";GraphContactID@1001 : Text[250];CustomerName@1002 : Text) : Boolean;
+    VAR
+      O365CouponClaim@1003 : Record "O365 Coupon Claim";
+      CouponsNotification@1004 : Notification;
+      DocumentTypeNumber@1005 : Integer;
+    BEGIN
+      // Show notification if there are coupons which have not been applied to this invoice
+      O365CouponClaim.SETRANGE("Graph Contact ID",GraphContactID);
+      O365CouponClaim.SETRANGE("Document Type Filter",SalesHeader."Document Type");
+      O365CouponClaim.SETRANGE("Document No. Filter",SalesHeader."No.");
+      O365CouponClaim.SETRANGE("Is applied",false);
+      O365CouponClaim.SETFILTER(Expiration,'>=%1',WORKDATE);
+      if O365CouponClaim.ISEMPTY then
+        exit;
+
+      CouponsNotification.SCOPE := NOTIFICATIONSCOPE::LocalScope;
+      CouponsNotification.MESSAGE := STRSUBSTNO(CustomerHasACouponTxt,CustomerName);
+      CouponsNotification.ADDACTION('View',CODEUNIT::"Display Coupons",'ShowCoupons');
+      DocumentTypeNumber := SalesHeader."Document Type";
+      CouponsNotification.SETDATA('DocumentType',FORMAT(DocumentTypeNumber));
+      CouponsNotification.SETDATA('DocumentNo',SalesHeader."No.");
+      CouponsNotification.SEND;
+      exit(true);
+    END;
+
+    PROCEDURE WarnIfExpiredOrClaimedCoupons@3(DocumentType@1001 : Option;DocumentNo@1000 : Code[20]) : Boolean;
+    VAR
+      O365CouponClaim@1004 : Record "O365 Coupon Claim";
+    BEGIN
+      O365CouponClaim.SETRANGE("Document Type Filter",DocumentType);
+      O365CouponClaim.SETRANGE("Document No. Filter",DocumentNo);
+      O365CouponClaim.SETRANGE("Is applied",true);
+      O365CouponClaim.SETFILTER(Expiration,'<%1',WORKDATE);
+      if not O365CouponClaim.ISEMPTY then begin
+        SendWarnExpiredMessage(DocumentType,DocumentNo);
+        exit(true);
+      end;
+
+      O365CouponClaim.SETRANGE(Expiration);
+      O365CouponClaim.SETRANGE("Is Valid",false);
+      if not O365CouponClaim.ISEMPTY then begin
+        SendWarnExpiredMessage(DocumentType,DocumentNo);
+        exit(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE SendWarnExpiredMessage@8(DocumentType@1001 : Integer;DocumentNo@1000 : Code[20]);
+    VAR
+      CouponExpiredNotification@1002 : Notification;
+    BEGIN
+      CouponExpiredNotification.SCOPE := NOTIFICATIONSCOPE::LocalScope;
+      CouponExpiredNotification.MESSAGE := CouponExpiredOrInvalidMsg;
+      CouponExpiredNotification.ADDACTION('View',CODEUNIT::"Display Coupons",'ShowCoupons');
+      CouponExpiredNotification.SETDATA('DocumentType',FORMAT(DocumentType));
+      CouponExpiredNotification.SETDATA('DocumentNo',DocumentNo);
+      CouponExpiredNotification.SEND;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE Initialize@12(URL@1002 : Text;Method@1001 : Text[6]);
+    VAR
+      O365SalesInitialSetup@1003 : Record "O365 Sales Initial Setup";
+      AzureADMgt@1000 : Codeunit "Azure AD Mgt.";
+      AccessToken@1007 : Text;
+    BEGIN
+      if not O365SalesInitialSetup.GET then
+        ERROR('');
+      AccessToken := AzureADMgt.GetAccessToken(CouponsResourceUrlTxt,'Connections',false);
+      if AccessToken = '' then
+        ERROR('');
+
+      CLEAR(HttpWebRequestMgt);
+      HttpWebRequestMgt.Initialize(STRSUBSTNO('https://%1/%2',O365SalesInitialSetup."Engage Endpoint",URL));
+      HttpWebRequestMgt.SetMethod(Method);
+      HttpWebRequestMgt.SetContentType('application/json');
+      HttpWebRequestMgt.SetReturnType('application/json');
+      HttpWebRequestMgt.AddHeader('Authorization',STRSUBSTNO('Bearer %1',AccessToken));
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE ExecuteWebServiceRequest@14(VAR Response@1002 : Text;VAR StatusCode@1005 : Integer);
+    VAR
+      ResponseTempBlob@1000 : Record TempBlob;
+      ResponseInStream@1001 : InStream;
+      HttpStatusCode@1004 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode";
+      ResponseHeaders@1003 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Specialized.NameValueCollection";
+    BEGIN
+      CLEAR(ResponseTempBlob);
+      ResponseTempBlob.INIT;
+      ResponseTempBlob.Blob.CREATEINSTREAM(ResponseInStream);
+
+      if not GUIALLOWED then
+        HttpWebRequestMgt.DisableUI;
+
+      if not HttpWebRequestMgt.GetResponse(ResponseInStream,HttpStatusCode,ResponseHeaders) then
+        ERROR(GETLASTERRORTEXT);
+      ResponseInStream.READTEXT(Response);
+      StatusCode := HttpStatusCode;
+    END;
+
+    LOCAL PROCEDURE CreateOrUpdateCouponClaimFromJSONBuffer@7(VAR TempCouponsJSONBuffer@1001 : TEMPORARY Record "JSON Buffer";GraphContactID@1004 : Text[250]);
+    VAR
+      O365CouponClaim@1000 : Record "O365 Coupon Claim";
+      StatusValue@1002 : Text;
+      OfferValue@1005 : Text;
+      TermsValue@1006 : Text;
+      UsageValue@1007 : Text;
+      ClaimAlreadyExists@1003 : Boolean;
+      isDiscountPercentage@1008 : Boolean;
+    BEGIN
+      if not TempCouponsJSONBuffer.GetPropertyValue(O365CouponClaim."Claim ID",'id') then
+        exit;
+      ClaimAlreadyExists := O365CouponClaim.GET(O365CouponClaim."Claim ID",GraphContactID);
+      O365CouponClaim.VALIDATE("Graph Contact ID",GraphContactID);
+      TempCouponsJSONBuffer.GetPropertyValue(O365CouponClaim.Code,'code');
+      TempCouponsJSONBuffer.GetPropertyValue(StatusValue,'status');
+      O365CouponClaim."Is Valid" := CheckIfStatusIsValid(StatusValue);
+
+      TempCouponsJSONBuffer.GetPropertyValue(OfferValue,'offer');
+      O365CouponClaim.SetOffer(OfferValue);
+      TempCouponsJSONBuffer.GetPropertyValue(TermsValue,'terms');
+      O365CouponClaim.SetTerms(TermsValue);
+      if not (TempCouponsJSONBuffer.GetPropertyValue(UsageValue,'usage') and EVALUATE(O365CouponClaim.Usage,UsageValue)) then
+        O365CouponClaim.Usage := O365CouponClaim.Usage::oneTime; // If we cannot determine the usage, assume onetime
+
+      if not TempCouponsJSONBuffer.GetDatePropertyValue(O365CouponClaim.Expiration,'expiry') then
+        O365CouponClaim.Expiration := DMY2DATE(1,1,2100); // Default expiration to year 2100 if no expiration
+      TempCouponsJSONBuffer.GetDecimalPropertyValue(O365CouponClaim."Discount Value",'numericValue');
+      TempCouponsJSONBuffer.GetBooleanPropertyValue(isDiscountPercentage,'isDiscountPercentage');
+      if O365CouponClaim."Discount Value" = 0 then
+        O365CouponClaim.VALIDATE("Discount Type",O365CouponClaim."Discount Type"::Custom)
+      else begin
+        if isDiscountPercentage then
+          O365CouponClaim.VALIDATE("Discount Type",O365CouponClaim."Discount Type"::"%")
+        else
+          O365CouponClaim.VALIDATE("Discount Type",O365CouponClaim."Discount Type"::Amount);
+      end;
+
+      if ClaimAlreadyExists then
+        O365CouponClaim.MODIFY
+      else
+        O365CouponClaim.INSERT;
+    END;
+
+    LOCAL PROCEDURE CheckIfStatusIsValid@4(Status@1000 : Text) : Boolean;
+    VAR
+      StatusOption@1001 : 'invalid,valid,expired,claimed,claimedAndValid';
+      NumberOfStatuses@1002 : Integer;
+      StatusNumber@1003 : Integer;
+    BEGIN
+      NumberOfStatuses := STRLEN(Status) - STRLEN(DELCHR(Status,'=',',')) + 1;
+      for StatusNumber := 1 to NumberOfStatuses do
+        if EVALUATE(StatusOption,SELECTSTR(StatusNumber,Status)) then
+          case StatusOption of
+            StatusOption::valid,
+            StatusOption::claimedAndValid:
+              exit(true);
+            StatusOption::invalid:
+              exit(false);
+          end;
+    END;
+
+    [EventSubscriber(Table,36,OnAfterDeleteEvent)]
+    PROCEDURE OnDeleteSalesHeaderRemoveUnusedCouponEntries@2(VAR Rec@1000 : Record "Sales Header";RunTrigger@1001 : Boolean);
+    VAR
+      O365CouponClaimDocLink@1002 : Record "O365 Coupon Claim Doc. Link";
+    BEGIN
+      if Rec.ISTEMPORARY then
+        exit;
+
+      O365CouponClaimDocLink.SETRANGE("Document Type",Rec."Document Type");
+      O365CouponClaimDocLink.SETRANGE("Document No.",Rec."No.");
+      if not O365CouponClaimDocLink.ISEMPTY then
+        O365CouponClaimDocLink.DELETEALL;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

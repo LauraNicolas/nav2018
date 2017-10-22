@@ -1,0 +1,284 @@
+OBJECT Codeunit 6705 Booking Service Sync.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            LocalBookingSync@1000 : Record "Booking Sync";
+          BEGIN
+            LocalBookingSync.SETRANGE("Sync Services",true);
+            LocalBookingSync.SETRANGE(Enabled,true);
+            if LocalBookingSync.FINDFIRST then
+              O365SyncManagement.SyncBookingServices(LocalBookingSync);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempItem@1013 : TEMPORARY Record Item;
+      TempBookingServiceMapping@1001 : TEMPORARY Record "Booking Service Mapping";
+      ProcessNavServiceItemsMsg@1006 : TextConst 'ENU=Processing service items.';
+      ProcessBookingServicesMsg@1002 : TextConst 'ENU=Processing Booking services from Exchange.';
+      RetrieveBookingServicesMsg@1004 : TextConst 'ENU=Retrieving Booking services from Exchange.';
+      CreateBookingServiceTxt@1009 : TextConst 'ENU=Create Booking service.';
+      CreateNavItemTxt@1010 : TextConst 'ENU=Create service item.';
+      O365SyncManagement@1000 : Codeunit "O365 Sync. Management";
+
+    [Internal]
+    PROCEDURE SyncRecords@1(VAR BookingSync@1000 : Record "Booking Sync");
+    BEGIN
+      O365SyncManagement.ShowProgress(RetrieveBookingServicesMsg);
+      GetBookingServices(BookingSync);
+
+      O365SyncManagement.ShowProgress(ProcessNavServiceItemsMsg);
+      ProcessNavServices(BookingSync);
+
+      O365SyncManagement.ShowProgress(ProcessBookingServicesMsg);
+      ProcessBookingServices(BookingSync);
+
+      O365SyncManagement.CloseProgress;
+
+      BookingSync."Last Service Sync" := CREATEDATETIME(TODAY,TIME);
+      BookingSync.MODIFY(true);
+    END;
+
+    [External]
+    PROCEDURE GetRequestParameters@4(VAR BookingSync@1000 : Record "Booking Sync") : Text;
+    VAR
+      LocalItem@1004 : Record Item;
+      FilterPage@1003 : FilterPageBuilder;
+      FilterText@1001 : Text;
+      ItemTxt@1005 : Text;
+    BEGIN
+      FilterText := BookingSync.GetItemFilter;
+
+      ItemTxt := LocalItem.TABLECAPTION;
+      FilterPage.PAGECAPTION := ItemTxt;
+      FilterPage.ADDTABLE(ItemTxt,DATABASE::Item);
+
+      if FilterText <> '' then
+        FilterPage.SETVIEW(ItemTxt,FilterText);
+
+      FilterPage.ADDFIELD(ItemTxt,LocalItem."Base Unit of Measure");
+      FilterPage.ADDFIELD(ItemTxt,LocalItem."Gen. Prod. Posting Group");
+      FilterPage.ADDFIELD(ItemTxt,LocalItem."Tax Group Code");
+      FilterPage.ADDFIELD(ItemTxt,LocalItem."Inventory Posting Group");
+
+      if FilterPage.RUNMODAL then
+        FilterText := FilterPage.GETVIEW(ItemTxt);
+
+      if FilterText <> '' then begin
+        BookingSync.SaveItemFilter(FilterText);
+        BookingSync.MODIFY(true);
+      end;
+
+      exit(FilterText);
+    END;
+
+    LOCAL PROCEDURE GetBookingServices@6(BookingSync@1002 : Record "Booking Sync");
+    VAR
+      BookingService@1001 : Record "Booking Service";
+      Counter@1000 : BigInteger;
+    BEGIN
+      TempItem.RESET;
+      TempItem.DELETEALL;
+      TempBookingServiceMapping.RESET;
+      TempBookingServiceMapping.DELETEALL;
+
+      if BookingService.FINDSET then
+        repeat
+          Counter += 1;
+          CLEAR(TempItem);
+          TempItem.INIT;
+          TempItem."No." := FORMAT(Counter);
+
+          if not TransferBookingServiceToNavServiceNoValidate(BookingService,TempItem) then
+            O365SyncManagement.LogActivityFailed(BookingSync.RECORDID,BookingSync."User ID",
+              CreateNavItemTxt,BookingService."Display Name")
+          else begin
+            TempItem.INSERT;
+            TempBookingServiceMapping.Map(TempItem."No.",BookingService."Service ID",BookingSync."Booking Mailbox Address");
+          end;
+        until BookingService.NEXT = 0;
+      CLEAR(BookingService);
+    END;
+
+    LOCAL PROCEDURE ProcessNavServices@10(VAR BookingSync@1000 : Record "Booking Sync");
+    VAR
+      Item@1001 : Record Item;
+    BEGIN
+      BuildNavItemFilter(Item,BookingSync);
+      Item.SetLastDateTimeFilter(BookingSync."Last Service Sync");
+      ProcessNavServiceRecordSet(Item,BookingSync);
+    END;
+
+    LOCAL PROCEDURE ProcessBookingServices@22(VAR BookingSync@1002 : Record "Booking Sync");
+    BEGIN
+      TempItem.RESET;
+      TempItem.SetLastDateTimeFilter(BookingSync."Last Service Sync");
+      ProcessBookingServiceRecordSet(TempItem,BookingSync);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TransferBookingServiceToNavServiceNoValidate@17(VAR BookingService@1000 : Record "Booking Service";VAR NavServiceItem@1001 : Record Item);
+    VAR
+      DateFilterCalc@1003 : Codeunit "DateFilter-Calc";
+      ExchContDateTimeUtc@1002 : DateTime;
+    BEGIN
+      NavServiceItem.Type := NavServiceItem.Type::Service;
+      NavServiceItem."Unit Price" := BookingService.Price;
+      NavServiceItem.Description := BookingService."Display Name";
+
+      ExchContDateTimeUtc := DateFilterCalc.ConvertToUtcDateTime(BookingService."Last Modified Time");
+      NavServiceItem."Last Date Modified" := DT2DATE(ExchContDateTimeUtc);
+      NavServiceItem."Last Time Modified" := DT2TIME(ExchContDateTimeUtc);
+    END;
+
+    LOCAL PROCEDURE BuildNavItemFilter@16(VAR Item@1000 : Record Item;VAR BookingSync@1001 : Record "Booking Sync");
+    BEGIN
+      Item.SETVIEW(BookingSync.GetItemFilter);
+      Item.SETRANGE(Type,Item.Type::Service);
+    END;
+
+    LOCAL PROCEDURE ProcessNavServiceRecordSet@24(VAR Item@1000 : Record Item;VAR BookingSync@1002 : Record "Booking Sync");
+    VAR
+      BookingService@1003 : Record "Booking Service";
+      LocalBookingService@1004 : Record "Booking Service";
+      BookingServiceMapping@1005 : Record "Booking Service Mapping";
+    BEGIN
+      if Item.FINDSET then
+        repeat
+          TempItem.RESET;
+
+          if not TransferNavServiceToBookingService(Item,BookingService,BookingSync."Booking Mailbox Address") then
+            O365SyncManagement.LogActivityFailed(BookingSync.RECORDID,BookingSync."User ID",
+              CreateBookingServiceTxt,BookingService."Display Name")
+          else
+            if FindNavServiceInBookings(Item."No.",BookingSync."Booking Mailbox Address") then
+              BookingService.MODIFY(true)
+            else begin
+              CLEAR(LocalBookingService);
+              LocalBookingService.SETRANGE("Display Name",Item.Description);
+              if LocalBookingService.FINDFIRST then
+                O365SyncManagement.LogActivityFailed(BookingSync.RECORDID,BookingSync."User ID",
+                  CreateBookingServiceTxt,BookingService."Display Name")
+              else begin
+                BookingService.INSERT(true);
+                BookingService.GET(BookingService."Display Name");
+                BookingServiceMapping.Map(Item."No.",BookingService."Service ID",BookingSync."Booking Mailbox Address");
+              end;
+            end;
+        until Item.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ProcessBookingServiceRecordSet@21(VAR LocalItem@1000 : Record Item;VAR BookingSync@1003 : Record "Booking Sync");
+    VAR
+      ConfigTemplateHeader@1006 : Record "Config. Template Header";
+      BookingServiceMapping@1002 : Record "Booking Service Mapping";
+      Item@1008 : Record Item;
+      ConfigTemplateManagement@1005 : Codeunit "Config. Template Management";
+      ItemRecRef@1004 : RecordRef;
+      Found@1001 : Boolean;
+    BEGIN
+      if LocalItem.FINDSET then
+        repeat
+          CLEAR(Item);
+          Found := FindBookingServiceInNav(LocalItem,Item);
+
+          if not TransferBookingServiceToNavService(LocalItem,Item,TempBookingServiceMapping."Service ID",BookingSync) then
+            O365SyncManagement.LogActivityFailed(BookingSync.RECORDID,BookingSync."User ID",CreateNavItemTxt,LocalItem.Description)
+          else
+            if Found then
+              Item.MODIFY(true)
+            else begin
+              if BookingSync."Item Template Code" <> '' then begin
+                ItemRecRef.GETTABLE(Item);
+                ConfigTemplateHeader.GET(BookingSync."Item Template Code");
+                ConfigTemplateManagement.UpdateRecord(ConfigTemplateHeader,ItemRecRef);
+                ItemRecRef.SETTABLE(Item);
+              end else
+                Item.INSERT(true);
+              BookingServiceMapping.Map(Item."No.",TempBookingServiceMapping."Service ID",BookingSync."Booking Mailbox Address");
+            end;
+        until (LocalItem.NEXT = 0)
+    END;
+
+    LOCAL PROCEDURE FindNavServiceInBookings@2(ItemNo@1000 : Code[20];BookingMailbox@1001 : Text[80]) Found : Boolean;
+    VAR
+      BookingServiceMapping@1002 : Record "Booking Service Mapping";
+    BEGIN
+      BookingServiceMapping.SETRANGE("Item No.",ItemNo);
+      BookingServiceMapping.SETRANGE("Booking Mailbox",BookingMailbox);
+      if BookingServiceMapping.FINDFIRST then
+        if TempBookingServiceMapping.GET(BookingServiceMapping."Service ID") then begin
+          TempItem.GET(TempBookingServiceMapping."Item No.");
+          TempItem.DELETE;
+          Found := true;
+        end;
+    END;
+
+    LOCAL PROCEDURE FindBookingServiceInNav@3(LocalItem@1001 : Record Item;VAR Item@1004 : Record Item) Found : Boolean;
+    VAR
+      BookingServiceMapping@1002 : Record "Booking Service Mapping";
+    BEGIN
+      TempBookingServiceMapping.SETRANGE("Item No.",LocalItem."No.");
+      if TempBookingServiceMapping.FINDFIRST then
+        if BookingServiceMapping.GET(TempBookingServiceMapping."Service ID") then
+          Found := Item.GET(BookingServiceMapping."Item No.");
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TransferNavServiceToBookingService@20(VAR NavItem@1000 : Record Item;VAR BookingService@1001 : Record "Booking Service";BookingMailbox@1002 : Text[80]);
+    VAR
+      BookingServiceMapping@1003 : Record "Booking Service Mapping";
+    BEGIN
+      CLEAR(BookingService);
+      BookingService.INIT;
+      BookingService.VALIDATE("Display Name",NavItem.Description);
+      BookingService.VALIDATE(Price,NavItem."Unit Price");
+      BookingServiceMapping.SETRANGE("Item No.",NavItem."No.");
+      BookingServiceMapping.SETRANGE("Booking Mailbox",BookingMailbox);
+      if BookingServiceMapping.FINDFIRST then
+        BookingService.VALIDATE("Service ID",BookingServiceMapping."Service ID");
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TransferBookingServiceToNavService@13(VAR BookingServiceItem@1000 : Record Item;VAR NavServiceItem@1001 : Record Item;ServiceId@1004 : Text[50];BookingSync@1003 : Record "Booking Sync");
+    VAR
+      LocalItem@1002 : Record Item;
+    BEGIN
+      NavServiceItem."Unit Price" := BookingServiceItem."Unit Price";
+      NavServiceItem."Base Unit of Measure" := BookingServiceItem."Base Unit of Measure";
+      NavServiceItem.Description := BookingServiceItem.Description;
+      NavServiceItem.Type := NavServiceItem.Type::Service;
+      NavServiceItem.VALIDATE("Last Date Modified",BookingServiceItem."Last Date Modified");
+      NavServiceItem.VALIDATE("Last Time Modified",BookingServiceItem."Last Time Modified");
+
+      // NAV is the master and should overwrite O365 properties if it has also been updated since the last sync.
+      CLEAR(LocalItem);
+      if OverrideUpdate(LocalItem,BookingSync,ServiceId) then
+        NavServiceItem.TRANSFERFIELDS(LocalItem);
+    END;
+
+    LOCAL PROCEDURE OverrideUpdate@8(VAR Item@1001 : Record Item;BookingSync@1002 : Record "Booking Sync";BookingServiceId@1000 : Text[50]) : Boolean;
+    VAR
+      BookingServiceMapping@1004 : Record "Booking Service Mapping";
+    BEGIN
+      if BookingServiceMapping.GET(BookingServiceId) then begin
+        Item.SETRANGE("No.",BookingServiceMapping."Item No.");
+        Item.SetLastDateTimeFilter(BookingSync."Last Service Sync");
+        exit(Item.FINDFIRST);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

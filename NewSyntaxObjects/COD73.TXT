@@ -1,0 +1,164 @@
+OBJECT Codeunit 73 Purch.-Explode BOM
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Purchase Line";
+    OnRun=BEGIN
+            TESTFIELD(Type,Type::Item);
+            TESTFIELD("Quantity Received",0);
+            TESTFIELD("Return Qty. Shipped",0);
+            TESTFIELD("Reserved Qty. (Base)",0);
+            if "Sales Order No." <> '' then
+              ERROR(
+                Text000,
+                "Sales Order No.");
+
+            PurchHeader.GET("Document Type","Document No.");
+            PurchHeader.TESTFIELD(Status,PurchHeader.Status::Open);
+            FromBOMComp.SETRANGE("Parent Item No.","No.");
+            NoOfBOMComp := FromBOMComp.COUNT;
+            if NoOfBOMComp = 0 then
+              ERROR(
+                Text001,
+                "No.");
+
+            Selection := STRMENU(Text005,2);
+            if Selection = 0 then
+              exit;
+
+            ToPurchLine := Rec;
+            ToPurchLine.INIT;
+            ToPurchLine.Description := Description;
+            ToPurchLine."Description 2" := "Description 2";
+            ToPurchLine.MODIFY;
+
+            if TransferExtendedText.PurchCheckIfAnyExtText(ToPurchLine,false) then
+              TransferExtendedText.InsertPurchExtText(ToPurchLine);
+
+            ExplodeBOMCompLines(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=The BOM cannot be exploded on the purchase lines because it is associated with sales order %1.';
+      Text001@1001 : TextConst 'ENU=Item %1 is not a BOM.';
+      Text003@1002 : TextConst 'ENU=There is not enough space to explode the BOM.';
+      Text004@1003 : TextConst 'ENU=You cannot purchase resources. Resource %1 was not transferred.';
+      Text005@1004 : TextConst 'ENU=&Copy dimensions from BOM,&Retrieve dimensions from components';
+      ToPurchLine@1005 : Record "Purchase Line";
+      FromBOMComp@1006 : Record "BOM Component";
+      PurchHeader@1007 : Record "Purchase Header";
+      ItemTranslation@1008 : Record "Item Translation";
+      Item@1009 : Record Item;
+      UOMMgt@1010 : Codeunit "Unit of Measure Management";
+      TransferExtendedText@1015 : Codeunit "Transfer Extended Text";
+      LineSpacing@1011 : Integer;
+      NextLineNo@1012 : Integer;
+      NoOfBOMComp@1013 : Integer;
+      Selection@1014 : Integer;
+
+    LOCAL PROCEDURE ExplodeBOMCompLines@1(PurchLine@1000 : Record "Purchase Line");
+    VAR
+      PreviousPurchLine@1001 : Record "Purchase Line";
+      InsertLinesBetween@1002 : Boolean;
+    BEGIN
+      with PurchLine do begin
+        ToPurchLine.RESET;
+        ToPurchLine.SETRANGE("Document Type","Document Type");
+        ToPurchLine.SETRANGE("Document No.","Document No.");
+        ToPurchLine := PurchLine;
+        NextLineNo := "Line No.";
+        InsertLinesBetween := false;
+        if ToPurchLine.FIND('>') then
+          if ToPurchLine."Attached to Line No." = "Line No." then begin
+            ToPurchLine.SETRANGE("Attached to Line No.","Line No.");
+            ToPurchLine.FINDLAST;
+            ToPurchLine.SETRANGE("Attached to Line No.");
+            NextLineNo := ToPurchLine."Line No.";
+            InsertLinesBetween := ToPurchLine.FIND('>');
+          end else
+            InsertLinesBetween := true;
+        if InsertLinesBetween then
+          LineSpacing := (ToPurchLine."Line No." - NextLineNo) div (1 + NoOfBOMComp)
+        else
+          LineSpacing := 10000;
+        if LineSpacing = 0 then
+          ERROR(Text003);
+
+        FromBOMComp.FIND('-');
+        repeat
+          ToPurchLine.INIT;
+          NextLineNo := NextLineNo + LineSpacing;
+          ToPurchLine."Line No." := NextLineNo;
+          case FromBOMComp.Type of
+            FromBOMComp.Type::" ":
+              ToPurchLine.Type := ToPurchLine.Type::" ";
+            FromBOMComp.Type::Item:
+              begin
+                Item.GET(FromBOMComp."No.");
+                ToPurchLine.Type := ToPurchLine.Type::Item;
+                ToPurchLine.VALIDATE("No.",FromBOMComp."No.");
+                ToPurchLine.VALIDATE("Variant Code",FromBOMComp."Variant Code");
+                ToPurchLine.VALIDATE("Unit of Measure Code",FromBOMComp."Unit of Measure Code");
+                ToPurchLine."Qty. per Unit of Measure" := UOMMgt.GetQtyPerUnitOfMeasure(Item,ToPurchLine."Unit of Measure Code");
+                ToPurchLine.VALIDATE(
+                  Quantity,
+                  ROUND(
+                    "Quantity (Base)" * FromBOMComp."Quantity per" *
+                    UOMMgt.GetQtyPerUnitOfMeasure(Item,ToPurchLine."Unit of Measure Code") /
+                    ToPurchLine."Qty. per Unit of Measure",
+                    0.00001));
+              end;
+            FromBOMComp.Type::Resource:
+              ToPurchLine.Type := 3; // Resource
+          end;
+
+          if (FromBOMComp.Type <> FromBOMComp.Type::" ") and
+             (PurchHeader."Expected Receipt Date" <> "Expected Receipt Date")
+          then
+            ToPurchLine.VALIDATE("Expected Receipt Date","Expected Receipt Date");
+
+          if PurchHeader."Language Code" = '' then
+            ToPurchLine.Description := FromBOMComp.Description
+          else
+            if not ItemTranslation.GET(FromBOMComp."No.",FromBOMComp."Variant Code",PurchHeader."Language Code") then
+              ToPurchLine.Description := FromBOMComp.Description;
+          if ToPurchLine.Type = 3 then // Resource
+            MESSAGE(
+              Text004,
+              FromBOMComp."No.")
+          else
+            ToPurchLine.INSERT;
+
+          if Selection = 1 then begin
+            ToPurchLine."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+            ToPurchLine."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+            ToPurchLine."Dimension Set ID" := "Dimension Set ID";
+            ToPurchLine.MODIFY;
+          end;
+
+          if PreviousPurchLine."Document No." <> '' then
+            if TransferExtendedText.PurchCheckIfAnyExtText(PreviousPurchLine,false) then
+              TransferExtendedText.InsertPurchExtText(PreviousPurchLine);
+
+          PreviousPurchLine := ToPurchLine;
+        until FromBOMComp.NEXT = 0;
+
+        if TransferExtendedText.PurchCheckIfAnyExtText(ToPurchLine,false) then
+          TransferExtendedText.InsertPurchExtText(ToPurchLine);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

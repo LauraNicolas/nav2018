@@ -1,0 +1,498 @@
+OBJECT Report 1131 Cost Allocation
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Cost Allocation;
+    ProcessingOnly=true;
+    OnInitReport=BEGIN
+                   InitializeRequest(1,99,WORKDATE,'','');
+                 END;
+
+  }
+  DATASET
+  {
+    { 7485;    ;DataItem;CostAllocationSource;
+               DataItemTable="Cost Allocation Source";
+               DataItemTableView=SORTING(Level,"Valid From","Valid To","Cost Type Range") ORDER(Ascending);
+               OnPreDataItem=BEGIN
+                               SETRANGE(Level,FromLevel,ToLevel);
+                               SETRANGE(Variant,AllocVariant);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  if not AllocSourceErrorFound then
+                                    AllocSourceErrorFound := ("Cost Center Code" = '') and ("Cost Object Code" = '')
+                                  else
+                                    CurrReport.SKIP;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                if AllocSourceErrorFound or AllocTargetErrorFound then begin
+                                  ShowAllocations(not AllocSourceErrorFound);
+                                  CurrReport.QUIT;
+                                end;
+                              END;
+                               }
+
+    { 4986;1   ;DataItem;CostAllocationTarget;
+               DataItemTable="Cost Allocation Target";
+               DataItemTableView=SORTING(ID,"Line No.") ORDER(Ascending);
+               OnAfterGetRecord=BEGIN
+                                  if not AllocTargetErrorFound then
+                                    AllocTargetErrorFound := ("Target Cost Center" = '') and ("Target Cost Object" = '')
+                                  else
+                                    CurrReport.BREAK;
+                                END;
+
+               DataItemLink=ID=FIELD(ID) }
+
+    { 1662;    ;DataItem;Cost Allocation Source;
+               DataItemTable="Cost Allocation Source";
+               DataItemTableView=SORTING(Level,"Valid From","Valid To","Cost Type Range");
+               OnPreDataItem=BEGIN
+                               "Cost Entry".LOCKTABLE;
+                               CostRegister.LOCKTABLE;
+                               CostBudgetRegister.LOCKTABLE;
+                               LOCKTABLE;
+                               "Cost Allocation Target".LOCKTABLE;
+                               "Cost Budget Entry".LOCKTABLE;
+
+                               CostAccSetup.GET;
+                               SourceCodeSetup.GET;
+                               SourceCodeSetup.TESTFIELD("Cost Allocation");
+
+                               if AllocDate = 0D then
+                                 ERROR(Text000);
+
+                               if FromLevel > ToLevel then
+                                 ERROR(Text001);
+
+                               if CostBudgetName.Name <> '' then begin
+                                 AllocateBudget := true;
+                                 MsgText := Text002 + ' ' + CostBudgetName.Name;
+                               end else
+                                 MsgText := Text003;
+
+                               if CurrReport.USEREQUESTPAGE then
+                                 if not CONFIRM(Text004,true,MsgText,FromLevel,ToLevel,AllocDate,AllocVariant) then
+                                   ERROR('');
+
+                               SETRANGE(Level,FromLevel,ToLevel);
+                               SETRANGE(Variant,AllocVariant);
+                               SETRANGE("Valid From",0D,AllocDate);
+                               SETFILTER("Valid To",'%1|>=%2',0D,AllocDate);
+                               SETRANGE(Blocked,false);
+
+                               if AllocateBudget then
+                                 SETFILTER("Allocation Source Type",'%1|%2',"Allocation Source Type"::Both,"Allocation Source Type"::Budget)
+                               else
+                                 SETRANGE("Allocation Source Type","Allocation Source Type"::Both,"Allocation Source Type"::Actual);
+
+                               Window.OPEN(Text005)
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  if (LastLevel <> 0) and (Level > LastLevel) then begin
+                                    if EntriesPerLevel > 0 then
+                                      PostCostJournalLines;
+                                    LastCostJourLineNo := 0;
+                                    EntriesPerLevel := 0;
+                                  end;
+
+                                  LastLevel := Level;
+
+                                  SourceTotalAmount := 0;
+                                  Window.UPDATE(1,FORMAT(Level));
+                                  Window.UPDATE(2,FORMAT(ID));
+                                END;
+
+               OnPostDataItem=BEGIN
+                                if TotalEntries = 0 then
+                                  ERROR(Text006);
+
+                                if EntriesPerLevel > 0 then
+                                  PostCostJournalLines;
+
+                                Window.CLOSE;
+                                if CurrReport.USEREQUESTPAGE then
+                                  MESSAGE(Text007,TotalEntries);
+                              END;
+                               }
+
+    { 5276;1   ;DataItem;Cost Entry          ;
+               DataItemTable="Cost Entry";
+               DataItemTableView=SORTING("Entry No.") ORDER(Ascending);
+               OnPreDataItem=BEGIN
+                               if AllocateBudget then
+                                 CurrReport.BREAK;
+
+                               if "Cost Allocation Source"."Cost Center Code" <> '' then begin
+                                 SETCURRENTKEY("Cost Center Code","Cost Type No.",Allocated);
+                                 SETFILTER("Cost Center Code","Cost Allocation Source"."Cost Center Code");
+                               end else begin
+                                 SETCURRENTKEY("Cost Object Code","Cost Type No.",Allocated);
+                                 SETFILTER("Cost Object Code","Cost Allocation Source"."Cost Object Code");
+                               end;
+                               SETFILTER("Cost Type No.","Cost Allocation Source"."Cost Type Range");
+                               SETRANGE(Allocated,false);
+                               SETRANGE("Posting Date",0D,AllocDate);
+
+                               SourceTotalAmount := 0;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  SourceTotalAmount := SourceTotalAmount + Amount;
+                                  NoOfEntries := NoOfEntries + 1;
+                                  Window.UPDATE(3,FORMAT(NoOfEntries));
+                                END;
+
+               OnPostDataItem=BEGIN
+                                if CostRegister.FINDLAST then;
+                                MODIFYALL("Allocated with Journal No.",CostRegister."No." + 1);
+                                MODIFYALL(Allocated,true);
+                              END;
+                               }
+
+    { 3233;1   ;DataItem;Cost Budget Entry   ;
+               DataItemTable="Cost Budget Entry";
+               DataItemTableView=SORTING("Entry No.") ORDER(Ascending);
+               OnPreDataItem=BEGIN
+                               if not AllocateBudget then
+                                 CurrReport.BREAK;
+
+                               if "Cost Allocation Source"."Cost Center Code" <> '' then begin
+                                 SETCURRENTKEY("Budget Name","Cost Center Code","Cost Type No.",Allocated);
+                                 SETFILTER("Cost Center Code","Cost Allocation Source"."Cost Center Code");
+                               end else begin
+                                 SETCURRENTKEY("Budget Name","Cost Object Code","Cost Type No.",Allocated);
+                                 SETFILTER("Cost Object Code","Cost Allocation Source"."Cost Object Code");
+                               end;
+                               SETRANGE("Budget Name",CostBudgetName.Name);
+                               SETFILTER("Cost Type No.","Cost Allocation Source"."Cost Type Range");
+                               SETRANGE(Allocated,false);
+                               SETRANGE(Date,0D,AllocDate);
+
+                               SourceTotalAmount := 0;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  SourceTotalAmount := SourceTotalAmount + Amount;
+                                  NoOfEntries := NoOfEntries + 1;
+                                  Window.UPDATE(3,FORMAT(NoOfEntries));
+                                END;
+
+               OnPostDataItem=BEGIN
+                                if CostBudgetRegister.FINDLAST then;
+                                MODIFYALL("Allocated with Journal No.",CostBudgetRegister."No." + 1);
+                                MODIFYALL(Allocated,true);
+                              END;
+                               }
+
+    { 9203;1   ;DataItem;Cost Allocation Target;
+               DataItemTable="Cost Allocation Target";
+               DataItemTableView=SORTING(ID,"Line No.");
+               OnPreDataItem=BEGIN
+                               SETRANGE(ID,"Cost Allocation Source".ID);
+                               "Cost Allocation Source".CALCFIELDS("Total Share");
+                               AllocTotalAmount := 0;
+                               ReminderAmount := 0;
+
+                               AllocSourceText := Text008;
+                               if "Cost Allocation Source"."Cost Type Range" <> '' then
+                                 AllocSourceText := AllocSourceText + ' ' + "Cost Allocation Source"."Cost Type Range" + ' (' + Text017 + ')';
+                               if "Cost Allocation Source"."Cost Center Code" <> '' then
+                                 AllocSourceText := AllocSourceText + ' ' + "Cost Allocation Source"."Cost Center Code" + ' (' + Text018 + ')';
+                               if "Cost Allocation Source"."Cost Object Code" <> '' then
+                                 AllocSourceText := AllocSourceText + ' ' + "Cost Allocation Source"."Cost Object Code" + ' (' + Text019 + ')';
+
+                               AllocTargetText := Text009;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  case "Allocation Target Type" of
+                                    "Allocation Target Type"::"All Costs":
+                                      begin
+                                        ReminderAmount += SourceTotalAmount / 100 * Percent;
+                                        AllocAmount := ROUND(ReminderAmount,0.01);
+                                        ReminderAmount -= AllocAmount;
+                                        AllocRatio := STRSUBSTNO(Text010,
+                                            Share,"Cost Allocation Source"."Total Share",SourceTotalAmount);
+                                      end;
+                                    "Allocation Target Type"::"Percent per Share":
+                                      begin
+                                        AllocAmount := ROUND(Share / 100 * "Percent per Share",0.01);
+                                        AllocRatio := STRSUBSTNO(Text011,
+                                            "Percent per Share",Share);
+                                      end;
+                                    "Allocation Target Type"::"Amount per Share":
+                                      begin
+                                        AllocAmount := ROUND(Share * "Amount per Share",0.01);
+                                        AllocRatio := STRSUBSTNO(Text012,
+                                            "Amount per Share",Share);
+                                      end;
+                                  end;
+
+                                  if STRLEN(AllocTargetText) < MAXSTRLEN(TempCostJnlLine.Description) then begin
+                                    if "Target Cost Center" <> '' then
+                                      AllocTargetText := AllocTargetText + "Target Cost Center" + ', '
+                                    else
+                                      AllocTargetText := AllocTargetText + "Target Cost Object" + ', ';
+                                  end;
+
+                                  AllocTotalAmount := AllocTotalAmount + AllocAmount;
+
+                                  WriteJournalLine("Target Cost Type","Target Cost Center","Target Cost Object",AllocAmount,
+                                    AllocSourceText,AllocRatio,"Cost Allocation Source".ID,false);
+                                END;
+
+               OnPostDataItem=BEGIN
+                                if STRLEN(AllocTargetText) > MAXSTRLEN(TempCostJnlLine.Description) then
+                                  AllocTargetText := COPYSTR(AllocTargetText,1,MAXSTRLEN(TempCostJnlLine.Description) - 10) + Text013;
+
+                                AllocRatio := STRSUBSTNO(Text014,"Cost Allocation Source".Level,AllocDate);
+
+                                WriteJournalLine("Cost Allocation Source"."Credit to Cost Type","Cost Allocation Source"."Cost Center Code",
+                                  "Cost Allocation Source"."Cost Object Code",-AllocTotalAmount,
+                                  AllocTargetText,AllocRatio,"Cost Allocation Source".ID,true);
+
+                                CostAccSetup."Last Allocation Doc. No." := INCSTR(CostAccSetup."Last Allocation Doc. No.");
+                                CostAccSetup.MODIFY;
+                              END;
+                               }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=true;
+      OnOpenPage=BEGIN
+                   CostBudgetName.INIT;
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1   ;0   ;Container ;
+                  Name=Container1;
+                  ContainerType=ContentArea }
+
+      { 2   ;1   ;Group     ;
+                  Name=Options;
+                  CaptionML=ENU=Options }
+
+      { 3   ;2   ;Field     ;
+                  Name=From Alloc. Level;
+                  CaptionML=ENU=From Alloc. Level;
+                  ToolTipML=ENU=Specifies a level. If you do not want to perform the allocation of costs to all the levels in the same process, you should fill in the field.;
+                  ApplicationArea=#CostAccounting;
+                  SourceExpr=FromLevel;
+                  MinValue=1;
+                  MaxValue=99 }
+
+      { 4   ;2   ;Field     ;
+                  Name=To Alloc. Level;
+                  CaptionML=ENU=To Alloc. Level;
+                  ToolTipML=ENU=Specifies a level. If you do not want to perform the allocation of costs to all the levels in the same process, you should fill in the field.;
+                  ApplicationArea=#CostAccounting;
+                  SourceExpr=ToLevel;
+                  MinValue=1;
+                  MaxValue=99 }
+
+      { 5   ;2   ;Field     ;
+                  Name=Allocation Date;
+                  CaptionML=ENU=Allocation Date;
+                  ToolTipML=ENU=Specifies the date of the cost allocation.;
+                  ApplicationArea=#CostAccounting;
+                  SourceExpr=AllocDate }
+
+      { 6   ;2   ;Field     ;
+                  Name=Group;
+                  CaptionML=ENU=Group;
+                  ToolTipML=ENU=Specifies the variant code if you have assigned it to an allocation. Leave it blank if you do not use variant.;
+                  ApplicationArea=#CostAccounting;
+                  BlankZero=true;
+                  SourceExpr=AllocVariant }
+
+      { 7   ;2   ;Field     ;
+                  Name=Budget Name;
+                  Lookup=true;
+                  CaptionML=ENU=Budget Name;
+                  ToolTipML=ENU=Specifies the name of the budget.;
+                  ApplicationArea=#CostAccounting;
+                  BlankZero=true;
+                  SourceExpr=CostBudgetName.Name;
+                  TableRelation="Cost Budget Name" }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      CostRegister@1000 : Record "Cost Register";
+      CostBudgetRegister@1050 : Record "Cost Budget Register";
+      TempCostJnlLine@1001 : TEMPORARY Record "Cost Journal Line";
+      CostAccSetup@1002 : Record "Cost Accounting Setup";
+      CostBudgetName@1003 : Record "Cost Budget Name";
+      SourceCodeSetup@1004 : Record "Source Code Setup";
+      Window@1005 : Dialog;
+      FromLevel@1006 : Integer;
+      ToLevel@1007 : Integer;
+      AllocVariant@1008 : Code[10];
+      LastLevel@1009 : Integer;
+      NoOfEntries@1010 : Integer;
+      EntriesPerLevel@1011 : Integer;
+      TotalEntries@1012 : Integer;
+      AllocDate@1013 : Date;
+      SourceTotalAmount@1014 : Decimal;
+      AllocAmount@1015 : Decimal;
+      AllocSourceText@1016 : Text;
+      AllocTargetText@1017 : Text;
+      AllocRatio@1018 : Text;
+      AllocTotalAmount@1019 : Decimal;
+      ReminderAmount@1051 : Decimal;
+      LastCostJourLineNo@1020 : Integer;
+      TotalDebit@1021 : Decimal;
+      TotalCredit@1022 : Decimal;
+      AllocateBudget@1023 : Boolean;
+      MsgText@1024 : Text;
+      AllocSourceErrorFound@1025 : Boolean;
+      AllocTargetErrorFound@1026 : Boolean;
+      Text000@1027 : TextConst 'ENU=Allocation date must be defined.';
+      Text001@1028 : TextConst 'ENU=From Alloc. Level must not be higher than To Alloc. Level.';
+      Text002@1029 : TextConst 'ENU=Budget cost from budget';
+      Text003@1030 : TextConst 'ENU=Actual cost';
+      Text004@1031 : TextConst 'ENU=%1 will be allocated for levels %2 to %3.\Posting date: %4,  group: "%5"\Do you want to start the job?';
+      Text005@1032 : TextConst 'ENU="Cost allocation\Level                      #1####### \Source ID                  #2####### \Sum source entries         #3####### \Write allocation entries   #4####### "';
+      Text006@1033 : TextConst 'ENU=No entries have been created for the selected allocations.';
+      Text007@1034 : TextConst 'ENU=%1 allocation entries have been generated and processed.';
+      Text008@1035 : TextConst 'ENU=Alloc. Source:';
+      Text009@1036 : TextConst 'ENU="Alloc. Target: "';
+      Text010@1037 : TextConst 'ENU=Alloc: %1 of %2 shares. Base LCY %3';
+      Text011@1038 : TextConst 'ENU=Alloc: %1 pct of %2 shares';
+      Text012@1039 : TextConst 'ENU=Alloc: %1 LCY of %2 shares';
+      Text013@1040 : TextConst 'ENU=" ... etc."';
+      Text014@1041 : TextConst 'ENU=Alloc. level %1 of %2';
+      Text015@1042 : TextConst 'ENU=Not all cost types for debit and credit are defined for allocation ID %1.';
+      Text016@1043 : TextConst 'ENU=For allocation ID %1, cost center or cost object must be defined for debit and credit. Cost center: "%2", cost object "%3".';
+      Text017@1044 : TextConst 'ENU=Cost Type';
+      Text018@1045 : TextConst 'ENU=Cost Center';
+      Text019@1046 : TextConst 'ENU=Cost Object';
+      Text020@1047 : TextConst 'ENU=One or more allocation targets do not have a cost center or cost object defined. The allocation cannot continue.';
+      Text021@1048 : TextConst 'ENU=One or more allocation sources do not have a cost center or cost object defined. The allocation cannot continue.';
+      Text022@1049 : TextConst 'ENU=Posting Cost Entries @1@@@@@@@@@@\';
+
+    LOCAL PROCEDURE ShowAllocations@2(CheckTargets@1001 : Boolean);
+    VAR
+      CostAllocations@1003 : Report "Cost Allocations";
+      ConfirmText@1002 : Text[1024];
+      SkipSourcesWithoutTargets@1004 : Boolean;
+    BEGIN
+      if CheckTargets then begin
+        ConfirmText := Text020;
+        CostAllocationTarget.SETFILTER("Target Cost Center",'%1','');
+        CostAllocationTarget.SETFILTER("Target Cost Object",'%1','');
+      end else begin
+        ConfirmText := Text021;
+        CostAllocationSource.SETFILTER("Cost Center Code",'%1','');
+        CostAllocationSource.SETFILTER("Cost Object Code",'%1','');
+        CostAllocationTarget.SETFILTER(ID,'<%1','');
+      end;
+      if CONFIRM(ConfirmText,true) then begin
+        SkipSourcesWithoutTargets := CheckTargets;
+        CostAllocations.InitializeRequest(CostAllocationSource,CostAllocationTarget,SkipSourcesWithoutTargets);
+        CostAllocations.RUN;
+      end;
+    END;
+
+    LOCAL PROCEDURE WriteJournalLine@1(CostTypeCode@1000 : Code[20];CostCenterCode@1001 : Code[20];CostObjectCode@1002 : Code[20];PostAmount@1003 : Decimal;Text@1004 : Text;AllocKey@1005 : Text;AllocID@1006 : Code[10];Allocated2@1007 : Boolean);
+    BEGIN
+      if PostAmount = 0 then
+        exit;
+
+      if CostTypeCode = '' then
+        ERROR(Text015,"Cost Allocation Source".ID);
+
+      if ((CostCenterCode = '') and (CostObjectCode = '')) or ((CostCenterCode <> '') and (CostObjectCode <> '')) then
+        ERROR(Text016,"Cost Allocation Source".ID,CostCenterCode,CostObjectCode);
+
+      with TempCostJnlLine do begin
+        LastCostJourLineNo := LastCostJourLineNo + 10000;
+        "Line No." := LastCostJourLineNo;
+        "Posting Date" := AllocDate;
+        "Cost Type No." := CostTypeCode;
+        "Cost Center Code" := CostCenterCode;
+        "Cost Object Code" := CostObjectCode;
+        "Document No." := INCSTR(CostAccSetup."Last Allocation Doc. No.");
+        Description := COPYSTR(Text,1,MAXSTRLEN(Description));
+        Amount := PostAmount;
+        "System-Created Entry" := true;
+        Allocated := Allocated2;
+        "Allocation Description" := COPYSTR(AllocKey,1,MAXSTRLEN("Allocation Description"));
+        "Allocation ID" := AllocID;
+        "Source Code" := SourceCodeSetup."Cost Allocation";
+        "Budget Name" := CostBudgetName.Name;
+        INSERT;
+
+        if Amount > 0 then
+          TotalDebit := TotalDebit + Amount
+        else
+          TotalCredit := TotalCredit + Amount;
+      end;
+
+      EntriesPerLevel := EntriesPerLevel + 1;
+      TotalEntries := TotalEntries + 1;
+      Window.UPDATE(4,FORMAT(TotalEntries));
+    END;
+
+    LOCAL PROCEDURE PostCostJournalLines@12();
+    VAR
+      CostJnlLine@1000 : Record "Cost Journal Line";
+      CAJnlPostLine@1001 : Codeunit "CA Jnl.-Post Line";
+      Window2@1002 : Dialog;
+      CostJnlLineStep@1004 : Integer;
+      JournalLineCount@1005 : Integer;
+    BEGIN
+      TempCostJnlLine.RESET;
+      Window2.OPEN(
+        Text022);
+      if TempCostJnlLine.COUNT > 0 then
+        JournalLineCount := 10000 * 100000 div TempCostJnlLine.COUNT;
+      if TempCostJnlLine.FINDSET then begin
+        repeat
+          CostJnlLineStep := CostJnlLineStep + JournalLineCount;
+          Window2.UPDATE(1,CostJnlLineStep div 100000);
+          CostJnlLine := TempCostJnlLine;
+          CAJnlPostLine.RunWithCheck(CostJnlLine);
+        until TempCostJnlLine.NEXT = 0;
+        TempCostJnlLine.DELETEALL;
+      end;
+      Window2.CLOSE;
+    END;
+
+    PROCEDURE InitializeRequest@3(NewFromLevel@1000 : Integer;NewToLevel@1001 : Integer;NewAllocDate@1002 : Date;NewAllocVariant@1003 : Code[10];NewCostBudgetName@1004 : Code[10]);
+    BEGIN
+      FromLevel := NewFromLevel;
+      ToLevel := NewToLevel;
+      AllocDate := NewAllocDate;
+      AllocVariant := NewAllocVariant;
+      CostBudgetName.Name := NewCostBudgetName;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

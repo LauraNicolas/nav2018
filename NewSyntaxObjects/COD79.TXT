@@ -1,0 +1,112 @@
+OBJECT Codeunit 79 Sales-Post and Send
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Sales Header";
+    OnRun=BEGIN
+            if not FIND then
+              ERROR(NothingToPostErr);
+
+            SalesHeader.COPY(Rec);
+            Code;
+            Rec := SalesHeader;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SalesHeader@1003 : Record "Sales Header";
+      NotSupportedDocumentTypeErr@1012 : TextConst '@@@="%1=Document Type";ENU=Document type %1 is not supported.';
+      NothingToPostErr@1000 : TextConst 'ENU=There is nothing to post.';
+
+    LOCAL PROCEDURE Code@2();
+    VAR
+      TempDocumentSendingProfile@1004 : TEMPORARY Record "Document Sending Profile";
+      SalesPost@1002 : Codeunit "Sales-Post";
+    BEGIN
+      with SalesHeader do
+        case "Document Type" of
+          "Document Type"::Invoice,
+          "Document Type"::"Credit Memo",
+          "Document Type"::Order:
+            if not ConfirmPostAndSend(SalesHeader,TempDocumentSendingProfile) then
+              exit;
+          else
+            ERROR(STRSUBSTNO(NotSupportedDocumentTypeErr,"Document Type"));
+        end;
+
+      TempDocumentSendingProfile.CheckElectronicSendingEnabled;
+      ValidateElectronicFormats(TempDocumentSendingProfile);
+
+      if SalesHeader."Document Type" = SalesHeader."Document Type"::Order then begin
+        CODEUNIT.RUN(CODEUNIT::"Sales-Post (Yes/No)",SalesHeader);
+        if not (SalesHeader.Ship or SalesHeader.Invoice) then
+          exit;
+      end else
+        CODEUNIT.RUN(CODEUNIT::"Sales-Post",SalesHeader);
+
+      COMMIT;
+
+      SalesPost.SendPostedDocumentRecord(SalesHeader,TempDocumentSendingProfile);
+    END;
+
+    LOCAL PROCEDURE ConfirmPostAndSend@5(SalesHeader@1000 : Record "Sales Header";VAR TempDocumentSendingProfile@1001 : TEMPORARY Record "Document Sending Profile") : Boolean;
+    VAR
+      Customer@1004 : Record Customer;
+      DocumentSendingProfile@1002 : Record "Document Sending Profile";
+      OfficeMgt@1003 : Codeunit "Office Management";
+    BEGIN
+      Customer.GET(SalesHeader."Bill-to Customer No.");
+      if OfficeMgt.IsAvailable then
+        DocumentSendingProfile.GetOfficeAddinDefault(TempDocumentSendingProfile,OfficeMgt.AttachAvailable)
+      else begin
+        if not DocumentSendingProfile.GET(Customer."Document Sending Profile") then
+          DocumentSendingProfile.GetDefault(DocumentSendingProfile);
+
+        COMMIT;
+        TempDocumentSendingProfile.COPY(DocumentSendingProfile);
+        TempDocumentSendingProfile.SetDocumentUsage(SalesHeader);
+        TempDocumentSendingProfile.INSERT;
+        if PAGE.RUNMODAL(PAGE::"Post and Send Confirmation",TempDocumentSendingProfile) <> ACTION::Yes then
+          exit(false);
+      end;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE ValidateElectronicFormats@3(DocumentSendingProfile@1000 : Record "Document Sending Profile");
+    VAR
+      ElectronicDocumentFormat@1001 : Record "Electronic Document Format";
+    BEGIN
+      if (DocumentSendingProfile."E-Mail" <> DocumentSendingProfile."E-Mail"::No) and
+         (DocumentSendingProfile."E-Mail Attachment" <> DocumentSendingProfile."E-Mail Attachment"::PDF)
+      then begin
+        ElectronicDocumentFormat.ValidateElectronicFormat(DocumentSendingProfile."E-Mail Format");
+        ElectronicDocumentFormat.ValidateElectronicSalesDocument(SalesHeader,DocumentSendingProfile."E-Mail Format");
+      end;
+
+      if (DocumentSendingProfile.Disk <> DocumentSendingProfile.Disk::No) and
+         (DocumentSendingProfile.Disk <> DocumentSendingProfile.Disk::PDF)
+      then begin
+        ElectronicDocumentFormat.ValidateElectronicFormat(DocumentSendingProfile."Disk Format");
+        ElectronicDocumentFormat.ValidateElectronicSalesDocument(SalesHeader,DocumentSendingProfile."Disk Format");
+      end;
+
+      if DocumentSendingProfile."Electronic Document" <> DocumentSendingProfile."Electronic Document"::No then begin
+        ElectronicDocumentFormat.ValidateElectronicFormat(DocumentSendingProfile."Electronic Format");
+        ElectronicDocumentFormat.ValidateElectronicSalesDocument(SalesHeader,DocumentSendingProfile."Electronic Format");
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

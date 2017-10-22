@@ -1,0 +1,237 @@
+OBJECT Codeunit 99000771 BOM Matrix Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData Item=r,
+                TableData "Production BOM Header"=r,
+                TableData "Production BOM Version"=r,
+                TableData "Production Matrix BOM Line"=rimd,
+                TableData "Production Matrix  BOM Entry"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Item@1000 : Record Item;
+      ItemAssembly@1001 : Record Item;
+      ProdBOMHeader@1002 : Record "Production BOM Header";
+      ProdBOMVersion@1003 : Record "Production BOM Version";
+      ProdBOMVersion2@1004 : Record "Production BOM Version";
+      ComponentList@1005 : TEMPORARY Record "Production Matrix BOM Line";
+      ComponentEntry@1006 : TEMPORARY Record "Production Matrix  BOM Entry";
+      ComponentEntry2@1007 : Record "Production Matrix  BOM Entry";
+      UOMMgt@1008 : Codeunit "Unit of Measure Management";
+      VersionMgt@1009 : Codeunit VersionManagement;
+      GlobalCalcDate@1010 : Date;
+      MatrixType@1011 : 'Version,Item';
+      MultiLevel@1012 : Boolean;
+
+    [External]
+    PROCEDURE FindRecord@2(Which@1000 : Text[30];VAR ComponentList2@1001 : Record "Production Matrix BOM Line") : Boolean;
+    BEGIN
+      ComponentList := ComponentList2;
+      if not ComponentList.FIND(Which) then
+        exit(false);
+      ComponentList2 := ComponentList;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE NextRecord@3(Steps@1000 : Integer;VAR ComponentList2@1001 : Record "Production Matrix BOM Line") : Integer;
+    VAR
+      CurrentSteps@1002 : Integer;
+    BEGIN
+      ComponentList := ComponentList2;
+      CurrentSteps := ComponentList.NEXT(Steps);
+      if CurrentSteps <> 0 then
+        ComponentList2 := ComponentList;
+      exit(CurrentSteps);
+    END;
+
+    [External]
+    PROCEDURE GetComponentNeed@9(No@1000 : Code[20];VariantCode@1001 : Code[10];ID@1002 : Code[20]) : Decimal;
+    BEGIN
+      ComponentEntry.SETRANGE("Item No.",No);
+      ComponentEntry.SETRANGE("Variant Code",VariantCode);
+      ComponentEntry.SETRANGE(ID,ID);
+      if not ComponentEntry.FINDFIRST then
+        CLEAR(ComponentEntry);
+
+      exit(ComponentEntry.Quantity);
+    END;
+
+    [External]
+    PROCEDURE CompareTwoItems@6(Item1@1000 : Record Item;Item2@1001 : Record Item;CalcDate@1002 : Date;NewMultiLevel@1003 : Boolean;VAR VersionCode1@1004 : Code[20];VAR VersionCode2@1005 : Code[20];VAR UnitOfMeasure1@1006 : Code[10];VAR UnitOfMeasure2@1007 : Code[10]);
+    BEGIN
+      GlobalCalcDate := CalcDate;
+
+      ComponentList.DELETEALL;
+      ComponentEntry.RESET;
+      ComponentEntry.DELETEALL;
+
+      MultiLevel := NewMultiLevel;
+      MatrixType := MatrixType::Item;
+
+      VersionCode1 :=
+        VersionMgt.GetBOMVersion(
+          Item1."Production BOM No.",
+          GlobalCalcDate,false);
+      UnitOfMeasure1 :=
+        VersionMgt.GetBOMUnitOfMeasure(
+          Item1."Production BOM No.",VersionCode1);
+
+      ItemAssembly := Item1;
+      BuildMatrix(
+        Item1."Production BOM No.",
+        VersionCode1,1,
+        UOMMgt.GetQtyPerUnitOfMeasure(
+          Item1,UnitOfMeasure1) /
+        UOMMgt.GetQtyPerUnitOfMeasure(
+          Item1,Item1."Base Unit of Measure"));
+
+      VersionCode2 :=
+        VersionMgt.GetBOMVersion(
+          Item2."Production BOM No.",
+          GlobalCalcDate,false);
+      UnitOfMeasure2 :=
+        VersionMgt.GetBOMUnitOfMeasure(
+          Item2."Production BOM No.",VersionCode2);
+
+      ItemAssembly := Item2;
+      BuildMatrix(
+        Item2."Production BOM No.",
+        VersionCode2,1,
+        UOMMgt.GetQtyPerUnitOfMeasure(
+          Item2,UnitOfMeasure2) /
+        UOMMgt.GetQtyPerUnitOfMeasure(
+          Item2,Item2."Base Unit of Measure"));
+    END;
+
+    [External]
+    PROCEDURE BOMMatrixFromBOM@4(ProdBOM@1000 : Record "Production BOM Header";NewMultiLevel@1001 : Boolean);
+    BEGIN
+      ComponentList.DELETEALL;
+      ComponentEntry.RESET;
+      ComponentEntry.DELETEALL;
+
+      MultiLevel := NewMultiLevel;
+      MatrixType := MatrixType::Version;
+      BuildMatrix(ProdBOM."No.",'',1,1);
+      ProdBOMVersion.SETRANGE("Production BOM No.",ProdBOM."No.");
+
+      if ProdBOMVersion.FIND('-') then
+        repeat
+          GlobalCalcDate := ProdBOMVersion."Starting Date";
+          BuildMatrix(ProdBOM."No.",ProdBOMVersion."Version Code",1,1);
+        until ProdBOMVersion.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE BuildMatrix@1(ProdBOMNo@1000 : Code[20];VersionCode@1001 : Code[20];Level@1002 : Integer;Quantity@1003 : Decimal);
+    VAR
+      ProdBOMComponent@1004 : Record "Production BOM Line";
+    BEGIN
+      if Level > 20 then
+        exit;
+
+      ProdBOMComponent.SETRANGE("Production BOM No.",ProdBOMNo);
+      ProdBOMComponent.SETRANGE("Version Code",VersionCode);
+      if GlobalCalcDate <> 0D then begin
+        ProdBOMComponent.SETFILTER("Starting Date",'%1|..%2',0D,GlobalCalcDate);
+        ProdBOMComponent.SETFILTER("Ending Date",'%1|%2..',0D,GlobalCalcDate);
+      end;
+
+      if ProdBOMComponent.FIND('-') then
+        repeat
+          case ProdBOMComponent.Type of
+            ProdBOMComponent.Type::Item:
+              if Item.GET(ProdBOMComponent."No.") then
+                if MultiLevel and (Item."Production BOM No." <> '') then begin
+                  VersionCode :=
+                    VersionMgt.GetBOMVersion(
+                      Item."Production BOM No.",
+                      GlobalCalcDate,false);
+                  BuildMatrix(
+                    Item."Production BOM No.",
+                    VersionCode,
+                    Level + 1,
+                    Quantity *
+                    UOMMgt.GetQtyPerUnitOfMeasure(
+                      Item,
+                      ProdBOMComponent."Unit of Measure Code") /
+                    UOMMgt.GetQtyPerUnitOfMeasure(
+                      Item,
+                      Item."Base Unit of Measure") /
+                    UOMMgt.GetQtyPerUnitOfMeasure(
+                      Item,
+                      VersionMgt.GetBOMUnitOfMeasure(
+                        Item."Production BOM No.",
+                        VersionCode)) *
+                    ProdBOMComponent.Quantity);
+                end else begin
+                  ComponentList."Item No." := ProdBOMComponent."No.";
+                  ComponentList."Variant Code" := ProdBOMComponent."Variant Code";
+                  ComponentList.Description := ProdBOMComponent.Description;
+                  ComponentList."Unit of Measure Code" := Item."Base Unit of Measure";
+                  if not ComponentList.FIND then
+                    ComponentList.INSERT;
+                  ComponentEntry2.INIT;
+                  ComponentEntry2."Item No." := ProdBOMComponent."No.";
+                  ComponentEntry2."Variant Code" := ProdBOMComponent."Variant Code";
+                  case MatrixType of
+                    MatrixType::Version:
+                      ComponentEntry2.ID := ProdBOMVersion."Version Code";
+                    MatrixType::Item:
+                      ComponentEntry2.ID := ItemAssembly."No.";
+                  end;
+                  ComponentEntry2.Quantity :=
+                    ProdBOMComponent.Quantity *
+                    UOMMgt.GetQtyPerUnitOfMeasure(Item,ProdBOMComponent."Unit of Measure Code") /
+                    UOMMgt.GetQtyPerUnitOfMeasure(Item,Item."Base Unit of Measure") *
+                    Quantity;
+                  ComponentEntry := ComponentEntry2;
+                  ComponentEntry.SETRANGE("Item No.",ComponentEntry2."Item No.");
+                  ComponentEntry.SETRANGE("Variant Code",ComponentEntry2."Variant Code");
+                  ComponentEntry.SETRANGE(ID,ComponentEntry2.ID);
+                  if ComponentEntry.FINDFIRST then begin
+                    ComponentEntry.Quantity :=
+                      ComponentEntry.Quantity + ComponentEntry2.Quantity;
+                    ComponentEntry.MODIFY;
+                  end else
+                    ComponentEntry.INSERT;
+                end;
+            ProdBOMComponent.Type::"Production BOM":
+              begin
+                if ProdBOMHeader.GET(ProdBOMComponent."No.") then
+                  BuildMatrix(
+                    ProdBOMHeader."No.",
+                    GetVersion(ProdBOMHeader."No."),
+                    Level + 1,
+                    Quantity * ProdBOMComponent.Quantity);
+              end;
+          end;
+        until ProdBOMComponent.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetVersion@7(ProdBOMNo@1000 : Code[20]) : Code[20];
+    BEGIN
+      ProdBOMVersion2.SETRANGE("Production BOM No.",ProdBOMNo);
+      ProdBOMVersion2.SETFILTER("Starting Date",'%1|..%2',0D,GlobalCalcDate);
+      if ProdBOMVersion2.FINDLAST then
+        exit(ProdBOMVersion2."Version Code");
+
+      exit('');
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

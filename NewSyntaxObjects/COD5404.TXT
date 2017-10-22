@@ -1,0 +1,289 @@
+OBJECT Codeunit 5404 Lead-Time Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      InvtSetup@1001 : Record "Inventory Setup";
+      Location@1002 : Record Location;
+      Item@1003 : Record Item;
+      SKU@1004 : TEMPORARY Record "Stockkeeping Unit";
+      CalChange@1000 : Record "Customized Calendar Change";
+      LeadTimeCalcNegativeErr@1007 : TextConst 'ENU=The amount of time to replenish the item must not be negative.';
+      GetPlanningParameters@1005 : Codeunit "Planning-Get Parameters";
+      CalendarMgmt@1006 : Codeunit "Calendar Management";
+
+    [External]
+    PROCEDURE PurchaseLeadTime@1(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10];VariantCode@1002 : Code[10];VendorNo@1003 : Code[20]) : Code[20];
+    VAR
+      ItemVend@1007 : Record "Item Vendor";
+    BEGIN
+      // Returns the leadtime in a date formula
+
+      GetItem(ItemNo);
+      ItemVend."Vendor No." := VendorNo;
+      ItemVend."Variant Code" := VariantCode;
+      Item.FindItemVend(ItemVend,LocationCode);
+      exit(FORMAT(ItemVend."Lead Time Calculation"));
+    END;
+
+    [External]
+    PROCEDURE ManufacturingLeadTime@2(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10];VariantCode@1002 : Code[10]) : Code[20];
+    BEGIN
+      // Returns the leadtime in a date formula
+
+      GetPlanningParameters.AtSKU(SKU,ItemNo,VariantCode,LocationCode);
+      exit(FORMAT(SKU."Lead Time Calculation"));
+    END;
+
+    [External]
+    PROCEDURE WhseOutBoundHandlingTime@14(LocationCode@1000 : Code[10]) : Code[10];
+    BEGIN
+      // Returns the outbound warehouse handling time in a date formula
+
+      if LocationCode = '' then begin
+        InvtSetup.GET;
+        exit(FORMAT(InvtSetup."Outbound Whse. Handling Time"));
+      end;
+
+      GetLocation(LocationCode);
+      exit(FORMAT(Location."Outbound Whse. Handling Time"));
+    END;
+
+    LOCAL PROCEDURE WhseInBoundHandlingTime@3(LocationCode@1000 : Code[10]) : Code[10];
+    BEGIN
+      // Returns the inbound warehouse handling time in a date formula
+
+      if LocationCode = '' then begin
+        InvtSetup.GET;
+        exit(FORMAT(InvtSetup."Inbound Whse. Handling Time"));
+      end;
+
+      GetLocation(LocationCode);
+      exit(FORMAT(Location."Inbound Whse. Handling Time"));
+    END;
+
+    [External]
+    PROCEDURE SafetyLeadTime@11(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10];VariantCode@1002 : Code[10]) : Code[20];
+    BEGIN
+      // Returns the safety lead time in a date formula
+
+      GetPlanningParameters.AtSKU(SKU,ItemNo,VariantCode,LocationCode);
+      exit(FORMAT(SKU."Safety Lead Time"));
+    END;
+
+    [External]
+    PROCEDURE PlannedEndingDate@4(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10];VariantCode@1002 : Code[10];DueDate@1003 : Date;VendorNo@1005 : Code[20];RefOrderType@1004 : '" ",Purchase,"Prod. Order",Transfer,Assembly') : Date;
+    VAR
+      TransferRoute@1006 : Record "Transfer Route";
+      PlannedReceiptDate@1007 : Date;
+      DateFormula@1008 : DateFormula;
+    BEGIN
+      // Returns Ending Date calculated backward from Due Date
+
+      GetPlanningParameters.AtSKU(SKU,ItemNo,VariantCode,LocationCode);
+
+      if RefOrderType = RefOrderType::Transfer then begin
+        EVALUATE(DateFormula,WhseInBoundHandlingTime(LocationCode));
+        with TransferRoute do begin
+          GetTransferRoute(
+            SKU."Transfer-from Code",LocationCode,"In-Transit Code","Shipping Agent Code","Shipping Agent Service Code");
+          CalcPlanReceiptDateBackward(
+            PlannedReceiptDate,DueDate,DateFormula,LocationCode,"Shipping Agent Code","Shipping Agent Service Code");
+        end;
+        exit(PlannedReceiptDate);
+      end;
+      FormatDateFormula(SKU."Safety Lead Time");
+
+      if (VendorNo <> '') and (RefOrderType = RefOrderType::Purchase) then
+        exit(
+          CalendarMgmt.CalcDateBOC2(
+            InternalLeadTimeDays(WhseInBoundHandlingTime(LocationCode) + FORMAT(SKU."Safety Lead Time")),DueDate,
+            CalChange."Source Type"::Location,LocationCode,'',
+            CalChange."Source Type"::Vendor,VendorNo,'',true));
+
+      exit(
+        CalendarMgmt.CalcDateBOC2(
+          InternalLeadTimeDays(WhseInBoundHandlingTime(LocationCode) + FORMAT(SKU."Safety Lead Time")),DueDate,
+          CalChange."Source Type"::Location,LocationCode,'',
+          CalChange."Source Type"::Location,LocationCode,'',false));
+    END;
+
+    [External]
+    PROCEDURE PlannedStartingDate@12(ItemNo@1008 : Code[20];LocationCode@1001 : Code[10];VariantCode@1009 : Code[10];VendorNo@1004 : Code[20];LeadTime@1005 : Code[20];RefOrderType@1002 : '" ",Purchase,"Prod. Order",Transfer,Assembly';EndingDate@1000 : Date) : Date;
+    VAR
+      TransferRoute@1007 : Record "Transfer Route";
+      PlannedShipmentDate@1006 : Date;
+      ShippingTime@1010 : DateFormula;
+    BEGIN
+      // Returns Starting Date calculated backward from Ending Date
+
+      if RefOrderType = RefOrderType::Transfer then begin
+        GetPlanningParameters.AtSKU(SKU,ItemNo,VariantCode,LocationCode);
+
+        with TransferRoute do begin
+          GetTransferRoute(
+            SKU."Transfer-from Code",LocationCode,"In-Transit Code","Shipping Agent Code","Shipping Agent Service Code");
+          GetShippingTime(
+            SKU."Transfer-from Code",LocationCode,"Shipping Agent Code","Shipping Agent Service Code",ShippingTime);
+          CalcPlanShipmentDateBackward(
+            PlannedShipmentDate,EndingDate,ShippingTime,
+            SKU."Transfer-from Code","Shipping Agent Code","Shipping Agent Service Code");
+        end;
+        exit(PlannedShipmentDate);
+      end;
+      if DateFormulaIsEmpty(LeadTime) then
+        exit(EndingDate);
+
+      if (VendorNo <> '') and (RefOrderType = RefOrderType::Purchase) then
+        exit(
+          CalendarMgmt.CalcDateBOC2(
+            InternalLeadTimeDays(LeadTime),EndingDate,
+            CalChange."Source Type"::Vendor,VendorNo,'',
+            CalChange."Source Type"::Location,LocationCode,'',true));
+
+      exit(
+        CalendarMgmt.CalcDateBOC2(
+          InternalLeadTimeDays(LeadTime),EndingDate,
+          CalChange."Source Type"::Location,LocationCode,'',
+          CalChange."Source Type"::Location,LocationCode,'',false));
+    END;
+
+    [External]
+    PROCEDURE PlannedEndingDate2@15(ItemNo@1006 : Code[20];LocationCode@1003 : Code[10];VariantCode@1001 : Code[10];VendorNo@1004 : Code[20];LeadTime@1005 : Code[20];RefOrderType@1002 : '" ",Purchase,"Prod. Order",Transfer,Assembly';StartingDate@1000 : Date) : Date;
+    VAR
+      TransferRoute@1009 : Record "Transfer Route";
+      PlannedReceiptDate@1008 : Date;
+      ShippingTime@1007 : DateFormula;
+    BEGIN
+      // Returns Ending Date calculated forward from Starting Date
+
+      if RefOrderType = RefOrderType::Transfer then begin
+        GetPlanningParameters.AtSKU(SKU,ItemNo,VariantCode,LocationCode);
+
+        with TransferRoute do begin
+          GetTransferRoute(
+            SKU."Transfer-from Code",LocationCode,"In-Transit Code","Shipping Agent Code","Shipping Agent Service Code");
+          GetShippingTime(
+            SKU."Transfer-from Code",LocationCode,"Shipping Agent Code","Shipping Agent Service Code",ShippingTime);
+          CalcPlannedReceiptDateForward(
+            StartingDate,PlannedReceiptDate,ShippingTime,LocationCode,"Shipping Agent Code","Shipping Agent Service Code");
+        end;
+        exit(PlannedReceiptDate);
+      end;
+      if DateFormulaIsEmpty(LeadTime) then
+        exit(StartingDate);
+
+      if (VendorNo <> '') and (RefOrderType = RefOrderType::Purchase) then
+        exit(
+          CalendarMgmt.CalcDateBOC(
+            LeadTime,StartingDate,
+            CalChange."Source Type"::Vendor,VendorNo,'',
+            CalChange."Source Type"::Location,LocationCode,'',true));
+
+      exit(
+        CalendarMgmt.CalcDateBOC(
+          LeadTime,StartingDate,
+          CalChange."Source Type"::Location,LocationCode,'',
+          CalChange."Source Type"::Location,LocationCode,'',false));
+    END;
+
+    [External]
+    PROCEDURE PlannedDueDate@6(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10];VariantCode@1002 : Code[10];EndingDate@1003 : Date;VendorNo@1005 : Code[20];RefOrderType@1004 : '" ",Purchase,"Prod. Order",Transfer,Assembly') : Date;
+    VAR
+      TransferRoute@1008 : Record "Transfer Route";
+      ReceiptDate@1007 : Date;
+      DateFormula@1006 : DateFormula;
+    BEGIN
+      // Returns Due Date calculated forward from Ending Date
+
+      GetPlanningParameters.AtSKU(SKU,ItemNo,VariantCode,LocationCode);
+      FormatDateFormula(SKU."Safety Lead Time");
+
+      if RefOrderType = RefOrderType::Transfer then begin
+        EVALUATE(DateFormula,WhseInBoundHandlingTime(LocationCode));
+        TransferRoute.CalcReceiptDateForward(EndingDate,ReceiptDate,DateFormula,LocationCode);
+        exit(ReceiptDate);
+      end;
+      if (VendorNo <> '') and (RefOrderType = RefOrderType::Purchase) then
+        exit(
+          CalendarMgmt.CalcDateBOC(
+            WhseInBoundHandlingTime(LocationCode) + FORMAT(SKU."Safety Lead Time"),EndingDate,
+            CalChange."Source Type"::Location,LocationCode,'',
+            CalChange."Source Type"::Vendor,VendorNo,'',true));
+
+      exit(
+        CalendarMgmt.CalcDateBOC(
+          WhseInBoundHandlingTime(LocationCode) + FORMAT(SKU."Safety Lead Time"),EndingDate,
+          CalChange."Source Type"::Location,LocationCode,'',
+          CalChange."Source Type"::Location,LocationCode,'',false));
+    END;
+
+    LOCAL PROCEDURE FormatDateFormula@10(VAR DateFormula@1000 : DateFormula);
+    VAR
+      DateFormulaText@1001 : Text;
+    BEGIN
+      if FORMAT(DateFormula) = '' then
+        EVALUATE(DateFormula,'<+0D>')
+      else
+        if not (COPYSTR(FORMAT(DateFormula),1,1) in ['+','-']) then begin
+          DateFormulaText := '+' + FORMAT(DateFormula); // DateFormula is formated to local language
+          EVALUATE(DateFormula,DateFormulaText);
+        end;
+    END;
+
+    LOCAL PROCEDURE GetItem@7(ItemNo@1000 : Code[20]);
+    BEGIN
+      if ItemNo <> Item."No." then
+        Item.GET(ItemNo);
+    END;
+
+    LOCAL PROCEDURE GetLocation@5(LocationCode@1000 : Code[10]);
+    BEGIN
+      if Location.Code <> LocationCode then
+        Location.GET(LocationCode);
+    END;
+
+    LOCAL PROCEDURE InternalLeadTimeDays@18(DateFormulaText@1002 : Code[30]) : Text[20];
+    VAR
+      TotalDays@1000 : DateFormula;
+      DateFormulaLoc@1001 : DateFormula;
+    BEGIN
+      EVALUATE(DateFormulaLoc,DateFormulaText);
+      EVALUATE(TotalDays,'<' + FORMAT(CALCDATE(DateFormulaLoc,WORKDATE) - WORKDATE) + 'D>'); // DateFormulaText is formatet to local language
+      exit(FORMAT(TotalDays));
+    END;
+
+    LOCAL PROCEDURE DateFormulaIsEmpty@17(DateFormulaText@1002 : Code[30]) : Boolean;
+    VAR
+      DateFormula@1000 : DateFormula;
+    BEGIN
+      if DateFormulaText = '' then
+        exit(true);
+
+      EVALUATE(DateFormula,DateFormulaText);
+      exit(CALCDATE(DateFormula,WORKDATE) = WORKDATE);
+    END;
+
+    PROCEDURE CheckLeadTimeIsNotNegative@8(LeadTimeDateFormula@1000 : DateFormula);
+    BEGIN
+      if CALCDATE(LeadTimeDateFormula,WORKDATE) < WORKDATE then
+        ERROR(LeadTimeCalcNegativeErr);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,590 @@
+OBJECT Codeunit 5790 Available to Promise
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ChangedSalesLine@1001 : Record "Sales Line";
+      OldRecordExists@1000 : Boolean;
+      ReqShipDate@1006 : Date;
+
+    [External]
+    PROCEDURE QtyAvailabletoPromise@1(VAR Item@1000 : Record Item;VAR GrossRequirement@1001 : Decimal;VAR ScheduledReceipt@1002 : Decimal;AvailabilityDate@1003 : Date;PeriodType@1004 : 'Day,Week,Month,Quarter,Year';LookaheadDateFormula@1005 : DateFormula) : Decimal;
+    BEGIN
+      ScheduledReceipt := CalcScheduledReceipt(Item);
+      GrossRequirement := CalcGrossRequirement(Item);
+
+      if FORMAT(LookaheadDateFormula) <> '' then
+        GrossRequirement :=
+          GrossRequirement +
+          CalculateLookahead(
+            Item,PeriodType,
+            AvailabilityDate + 1,
+            AdjustedEndingDate(CALCDATE(LookaheadDateFormula,AvailabilityDate),PeriodType));
+
+      exit(
+        CalcAvailableInventory(Item) +
+        (ScheduledReceipt - CalcReservedReceipt(Item)) -
+        (GrossRequirement - CalcReservedRequirement(Item)));
+    END;
+
+    [External]
+    PROCEDURE CalcAvailableInventory@30(VAR Item@1000 : Record Item) : Decimal;
+    BEGIN
+      Item.CALCFIELDS(Inventory,"Reserved Qty. on Inventory");
+      exit(Item.Inventory - Item."Reserved Qty. on Inventory");
+    END;
+
+    [External]
+    PROCEDURE CalcGrossRequirement@4(VAR Item@1000 : Record Item) : Decimal;
+    BEGIN
+      with Item do begin
+        CALCFIELDS(
+          "Scheduled Need (Qty.)",
+          "Planning Issues (Qty.)",
+          "Planning Transfer Ship. (Qty).",
+          "Qty. on Sales Order",
+          "Qty. on Service Order",
+          "Qty. on Job Order",
+          "Trans. Ord. Shipment (Qty.)",
+          "Qty. on Asm. Component",
+          "Qty. on Purch. Return");
+
+        exit(
+          "Scheduled Need (Qty.)" +
+          "Planning Issues (Qty.)" +
+          "Planning Transfer Ship. (Qty)." +
+          "Qty. on Sales Order" +
+          "Qty. on Service Order" +
+          "Qty. on Job Order" +
+          "Trans. Ord. Shipment (Qty.)" +
+          "Qty. on Asm. Component" +
+          "Qty. on Purch. Return");
+      end;
+    END;
+
+    [External]
+    PROCEDURE CalcReservedRequirement@12(VAR Item@1000 : Record Item) : Decimal;
+    BEGIN
+      with Item do begin
+        CALCFIELDS(
+          "Res. Qty. on Prod. Order Comp.",
+          "Reserved Qty. on Sales Orders",
+          "Res. Qty. on Service Orders",
+          "Res. Qty. on Job Order",
+          "Res. Qty. on Outbound Transfer",
+          "Res. Qty. on  Asm. Comp.",
+          "Res. Qty. on Purch. Returns");
+
+        exit(
+          "Res. Qty. on Prod. Order Comp." +
+          "Reserved Qty. on Sales Orders" +
+          "Res. Qty. on Service Orders" +
+          "Res. Qty. on Job Order" +
+          "Res. Qty. on Outbound Transfer" +
+          "Res. Qty. on  Asm. Comp." +
+          "Res. Qty. on Purch. Returns");
+      end;
+    END;
+
+    [External]
+    PROCEDURE CalcScheduledReceipt@8(VAR Item@1000 : Record Item) : Decimal;
+    BEGIN
+      with Item do begin
+        CALCFIELDS(
+          "Scheduled Receipt (Qty.)",
+          "Planned Order Receipt (Qty.)",
+          "Qty. on Purch. Order",
+          "Trans. Ord. Receipt (Qty.)",
+          "Qty. in Transit",
+          "Qty. on Assembly Order",
+          "Qty. on Sales Return");
+
+        exit(
+          "Scheduled Receipt (Qty.)" +
+          "Planned Order Receipt (Qty.)" +
+          "Qty. on Purch. Order" +
+          "Trans. Ord. Receipt (Qty.)" +
+          "Qty. in Transit" +
+          "Qty. on Assembly Order" +
+          "Qty. on Sales Return");
+      end;
+    END;
+
+    [External]
+    PROCEDURE CalcReservedReceipt@13(VAR Item@1000 : Record Item) : Decimal;
+    BEGIN
+      with Item do begin
+        CALCFIELDS("Reserved Qty. on Prod. Order",
+          "Reserved Qty. on Purch. Orders",
+          "Res. Qty. on Inbound Transfer",
+          "Res. Qty. on Assembly Order",
+          "Res. Qty. on Sales Returns");
+
+        exit("Reserved Qty. on Prod. Order" +
+          "Reserved Qty. on Purch. Orders" +
+          "Res. Qty. on Inbound Transfer" +
+          "Res. Qty. on Assembly Order" +
+          "Res. Qty. on Sales Returns");
+      end;
+    END;
+
+    [External]
+    PROCEDURE EarliestAvailabilityDate@5(VAR Item@1000 : Record Item;NeededQty@1001 : Decimal;StartDate@1002 : Date;ExcludeQty@1003 : Decimal;ExcludeOnDate@1004 : Date;VAR AvailableQty@1005 : Decimal;PeriodType@1006 : 'Day,Week,Month,Quarter,Year';LookaheadDateFormula@1007 : DateFormula) : Date;
+    VAR
+      Date@1008 : Record Date;
+      DummyItem@1009 : Record Item;
+      AvailabilityAtDate@1021 : TEMPORARY Record "Availability at Date";
+      QtyIsAvailable@1011 : Boolean;
+      ExactDateFound@1013 : Boolean;
+      ScheduledReceipt@1014 : Decimal;
+      GrossRequirement@1015 : Decimal;
+      AvailableQtyPeriod@1016 : Decimal;
+      AvailableDate@1017 : Date;
+      PeriodStart@1018 : Date;
+      PeriodEnd@1019 : Date;
+    BEGIN
+      AvailableQty := 0;
+      if FORMAT(LookaheadDateFormula) = '' then
+        exit;
+
+      Item.COPYFILTER("Date Filter",DummyItem."Date Filter");
+      Item.SETRANGE("Date Filter",0D,AdjustedEndingDate(CALCDATE(LookaheadDateFormula,StartDate),PeriodType));
+      CalculateAvailability(Item,AvailabilityAtDate);
+      UpdateScheduledReceipt(AvailabilityAtDate,ExcludeOnDate,ExcludeQty);
+      CalculateAvailabilityByPeriod(AvailabilityAtDate,PeriodType);
+
+      Date.SETRANGE("Period Type",PeriodType);
+      Date.SETRANGE("Period Start",0D,StartDate);
+      if Date.FINDLAST then begin
+        AvailabilityAtDate.SETRANGE("Period Start",0D,Date."Period Start");
+        if AvailabilityAtDate.FINDSET then
+          repeat
+            if PeriodStart = 0D then
+              PeriodStart := AvailabilityAtDate."Period Start";
+            ScheduledReceipt += AvailabilityAtDate."Scheduled Receipt";
+            GrossRequirement += AvailabilityAtDate."Gross Requirement";
+          until AvailabilityAtDate.NEXT = 0;
+        AvailableQty := Item.Inventory - Item."Reserved Qty. on Inventory" + ScheduledReceipt - GrossRequirement;
+        if AvailableQty >= NeededQty then begin
+          QtyIsAvailable := true;
+          AvailableDate := Date."Period End";
+          PeriodEnd := Date."Period End";
+        end else
+          PeriodStart := 0D;
+      end;
+
+      AvailabilityAtDate.SETRANGE("Period Start",StartDate + 1,CALCDATE(LookaheadDateFormula,StartDate));
+      AvailabilityAtDate."Period Start" := 0D;
+      while AvailabilityAtDate.NEXT <> 0 do begin
+        AvailableQtyPeriod := AvailabilityAtDate."Scheduled Receipt" - AvailabilityAtDate."Gross Requirement";
+        if AvailabilityAtDate."Scheduled Receipt" <= AvailabilityAtDate."Gross Requirement" then begin
+          AvailableQty := AvailableQty + AvailableQtyPeriod;
+          AvailableDate := AvailabilityAtDate."Period End";
+          if AvailableQty < NeededQty then
+            QtyIsAvailable := false;
+        end else
+          if QtyIsAvailable then
+            AvailabilityAtDate.FINDLAST
+          else begin
+            AvailableQty := AvailableQty + AvailableQtyPeriod;
+            if AvailableQty >= NeededQty then begin
+              QtyIsAvailable := true;
+              AvailableDate := AvailabilityAtDate."Period End";
+              PeriodStart := AvailabilityAtDate."Period Start";
+              PeriodEnd := AvailabilityAtDate."Period End";
+              AvailabilityAtDate.FINDLAST;
+            end;
+          end;
+      end;
+
+      if QtyIsAvailable then begin
+        if PeriodType <> PeriodType::Day then begin
+          Item.SETRANGE("Date Filter",PeriodStart,PeriodEnd);
+          CalculateAvailability(Item,AvailabilityAtDate);
+          if (ExcludeOnDate >= PeriodStart) and (ExcludeOnDate <= PeriodEnd) then
+            UpdateScheduledReceipt(AvailabilityAtDate,ExcludeOnDate,ExcludeQty);
+        end;
+        AvailabilityAtDate.SETRANGE("Period Start",PeriodStart,PeriodEnd);
+        if AvailabilityAtDate.FIND('+') then
+          repeat
+            if (AvailableQty - AvailabilityAtDate."Scheduled Receipt") < NeededQty then begin
+              ExactDateFound := true;
+              AvailableDate := AvailabilityAtDate."Period Start";
+            end else
+              AvailableQty := AvailableQty - AvailabilityAtDate."Scheduled Receipt";
+          until (AvailabilityAtDate.NEXT(-1) = 0) or ExactDateFound;
+        if not ExactDateFound then begin
+          AvailableDate := StartDate;
+          if AvailabilityAtDate.FIND then
+            AvailableQty := AvailableQty + AvailabilityAtDate."Scheduled Receipt";
+        end;
+      end else
+        AvailableDate := 0D;
+
+      DummyItem.COPYFILTER("Date Filter",Item."Date Filter");
+      exit(AvailableDate);
+    END;
+
+    [External]
+    PROCEDURE CalculateLookahead@3(VAR Item@1000 : Record Item;PeriodType@1001 : 'Day,Week,Month,Quarter,Year';StartDate@1002 : Date;EndDate@1003 : Date) : Decimal;
+    VAR
+      DummyItem@1004 : Record Item;
+      AvailabilityAtDate@1009 : TEMPORARY Record "Availability at Date";
+      LookaheadQty@1008 : Decimal;
+      Stop@1005 : Boolean;
+    BEGIN
+      Item.COPYFILTER("Date Filter",DummyItem."Date Filter");
+      Item.SETRANGE("Date Filter",StartDate,EndDate);
+      CalculateAvailability(Item,AvailabilityAtDate);
+      CalculateAvailabilityByPeriod(AvailabilityAtDate,PeriodType);
+      AvailabilityAtDate.SETRANGE("Period Start",0D,StartDate - 1);
+      if AvailabilityAtDate.FINDSET then
+        repeat
+          LookaheadQty += AvailabilityAtDate."Gross Requirement" - AvailabilityAtDate."Scheduled Receipt";
+        until AvailabilityAtDate.NEXT = 0;
+
+      AvailabilityAtDate.SETRANGE("Period Start",StartDate,EndDate);
+      if AvailabilityAtDate.FINDSET then
+        repeat
+          if AvailabilityAtDate."Gross Requirement" > AvailabilityAtDate."Scheduled Receipt" then
+            LookaheadQty += AvailabilityAtDate."Gross Requirement" - AvailabilityAtDate."Scheduled Receipt"
+          else
+            if AvailabilityAtDate."Gross Requirement" < AvailabilityAtDate."Scheduled Receipt" then
+              Stop := true;
+        until (AvailabilityAtDate.NEXT = 0) or Stop;
+
+      if LookaheadQty < 0 then
+        LookaheadQty := 0;
+
+      DummyItem.COPYFILTER("Date Filter",Item."Date Filter");
+      exit(LookaheadQty);
+    END;
+
+    [External]
+    PROCEDURE CalculateAvailability@6(VAR Item@1002 : Record Item;VAR AvailabilityAtDate@1000 : Record "Availability at Date");
+    VAR
+      Item2@1006 : Record Item;
+    BEGIN
+      Item2.COPYFILTERS(Item);
+      Item.SETRANGE("Bin Filter");
+      Item.SETRANGE("Global Dimension 1 Filter");
+      Item.SETRANGE("Global Dimension 2 Filter");
+
+      Item.CALCFIELDS(Inventory,"Reserved Qty. on Inventory");
+
+      AvailabilityAtDate.RESET;
+      AvailabilityAtDate.DELETEALL;
+      OldRecordExists := false;
+
+      UpdateSchedRcptAvail(AvailabilityAtDate,Item);
+      UpdatePurchReqRcptAvail(AvailabilityAtDate,Item);
+      UpdatePurchOrderAvail(AvailabilityAtDate,Item);
+      UpdateTransOrderRcptAvail(AvailabilityAtDate,Item);
+      UpdateSchedNeedAvail(AvailabilityAtDate,Item);
+      UpdatePlanningIssuesAvail(AvailabilityAtDate,Item);
+      UpdateSalesOrderAvail(AvailabilityAtDate,Item);
+      UpdateServOrderAvail(AvailabilityAtDate,Item);
+      UpdateJobOrderAvail(AvailabilityAtDate,Item);
+      UpdateTransOrderShptAvail(AvailabilityAtDate,Item);
+      UpdateAsmOrderAvail(AvailabilityAtDate,Item);
+      UpdateAsmCompAvail(AvailabilityAtDate,Item);
+
+      Item.COPYFILTERS(Item2);
+    END;
+
+    LOCAL PROCEDURE UpdateScheduledReceipt@17(VAR AvailabilityAtDate@1000 : Record "Availability at Date";ReceiptDate@1002 : Date;ScheduledReceipt@1003 : Decimal);
+    BEGIN
+      UpdateAvailability(AvailabilityAtDate,ReceiptDate,ScheduledReceipt,0);
+    END;
+
+    LOCAL PROCEDURE UpdateGrossRequirement@16(VAR AvailabilityAtDate@1000 : Record "Availability at Date";ShipmentDate@1002 : Date;GrossRequirement@1004 : Decimal);
+    BEGIN
+      UpdateAvailability(AvailabilityAtDate,ShipmentDate,0,GrossRequirement);
+    END;
+
+    LOCAL PROCEDURE UpdateAvailability@7(VAR AvailabilityAtDate@1000 : Record "Availability at Date";Date@1002 : Date;ScheduledReceipt@1003 : Decimal;GrossRequirement@1004 : Decimal);
+    VAR
+      RecordExists@1005 : Boolean;
+    BEGIN
+      if (ScheduledReceipt = 0) and (GrossRequirement = 0) then
+        exit;
+
+      if OldRecordExists and (Date = AvailabilityAtDate."Period Start") then
+        RecordExists := true
+      else begin
+        AvailabilityAtDate."Period Start" := Date;
+        if AvailabilityAtDate.FIND then
+          RecordExists := true
+        else begin
+          AvailabilityAtDate.INIT;
+          AvailabilityAtDate."Period End" := Date;
+        end;
+      end;
+
+      AvailabilityAtDate."Scheduled Receipt" += ScheduledReceipt;
+      AvailabilityAtDate."Gross Requirement" += GrossRequirement;
+
+      if RecordExists then
+        AvailabilityAtDate.MODIFY
+      else
+        AvailabilityAtDate.INSERT;
+
+      OldRecordExists := true;
+    END;
+
+    LOCAL PROCEDURE CalculateAvailabilityByPeriod@11(VAR AvailabilityAtDate@1000 : Record "Availability at Date";PeriodType@1001 : 'Day,Week,Month,Quarter,Year');
+    VAR
+      AvailabilityInPeriod@1003 : Record "Availability at Date";
+      Date@1002 : Record Date;
+    BEGIN
+      if PeriodType = PeriodType::Day then
+        exit;
+
+      if AvailabilityAtDate.FINDSET then
+        repeat
+          Date.SETRANGE("Period Type",PeriodType);
+          Date."Period Type" := PeriodType;
+          Date."Period Start" := AvailabilityAtDate."Period Start";
+          if Date.FIND('=<') then begin
+            AvailabilityAtDate.SETRANGE("Period Start",Date."Period Start",Date."Period End");
+            AvailabilityInPeriod.INIT;
+            AvailabilityInPeriod."Period Start" := Date."Period Start";
+            AvailabilityInPeriod."Period End" := NORMALDATE(Date."Period End");
+            repeat
+              AvailabilityInPeriod."Scheduled Receipt" += AvailabilityAtDate."Scheduled Receipt";
+              AvailabilityInPeriod."Gross Requirement" += AvailabilityAtDate."Gross Requirement";
+              AvailabilityAtDate.DELETE;
+            until AvailabilityAtDate.NEXT = 0;
+            AvailabilityAtDate.SETRANGE("Period Start");
+            AvailabilityAtDate := AvailabilityInPeriod;
+            AvailabilityAtDate.INSERT;
+          end;
+        until AvailabilityAtDate.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE AdjustedEndingDate@2(PeriodEnd@1000 : Date;PeriodType@1001 : 'Day,Week,Month,Quarter,Year') : Date;
+    VAR
+      Date@1002 : Record Date;
+    BEGIN
+      if PeriodType = PeriodType::Day then
+        exit(PeriodEnd);
+
+      Date.SETRANGE("Period Type",PeriodType);
+      Date.SETRANGE("Period Start",0D,PeriodEnd);
+      Date.FINDLAST;
+      exit(NORMALDATE(Date."Period End"));
+    END;
+
+    [External]
+    PROCEDURE SetPromisingReqShipDate@9(OrderPromisingLine@1000 : Record "Order Promising Line");
+    BEGIN
+      ReqShipDate := OrderPromisingLine."Requested Shipment Date";
+    END;
+
+    PROCEDURE SetChangedSalesLine@27(SalesLine@1000 : Record "Sales Line");
+    BEGIN
+      ChangedSalesLine := SalesLine;
+    END;
+
+    LOCAL PROCEDURE CalcReqShipDate@10(SalesLine@1000 : Record "Sales Line") : Date;
+    BEGIN
+      if SalesLine."Requested Delivery Date" = 0D then
+        exit(SalesLine."Shipment Date");
+
+      SalesLine."Planned Delivery Date" := SalesLine."Requested Delivery Date";
+      if FORMAT(SalesLine."Shipping Time") <> '' then
+        SalesLine."Planned Shipment Date" := SalesLine.CalcPlannedDeliveryDate(SalesLine.FIELDNO("Planned Delivery Date"))
+      else
+        SalesLine."Planned Shipment Date" := SalesLine.CalcPlannedShptDate(SalesLine.FIELDNO("Planned Delivery Date"));
+      exit(SalesLine.CalcShipmentDate);
+    END;
+
+    LOCAL PROCEDURE UpdateSchedRcptAvail@14(VAR AvailabilityAtDate@1000 : Record "Availability at Date";VAR Item@1001 : Record Item);
+    VAR
+      ProdOrderLine@1002 : Record "Prod. Order Line";
+    BEGIN
+      with ProdOrderLine do
+        if FindLinesWithItemToPlan(Item,true) then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateScheduledReceipt(AvailabilityAtDate,"Due Date","Remaining Qty. (Base)" - "Reserved Qty. (Base)");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdatePurchReqRcptAvail@15(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      ReqLine@1002 : Record "Requisition Line";
+    BEGIN
+      with ReqLine do begin
+        if FindLinesWithItemToPlan(Item) then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateScheduledReceipt(AvailabilityAtDate,"Due Date","Quantity (Base)" - "Reserved Qty. (Base)");
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdatePurchOrderAvail@18(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      PurchLine@1002 : Record "Purchase Line";
+    BEGIN
+      with PurchLine do begin
+        if FindLinesWithItemToPlan(Item,"Document Type"::Order) then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateScheduledReceipt(AvailabilityAtDate,"Expected Receipt Date","Outstanding Qty. (Base)" - "Reserved Qty. (Base)");
+          until NEXT = 0;
+
+        if FindLinesWithItemToPlan(Item,"Document Type"::"Return Order") then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateGrossRequirement(AvailabilityAtDate,"Expected Receipt Date","Outstanding Qty. (Base)" - "Reserved Qty. (Base)")
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateTransOrderRcptAvail@19(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      TransLine@1002 : Record "Transfer Line";
+    BEGIN
+      with TransLine do
+        if FindLinesWithItemToPlan(Item,true,false) then
+          repeat
+            CALCFIELDS("Reserved Qty. Inbnd. (Base)");
+            UpdateScheduledReceipt(AvailabilityAtDate,"Receipt Date",
+              "Outstanding Qty. (Base)" + "Qty. Shipped (Base)" - "Qty. Received (Base)" - "Reserved Qty. Inbnd. (Base)");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateSchedNeedAvail@21(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      ProdOrderComp@1002 : Record "Prod. Order Component";
+    BEGIN
+      with ProdOrderComp do
+        if FindLinesWithItemToPlan(Item,true) then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateGrossRequirement(AvailabilityAtDate,"Due Date","Remaining Qty. (Base)" - "Reserved Qty. (Base)");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdatePlanningIssuesAvail@22(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      PlanningComp@1002 : Record "Planning Component";
+    BEGIN
+      with PlanningComp do
+        if FindLinesWithItemToPlan(Item) then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateGrossRequirement(AvailabilityAtDate,"Due Date","Expected Quantity (Base)" - "Reserved Qty. (Base)");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateSalesOrderAvail@23(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      with SalesLine do begin
+        if FindLinesWithItemToPlan(Item,"Document Type"::Order) then
+          repeat
+            if not IsSalesLineChanged(SalesLine) and
+               ((ReqShipDate = 0D) or (CalcReqShipDate(SalesLine) <= ReqShipDate))
+            then begin
+              CALCFIELDS("Reserved Qty. (Base)");
+              UpdateGrossRequirement(AvailabilityAtDate,"Shipment Date","Outstanding Qty. (Base)" - "Reserved Qty. (Base)")
+            end
+          until NEXT = 0;
+
+        if FindLinesWithItemToPlan(Item,"Document Type"::"Return Order") then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateScheduledReceipt(AvailabilityAtDate,"Shipment Date","Outstanding Qty. (Base)" - "Reserved Qty. (Base)")
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateServOrderAvail@24(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      ServLine@1002 : Record "Service Line";
+    BEGIN
+      with ServLine do
+        if FindLinesWithItemToPlan(Item) then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateGrossRequirement(AvailabilityAtDate,"Needed by Date","Outstanding Qty. (Base)" - "Reserved Qty. (Base)");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateJobOrderAvail@26(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      JobPlanningLine@1002 : Record "Job Planning Line";
+    BEGIN
+      with JobPlanningLine do
+        if FindLinesWithItemToPlan(Item) then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateGrossRequirement(AvailabilityAtDate,"Planning Date","Remaining Qty. (Base)" - "Reserved Qty. (Base)");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateTransOrderShptAvail@25(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      TransLine@1002 : Record "Transfer Line";
+    BEGIN
+      with TransLine do
+        if FindLinesWithItemToPlan(Item,false,false) then
+          repeat
+            CALCFIELDS("Reserved Qty. Outbnd. (Base)");
+            UpdateGrossRequirement(AvailabilityAtDate,"Shipment Date","Outstanding Qty. (Base)" - "Reserved Qty. Outbnd. (Base)");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateAsmOrderAvail@28(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      AsmHeader@1002 : Record "Assembly Header";
+    BEGIN
+      with AsmHeader do
+        if FindLinesWithItemToPlan(Item,"Document Type"::Order) then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateScheduledReceipt(AvailabilityAtDate,"Due Date","Remaining Quantity (Base)" - "Reserved Qty. (Base)");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateAsmCompAvail@29(VAR AvailabilityAtDate@1001 : Record "Availability at Date";VAR Item@1000 : Record Item);
+    VAR
+      AsmLine@1002 : Record "Assembly Line";
+    BEGIN
+      with AsmLine do
+        if FindLinesWithItemToPlan(Item,"Document Type"::Order) then
+          repeat
+            CALCFIELDS("Reserved Qty. (Base)");
+            UpdateGrossRequirement(AvailabilityAtDate,"Due Date","Remaining Quantity (Base)" - "Reserved Qty. (Base)");
+          until NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE IsSalesLineChanged@39(SalesLine@1000 : Record "Sales Line") : Boolean;
+    BEGIN
+      exit((ChangedSalesLine."Document Type" = SalesLine."Document Type") and
+        (ChangedSalesLine."Document No." = SalesLine."Document No.") and
+        (ChangedSalesLine."Line No." = SalesLine."Line No."));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,350 @@
+OBJECT Codeunit 5451 Graph Integration Table Sync
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Integration Table Mapping";
+    OnRun=VAR
+            GraphConnectionSetup@1000 : Codeunit "Graph Connection Setup";
+            SynchronizeConnectionName@1001 : Text;
+          BEGIN
+            GraphConnectionSetup.RegisterConnections;
+            SynchronizeConnectionName := GraphConnectionSetup.GetSynchronizeConnectionName("Table ID");
+            SETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph,SynchronizeConnectionName,true);
+
+            if Direction in [Direction::ToIntegrationTable,Direction::Bidirectional] then
+              PerformScheduledSynchToIntegrationTable(Rec);
+
+            if Direction in [Direction::FromIntegrationTable,Direction::Bidirectional] then
+              PerformScheduledSynchFromIntegrationTable(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SkippingSyncTxt@1000 : TextConst '@@@={Locked};ENU=Ignoring sync for record of table %1.';
+
+    LOCAL PROCEDURE PerformScheduledSynchToIntegrationTable@3(VAR IntegrationTableMapping@1000 : Record "Integration Table Mapping");
+    VAR
+      IntegrationRecord@1005 : Record "Integration Record";
+      ModifiedOnIntegrationRecord@1004 : Record "Integration Record";
+      GraphIntegrationRecord@1003 : Record "Graph Integration Record";
+      IntegrationTableSynch@1006 : Codeunit "Integration Table Synch.";
+      SourceRecordRef@1002 : RecordRef;
+      DestinationRecordRef@1007 : RecordRef;
+      LatestModifiedOn@1009 : DateTime;
+      Found@1012 : Boolean;
+      SkipSyncOnRecord@1010 : Boolean;
+    BEGIN
+      SourceRecordRef.OPEN(IntegrationTableMapping."Table ID");
+
+      IntegrationRecord.SETRANGE("Table ID",IntegrationTableMapping."Table ID");
+      if IntegrationTableMapping."Synch. Modified On Filter" <> 0DT then
+        IntegrationRecord.SETFILTER("Modified On",'>%1',IntegrationTableMapping."Synch. Modified On Filter");
+
+      // Peform synch.
+      IntegrationTableSynch.BeginIntegrationSynchJob(
+        TABLECONNECTIONTYPE::MicrosoftGraph,IntegrationTableMapping,SourceRecordRef.NUMBER);
+
+      LatestModifiedOn := 0DT;
+      if not IntegrationRecord.FINDSET then begin
+        IntegrationTableSynch.EndIntegrationSynchJob;
+        exit;
+      end;
+
+      repeat
+        Found := false;
+        SkipSyncOnRecord := false;
+
+        if SourceRecordRef.GET(IntegrationRecord."Record ID") then
+          Found := true;
+
+        if not Found then
+          if GraphIntegrationRecord.IsRecordCoupled(IntegrationRecord."Record ID") then begin
+            SourceRecordRef.GET(IntegrationRecord."Record ID");
+            Found := true;
+          end;
+
+        OnBeforeSynchronizationStart(IntegrationTableMapping,SourceRecordRef,SkipSyncOnRecord);
+
+        if Found and (not SkipSyncOnRecord) then
+          if IntegrationTableSynch.Synchronize(SourceRecordRef,DestinationRecordRef,false,false) then begin
+            SaveChangeKeyFromDestinationRefToGraphIntegrationTable(IntegrationTableMapping,DestinationRecordRef);
+            ModifiedOnIntegrationRecord.FindByRecordId(SourceRecordRef.RECORDID);
+            if ModifiedOnIntegrationRecord."Modified On" > LatestModifiedOn then
+              LatestModifiedOn := ModifiedOnIntegrationRecord."Modified On";
+          end;
+      until (IntegrationRecord.NEXT = 0);
+
+      IntegrationTableSynch.EndIntegrationSynchJob;
+
+      if (LatestModifiedOn <> 0DT) and (LatestModifiedOn > IntegrationTableMapping."Synch. Modified On Filter") then begin
+        IntegrationTableMapping."Synch. Modified On Filter" := LatestModifiedOn;
+        IntegrationTableMapping.MODIFY(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE PerformScheduledSynchFromIntegrationTable@4(VAR IntegrationTableMapping@1000 : Record "Integration Table Mapping");
+    VAR
+      IntegrationTableSynch@1004 : Codeunit "Integration Table Synch.";
+      SourceRecordRef@1002 : RecordRef;
+      SourceRecordRef2@1003 : RecordRef;
+      DestinationRecordRef@1001 : RecordRef;
+      SourceFieldRef@1009 : FieldRef;
+      ModifiedOn@1006 : DateTime;
+      LatestModifiedOn@1007 : DateTime;
+      SkipSyncOnRecord@1008 : Boolean;
+    BEGIN
+      SourceRecordRef.OPEN(IntegrationTableMapping."Integration Table ID");
+      if IntegrationTableMapping."Graph Delta Token" <> '' then begin
+        SourceFieldRef := SourceRecordRef.FIELD(IntegrationTableMapping."Int. Tbl. Delta Token Fld. No.");
+        SourceFieldRef.SETFILTER('<>%1',IntegrationTableMapping."Graph Delta Token");
+      end;
+
+      // Peform synch.
+      IntegrationTableSynch.BeginIntegrationSynchJob(
+        TABLECONNECTIONTYPE::MicrosoftGraph,IntegrationTableMapping,SourceRecordRef.NUMBER);
+
+      LatestModifiedOn := 0DT;
+      if SourceRecordRef.FINDSET then begin
+        SaveDeltaTokenFromSourceRecRefToIntegrationTable(SourceRecordRef,IntegrationTableMapping);
+        repeat
+          SourceRecordRef2 := SourceRecordRef.DUPLICATE;
+          SkipSyncOnRecord := false;
+          OnBeforeSynchronizationStart(IntegrationTableMapping,SourceRecordRef2,SkipSyncOnRecord);
+          if not SkipSyncOnRecord then
+            if IntegrationTableSynch.Synchronize(SourceRecordRef2,DestinationRecordRef,true,false) then begin
+              SaveChangeKeyFromDestinationRefToGraphIntegrationTable(IntegrationTableMapping,SourceRecordRef2);
+              ModifiedOn := IntegrationTableSynch.GetRowLastModifiedOn(IntegrationTableMapping,SourceRecordRef2);
+              if ModifiedOn > LatestModifiedOn then
+                LatestModifiedOn := ModifiedOn;
+            end;
+        until (SourceRecordRef.NEXT = 0);
+      end;
+
+      IntegrationTableSynch.EndIntegrationSynchJob;
+
+      if (LatestModifiedOn <> 0DT) and (LatestModifiedOn > IntegrationTableMapping."Synch. Int. Tbl. Mod. On Fltr.") then begin
+        IntegrationTableMapping."Synch. Int. Tbl. Mod. On Fltr." := LatestModifiedOn;
+        IntegrationTableMapping.MODIFY(true);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE PerformRecordSynchToIntegrationTable@1(VAR IntegrationTableMapping@1000 : Record "Integration Table Mapping";SourceRecordRef@1001 : RecordRef) : Boolean;
+    VAR
+      ModifiedOnIntegrationRecord@1004 : Record "Integration Record";
+      IntegrationTableSynch@1006 : Codeunit "Integration Table Synch.";
+      DestinationRecordRef@1007 : RecordRef;
+      LatestModifiedOn@1009 : DateTime;
+      SkipSyncOnRecord@1008 : Boolean;
+    BEGIN
+      if GETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph) = '' then
+        exit;
+
+      // Peform synch.
+      IntegrationTableSynch.BeginIntegrationSynchJob(
+        TABLECONNECTIONTYPE::MicrosoftGraph,IntegrationTableMapping,SourceRecordRef.NUMBER);
+
+      LatestModifiedOn := 0DT;
+
+      OnBeforeSynchronizationStart(IntegrationTableMapping,SourceRecordRef,SkipSyncOnRecord);
+      if not SkipSyncOnRecord then
+        if IntegrationTableSynch.Synchronize(SourceRecordRef,DestinationRecordRef,false,false) then begin
+          SaveChangeKeyFromDestinationRefToGraphIntegrationTable(IntegrationTableMapping,DestinationRecordRef);
+          ModifiedOnIntegrationRecord.FindByRecordId(SourceRecordRef.RECORDID);
+          if ModifiedOnIntegrationRecord."Modified On" > LatestModifiedOn then
+            LatestModifiedOn := ModifiedOnIntegrationRecord."Modified On";
+        end;
+
+      IntegrationTableSynch.EndIntegrationSynchJob;
+
+      exit(SkipSyncOnRecord);
+    END;
+
+    [Internal]
+    PROCEDURE PerformRecordSynchFromIntegrationTable@6(VAR IntegrationTableMapping@1000 : Record "Integration Table Mapping";SourceRecordRef@1005 : RecordRef);
+    VAR
+      IntegrationTableSynch@1004 : Codeunit "Integration Table Synch.";
+      DestinationRecordRef@1001 : RecordRef;
+      ModifiedOn@1006 : DateTime;
+      LatestModifiedOn@1007 : DateTime;
+      SkipSyncOnRecord@1003 : Boolean;
+    BEGIN
+      if GETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph) = '' then
+        exit;
+
+      // Peform synch.
+      IntegrationTableSynch.BeginIntegrationSynchJob(
+        TABLECONNECTIONTYPE::MicrosoftGraph,IntegrationTableMapping,SourceRecordRef.NUMBER);
+
+      LatestModifiedOn := 0DT;
+      OnBeforeSynchronizationStart(IntegrationTableMapping,SourceRecordRef,SkipSyncOnRecord);
+      if not SkipSyncOnRecord then
+        if IntegrationTableSynch.Synchronize(SourceRecordRef,DestinationRecordRef,true,false) then begin
+          SaveChangeKeyFromDestinationRefToGraphIntegrationTable(IntegrationTableMapping,SourceRecordRef);
+          ModifiedOn := IntegrationTableSynch.GetRowLastModifiedOn(IntegrationTableMapping,SourceRecordRef);
+          if ModifiedOn > LatestModifiedOn then
+            LatestModifiedOn := ModifiedOn;
+        end;
+
+      IntegrationTableSynch.EndIntegrationSynchJob;
+    END;
+
+    [External]
+    PROCEDURE PerformRecordDeleteFromIntegrationTable@11(VAR IntegrationTableMapping@1001 : Record "Integration Table Mapping";DestinationRecordRef@1000 : RecordRef);
+    VAR
+      IntegrationTableSynch@1002 : Codeunit "Integration Table Synch.";
+      SkipSyncOnRecord@1003 : Boolean;
+    BEGIN
+      if GETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph) = '' then
+        exit;
+
+      IntegrationTableSynch.BeginIntegrationSynchJob(
+        TABLECONNECTIONTYPE::MicrosoftGraph,IntegrationTableMapping,DestinationRecordRef.NUMBER);
+      OnBeforeSynchronizationStart(IntegrationTableMapping,DestinationRecordRef,SkipSyncOnRecord);
+      IntegrationTableSynch.Delete(DestinationRecordRef);
+      IntegrationTableSynch.EndIntegrationSynchJob;
+    END;
+
+    [External]
+    PROCEDURE PerformRecordDeleteToIntegrationTable@7(VAR IntegrationTableMapping@1001 : Record "Integration Table Mapping";DestinationRecordRef@1000 : RecordRef);
+    VAR
+      IntegrationTableSynch@1002 : Codeunit "Integration Table Synch.";
+      SkipSyncOnRecord@1003 : Boolean;
+    BEGIN
+      if GETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph) = '' then
+        exit;
+
+      IntegrationTableSynch.BeginIntegrationSynchJob(
+        TABLECONNECTIONTYPE::MicrosoftGraph,IntegrationTableMapping,DestinationRecordRef.NUMBER);
+      OnBeforeSynchronizationStart(IntegrationTableMapping,DestinationRecordRef,SkipSyncOnRecord);
+      if IntegrationTableSynch.Delete(DestinationRecordRef) then
+        ArchiveIntegrationRecords(DestinationRecordRef,IntegrationTableMapping);
+
+      IntegrationTableSynch.EndIntegrationSynchJob;
+    END;
+
+    LOCAL PROCEDURE SaveDeltaTokenFromSourceRecRefToIntegrationTable@10(SourceRecRef@1000 : RecordRef;VAR IntegrationTableMapping@1001 : Record "Integration Table Mapping");
+    VAR
+      DeltaTokenFieldRef@1003 : FieldRef;
+    BEGIN
+      if IntegrationTableMapping."Int. Tbl. Delta Token Fld. No." > 0 then begin
+        DeltaTokenFieldRef := SourceRecRef.FIELD(IntegrationTableMapping."Int. Tbl. Delta Token Fld. No.");
+        IntegrationTableMapping."Graph Delta Token" := DeltaTokenFieldRef.VALUE;
+        IntegrationTableMapping.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE SaveChangeKeyFromDestinationRefToGraphIntegrationTable@5(IntegrationTableMapping@1001 : Record "Integration Table Mapping";SourceRecRef@1000 : RecordRef);
+    VAR
+      GraphIntegrationRecord@1004 : Record "Graph Integration Record";
+      ChangeKeyFieldRef@1003 : FieldRef;
+      GraphIdFieldRef@1005 : FieldRef;
+    BEGIN
+      if SourceRecRef.NUMBER = IntegrationTableMapping."Integration Table ID" then begin
+        ChangeKeyFieldRef := SourceRecRef.FIELD(IntegrationTableMapping."Int. Tbl. ChangeKey Fld. No.");
+        GraphIdFieldRef := SourceRecRef.FIELD(IntegrationTableMapping."Integration Table UID Fld. No.");
+
+        GraphIntegrationRecord.SETRANGE("Graph ID",FORMAT(GraphIdFieldRef.VALUE));
+        GraphIntegrationRecord.SETRANGE("Table ID",IntegrationTableMapping."Table ID");
+        if GraphIntegrationRecord.FINDFIRST then begin
+          GraphIntegrationRecord.ChangeKey := ChangeKeyFieldRef.VALUE;
+          GraphIntegrationRecord.MODIFY;
+        end;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE WasChangeKeyModifiedAfterLastRecordSynch@8(IntegrationTableMapping@1000 : Record "Integration Table Mapping";VAR RecordRef@1001 : RecordRef) : Boolean;
+    VAR
+      GraphIntegrationRecord@1005 : Record "Graph Integration Record";
+      GraphRecordRef@1007 : RecordRef;
+      ChangeKeyFieldRef@1004 : FieldRef;
+      GraphIdFieldRef@1006 : FieldRef;
+      DestinationGraphId@1008 : Text[250];
+    BEGIN
+      // If a changekey field is not present, default it to changed so that the sync is not skipped
+      if IntegrationTableMapping."Int. Tbl. ChangeKey Fld. No." = 0 then
+        exit(true);
+
+      if IntegrationTableMapping."Integration Table ID" = RecordRef.NUMBER then begin
+        ChangeKeyFieldRef := RecordRef.FIELD(IntegrationTableMapping."Int. Tbl. ChangeKey Fld. No.");
+        GraphIdFieldRef := RecordRef.FIELD(IntegrationTableMapping."Integration Table UID Fld. No.");
+
+        GraphIntegrationRecord.SETRANGE("Graph ID",FORMAT(GraphIdFieldRef.VALUE));
+        GraphIntegrationRecord.SETRANGE("Table ID",IntegrationTableMapping."Table ID");
+        if not GraphIntegrationRecord.FINDFIRST then
+          exit(true);
+        if GraphIntegrationRecord.ChangeKey <> FORMAT(ChangeKeyFieldRef.VALUE) then
+          exit(true);
+      end;
+
+      if IntegrationTableMapping."Table ID" = RecordRef.NUMBER then
+        if GraphIntegrationRecord.FindIDFromRecordID(RecordRef.RECORDID,DestinationGraphId) then begin
+          GraphRecordRef.OPEN(IntegrationTableMapping."Integration Table ID");
+          GraphIdFieldRef := GraphRecordRef.FIELD(IntegrationTableMapping."Integration Table UID Fld. No.");
+          GraphIdFieldRef.SETRANGE(DestinationGraphId);
+          if not GraphRecordRef.FINDFIRST then
+            exit(true);
+
+          ChangeKeyFieldRef := GraphRecordRef.FIELD(IntegrationTableMapping."Int. Tbl. ChangeKey Fld. No.");
+          GraphIntegrationRecord.SETRANGE("Graph ID",DestinationGraphId);
+          GraphIntegrationRecord.SETRANGE("Table ID",IntegrationTableMapping."Table ID");
+          if not GraphIntegrationRecord.FINDFIRST then
+            exit(true);
+          if FORMAT(ChangeKeyFieldRef.VALUE) <> GraphIntegrationRecord.ChangeKey then
+            exit(true);
+        end;
+    END;
+
+    [EventSubscriber(Codeunit,5451,OnBeforeSynchronizationStart)]
+    LOCAL PROCEDURE IgnoreSyncBasedOnChangekey@27(IntegrationTableMapping@1000 : Record "Integration Table Mapping";SourceRecordRef@1001 : RecordRef;VAR IgnoreRecord@1003 : Boolean);
+    VAR
+      GraphSubscriptionManagement@1002 : Codeunit "Graph Subscription Management";
+    BEGIN
+      if IgnoreRecord or (IntegrationTableMapping."Int. Tbl. ChangeKey Fld. No." = 0) then
+        exit;
+      if WasChangeKeyModifiedAfterLastRecordSynch(IntegrationTableMapping,SourceRecordRef) then begin
+        IgnoreRecord := SourceRecordRef.NUMBER = IntegrationTableMapping."Table ID";
+        if IgnoreRecord then
+          SENDTRACETAG(
+            '00001BE',GraphSubscriptionManagement.TraceCategory,VERBOSITY::Verbose,STRSUBSTNO(SkippingSyncTxt,SourceRecordRef.NUMBER));
+        exit;
+      end;
+
+      IgnoreRecord := SourceRecordRef.NUMBER = IntegrationTableMapping."Integration Table ID";
+    END;
+
+    LOCAL PROCEDURE ArchiveIntegrationRecords@9(RecordRef@1000 : RecordRef;IntegrationTableMapping@1003 : Record "Integration Table Mapping");
+    VAR
+      GraphIntegrationRecord@1001 : Record "Graph Integration Record";
+      GraphIntegrationRecArchive@1002 : Record "Graph Integration Rec. Archive";
+      GraphIdFieldRef@1004 : FieldRef;
+    BEGIN
+      GraphIdFieldRef := RecordRef.FIELD(IntegrationTableMapping."Integration Table UID Fld. No.");
+      GraphIntegrationRecord.SETRANGE("Graph ID",FORMAT(GraphIdFieldRef.VALUE));
+      GraphIntegrationRecord.SETRANGE("Table ID",IntegrationTableMapping."Table ID");
+      if GraphIntegrationRecord.FINDFIRST then begin
+        GraphIntegrationRecArchive.TRANSFERFIELDS(GraphIntegrationRecord);
+        if GraphIntegrationRecArchive.INSERT then
+          GraphIntegrationRecord.DELETE;
+      end;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeSynchronizationStart@28(IntegrationTableMapping@1000 : Record "Integration Table Mapping";SourceRecordRef@1001 : RecordRef;VAR IgnoreRecord@1002 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

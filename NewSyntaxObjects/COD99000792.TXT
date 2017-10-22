@@ -1,0 +1,121 @@
+OBJECT Codeunit 99000792 Create Prod. Order from Sale
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=%1 Prod. Order %2 has been created.';
+      HideValidationDialog@1001 : Boolean;
+
+    [Internal]
+    PROCEDURE CreateProdOrder@1(SalesLine@1000 : Record "Sales Line";ProdOrderStatus@1001 : 'Simulated,Planned,"Firm Planned",Released,Finished';OrderType@1002 : 'ItemOrder,ProjectOrder');
+    VAR
+      ProdOrder@1004 : Record "Production Order";
+      ProdOrderLine@1005 : Record "Prod. Order Line";
+      SalesLineReserve@1007 : Codeunit "Sales Line-Reserve";
+      CreateProdOrderLines@1008 : Codeunit "Create Prod. Order Lines";
+      ProdOrderStatusMgt@1009 : Codeunit "Prod. Order Status Management";
+      LeadTimeMgt@1011 : Codeunit "Lead-Time Management";
+      ItemTrackingMgt@1012 : Codeunit "Item Tracking Management";
+      ReservQty@1013 : Decimal;
+      ReservQtyBase@1010 : Decimal;
+      ProdOrderRowID@1006 : Text[250];
+    BEGIN
+      ProdOrder.INIT;
+      ProdOrder.Status := ProdOrderStatus;
+      ProdOrder."No." := '';
+      ProdOrder.INSERT(true);
+
+      ProdOrder."Starting Date" := WORKDATE;
+      ProdOrder."Creation Date" := WORKDATE;
+      ProdOrder."Low-Level Code" := 0;
+      ProdOrder."Gen. Bus. Posting Group" := SalesLine."Gen. Bus. Posting Group";
+      if OrderType = OrderType::ProjectOrder then begin
+        ProdOrder."Source Type" := ProdOrder."Source Type"::"Sales Header";
+        ProdOrder.VALIDATE("Source No.",SalesLine."Document No.");
+        ProdOrder."Due Date" := SalesLine."Shipment Date";
+        ProdOrder."Ending Date" :=
+          LeadTimeMgt.PlannedEndingDate(
+            SalesLine."No.",
+            SalesLine."Location Code",
+            '',
+            ProdOrder."Due Date",
+            '',
+            2);
+      end else begin
+        ProdOrder."Due Date" := SalesLine."Shipment Date";
+        ProdOrder."Source Type" := ProdOrder."Source Type"::Item;
+        ProdOrder."Location Code" := SalesLine."Location Code";
+        ProdOrder."Bin Code" := SalesLine."Bin Code";
+        ProdOrder.VALIDATE("Source No.",SalesLine."No.");
+        ProdOrder.VALIDATE(Description,SalesLine.Description);
+        SalesLine.CALCFIELDS("Reserved Qty. (Base)");
+        ProdOrder.Quantity := SalesLine."Outstanding Qty. (Base)" - SalesLine."Reserved Qty. (Base)";
+      end;
+      ProdOrder.MODIFY;
+
+      ProdOrder.SETRANGE("No.",ProdOrder."No.");
+      CreateProdOrderLines.SetSalesLine(SalesLine);
+      CreateProdOrderLines.Copy(ProdOrder,1,SalesLine."Variant Code",true);
+
+      if ProdOrder."Source Type" = ProdOrder."Source Type"::Item then begin
+        ProdOrderLine.SETRANGE(Status,ProdOrder.Status);
+        ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrder."No.");
+
+        if ProdOrderLine.FINDFIRST then begin
+          ProdOrderRowID :=
+            ItemTrackingMgt.ComposeRowID(
+              DATABASE::"Prod. Order Line",ProdOrderLine.Status,
+              ProdOrderLine."Prod. Order No.",'',ProdOrderLine."Line No.",0);
+          ItemTrackingMgt.CopyItemTracking2(SalesLine.RowID1,ProdOrderRowID,true,true);
+
+          SalesLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+          if ProdOrderLine."Remaining Qty. (Base)" > (SalesLine."Outstanding Qty. (Base)" - SalesLine."Reserved Qty. (Base)")
+          then begin
+            ReservQty := (SalesLine."Outstanding Quantity" - SalesLine."Reserved Quantity");
+            ReservQtyBase := (SalesLine."Outstanding Qty. (Base)" - SalesLine."Reserved Qty. (Base)");
+          end else begin
+            ReservQty := ROUND(ProdOrderLine."Remaining Qty. (Base)" / SalesLine."Qty. per Unit of Measure",0.00001);
+            ReservQtyBase := ProdOrderLine."Remaining Qty. (Base)";
+          end;
+          SalesLineReserve.BindToProdOrder(SalesLine,ProdOrderLine,ReservQty,ReservQtyBase);
+          if SalesLine.Reserve = SalesLine.Reserve::Never then begin
+            SalesLine.Reserve := SalesLine.Reserve::Optional;
+            SalesLine.MODIFY;
+          end;
+          ProdOrderLine.MODIFY;
+          if OrderType = OrderType::ItemOrder then
+            CreateProdOrderLines.CopyDimFromSalesLine(SalesLine,ProdOrderLine);
+        end;
+      end;
+      if ProdOrder.Status = ProdOrder.Status::Released then
+        ProdOrderStatusMgt.FlushProdOrder(ProdOrder,ProdOrder.Status,WORKDATE);
+
+      if not HideValidationDialog then
+        MESSAGE(
+          Text000,
+          ProdOrder.Status,ProdOrder."No.");
+    END;
+
+    [External]
+    PROCEDURE SetHideValidationDialog@14(NewHideValidationDialog@1000 : Boolean);
+    BEGIN
+      HideValidationDialog := NewHideValidationDialog;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -2,9 +2,9 @@ OBJECT Page 2141 O365 Sales Quote
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -15,9 +15,9 @@ OBJECT Page 2141 O365 Sales Quote
     PageType=Document;
     RefreshOnActivate=Yes;
     OnOpenPage=VAR
-                 O365DocumentSendMgt@1000 : Codeunit 2158;
+                 O365SalesInitialSetup@1000 : Record 2110;
                BEGIN
-                 O365DocumentSendMgt.ShowEstimateFailedNotificationOnOpenPage(Rec);
+                 IsUsingVAT := O365SalesInitialSetup.IsUsingVAT;
                END;
 
     OnNewRecord=BEGIN
@@ -62,10 +62,13 @@ OBJECT Page 2141 O365 Sales Quote
     OnAfterGetCurrRecord=VAR
                            Currency@1000 : Record 4;
                            GLSetup@1001 : Record 98;
+                           TaxArea@1004 : Record 318;
+                           O365DocumentSendMgt@1003 : Codeunit 2158;
                            CurrencySymbol@1002 : Text[10];
                          BEGIN
                            CustomerName := "Sell-to Customer Name";
                            CustomerEmail := GetCustomerEmail;
+                           IsCompanyContact := O365SalesInvoiceMgmt.IsCustomerCompanyContact("Sell-to Customer No.");
                            WorkDescription := GetWorkDescription;
                            CurrPageEditable := CurrPage.EDITABLE;
                            UpdateNoOfAttachmentsLabel(O365SalesAttachmentMgt.GetNoOfAttachments(Rec));
@@ -86,6 +89,13 @@ OBJECT Page 2141 O365 Sales Quote
                              O365SalesInvoiceMgmt.CustomerChanged;
                            O365SalesInvoiceMgmt.NotifyOrWarnAboutCoupouns(Rec);
                            O365SalesInvoiceMgmt.GetCouponCodesAndCouponsExists(Rec,CouponCodes,CouponsExistsForCustomer);
+
+                           O365DocumentSendMgt.ShowEstimateFailedNotificationOnOpenPage(Rec);
+
+                           TaxAreaDescription := '';
+                           IF "Tax Area Code" <> '' THEN
+                             IF TaxArea.GET("Tax Area Code") THEN
+                               TaxAreaDescription := TaxArea.Description;
                          END;
 
     ActionList=ACTIONS
@@ -236,7 +246,7 @@ OBJECT Page 2141 O365 Sales Quote
                 OnValidate=VAR
                              Customer@1000 : Record 18;
                            BEGIN
-                             IF NOT Customer.GET(Customer.GetCustNoOpenCard("Sell-to Customer Name",FALSE)) THEN BEGIN
+                             IF NOT Customer.GET(Customer.GetCustNoOpenCard("Sell-to Customer Name",FALSE,TRUE)) THEN BEGIN
                                IF Customer.IsLookupRequested THEN
                                  IF LookupCustomerName("Sell-to Customer Name") THEN
                                    EXIT;
@@ -250,6 +260,12 @@ OBJECT Page 2141 O365 Sales Quote
                              CurrPage.UPDATE(TRUE);
                            END;
 
+                OnLookup=BEGIN
+                           CurrPage.SAVERECORD;
+                           O365SalesInvoiceMgmt.LookupContactFromSalesHeader(Rec);
+                           CurrPage.UPDATE;
+                         END;
+
                 ShowMandatory=TRUE;
                 ShowCaption=No;
                 QuickEntry=FALSE }
@@ -261,21 +277,14 @@ OBJECT Page 2141 O365 Sales Quote
                 ApplicationArea=#Basic,#Suite,#Invoicing;
                 SourceExpr=CustomerEmail;
                 Editable=CurrPageEditable AND (CustomerName <> '');
-                OnValidate=VAR
-                             Customer@1000 : Record 18;
-                           BEGIN
-                             IF (CustomerEmail <> '') AND ("Sell-to Customer No." <> '') AND Customer.WRITEPERMISSION THEN
-                               IF Customer.GET("Sell-to Customer No.") THEN
-                                 IF CustomerEmail <> Customer."E-Mail" THEN BEGIN
-                                   Customer."E-Mail" := CustomerEmail;
-                                   Customer.MODIFY;
-                                 END;
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerEmail(Rec,CustomerEmail);
                            END;
 
                 ShowCaption=No }
 
     { 29  ;3   ;Field     ;
-                CaptionML=ENU=Accepted;
+                CaptionML=ENU=Customer accepted;
                 ToolTipML=ENU=Specifies whether the customer has accepted the quote or not.;
                 ApplicationArea=#Basic,#Suite,#Invoicing;
                 SourceExpr="Quote Accepted";
@@ -307,6 +316,51 @@ OBJECT Page 2141 O365 Sales Quote
                 ApplicationArea=#Basic,#Suite,#Invoicing;
                 SourceExpr="Quote Accepted Date";
                 Importance=Additional }
+
+    { 37  ;2   ;Field     ;
+                CaptionML=ENU=Customer is tax liable;
+                ToolTipML=ENU=Specifies if the sales invoice contains sales tax.;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Tax Liable";
+                Importance=Additional;
+                Visible=NOT IsUsingVAT;
+                Editable=CustomerName <> '';
+                OnValidate=BEGIN
+                             CurrPage.UPDATE;
+                           END;
+                            }
+
+    { 36  ;2   ;Field     ;
+                Name=TaxAreaDescription;
+                CaptionML=ENU=Customer tax rate;
+                ToolTipML=ENU=Specifies the customer's tax area.;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                NotBlank=Yes;
+                SourceExpr=TaxAreaDescription;
+                Importance=Additional;
+                Visible=NOT IsUsingVAT;
+                Editable=CustomerName <> '';
+                OnValidate=BEGIN
+                             CurrPage.UPDATE;
+                           END;
+
+                OnLookup=VAR
+                           TaxArea@1000 : Record 318;
+                         BEGIN
+                           IF PAGE.RUNMODAL(PAGE::"O365 Tax Area List",TaxArea) = ACTION::LookupOK THEN BEGIN
+                             VALIDATE("Tax Area Code",TaxArea.Code);
+                             TaxAreaDescription := TaxArea.Description;
+                             CurrPage.UPDATE;
+                           END;
+                         END;
+                          }
+
+    { 35  ;2   ;Field     ;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="VAT Registration No.";
+                Importance=Additional;
+                Visible=IsUsingVAT;
+                Editable=(IsUsingVAT AND IsCompanyContact) }
 
     { 17  ;2   ;Field     ;
                 CaptionML=ENU=Address;
@@ -501,6 +555,8 @@ OBJECT Page 2141 O365 Sales Quote
       CurrPageEditable@1003 : Boolean;
       ProcessDraftInvoiceOptionQst@1007 : TextConst 'ENU=Keep,Discard';
       ProcessDraftInvoiceInstructionTxt@1008 : TextConst 'ENU=Do you want to keep the new estimate?';
+      IsUsingVAT@1014 : Boolean;
+      IsCompanyContact@1018 : Boolean;
       ForceExit@1012 : Boolean;
       NoOfAttachmentsTxt@1010 : TextConst '@@@="%1=an integer number, starting at 0";ENU=Attachments (%1)';
       InvDiscAmountVisible@1022 : Boolean;
@@ -513,6 +569,7 @@ OBJECT Page 2141 O365 Sales Quote
       ChangeDiscountTxt@1023 : TextConst 'ENU=Change discount';
       DeleteQst@1009 : TextConst 'ENU=Are you sure?';
       AddAttachmentTxt@1026 : TextConst 'ENU=Add attachment';
+      TaxAreaDescription@1017 : Text[50];
       CouponCodes@1021 : Text;
 
     LOCAL PROCEDURE LookupCustomerName@1(Text@1000 : Text) : Boolean;

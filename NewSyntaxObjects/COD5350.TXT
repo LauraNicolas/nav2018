@@ -1,0 +1,287 @@
+OBJECT Codeunit 5350 CRM Statistics Job
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Job Queue Entry";
+    OnRun=BEGIN
+            UpdateStatisticsAndInvoices(GetLastLogEntryNo);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ConnectionNotEnabledErr@1002 : TextConst '@@@="%1 = CRM product name";ENU=The %1 connection is not enabled.';
+      RecordFoundTxt@1001 : TextConst '@@@=%1 is a table name, e.g. Customer, %2 is a number, e.g. Customer 12344 was not found.;ENU=%1 %2 was not found.';
+      AccountStatisticsUpdatedMsg@1003 : TextConst 'ENU="Updated account statistics. "';
+      InvoiceStatusUpdatedMsg@1000 : TextConst 'ENU=Updated payment status of sales invoices.';
+      CRMProductName@1004 : Codeunit "CRM Product Name";
+
+    LOCAL PROCEDURE UpdateStatisticsAndInvoices@1(JobLogEntryNo@1011 : Integer);
+    VAR
+      CRMConnectionSetup@1004 : Record "CRM Connection Setup";
+      ConnectionName@1006 : Text;
+    BEGIN
+      CRMConnectionSetup.GET;
+      if not CRMConnectionSetup."Is Enabled" then
+        ERROR(ConnectionNotEnabledErr,CRMProductName.FULL);
+
+      ConnectionName := FORMAT(CREATEGUID);
+      CRMConnectionSetup.RegisterConnectionWithName(ConnectionName);
+      SETDEFAULTTABLECONNECTION(
+        TABLECONNECTIONTYPE::CRM,CRMConnectionSetup.GetDefaultCRMConnection(ConnectionName));
+
+      UpdateAccountStatistics(JobLogEntryNo);
+
+      UpdateInvoices(JobLogEntryNo);
+
+      CRMConnectionSetup.UnregisterConnectionWithName(ConnectionName);
+    END;
+
+    LOCAL PROCEDURE UpdateAccountStatistics@13(JobLogEntryNo@1000 : Integer);
+    VAR
+      IntegrationRecord@1007 : Record "Integration Record";
+      CRMIntegrationRecord@1006 : Record "CRM Integration Record";
+      IntegrationTableSynch@1005 : Codeunit "Integration Table Synch.";
+      CustomerRecordID@1004 : RecordID;
+      RecRef@1003 : ARRAY [2] OF RecordRef;
+      CRMID@1002 : GUID;
+      ErrorText@1001 : Text;
+      SynchActionType@1008 : 'None,Insert,Modify,ForceModify,IgnoreUnchanged,Fail,Skip,Delete';
+    BEGIN
+      IntegrationTableSynch.BeginIntegrationSynchJobLoging(
+        TABLECONNECTIONTYPE::CRM,CODEUNIT::"CRM Statistics Job",JobLogEntryNo);
+
+      IntegrationRecord.SETRANGE("Table ID",DATABASE::Customer);
+      IntegrationRecord.SETRANGE("Deleted On",0DT);
+      if IntegrationRecord.FINDSET then
+        repeat
+          CustomerRecordID := IntegrationRecord."Record ID";
+          if CRMIntegrationRecord.FindIDFromRecordID(CustomerRecordID,CRMID) then begin
+            SynchActionType := UpdateCRMAccountStatisticsForCoupledCustomer(CustomerRecordID,CRMID,RecRef[1],RecRef[2],ErrorText);
+            if SynchActionType = SynchActionType::Fail then
+              IntegrationTableSynch.LogSynchError(RecRef[1],RecRef[2],ErrorText)
+            else
+              IntegrationTableSynch.IncrementSynchJobCounters(SynchActionType);
+          end;
+        until IntegrationRecord.NEXT = 0;
+
+      IntegrationTableSynch.EndIntegrationSynchJobWithMsg(GetAccStatsUpdateFinalMessage);
+    END;
+
+    LOCAL PROCEDURE UpdateInvoices@14(JobLogEntryNo@1000 : Integer);
+    VAR
+      IntegrationTableSynch@1002 : Codeunit "Integration Table Synch.";
+      SynchActionType@1001 : 'None,Insert,Modify,ForceModify,IgnoreUnchanged,Fail,Skip,Delete';
+      Counter@1003 : Integer;
+    BEGIN
+      IntegrationTableSynch.BeginIntegrationSynchJobLoging(
+        TABLECONNECTIONTYPE::CRM,CODEUNIT::"CRM Statistics Job",JobLogEntryNo);
+
+      Counter := UpdateStatusOfPaidInvoices('');
+      IntegrationTableSynch.UpdateSynchJobCounters(SynchActionType::Modify,Counter);
+
+      IntegrationTableSynch.EndIntegrationSynchJobWithMsg(GetInvStatusUpdateFinalMessage);
+    END;
+
+    LOCAL PROCEDURE UpdateCRMAccountStatisticsForCoupledCustomer@2(CustomerRecordID@1000 : RecordID;CRMAccountID@1004 : GUID;VAR CustomerRecRef@1002 : RecordRef;VAR CRMAccountRecRef@1003 : RecordRef;VAR ErrorText@1006 : Text) : Integer;
+    VAR
+      Customer@1001 : Record Customer;
+      CRMAccount@1005 : Record "CRM Account";
+      SynchActionType@1007 : 'None,Insert,Modify,ForceModify,IgnoreUnchanged,Fail,Skip,Delete';
+    BEGIN
+      Customer.GET(CustomerRecordID);
+      CustomerRecRef.GETTABLE(Customer);
+      if not CRMAccount.GET(CRMAccountID) then begin
+        ErrorText := STRSUBSTNO(RecordFoundTxt,CRMAccount.TABLECAPTION,CRMAccountID);
+        exit(SynchActionType::Fail);
+      end;
+      CRMAccountRecRef.GETTABLE(CRMAccount);
+      exit(CreateOrUpdateCRMAccountStatistics(Customer,CRMAccount));
+    END;
+
+    [External]
+    PROCEDURE CreateOrUpdateCRMAccountStatistics@3(Customer@1001 : Record Customer;VAR CRMAccount@1000 : Record "CRM Account") : Integer;
+    VAR
+      CRMAccountStatistics@1002 : Record "CRM Account Statistics";
+      xCRMAccountStatistics@1003 : Record "CRM Account Statistics";
+      LcyCRMTransactioncurrency@1004 : Record "CRM Transactioncurrency";
+      CRMSynchHelper@1005 : Codeunit "CRM Synch. Helper";
+      SynchActionType@1006 : 'None,Insert,Modify,ForceModify,IgnoreUnchanged,Fail,Skip,Delete';
+    BEGIN
+      FindCRMAccountStatistics(CRMAccountStatistics,CRMAccount);
+      xCRMAccountStatistics := CRMAccountStatistics;
+      Customer.CALCFIELDS("Balance (LCY)","Outstanding Orders (LCY)","Shipped Not Invoiced (LCY)",
+        "Outstanding Invoices (LCY)","Outstanding Serv. Orders (LCY)","Serv Shipped Not Invoiced(LCY)",
+        "Outstanding Serv.Invoices(LCY)");
+      with CRMAccountStatistics do begin
+        Name := Customer.Name;
+        "Customer No" := Customer."No.";
+        "Balance (LCY)" := Customer."Balance (LCY)";
+        "Outstanding Orders (LCY)" := Customer."Outstanding Orders (LCY)";
+        "Shipped Not Invoiced (LCY)" := Customer."Shipped Not Invoiced (LCY)";
+        "Outstanding Invoices (LCY)" := Customer."Outstanding Invoices (LCY)";
+        "Outstanding Serv Orders (LCY)" := Customer."Outstanding Serv. Orders (LCY)";
+        "Serv Shipped Not Invd (LCY)" := Customer."Serv Shipped Not Invoiced(LCY)";
+        "Outstd Serv Invoices (LCY)" := Customer."Outstanding Serv.Invoices(LCY)";
+        "Total (LCY)" := Customer.GetTotalAmountLCY;
+        "Credit Limit (LCY)" := Customer."Credit Limit (LCY)";
+        "Overdue Amounts (LCY)" := Customer.CalcOverdueBalance;
+        "Overdue Amounts As Of Date" := WORKDATE;
+        "Total Sales (LCY)" := Customer.GetSalesLCY;
+        "Invd Prepayment Amount (LCY)" := Customer.GetInvoicedPrepmtAmountLCY;
+        TransactionCurrencyId := CRMSynchHelper.FindNAVLocalCurrencyInCRM(LcyCRMTransactioncurrency);
+        if xCRMAccountStatistics."Customer No" = '' then begin
+          MODIFY;
+          exit(SynchActionType::Insert);
+        end;
+        if IsCRMAccountStatisticsModified(xCRMAccountStatistics,CRMAccountStatistics) then begin
+          MODIFY;
+          exit(SynchActionType::Modify);
+        end;
+        exit(SynchActionType::IgnoreUnchanged);
+      end;
+    END;
+
+    PROCEDURE GetAccStatsUpdateFinalMessage@10() : Text;
+    BEGIN
+      exit(AccountStatisticsUpdatedMsg);
+    END;
+
+    PROCEDURE GetInvStatusUpdateFinalMessage@11() : Text;
+    BEGIN
+      exit(InvoiceStatusUpdatedMsg);
+    END;
+
+    LOCAL PROCEDURE IsCRMAccountStatisticsModified@9(xCRMAccountStatistics@1001 : Record "CRM Account Statistics";CRMAccountStatistics@1000 : Record "CRM Account Statistics") : Boolean;
+    VAR
+      RecRef@1002 : ARRAY [2] OF RecordRef;
+      FieldRef@1003 : ARRAY [2] OF FieldRef;
+      I@1004 : Integer;
+    BEGIN
+      RecRef[1].GETTABLE(xCRMAccountStatistics);
+      RecRef[2].GETTABLE(CRMAccountStatistics);
+      for I := 1 to RecRef[1].FIELDCOUNT do begin
+        FieldRef[1] := RecRef[1].FIELDINDEX(I);
+        if FieldRef[1].NUMBER >= CRMAccountStatistics.FIELDNO(Name) then begin // non system CRM fields starts from Name
+          FieldRef[2] := RecRef[2].FIELDINDEX(I);
+          if FieldRef[1].VALUE <> FieldRef[2].VALUE then
+            exit(true);
+        end;
+      end;
+      RecRef[1].CLOSE;
+      RecRef[2].CLOSE;
+    END;
+
+    LOCAL PROCEDURE InitCRMAccountStatistics@5(VAR CRMAccountStatistics@1001 : Record "CRM Account Statistics");
+    BEGIN
+      with CRMAccountStatistics do begin
+        INIT;
+        AccountStatisticsId := CREATEGUID;
+        // Set all Money type fields to 1 temporarily, because if they have always been zero they show as '--' in CRM
+        "Balance (LCY)" := 1;
+        "Total (LCY)" := 1;
+        "Credit Limit (LCY)" := 1;
+        "Overdue Amounts (LCY)" := 1;
+        "Total Sales (LCY)" := 1;
+        "Invd Prepayment Amount (LCY)" := 1;
+        "Outstanding Orders (LCY)" := 1;
+        "Shipped Not Invoiced (LCY)" := 1;
+        "Outstanding Invoices (LCY)" := 1;
+        "Outstanding Serv Orders (LCY)" := 1;
+        "Serv Shipped Not Invd (LCY)" := 1;
+        "Outstd Serv Invoices (LCY)" := 1;
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE FindCRMAccountStatistics@8(VAR CRMAccountStatistics@1000 : Record "CRM Account Statistics";VAR CRMAccount@1001 : Record "CRM Account");
+    BEGIN
+      if ISNULLGUID(CRMAccount.AccountStatiticsId) then begin
+        InitCRMAccountStatistics(CRMAccountStatistics);
+        CRMAccount.AccountStatiticsId := CRMAccountStatistics.AccountStatisticsId;
+        ModifyCRMAccount(CRMAccount);
+      end else
+        CRMAccountStatistics.GET(CRMAccount.AccountStatiticsId);
+    END;
+
+    LOCAL PROCEDURE ModifyCRMAccount@6(VAR CRMAccount@1000 : Record "CRM Account");
+    VAR
+      CRMIntegrationRecord@1001 : Record "CRM Integration Record";
+    BEGIN
+      with CRMAccount do
+        if not CRMIntegrationRecord.IsModifiedAfterLastSynchonizedCRMRecord(AccountId,DATABASE::Customer,ModifiedOn) then begin
+          MODIFY;
+          CRMIntegrationRecord.SetLastSynchCRMModifiedOn(AccountId,DATABASE::Customer,ModifiedOn);
+        end else
+          MODIFY;
+    END;
+
+    PROCEDURE UpdateStatusOfPaidInvoices@4(CustomerNo@1002 : Code[20]) UpdatedInvoiceCounter : Integer;
+    VAR
+      CRMConnectionSetup@1001 : Record "CRM Connection Setup";
+      DtldCustLedgEntry@1004 : Record "Detailed Cust. Ledg. Entry";
+      CurrCLENo@1000 : Integer;
+      ForAllCustomers@1003 : Boolean;
+    BEGIN
+      CRMConnectionSetup.GET;
+      DtldCustLedgEntry.SETCURRENTKEY("Cust. Ledger Entry No.","Posting Date");
+      DtldCustLedgEntry.SETFILTER("Entry No.",'>%1',CRMConnectionSetup."Last Update Invoice Entry No.");
+      ForAllCustomers := CustomerNo = '';
+      if not ForAllCustomers then
+        DtldCustLedgEntry.SETRANGE("Customer No.",CustomerNo);
+      if DtldCustLedgEntry.FINDSET then begin
+        CurrCLENo := DtldCustLedgEntry."Cust. Ledger Entry No.";
+        repeat
+          if CurrCLENo <> DtldCustLedgEntry."Cust. Ledger Entry No." then begin
+            UpdatedInvoiceCounter += UpdateInvoice(CurrCLENo);
+            CurrCLENo := DtldCustLedgEntry."Cust. Ledger Entry No.";
+          end;
+        until DtldCustLedgEntry.NEXT = 0;
+        UpdatedInvoiceCounter += UpdateInvoice(CurrCLENo);
+        if ForAllCustomers then
+          CRMConnectionSetup.UpdateLastUpdateInvoiceEntryNo;
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateInvoice@7(CustLedgEntryNo@1000 : Integer) : Integer;
+    VAR
+      CRMIntegrationRecord@1005 : Record "CRM Integration Record";
+      CRMInvoice@1002 : Record "CRM Invoice";
+      CustLedgerEntry@1001 : Record "Cust. Ledger Entry";
+      SalesInvHeader@1003 : Record "Sales Invoice Header";
+      CRMSynchHelper@1004 : Codeunit "CRM Synch. Helper";
+    BEGIN
+      if CustLedgerEntry.GET(CustLedgEntryNo) then
+        if CustLedgerEntry."Document Type" = CustLedgerEntry."Document Type"::Invoice then
+          if SalesInvHeader.GET(CustLedgerEntry."Document No.") then
+            if CRMIntegrationRecord.FindByRecordID(SalesInvHeader.RECORDID) then
+              if CRMInvoice.GET(CRMIntegrationRecord."CRM ID") then
+                exit(CRMSynchHelper.UpdateCRMInvoiceStatusFromEntry(CRMInvoice,CustLedgerEntry));
+    END;
+
+    [EventSubscriber(Table,472,OnFindingIfJobNeedsToBeRun)]
+    LOCAL PROCEDURE OnFindingIfJobNeedsToBeRun@65(VAR Sender@1000 : Record "Job Queue Entry";VAR Result@1001 : Boolean);
+    VAR
+      CRMConnectionSetup@1002 : Record "CRM Connection Setup";
+      DetailedCustLedgEntry@1003 : Record "Detailed Cust. Ledg. Entry";
+    BEGIN
+      with Sender do
+        if ("Object Type to Run" = "Object Type to Run"::Codeunit) and ("Object ID to Run" = CODEUNIT::"CRM Statistics Job") then
+          if CRMConnectionSetup.GET and CRMConnectionSetup."Is Enabled" then
+            Result :=
+              DetailedCustLedgEntry.FINDLAST and
+              (CRMConnectionSetup."Last Update Invoice Entry No." < DetailedCustLedgEntry."Entry No.");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

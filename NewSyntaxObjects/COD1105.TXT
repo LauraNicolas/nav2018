@@ -1,0 +1,296 @@
+OBJECT Codeunit 1105 Transfer GL Entries to CA
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "G/L Entry"=rm;
+    OnRun=BEGIN
+            ConfirmTransferGLtoCA;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CostAccSetup@1000 : Record "Cost Accounting Setup";
+      GLEntry@1001 : Record "G/L Entry";
+      CostType@1002 : Record "Cost Type";
+      TempCostJnlLine@1003 : TEMPORARY Record "Cost Journal Line";
+      CostRegister@1004 : Record "Cost Register";
+      CostAccMgt@1005 : Codeunit "Cost Account Mgt";
+      Window@1006 : Dialog;
+      LastLineNo@1007 : Integer;
+      NoOfCombinedEntries@1008 : Integer;
+      FirstGLEntryNo@1009 : Integer;
+      LastGLEntryNo@1010 : Integer;
+      NoOfJnlLines@1011 : Integer;
+      TotalDebit@1012 : Decimal;
+      TotalCredit@1013 : Decimal;
+      PostingDate@1014 : Date;
+      BatchRun@1015 : Boolean;
+      GotCostAccSetup@1016 : Boolean;
+      Text000@1017 : TextConst 'ENU=Income statement accounts that have cost centers or cost objects will be transferred to Cost Accounting.\All entries since the last transfer will be processed.\\The link between cost type and G/L account will be verified.\\Do you want to start the transfer?';
+      Text001@1018 : TextConst 'ENU=Transfer G/L Entries to Cost Accounting.\G/L Entry No.          #1########\Cost Type              #2########\Combined entries       #3########\No. of Cost Entries    #4########';
+      Text002@1019 : TextConst 'ENU=G/L entries from No. %1 have been processed. %2 cost entries have been created.';
+      Text003@1020 : TextConst '@@@=%1 - Posting Date.;ENU=Combined entries per month %1';
+      Text004@1021 : TextConst '@@@=%1 - Posting Date;ENU=Combined entries per day %1';
+      Text005@1022 : TextConst 'ENU=Could not transfer general ledger entries to Cost Accounting.';
+      Text006@1023 : TextConst 'ENU=Posting Cost Entries @1@@@@@@@@@@\';
+
+    LOCAL PROCEDURE ConfirmTransferGLtoCA@1();
+    BEGIN
+      if not CONFIRM(Text000) then
+        exit;
+
+      TransferGLtoCA;
+
+      MESSAGE(Text002,FirstGLEntryNo,NoOfJnlLines);
+    END;
+
+    [Internal]
+    PROCEDURE TransferGLtoCA@2();
+    BEGIN
+      CLEARALL;
+
+      CostAccMgt.LinkCostTypesToGLAccounts;
+
+      Window.OPEN(Text001);
+
+      BatchRun := true;
+      GetGLEntries;
+
+      Window.CLOSE;
+    END;
+
+    [Internal]
+    PROCEDURE GetGLEntries@3();
+    VAR
+      SourceCodeSetup@1000 : Record "Source Code Setup";
+      CostCenterCode@1003 : Code[20];
+      CostObjectCode@1004 : Code[20];
+      CombinedEntryText@1001 : Text[50];
+    BEGIN
+      GetCostAccSetup;
+      SourceCodeSetup.GET;
+      SourceCodeSetup.TESTFIELD("G/L Entry to CA");
+
+      if not BatchRun then begin
+        if not CostAccSetup."Auto Transfer from G/L" then
+          exit;
+        TempCostJnlLine.DELETEALL;
+        CLEARALL;
+        GetCostAccSetup;
+      end;
+
+      CostRegister.LOCKTABLE;
+      CostRegister.SETCURRENTKEY(Source);
+      CostRegister.SETRANGE(Source,CostRegister.Source::"Transfer from G/L");
+      if CostRegister.FINDLAST then
+        FirstGLEntryNo := CostRegister."To G/L Entry No." + 1
+      else
+        FirstGLEntryNo := 1;
+
+      if GLEntry.FINDLAST then
+        LastGLEntryNo := GLEntry."Entry No.";
+
+      GLEntry.SETRANGE("Entry No.",FirstGLEntryNo,LastGLEntryNo);
+      GLEntry.SETFILTER("Posting Date",'%1..',CostAccSetup."Starting Date for G/L Transfer");
+
+      if GLEntry.FINDSET then
+        repeat
+          if BatchRun and ((GLEntry."Entry No." mod 100) = 0) then
+            Window.UPDATE(1,FORMAT(GLEntry."Entry No."));
+          CostCenterCode := '';
+          CostObjectCode := '';
+
+          if not SkipGLEntry(GLEntry) then
+            case true of // only need Cost Center or Cost Object
+              GetCostCenterCode(GLEntry."Dimension Set ID",CostCenterCode),
+              GetCostObjectCode(GLEntry."Dimension Set ID",CostObjectCode):
+                begin
+                  case CostType."Combine Entries" of
+                    CostType."Combine Entries"::None:
+                      PostingDate := GLEntry."Posting Date";
+                    CostType."Combine Entries"::Month:
+                      begin
+                        PostingDate := CALCDATE('<CM>',GLEntry."Posting Date");
+                        CombinedEntryText := STRSUBSTNO(Text003,PostingDate);
+                      end;
+                    CostType."Combine Entries"::Day:
+                      begin
+                        PostingDate := GLEntry."Posting Date";
+                        CombinedEntryText := STRSUBSTNO(Text004,PostingDate);
+                      end;
+                  end;
+
+                  if CostType."Combine Entries" <> CostType."Combine Entries"::None then begin
+                    TempCostJnlLine.RESET;
+                    TempCostJnlLine.SETRANGE("Cost Type No.",CostType."No.");
+                    if CostCenterCode <> '' then
+                      TempCostJnlLine.SETRANGE("Cost Center Code",CostCenterCode)
+                    else
+                      TempCostJnlLine.SETRANGE("Cost Object Code",CostObjectCode);
+                    TempCostJnlLine.SETRANGE("Posting Date",PostingDate);
+                    if TempCostJnlLine.FINDFIRST then
+                      ModifyCostJournalLine(CombinedEntryText)
+                    else
+                      InsertCostJournalLine(CostCenterCode,CostObjectCode);
+                  end else
+                    InsertCostJournalLine(CostCenterCode,CostObjectCode);
+
+                  if BatchRun and ((GLEntry."Entry No." mod 100) = 0) then begin
+                    Window.UPDATE(2,CostType."No.");
+                    Window.UPDATE(3,FORMAT(NoOfCombinedEntries));
+                    Window.UPDATE(4,FORMAT(NoOfJnlLines));
+                  end;
+                end;
+            end;
+        until GLEntry.NEXT = 0;
+
+      if NoOfJnlLines = 0 then begin
+        if BatchRun then begin
+          Window.CLOSE;
+          ERROR(Text005);
+        end;
+        exit;
+      end;
+
+      PostCostJournalLines;
+    END;
+
+    LOCAL PROCEDURE InsertCostJournalLine@4(CostCenterCode@1002 : Code[20];CostObjectCode@1003 : Code[20]);
+    VAR
+      SourceCodeSetup@1000 : Record "Source Code Setup";
+    BEGIN
+      SourceCodeSetup.GET;
+      TempCostJnlLine.INIT;
+      LastLineNo := LastLineNo + 10000;
+      TempCostJnlLine."Line No." := LastLineNo;
+      TempCostJnlLine."Cost Type No." := CostType."No.";
+      TempCostJnlLine."Posting Date" := PostingDate;
+      TempCostJnlLine."Document No." := GLEntry."Document No.";
+      TempCostJnlLine.Description := GLEntry.Description;
+      TempCostJnlLine.Amount := GLEntry.Amount;
+      TempCostJnlLine."Additional-Currency Amount" := GLEntry."Additional-Currency Amount";
+      TempCostJnlLine."Add.-Currency Credit Amount" := GLEntry."Add.-Currency Credit Amount";
+      TempCostJnlLine."Add.-Currency Debit Amount" := GLEntry."Add.-Currency Debit Amount";
+      if CostAccMgt.CostCenterExists(CostCenterCode) then
+        TempCostJnlLine."Cost Center Code" := CostCenterCode;
+      if CostAccMgt.CostObjectExists(CostObjectCode) then
+        TempCostJnlLine."Cost Object Code" := CostObjectCode;
+      TempCostJnlLine."Source Code" := SourceCodeSetup."G/L Entry to CA";
+      TempCostJnlLine."G/L Entry No." := GLEntry."Entry No.";
+      TempCostJnlLine."System-Created Entry" := true;
+      TempCostJnlLine.INSERT;
+
+      NoOfJnlLines := NoOfJnlLines + 1;
+      MaintainTotals(GLEntry.Amount);
+    END;
+
+    LOCAL PROCEDURE ModifyCostJournalLine@22(EntryText@1000 : Text[50]);
+    BEGIN
+      TempCostJnlLine.Description := EntryText;
+      TempCostJnlLine.Amount := TempCostJnlLine.Amount + GLEntry.Amount;
+      TempCostJnlLine."Additional-Currency Amount" :=
+        TempCostJnlLine."Additional-Currency Amount" + GLEntry."Additional-Currency Amount";
+      TempCostJnlLine."Add.-Currency Debit Amount" :=
+        TempCostJnlLine."Add.-Currency Debit Amount" + GLEntry."Add.-Currency Debit Amount";
+      TempCostJnlLine."Add.-Currency Credit Amount" :=
+        TempCostJnlLine."Add.-Currency Credit Amount" + GLEntry."Add.-Currency Credit Amount";
+      TempCostJnlLine."Document No." := GLEntry."Document No.";
+      TempCostJnlLine."G/L Entry No." := GLEntry."Entry No.";
+      TempCostJnlLine.MODIFY;
+      NoOfCombinedEntries := NoOfCombinedEntries + 1;
+      MaintainTotals(GLEntry.Amount);
+    END;
+
+    LOCAL PROCEDURE PostCostJournalLines@12();
+    VAR
+      CostJnlLine@1000 : Record "Cost Journal Line";
+      CAJnlPostLine@1001 : Codeunit "CA Jnl.-Post Line";
+      Window2@1003 : Dialog;
+      CostJnlLineStep@1004 : Integer;
+      JournalLineCount@1005 : Integer;
+    BEGIN
+      TempCostJnlLine.RESET;
+      Window2.OPEN(Text006);
+      if TempCostJnlLine.COUNT > 0 then
+        JournalLineCount := 10000 * 100000 div TempCostJnlLine.COUNT;
+      TempCostJnlLine.SETCURRENTKEY("G/L Entry No.");
+      if TempCostJnlLine.FINDSET then
+        repeat
+          CostJnlLineStep := CostJnlLineStep + JournalLineCount;
+          Window2.UPDATE(1,CostJnlLineStep div 100000);
+          CostJnlLine := TempCostJnlLine;
+          CAJnlPostLine.RunWithCheck(CostJnlLine);
+        until TempCostJnlLine.NEXT = 0;
+      Window2.CLOSE;
+    END;
+
+    LOCAL PROCEDURE GetCostAccSetup@11();
+    BEGIN
+      if not GotCostAccSetup then begin
+        CostAccSetup.GET;
+        GotCostAccSetup := true;
+      end;
+    END;
+
+    LOCAL PROCEDURE MaintainTotals@31(Amount@1000 : Decimal);
+    BEGIN
+      if Amount > 0 then
+        TotalDebit := TotalDebit + GLEntry.Amount
+      else
+        TotalCredit := TotalCredit - GLEntry.Amount;
+    END;
+
+    LOCAL PROCEDURE SkipGLEntry@5(GLEntry@1000 : Record "G/L Entry") : Boolean;
+    VAR
+      GLAcc@1001 : Record "G/L Account";
+    BEGIN
+      GLAcc.GET(GLEntry."G/L Account No.");
+      case true of // exit on first TRUE, skipping the other checks
+        GLEntry.Amount = 0,
+        IsBalanceSheetAccount(GLAcc),
+        not IsLinkedToCostType(GLAcc),
+        not IsNormalDate(GLEntry."Posting Date"):
+          exit(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE IsBalanceSheetAccount@7(GLAcc@1001 : Record "G/L Account") : Boolean;
+    BEGIN
+      exit(GLAcc."Income/Balance" = GLAcc."Income/Balance"::"Balance Sheet");
+    END;
+
+    LOCAL PROCEDURE IsLinkedToCostType@8(GLAcc@1000 : Record "G/L Account") : Boolean;
+    BEGIN
+      exit(CostType.GET(GLAcc."Cost Type No."));
+    END;
+
+    LOCAL PROCEDURE IsNormalDate@14(Date@1000 : Date) : Boolean;
+    BEGIN
+      exit(Date = NORMALDATE(Date));
+    END;
+
+    LOCAL PROCEDURE GetCostCenterCode@15(DimSetID@1000 : Integer;VAR CostCenterCode@1001 : Code[20]) : Boolean;
+    BEGIN
+      CostCenterCode := CostAccMgt.GetCostCenterCodeFromDimSet(DimSetID);
+      exit(CostCenterCode <> '');
+    END;
+
+    LOCAL PROCEDURE GetCostObjectCode@16(DimSetID@1001 : Integer;VAR CostObjectCode@1000 : Code[20]) : Boolean;
+    BEGIN
+      CostObjectCode := CostAccMgt.GetCostObjectCodeFromDimSet(DimSetID);
+      exit(CostObjectCode <> '');
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

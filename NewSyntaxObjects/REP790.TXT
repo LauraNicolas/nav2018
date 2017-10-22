@@ -1,0 +1,822 @@
+OBJECT Report 790 Calculate Inventory
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Calculate Inventory;
+    ProcessingOnly=true;
+    OnPreReport=BEGIN
+                  if SkipDim then
+                    ColumnDim := ''
+                  else
+                    DimSelectionBuf.CompareDimText(3,REPORT::"Calculate Inventory",'',ColumnDim,Text003);
+                  ZeroQtySave := ZeroQty;
+                END;
+
+  }
+  DATASET
+  {
+    { 8129;    ;DataItem;Item                ;
+               DataItemTable=Item;
+               DataItemTableView=SORTING("No.") WHERE(Type=CONST(Inventory));
+               OnPreDataItem=VAR
+                               ItemJnlTemplate@1000 : Record "Item Journal Template";
+                               ItemJnlBatch@1001 : Record "Item Journal Batch";
+                             BEGIN
+                               if PostingDate = 0D then
+                                 ERROR(Text000);
+
+                               ItemJnlTemplate.GET(ItemJnlLine."Journal Template Name");
+                               ItemJnlBatch.GET(ItemJnlLine."Journal Template Name",ItemJnlLine."Journal Batch Name");
+                               if NextDocNo = '' then begin
+                                 if ItemJnlBatch."No. Series" <> '' then begin
+                                   ItemJnlLine.SETRANGE("Journal Template Name",ItemJnlLine."Journal Template Name");
+                                   ItemJnlLine.SETRANGE("Journal Batch Name",ItemJnlLine."Journal Batch Name");
+                                   if not ItemJnlLine.FINDFIRST then
+                                     NextDocNo := NoSeriesMgt.GetNextNo(ItemJnlBatch."No. Series",PostingDate,false);
+                                   ItemJnlLine.INIT;
+                                 end;
+                                 if NextDocNo = '' then
+                                   ERROR(Text001);
+                               end;
+
+                               NextLineNo := 0;
+
+                               if not HideValidationDialog then
+                                 Window.OPEN(Text002,"No.");
+
+                               if not SkipDim then
+                                 SelectedDim.GetSelectedDim(USERID,3,REPORT::"Calculate Inventory",'',TempSelectedDim);
+
+                               QuantityOnHandBuffer.RESET;
+                               QuantityOnHandBuffer.DELETEALL;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  if not HideValidationDialog then
+                                    Window.UPDATE;
+                                  TempSKU.DELETEALL;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                CalcPhysInvQtyAndInsertItemJnlLine;
+                              END;
+
+               ReqFilterFields="No.","Location Filter","Bin Filter","Date Filter" }
+
+    { 7209;1   ;DataItem;Item Ledger Entry   ;
+               DataItemTable="Item Ledger Entry";
+               DataItemTableView=SORTING("Item No.","Entry Type","Variant Code","Drop Shipment","Location Code","Posting Date");
+               OnPreDataItem=BEGIN
+                               WhseEntry.SETCURRENTKEY("Item No.","Bin Code","Location Code","Variant Code");
+                               Item.COPYFILTER("Bin Filter",WhseEntry."Bin Code");
+
+                               if ColumnDim = '' then
+                                 TempDimBufIn.SETRANGE("Table ID",DATABASE::Item)
+                               else
+                                 TempDimBufIn.SETRANGE("Table ID",DATABASE::"Item Ledger Entry");
+                               TempDimBufIn.SETRANGE("Entry No.");
+                               TempDimBufIn.DELETEALL;
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  ItemVariant@1003 : Record "Item Variant";
+                                  ByBin@1000 : Boolean;
+                                  ExecuteLoop@1002 : Boolean;
+                                  InsertTempSKU@1001 : Boolean;
+                                BEGIN
+                                  if not GetLocation("Location Code") then
+                                    CurrReport.SKIP;
+
+                                  if ColumnDim <> '' then
+                                    TransferDim("Dimension Set ID");
+                                  if not "Drop Shipment" then
+                                    ByBin := Location."Bin Mandatory" and not Location."Directed Put-away and Pick";
+                                  if not SkipCycleSKU("Location Code","Item No.","Variant Code") then
+                                    if ByBin then begin
+                                      if not TempSKU.GET("Location Code","Item No.","Variant Code") then begin
+                                        InsertTempSKU := false;
+                                        if "Variant Code" = '' then
+                                          InsertTempSKU := true
+                                        else
+                                          if ItemVariant.GET("Item No.","Variant Code") then
+                                            InsertTempSKU := true;
+                                        if InsertTempSKU then begin
+                                          TempSKU."Item No." := "Item No.";
+                                          TempSKU."Variant Code" := "Variant Code";
+                                          TempSKU."Location Code" := "Location Code";
+                                          TempSKU.INSERT;
+                                          ExecuteLoop := true;
+                                        end;
+                                      end;
+                                      if ExecuteLoop then begin
+                                        WhseEntry.SETRANGE("Item No.","Item No.");
+                                        WhseEntry.SETRANGE("Location Code","Location Code");
+                                        WhseEntry.SETRANGE("Variant Code","Variant Code");
+                                        if WhseEntry.FIND('-') then
+                                          if WhseEntry."Entry No." <> OldWhseEntry."Entry No." then begin
+                                            OldWhseEntry := WhseEntry;
+                                            repeat
+                                              WhseEntry.SETRANGE("Bin Code",WhseEntry."Bin Code");
+                                              if not ItemBinLocationIsCalculated(WhseEntry."Bin Code") then begin
+                                                WhseEntry.CALCSUMS("Qty. (Base)");
+                                                UpdateBuffer(WhseEntry."Bin Code",WhseEntry."Qty. (Base)");
+                                              end;
+                                              WhseEntry.FIND('+');
+                                              Item.COPYFILTER("Bin Filter",WhseEntry."Bin Code");
+                                            until WhseEntry.NEXT = 0;
+                                          end;
+                                      end;
+                                    end else
+                                      UpdateBuffer('',Quantity);
+                                END;
+
+               DataItemLink="Item No."=FIELD("No."),"Variant Code"=FIELD("Variant Filter"),"Location Code"=FIELD("Location Filter"),"Global Dimension 1 Code"=FIELD("Global Dimension 1 Filter"),"Global Dimension 2 Code"=FIELD("Global Dimension 2 Filter"),"Posting Date"=FIELD("Date Filter") }
+
+    { 1   ;1   ;DataItem;Warehouse Entry     ;
+               DataItemTable="Warehouse Entry";
+               OnAfterGetRecord=BEGIN
+                                  if not "Item Ledger Entry".ISEMPTY then
+                                    CurrReport.SKIP;   // Skip if item has any record in Item Ledger Entry.
+                                  CLEAR(QuantityOnHandBuffer);
+                                  QuantityOnHandBuffer."Item No." := "Item No.";
+                                  QuantityOnHandBuffer."Location Code" := "Location Code";
+                                  QuantityOnHandBuffer."Variant Code" := "Variant Code";
+
+                                  GetLocation("Location Code");
+                                  if Location."Bin Mandatory" and not Location."Directed Put-away and Pick" then
+                                    QuantityOnHandBuffer."Bin Code" := "Bin Code";
+                                  if not QuantityOnHandBuffer.FIND then
+                                    QuantityOnHandBuffer.INSERT;   // Insert a zero quantity line.
+                                END;
+
+               DataItemLink="Item No."=FIELD("No."),"Variant Code"=FIELD("Variant Filter"),"Location Code"=FIELD("Location Filter") }
+
+    { 2   ;1   ;DataItem;ItemWithNoTransaction;
+               DataItemTable=Integer;
+               DataItemTableView=SORTING(Number) WHERE(Number=CONST(1));
+               OnAfterGetRecord=BEGIN
+                                  if IncludeItemWithNoTransaction then
+                                    UpdateQuantityOnHandBuffer(Item."No.");
+                                END;
+                                 }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=true;
+      OnOpenPage=BEGIN
+                   if PostingDate = 0D then
+                     PostingDate := WORKDATE;
+                   ValidatePostingDate;
+                   ColumnDim := DimSelectionBuf.GetDimSelectionText(3,REPORT::"Calculate Inventory",'');
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  Name=Container1900000001;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  Name=Options;
+                  CaptionML=ENU=Options }
+
+      { 1   ;2   ;Field     ;
+                  Name=PostingDate;
+                  CaptionML=ENU=Posting Date;
+                  ToolTipML=ENU=Specifies the date for the posting of this batch job. By default, the working date is entered, but you can change it.;
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=PostingDate;
+                  OnValidate=BEGIN
+                               ValidatePostingDate;
+                             END;
+                              }
+
+      { 9   ;2   ;Field     ;
+                  Name=DocumentNo;
+                  CaptionML=ENU=Document No.;
+                  ToolTipML=ENU=Specifies the number of the document that is processed by the report or batch job.;
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=NextDocNo }
+
+      { 11  ;2   ;Field     ;
+                  Name=ItemsNotOnInventory;
+                  CaptionML=ENU=Items Not on Inventory.;
+                  ToolTipML=ENU=Specifies if journal lines should be created for items that are not on inventory, that is, items where the value in the Qty. (Calculated) field is 0.;
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=ZeroQty;
+                  OnValidate=BEGIN
+                               if not ZeroQty then
+                                 IncludeItemWithNoTransaction := false;
+                             END;
+                              }
+
+      { 2   ;2   ;Field     ;
+                  Name=IncludeItemWithNoTransaction;
+                  CaptionML=ENU=Include Item without Transactions;
+                  ToolTipML=ENU=Specifies if journal lines should be created for items that are not on inventory and are not used in any transactions.;
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=IncludeItemWithNoTransaction;
+                  OnValidate=BEGIN
+                               if not IncludeItemWithNoTransaction then
+                                 exit;
+                               if not ZeroQty then
+                                 ERROR(ItemNotOnInventoryErr);
+                             END;
+                              }
+
+      { 15  ;2   ;Field     ;
+                  Name=ByDimensions;
+                  CaptionML=ENU=By Dimensions;
+                  ToolTipML=ENU=Specifies the dimensions that you want the batch job to consider.;
+                  ApplicationArea=#Suite;
+                  SourceExpr=ColumnDim;
+                  Editable=FALSE;
+                  OnAssistEdit=BEGIN
+                                 DimSelectionBuf.SetDimSelectionMultiple(3,REPORT::"Calculate Inventory",ColumnDim);
+                               END;
+                                }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Enter the posting date.';
+      Text001@1001 : TextConst 'ENU=Enter the document no.';
+      Text002@1002 : TextConst 'ENU=Processing items    #1##########';
+      Text003@1003 : TextConst 'ENU=Retain Dimensions';
+      ItemJnlBatch@1004 : Record "Item Journal Batch";
+      ItemJnlLine@1005 : Record "Item Journal Line";
+      WhseEntry@1024 : Record "Warehouse Entry";
+      QuantityOnHandBuffer@1007 : TEMPORARY Record "Inventory Buffer";
+      SourceCodeSetup@1008 : Record "Source Code Setup";
+      DimSetEntry@1010 : Record "Dimension Set Entry";
+      OldWhseEntry@1038 : Record "Warehouse Entry";
+      TempSKU@1035 : TEMPORARY Record "Stockkeeping Unit";
+      TempDimSetEntry@1015 : TEMPORARY Record "Dimension Set Entry";
+      SelectedDim@1011 : Record "Selected Dimension";
+      TempSelectedDim@1012 : TEMPORARY Record "Selected Dimension";
+      TempDimBufIn@1013 : TEMPORARY Record "Dimension Buffer";
+      TempDimBufOut@1014 : TEMPORARY Record "Dimension Buffer";
+      DimSelectionBuf@1016 : Record "Dimension Selection Buffer";
+      Location@1009 : Record Location;
+      NoSeriesMgt@1017 : Codeunit NoSeriesManagement;
+      DimBufMgt@1018 : Codeunit "Dimension Buffer Management";
+      Window@1019 : Dialog;
+      PostingDate@1020 : Date;
+      CycleSourceType@1030 : '" ",Item,SKU';
+      PhysInvtCountCode@1029 : Code[10];
+      NextDocNo@1021 : Code[20];
+      NextLineNo@1023 : Integer;
+      ZeroQty@1026 : Boolean;
+      ZeroQtySave@1033 : Boolean;
+      IncludeItemWithNoTransaction@1022 : Boolean;
+      HideValidationDialog@1028 : Boolean;
+      AdjustPosQty@1036 : Boolean;
+      ItemTrackingSplit@1006 : Boolean;
+      SkipDim@1037 : Boolean;
+      ColumnDim@1027 : Text[250];
+      PosQty@1031 : Decimal;
+      NegQty@1032 : Decimal;
+      Text004@1025 : TextConst 'ENU=You must not filter on dimensions if you calculate locations with %1 is %2.';
+      ItemNotOnInventoryErr@1034 : TextConst 'ENU=Items Not on Inventory.';
+
+    [External]
+    PROCEDURE SetItemJnlLine@1(VAR NewItemJnlLine@1000 : Record "Item Journal Line");
+    BEGIN
+      ItemJnlLine := NewItemJnlLine;
+    END;
+
+    LOCAL PROCEDURE ValidatePostingDate@4();
+    BEGIN
+      ItemJnlBatch.GET(ItemJnlLine."Journal Template Name",ItemJnlLine."Journal Batch Name");
+      if ItemJnlBatch."No. Series" = '' then
+        NextDocNo := ''
+      else begin
+        NextDocNo := NoSeriesMgt.GetNextNo(ItemJnlBatch."No. Series",PostingDate,false);
+        CLEAR(NoSeriesMgt);
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertItemJnlLine@6(ItemNo@1000 : Code[20];VariantCode2@1001 : Code[10];DimEntryNo2@1002 : Integer;BinCode2@1004 : Code[20];Quantity2@1005 : Decimal;PhysInvQuantity@1014 : Decimal);
+    VAR
+      ItemLedgEntry@1007 : Record "Item Ledger Entry";
+      ReservEntry@1012 : Record "Reservation Entry";
+      WhseEntry@1009 : Record "Warehouse Entry";
+      WhseEntry2@1015 : Record "Warehouse Entry";
+      Bin@1008 : Record Bin;
+      DimValue@1013 : Record "Dimension Value";
+      CreateReservEntry@1010 : Codeunit "Create Reserv. Entry";
+      DimMgt@1016 : Codeunit DimensionManagement;
+      EntryType@1003 : '"Negative Adjmt.","Positive Adjmt."';
+      NoBinExist@1011 : Boolean;
+      OrderLineNo@1017 : Integer;
+    BEGIN
+      with ItemJnlLine do begin
+        if NextLineNo = 0 then begin
+          LOCKTABLE;
+          SETRANGE("Journal Template Name","Journal Template Name");
+          SETRANGE("Journal Batch Name","Journal Batch Name");
+          if FINDLAST then
+            NextLineNo := "Line No.";
+
+          SourceCodeSetup.GET;
+        end;
+        NextLineNo := NextLineNo + 10000;
+
+        if (Quantity2 <> 0) or ZeroQty then begin
+          if (Quantity2 = 0) and Location."Bin Mandatory" and not Location."Directed Put-away and Pick"
+          then
+            if not Bin.GET(Location.Code,BinCode2) then
+              NoBinExist := true;
+
+          INIT;
+          "Line No." := NextLineNo;
+          VALIDATE("Posting Date",PostingDate);
+          if PhysInvQuantity >= Quantity2 then
+            VALIDATE("Entry Type","Entry Type"::"Positive Adjmt.")
+          else
+            VALIDATE("Entry Type","Entry Type"::"Negative Adjmt.");
+          VALIDATE("Document No.",NextDocNo);
+          VALIDATE("Item No.",ItemNo);
+          VALIDATE("Variant Code",VariantCode2);
+          VALIDATE("Location Code",Location.Code);
+          if not NoBinExist then
+            VALIDATE("Bin Code",BinCode2)
+          else
+            VALIDATE("Bin Code",'');
+          VALIDATE("Source Code",SourceCodeSetup."Phys. Inventory Journal");
+          "Qty. (Phys. Inventory)" := PhysInvQuantity;
+          "Phys. Inventory" := true;
+          VALIDATE("Qty. (Calculated)",Quantity2);
+          "Posting No. Series" := ItemJnlBatch."Posting No. Series";
+          "Reason Code" := ItemJnlBatch."Reason Code";
+
+          "Phys Invt Counting Period Code" := PhysInvtCountCode;
+          "Phys Invt Counting Period Type" := CycleSourceType;
+
+          if Location."Bin Mandatory" then
+            "Dimension Set ID" := 0;
+          "Shortcut Dimension 1 Code" := '';
+          "Shortcut Dimension 2 Code" := '';
+
+          ItemLedgEntry.RESET;
+          ItemLedgEntry.SETCURRENTKEY("Item No.");
+          ItemLedgEntry.SETRANGE("Item No.",ItemNo);
+          if ItemLedgEntry.FINDLAST then
+            "Last Item Ledger Entry No." := ItemLedgEntry."Entry No."
+          else
+            "Last Item Ledger Entry No." := 0;
+
+          INSERT(true);
+
+          if Location.Code <> '' then
+            if Location."Directed Put-away and Pick" then begin
+              WhseEntry.SETCURRENTKEY(
+                "Item No.","Bin Code","Location Code","Variant Code","Unit of Measure Code",
+                "Lot No.","Serial No.","Entry Type");
+              WhseEntry.SETRANGE("Item No.","Item No.");
+              WhseEntry.SETRANGE("Bin Code",Location."Adjustment Bin Code");
+              WhseEntry.SETRANGE("Location Code","Location Code");
+              WhseEntry.SETRANGE("Variant Code","Variant Code");
+              if "Entry Type" = "Entry Type"::"Positive Adjmt." then
+                EntryType := EntryType::"Negative Adjmt.";
+              if "Entry Type" = "Entry Type"::"Negative Adjmt." then
+                EntryType := EntryType::"Positive Adjmt.";
+              WhseEntry.SETRANGE("Entry Type",EntryType);
+              if WhseEntry.FIND('-') then
+                repeat
+                  WhseEntry.SETRANGE("Lot No.",WhseEntry."Lot No.");
+                  WhseEntry.SETRANGE("Serial No.",WhseEntry."Serial No.");
+                  WhseEntry.CALCSUMS("Qty. (Base)");
+
+                  WhseEntry2.SETCURRENTKEY(
+                    "Item No.","Bin Code","Location Code","Variant Code","Unit of Measure Code",
+                    "Lot No.","Serial No.","Entry Type");
+                  WhseEntry2.COPYFILTERS(WhseEntry);
+                  case EntryType of
+                    EntryType::"Positive Adjmt.":
+                      WhseEntry2.SETRANGE("Entry Type",WhseEntry2."Entry Type"::"Negative Adjmt.");
+                    EntryType::"Negative Adjmt.":
+                      WhseEntry2.SETRANGE("Entry Type",WhseEntry2."Entry Type"::"Positive Adjmt.");
+                  end;
+                  WhseEntry2.CALCSUMS("Qty. (Base)");
+                  if ABS(WhseEntry2."Qty. (Base)") > ABS(WhseEntry."Qty. (Base)") then
+                    WhseEntry."Qty. (Base)" := 0
+                  else
+                    WhseEntry."Qty. (Base)" := WhseEntry."Qty. (Base)" + WhseEntry2."Qty. (Base)";
+
+                  if WhseEntry."Qty. (Base)" <> 0 then begin
+                    if "Order Type" = "Order Type"::Production then
+                      OrderLineNo := "Order Line No.";
+                    CreateReservEntry.CreateReservEntryFor(
+                      DATABASE::"Item Journal Line",
+                      "Entry Type",
+                      "Journal Template Name",
+                      "Journal Batch Name",
+                      OrderLineNo,
+                      "Line No.",
+                      "Qty. per Unit of Measure",
+                      ABS(WhseEntry.Quantity),
+                      ABS(WhseEntry."Qty. (Base)"),
+                      WhseEntry."Serial No.",
+                      WhseEntry."Lot No.");
+                    if WhseEntry."Qty. (Base)" < 0 then             // only Date on positive adjustments
+                      CreateReservEntry.SetDates(WhseEntry."Warranty Date",WhseEntry."Expiration Date");
+                    CreateReservEntry.CreateEntry(
+                      "Item No.",
+                      "Variant Code",
+                      "Location Code",
+                      Description,
+                      0D,
+                      0D,
+                      0,
+                      ReservEntry."Reservation Status"::Prospect);
+                  end;
+                  WhseEntry.FIND('+');
+                  WhseEntry.SETRANGE("Lot No.");
+                  WhseEntry.SETRANGE("Serial No.");
+                until WhseEntry.NEXT = 0;
+            end;
+
+          if ColumnDim = '' then
+            DimEntryNo2 := CreateDimFromItemDefault;
+
+          if DimBufMgt.GetDimensions(DimEntryNo2,TempDimBufOut) then begin
+            TempDimSetEntry.RESET;
+            TempDimSetEntry.DELETEALL;
+            if TempDimBufOut.FIND('-') then begin
+              repeat
+                DimValue.GET(TempDimBufOut."Dimension Code",TempDimBufOut."Dimension Value Code");
+                TempDimSetEntry."Dimension Code" := TempDimBufOut."Dimension Code";
+                TempDimSetEntry."Dimension Value Code" := TempDimBufOut."Dimension Value Code";
+                TempDimSetEntry."Dimension Value ID" := DimValue."Dimension Value ID";
+                if TempDimSetEntry.INSERT then;
+                "Dimension Set ID" := DimMgt.GetDimensionSetID(TempDimSetEntry);
+                DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID",
+                  "Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+                MODIFY;
+              until TempDimBufOut.NEXT = 0;
+              TempDimBufOut.DELETEALL;
+            end;
+          end;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertQuantityOnHandBuffer@10(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10]);
+    BEGIN
+      with QuantityOnHandBuffer do begin
+        INIT;
+        "Item No." := ItemNo;
+        "Location Code" := LocationCode;
+        INSERT(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE InitializeRequest@2(NewPostingDate@1000 : Date;DocNo@1001 : Code[20];ItemsNotOnInvt@1002 : Boolean);
+    BEGIN
+      PostingDate := NewPostingDate;
+      NextDocNo := DocNo;
+      ZeroQty := ItemsNotOnInvt;
+      if not SkipDim then
+        ColumnDim := DimSelectionBuf.GetDimSelectionText(3,REPORT::"Calculate Inventory",'');
+    END;
+
+    LOCAL PROCEDURE TransferDim@3(DimSetID@1000 : Integer);
+    BEGIN
+      DimSetEntry.SETRANGE("Dimension Set ID",DimSetID);
+      if DimSetEntry.FIND('-') then begin
+        repeat
+          if TempSelectedDim.GET(
+               USERID,3,REPORT::"Calculate Inventory",'',DimSetEntry."Dimension Code")
+          then
+            InsertDim(DATABASE::"Item Ledger Entry",DimSetID,DimSetEntry."Dimension Code",DimSetEntry."Dimension Value Code");
+        until DimSetEntry.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcWhseQty@5(AdjmtBin@1002 : Code[20];VAR PosQuantity@1003 : Decimal;VAR NegQuantity@1004 : Decimal);
+    VAR
+      WhseEntry@1000 : Record "Warehouse Entry";
+      WhseEntry2@1008 : Record "Warehouse Entry";
+      ItemTrackingMgt@1005 : Codeunit "Item Tracking Management";
+      WhseQuantity@1001 : Decimal;
+      WhseSNRequired@1006 : Boolean;
+      WhseLNRequired@1007 : Boolean;
+      NoWhseEntry@1010 : Boolean;
+      NoWhseEntry2@1009 : Boolean;
+    BEGIN
+      AdjustPosQty := false;
+      with QuantityOnHandBuffer do begin
+        ItemTrackingMgt.CheckWhseItemTrkgSetup("Item No.",WhseSNRequired,WhseLNRequired,false);
+        ItemTrackingSplit := WhseSNRequired or WhseLNRequired;
+        WhseEntry.SETCURRENTKEY(
+          "Item No.","Bin Code","Location Code","Variant Code","Unit of Measure Code",
+          "Lot No.","Serial No.","Entry Type");
+
+        WhseEntry.SETRANGE("Item No.","Item No.");
+        WhseEntry.SETRANGE("Location Code","Location Code");
+        WhseEntry.SETRANGE("Variant Code","Variant Code");
+        WhseEntry.CALCSUMS("Qty. (Base)");
+        WhseQuantity := WhseEntry."Qty. (Base)";
+        WhseEntry.SETRANGE("Bin Code",AdjmtBin);
+
+        if WhseSNRequired then begin
+          WhseEntry.SETRANGE("Entry Type",WhseEntry."Entry Type"::"Positive Adjmt.");
+          WhseEntry.CALCSUMS("Qty. (Base)");
+          PosQuantity := WhseQuantity - WhseEntry."Qty. (Base)";
+          WhseEntry.SETRANGE("Entry Type",WhseEntry."Entry Type"::"Negative Adjmt.");
+          WhseEntry.CALCSUMS("Qty. (Base)");
+          NegQuantity := WhseQuantity - WhseEntry."Qty. (Base)";
+          WhseEntry.SETRANGE("Entry Type",WhseEntry."Entry Type"::Movement);
+          WhseEntry.CALCSUMS("Qty. (Base)");
+          if WhseEntry."Qty. (Base)" <> 0 then begin
+            if WhseEntry."Qty. (Base)" > 0 then
+              PosQuantity := PosQuantity + WhseQuantity - WhseEntry."Qty. (Base)"
+            else
+              NegQuantity := NegQuantity - WhseQuantity - WhseEntry."Qty. (Base)";
+          end;
+
+          WhseEntry.SETRANGE("Entry Type",WhseEntry."Entry Type"::"Positive Adjmt.");
+          if WhseEntry.FIND('-') then begin
+            repeat
+              WhseEntry.SETRANGE("Serial No.",WhseEntry."Serial No.");
+
+              WhseEntry2.RESET;
+              WhseEntry2.SETCURRENTKEY(
+                "Item No.","Bin Code","Location Code","Variant Code",
+                "Unit of Measure Code","Lot No.","Serial No.","Entry Type");
+
+              WhseEntry2.COPYFILTERS(WhseEntry);
+              WhseEntry2.SETRANGE("Entry Type",WhseEntry2."Entry Type"::"Negative Adjmt.");
+              WhseEntry2.SETRANGE("Serial No.",WhseEntry."Serial No.");
+              if WhseEntry2.FIND('-') then
+                repeat
+                  PosQuantity := PosQuantity + 1;
+                  NegQuantity := NegQuantity - 1;
+                  NoWhseEntry := WhseEntry.NEXT = 0;
+                  NoWhseEntry2 := WhseEntry2.NEXT = 0;
+                until NoWhseEntry2 or NoWhseEntry
+              else
+                AdjustPosQty := true;
+
+              if not NoWhseEntry and NoWhseEntry2 then
+                AdjustPosQty := true;
+
+              WhseEntry.FIND('+');
+              WhseEntry.SETRANGE("Serial No.");
+            until WhseEntry.NEXT = 0;
+          end;
+        end else begin
+          if WhseEntry.FIND('-') then
+            repeat
+              WhseEntry.SETRANGE("Lot No.",WhseEntry."Lot No.");
+              WhseEntry.CALCSUMS("Qty. (Base)");
+              if WhseEntry."Qty. (Base)" <> 0 then begin
+                if WhseEntry."Qty. (Base)" > 0 then
+                  NegQuantity := NegQuantity - WhseEntry."Qty. (Base)"
+                else
+                  PosQuantity := PosQuantity + WhseEntry."Qty. (Base)";
+              end;
+              WhseEntry.FIND('+');
+              WhseEntry.SETRANGE("Lot No.");
+            until WhseEntry.NEXT = 0;
+          if PosQuantity <> WhseQuantity then
+            PosQuantity := WhseQuantity - PosQuantity;
+          if NegQuantity <> -WhseQuantity then
+            NegQuantity := WhseQuantity + NegQuantity;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetHideValidationDialog@7380(NewHideValidationDialog@1000 : Boolean);
+    BEGIN
+      HideValidationDialog := NewHideValidationDialog;
+    END;
+
+    [External]
+    PROCEDURE InitializePhysInvtCount@7381(PhysInvtCountCode2@1000 : Code[10];CountSourceType2@1001 : '" ",Item,SKU');
+    BEGIN
+      PhysInvtCountCode := PhysInvtCountCode2;
+      CycleSourceType := CountSourceType2;
+    END;
+
+    LOCAL PROCEDURE SkipCycleSKU@7382(LocationCode@1000 : Code[10];ItemNo@1002 : Code[20];VariantCode@1003 : Code[10]) : Boolean;
+    VAR
+      SKU@1001 : Record "Stockkeeping Unit";
+    BEGIN
+      if CycleSourceType = CycleSourceType::Item then
+        if SKU.READPERMISSION then
+          if SKU.GET(LocationCode,ItemNo,VariantCode) then
+            exit(true);
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE GetLocation@11(LocationCode@1000 : Code[10]) : Boolean;
+    BEGIN
+      if LocationCode = '' then begin
+        CLEAR(Location);
+        exit(true);
+      end;
+
+      if Location.Code <> LocationCode then
+        if not Location.GET(LocationCode) then
+          exit(false);
+
+      if Location."Bin Mandatory" and not Location."Directed Put-away and Pick" then begin
+        if (Item.GETFILTER("Global Dimension 1 Code") <> '') or
+           (Item.GETFILTER("Global Dimension 2 Code") <> '') or
+           TempDimBufIn.FINDFIRST
+        then
+          ERROR(Text004,Location.FIELDCAPTION("Bin Mandatory"),Location."Bin Mandatory");
+      end;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE UpdateBuffer@12(BinCode@1002 : Code[20];NewQuantity@1001 : Decimal);
+    VAR
+      DimEntryNo@1000 : Integer;
+    BEGIN
+      with QuantityOnHandBuffer do begin
+        if not HasNewQuantity(NewQuantity) then
+          exit;
+        if BinCode = '' then begin
+          if ColumnDim <> '' then
+            TempDimBufIn.SETRANGE("Entry No.","Item Ledger Entry"."Dimension Set ID");
+          DimEntryNo := DimBufMgt.FindDimensions(TempDimBufIn);
+          if DimEntryNo = 0 then
+            DimEntryNo := DimBufMgt.InsertDimensions(TempDimBufIn);
+        end;
+        if RetrieveBuffer(BinCode,DimEntryNo) then begin
+          Quantity := Quantity + NewQuantity;
+          MODIFY;
+        end else begin
+          Quantity := NewQuantity;
+          INSERT;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE RetrieveBuffer@7(BinCode@1000 : Code[20];DimEntryNo@1001 : Integer) : Boolean;
+    BEGIN
+      with QuantityOnHandBuffer do begin
+        RESET;
+        "Item No." := "Item Ledger Entry"."Item No.";
+        "Variant Code" := "Item Ledger Entry"."Variant Code";
+        "Location Code" := "Item Ledger Entry"."Location Code";
+        "Dimension Entry No." := DimEntryNo;
+        "Bin Code" := BinCode;
+        exit(FIND);
+      end;
+    END;
+
+    LOCAL PROCEDURE HasNewQuantity@22(NewQuantity@1000 : Decimal) : Boolean;
+    BEGIN
+      exit((NewQuantity <> 0) or ZeroQty);
+    END;
+
+    LOCAL PROCEDURE ItemBinLocationIsCalculated@18(BinCode@1000 : Code[20]) : Boolean;
+    BEGIN
+      with QuantityOnHandBuffer do begin
+        RESET;
+        SETRANGE("Item No.","Item Ledger Entry"."Item No.");
+        SETRANGE("Variant Code","Item Ledger Entry"."Variant Code");
+        SETRANGE("Location Code","Item Ledger Entry"."Location Code");
+        SETRANGE("Bin Code",BinCode);
+        exit(FIND('-'));
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetSkipDim@8(NewSkipDim@1000 : Boolean);
+    BEGIN
+      SkipDim := NewSkipDim;
+    END;
+
+    LOCAL PROCEDURE UpdateQuantityOnHandBuffer@13(ItemNo@1000 : Code[20]);
+    VAR
+      Location@1001 : Record Location;
+    BEGIN
+      QuantityOnHandBuffer.SETRANGE("Item No.",ItemNo);
+      if QuantityOnHandBuffer.ISEMPTY then begin
+        Item.COPYFILTER("Location Filter",Location.Code);
+        Location.SETRANGE("Use As In-Transit",false);
+        if (Item.GETFILTER("Location Filter") <> '') and Location.FINDSET then
+          repeat
+            InsertQuantityOnHandBuffer(ItemNo,Location.Code);
+          until Location.NEXT = 0
+        else
+          InsertQuantityOnHandBuffer(ItemNo,'');
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcPhysInvQtyAndInsertItemJnlLine@9();
+    BEGIN
+      with QuantityOnHandBuffer do begin
+        RESET;
+        if FINDSET then begin
+          repeat
+            PosQty := 0;
+            NegQty := 0;
+
+            GetLocation("Location Code");
+            if Location."Directed Put-away and Pick" then
+              CalcWhseQty(Location."Adjustment Bin Code",PosQty,NegQty);
+
+            if (NegQty - Quantity <> Quantity - PosQty) or ItemTrackingSplit then begin
+              if PosQty = Quantity then
+                PosQty := 0;
+              if (PosQty <> 0) or AdjustPosQty then
+                InsertItemJnlLine(
+                  "Item No.","Variant Code","Dimension Entry No.",
+                  "Bin Code",Quantity,PosQty);
+
+              if NegQty = Quantity then
+                NegQty := 0;
+              if NegQty <> 0 then begin
+                if ((PosQty <> 0) or AdjustPosQty) and not ItemTrackingSplit then begin
+                  NegQty := NegQty - Quantity;
+                  Quantity := 0;
+                  ZeroQty := true;
+                end;
+                if NegQty = -Quantity then begin
+                  NegQty := 0;
+                  AdjustPosQty := true;
+                end;
+                InsertItemJnlLine(
+                  "Item No.","Variant Code","Dimension Entry No.",
+                  "Bin Code",Quantity,NegQty);
+
+                ZeroQty := ZeroQtySave;
+              end;
+            end else begin
+              PosQty := 0;
+              NegQty := 0;
+            end;
+
+            if (PosQty = 0) and (NegQty = 0) and not AdjustPosQty then
+              InsertItemJnlLine(
+                "Item No.","Variant Code","Dimension Entry No.",
+                "Bin Code",Quantity,Quantity);
+          until NEXT = 0;
+          DELETEALL;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateDimFromItemDefault@17() DimEntryNo : Integer;
+    VAR
+      DefaultDimension@1000 : Record "Default Dimension";
+    BEGIN
+      with DefaultDimension do begin
+        SETRANGE("No.",QuantityOnHandBuffer."Item No.");
+        SETRANGE("Table ID",DATABASE::Item);
+        SETFILTER("Dimension Value Code",'<>%1','');
+        if FINDSET then
+          repeat
+            InsertDim(DATABASE::Item,0,"Dimension Code","Dimension Value Code");
+          until NEXT = 0;
+      end;
+
+      DimEntryNo := DimBufMgt.InsertDimensions(TempDimBufIn);
+      TempDimBufIn.SETRANGE("Table ID",DATABASE::Item);
+      TempDimBufIn.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE InsertDim@56(TableID@1000 : Integer;EntryNo@1001 : Integer;DimCode@1002 : Code[20];DimValueCode@1003 : Code[20]);
+    BEGIN
+      with TempDimBufIn do begin
+        INIT;
+        "Table ID" := TableID;
+        "Entry No." := EntryNo;
+        "Dimension Code" := DimCode;
+        "Dimension Value Code" := DimValueCode;
+        if INSERT then;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

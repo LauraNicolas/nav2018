@@ -1,0 +1,1396 @@
+OBJECT Codeunit 1255 Match Bank Payments
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Bank Acc. Reconciliation Line";
+    Permissions=TableData "Cust. Ledger Entry"=rm,
+                TableData "Vendor Ledger Entry"=rm;
+    OnRun=VAR
+            BankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line";
+          BEGIN
+            BankAccReconciliationLine.COPY(Rec);
+
+            Code(BankAccReconciliationLine);
+
+            Rec := BankAccReconciliationLine;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      MatchSummaryMsg@1000 : TextConst 'ENU=%1 payment lines out of %2 are applied.\\';
+      BankAccount@1009 : Record "Bank Account";
+      TempBankPmtApplRule@1003 : TEMPORARY Record "Bank Pmt. Appl. Rule";
+      TempBankStatementMatchingBuffer@1004 : TEMPORARY Record "Bank Statement Matching Buffer";
+      TextMapperRulesOverridenTxt@1005 : TextConst 'ENU=%1 text mapper rules could be applied. They were overridden because a record with the %2 match confidence was found.';
+      MultipleEntriesWithSilarConfidenceFoundTxt@1006 : TextConst 'ENU=There are %1 ledger entries that this statement line could be applied to with the same confidence.';
+      MultipleStatementLinesWithSameConfidenceFoundTxt@1007 : TextConst 'ENU=There are %1 alternative statement lines that could be applied to the same ledger entry with the same confidence.';
+      OneToManyTempBankStatementMatchingBuffer@1012 : TEMPORARY Record "Bank Statement Matching Buffer";
+      TempBankStmtMultipleMatchLine@1001 : TEMPORARY Record "Bank Stmt Multiple Match Line";
+      TempCustomerLedgerEntryMatchingBuffer@1015 : TEMPORARY Record "Ledger Entry Matching Buffer";
+      TempVendorLedgerEntryMatchingBuffer@1016 : TEMPORARY Record "Ledger Entry Matching Buffer";
+      TempBankAccLedgerEntryMatchingBuffer@1019 : TEMPORARY Record "Ledger Entry Matching Buffer";
+      ApplyEntries@1008 : Boolean;
+      CannotApplyDocumentNoOneToManyApplicationTxt@1011 : TextConst 'ENU=Document No. %1 was not applied because the transaction amount was insufficient.';
+      UsePaymentDiscounts@1018 : Boolean;
+      MinimumMatchScore@1010 : Integer;
+      MatchingStmtLinesMsg@1013 : TextConst 'ENU=The matching of statement lines to open ledger entries is in progress.\\Please wait while the operation is being completed.\\#1####### @2@@@@@@@@@@@@@';
+      ProcessedStmtLinesMsg@1017 : TextConst 'ENU=Processed %1 out of %2 lines.';
+      CreatingAppliedEntriesMsg@1014 : TextConst 'ENU=The application of statement lines to open ledger entries is in progress. Please wait while the operation is being completed.';
+      ProgressBarMsg@1002 : TextConst 'ENU=Please wait while the operation is being completed.';
+      MustChooseAccountErr@1020 : TextConst 'ENU=You must choose an account to transfer the difference to.';
+      LineSplitTxt@1021 : TextConst '@@@=%1 - Difference;ENU=The value in the Transaction Amount field has been reduced by %1. A new line with %1 in the Transaction Amount field has been created.';
+
+    [External]
+    PROCEDURE Code@1(VAR BankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line");
+    BEGIN
+      if BankAccReconciliationLine.ISEMPTY then
+        exit;
+
+      MapLedgerEntriesToStatementLines(BankAccReconciliationLine);
+
+      if ApplyEntries then
+        ApplyLedgerEntriesToStatementLines(BankAccReconciliationLine);
+    END;
+
+    LOCAL PROCEDURE ApplyLedgerEntriesToStatementLines@46(VAR BankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line");
+    VAR
+      BankAccReconciliation@1002 : Record "Bank Acc. Reconciliation";
+      Window@1000 : Dialog;
+    BEGIN
+      Window.OPEN(CreatingAppliedEntriesMsg);
+      BankAccReconciliation.GET(
+        BankAccReconciliationLine."Statement Type",BankAccReconciliationLine."Bank Account No.",
+        BankAccReconciliationLine."Statement No.");
+
+      DeleteAppliedPaymentEntries(BankAccReconciliation);
+      DeletePaymentMatchDetails(BankAccReconciliation);
+
+      CreateAppliedEntries(BankAccReconciliation);
+      UpdatePaymentMatchDetails(BankAccReconciliationLine);
+      Window.CLOSE;
+
+      ShowMatchSummary(BankAccReconciliation);
+    END;
+
+    LOCAL PROCEDURE MapLedgerEntriesToStatementLines@40(VAR BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line");
+    VAR
+      Window@1003 : Dialog;
+      TotalNoOfLines@1001 : Integer;
+      ProcessedLines@1002 : Integer;
+    BEGIN
+      TempBankStatementMatchingBuffer.RESET;
+      TempBankStatementMatchingBuffer.DELETEALL;
+      TempCustomerLedgerEntryMatchingBuffer.DELETEALL;
+      TempVendorLedgerEntryMatchingBuffer.DELETEALL;
+      TempBankAccLedgerEntryMatchingBuffer.DELETEALL;
+
+      TempBankPmtApplRule.LoadRules;
+      MinimumMatchScore := GetLowestMatchScore;
+
+      BankAccReconciliationLine.SETFILTER("Statement Amount",'<>0');
+      if BankAccReconciliationLine.FINDSET then begin
+        InitializeCustomerLedgerEntriesMatchingBuffer(BankAccReconciliationLine,TempCustomerLedgerEntryMatchingBuffer);
+        InitializeVendorLedgerEntriesMatchingBuffer(BankAccReconciliationLine,TempVendorLedgerEntryMatchingBuffer);
+        InitializeBankAccLedgerEntriesMatchingBuffer(BankAccReconciliationLine,TempBankAccLedgerEntryMatchingBuffer);
+
+        TotalNoOfLines := BankAccReconciliationLine.COUNT;
+        ProcessedLines := 0;
+
+        if ApplyEntries then
+          Window.OPEN(MatchingStmtLinesMsg)
+        else
+          Window.OPEN(ProgressBarMsg);
+
+        repeat
+          FindMatchingEntries(
+            BankAccReconciliationLine,TempCustomerLedgerEntryMatchingBuffer,TempBankStatementMatchingBuffer."Account Type"::Customer);
+          FindMatchingEntries(
+            BankAccReconciliationLine,TempVendorLedgerEntryMatchingBuffer,TempBankStatementMatchingBuffer."Account Type"::Vendor);
+          FindMatchingEntries(
+            BankAccReconciliationLine,
+            TempBankAccLedgerEntryMatchingBuffer,TempBankStatementMatchingBuffer."Account Type"::"Bank Account");
+          FindTextMappings(BankAccReconciliationLine);
+          ProcessedLines += 1;
+
+          if ApplyEntries then begin
+            Window.UPDATE(1,STRSUBSTNO(ProcessedStmtLinesMsg,ProcessedLines,TotalNoOfLines));
+            Window.UPDATE(2,ROUND(ProcessedLines / TotalNoOfLines * 10000,1));
+          end;
+        until BankAccReconciliationLine.NEXT = 0;
+
+        UpdateOneToManyMatches(BankAccReconciliationLine);
+
+        Window.CLOSE;
+      end;
+    END;
+
+    [External]
+    PROCEDURE RerunTextMapper@14(BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line");
+    VAR
+      AppliedPaymentEntry@1001 : Record "Applied Payment Entry";
+      BankAccReconciliation@1002 : Record "Bank Acc. Reconciliation";
+    BEGIN
+      if BankAccReconciliationLine.ISEMPTY then
+        exit;
+
+      BankAccReconciliationLine.SETRANGE("Statement Type",BankAccReconciliationLine."Statement Type"::"Payment Application");
+      BankAccReconciliationLine.SETRANGE("Bank Account No.",BankAccReconciliationLine."Bank Account No.");
+      BankAccReconciliationLine.SETRANGE("Statement No.",BankAccReconciliationLine."Statement No.");
+      BankAccReconciliationLine.SETFILTER("Match Confidence",'<>%1 & <>%2',
+        BankAccReconciliationLine."Match Confidence"::Accepted,BankAccReconciliationLine."Match Confidence"::High);
+
+      if BankAccReconciliationLine.FINDSET then begin
+        BankAccReconciliation.GET(
+          BankAccReconciliationLine."Statement Type",BankAccReconciliationLine."Bank Account No.",
+          BankAccReconciliationLine."Statement No.");
+        repeat
+          SetFilterToBankAccReconciliation(AppliedPaymentEntry,BankAccReconciliationLine);
+          if FindTextMappings(BankAccReconciliationLine) then begin
+            BankAccReconciliationLine.RejectAppliedPayment;
+            CreateAppliedEntries(BankAccReconciliation);
+          end;
+        until BankAccReconciliationLine.NEXT = 0;
+
+        // Update match details for lines matched by text mapper
+        BankAccReconciliationLine.SETRANGE(
+          "Match Confidence",BankAccReconciliationLine."Match Confidence"::"High - Text-to-Account Mapping");
+        UpdatePaymentMatchDetails(BankAccReconciliationLine);
+      end;
+    END;
+
+    [External]
+    PROCEDURE TransferDiffToAccount@50(BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line";VAR TempGenJournalLine@1001 : TEMPORARY Record "Gen. Journal Line");
+    VAR
+      BankAccReconciliation@1002 : Record "Bank Acc. Reconciliation";
+      TempBankPmtApplRule@1004 : TEMPORARY Record "Bank Pmt. Appl. Rule";
+      Score@1005 : Integer;
+      Difference@1006 : Decimal;
+      TransactionDate@1008 : Date;
+      LineSplitMsg@1003 : Text;
+      ParentLineNo@1007 : Integer;
+      TransactionID@1009 : Text[50];
+    BEGIN
+      if BankAccReconciliationLine.ISEMPTY or (BankAccReconciliationLine.Difference = 0) then
+        exit;
+
+      TempGenJournalLine.Amount := BankAccReconciliationLine.Difference;
+      TempGenJournalLine.Description := BankAccReconciliationLine.Description;
+      if not TempGenJournalLine.INSERT then
+        TempGenJournalLine.MODIFY;
+
+      if PAGE.RUNMODAL(PAGE::"Transfer Difference to Account",TempGenJournalLine) = ACTION::LookupOK then begin
+        if TempGenJournalLine."Account No." = '' then
+          ERROR(MustChooseAccountErr);
+
+        if BankAccReconciliationLine."Statement Amount" <> BankAccReconciliationLine.Difference then begin
+          ParentLineNo := GetParentLineNo(BankAccReconciliationLine);
+          Difference := BankAccReconciliationLine.Difference;
+          LineSplitMsg := STRSUBSTNO(LineSplitTxt,Difference);
+          TransactionDate := BankAccReconciliationLine."Transaction Date";
+          TransactionID := BankAccReconciliationLine."Transaction ID";
+          RevertAcceptedPmtToleranceFromAppliedEntries(BankAccReconciliationLine,ABS(Difference));
+          BankAccReconciliationLine."Statement Amount" := BankAccReconciliationLine."Applied Amount";
+          BankAccReconciliationLine.Difference := 0;
+          BankAccReconciliationLine.MODIFY;
+
+          BankAccReconciliationLine.INIT;
+          BankAccReconciliationLine."Statement Line No." := GetAvailableSplitLineNo(BankAccReconciliationLine,ParentLineNo);
+          BankAccReconciliationLine."Parent Line No." := ParentLineNo;
+          BankAccReconciliationLine.Description := TempGenJournalLine.Description;
+          BankAccReconciliationLine."Transaction Text" := TempGenJournalLine.Description;
+          BankAccReconciliationLine."Transaction Date" := TransactionDate;
+          BankAccReconciliationLine."Statement Amount" := Difference;
+          BankAccReconciliationLine.Type := BankAccReconciliationLine.Type::Difference;
+          BankAccReconciliationLine."Transaction ID" := TransactionID;
+          BankAccReconciliationLine.INSERT;
+        end;
+
+        BankAccReconciliation.GET(
+          BankAccReconciliationLine."Statement Type",BankAccReconciliationLine."Bank Account No.",
+          BankAccReconciliationLine."Statement No.");
+
+        Score := TempBankPmtApplRule.GetTextMapperScore;
+        TempBankStatementMatchingBuffer.AddMatchCandidate(
+          BankAccReconciliationLine."Statement Line No.",-1,
+          Score,TempGenJournalLine."Account Type",TempGenJournalLine."Account No.");
+        CreateAppliedEntries(BankAccReconciliation);
+
+        BankAccReconciliationLine.SetManualApplication;
+        BankAccReconciliationLine.SETRANGE("Statement Type",BankAccReconciliationLine."Statement Type"::"Payment Application");
+        BankAccReconciliationLine.SETRANGE("Bank Account No.",BankAccReconciliationLine."Bank Account No.");
+        BankAccReconciliationLine.SETRANGE("Statement No.",BankAccReconciliationLine."Statement No.");
+        BankAccReconciliationLine.SETRANGE("Statement Line No.",BankAccReconciliationLine."Statement Line No.");
+        UpdatePaymentMatchDetails(BankAccReconciliationLine);
+        if LineSplitMsg <> '' then
+          MESSAGE(LineSplitMsg);
+      end;
+    END;
+
+    [External]
+    PROCEDURE MatchSingleLineCustomer@7(VAR BankPmtApplRule@1001 : Record "Bank Pmt. Appl. Rule";BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";AppliesToEntryNo@1000 : Integer;VAR NoOfLedgerEntriesWithinTolerance@1003 : Integer;VAR NoOfLedgerEntriesOutsideTolerance@1004 : Integer);
+    VAR
+      MinAmount@1007 : Decimal;
+      MaxAmount@1006 : Decimal;
+      AccountNo@1005 : Code[20];
+    BEGIN
+      ApplyEntries := false;
+      InitializeCustomerLedgerEntriesMatchingBuffer(BankAccReconciliationLine,TempCustomerLedgerEntryMatchingBuffer);
+      if TempCustomerLedgerEntryMatchingBuffer.GET(AppliesToEntryNo,TempCustomerLedgerEntryMatchingBuffer."Account Type"::Customer) then;
+
+      FindMatchingEntry(
+        TempCustomerLedgerEntryMatchingBuffer,BankAccReconciliationLine,TempBankStatementMatchingBuffer."Account Type"::Customer,
+        BankPmtApplRule);
+
+      AccountNo := TempCustomerLedgerEntryMatchingBuffer."Account No.";
+      BankAccReconciliationLine.GetAmountRangeForTolerance(MinAmount,MaxAmount);
+      TempCustomerLedgerEntryMatchingBuffer.RESET;
+      TempCustomerLedgerEntryMatchingBuffer.SETRANGE("Account No.",AccountNo);
+      NoOfLedgerEntriesWithinTolerance :=
+        TempCustomerLedgerEntryMatchingBuffer.GetNoOfLedgerEntriesWithinRange(
+          MinAmount,MaxAmount,BankAccReconciliationLine."Transaction Date",UsePaymentDiscounts);
+      NoOfLedgerEntriesOutsideTolerance :=
+        TempCustomerLedgerEntryMatchingBuffer.GetNoOfLedgerEntriesOutsideRange(
+          MinAmount,MaxAmount,BankAccReconciliationLine."Transaction Date",UsePaymentDiscounts);
+    END;
+
+    [External]
+    PROCEDURE MatchSingleLineVendor@19(VAR BankPmtApplRule@1001 : Record "Bank Pmt. Appl. Rule";BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";AppliesToEntryNo@1000 : Integer;VAR NoOfLedgerEntriesWithinTolerance@1005 : Integer;VAR NoOfLedgerEntriesOutsideTolerance@1006 : Integer);
+    VAR
+      MinAmount@1004 : Decimal;
+      MaxAmount@1003 : Decimal;
+      AccountNo@1007 : Code[20];
+    BEGIN
+      ApplyEntries := false;
+      InitializeVendorLedgerEntriesMatchingBuffer(BankAccReconciliationLine,TempVendorLedgerEntryMatchingBuffer);
+      if not TempVendorLedgerEntryMatchingBuffer.GET(AppliesToEntryNo,TempVendorLedgerEntryMatchingBuffer."Account Type"::Vendor) then;
+
+      FindMatchingEntry(
+        TempVendorLedgerEntryMatchingBuffer,BankAccReconciliationLine,TempBankStatementMatchingBuffer."Account Type"::Vendor,
+        BankPmtApplRule);
+
+      AccountNo := TempVendorLedgerEntryMatchingBuffer."Account No.";
+      BankAccReconciliationLine.GetAmountRangeForTolerance(MinAmount,MaxAmount);
+      TempVendorLedgerEntryMatchingBuffer.RESET;
+      TempVendorLedgerEntryMatchingBuffer.SETRANGE("Account No.",AccountNo);
+
+      NoOfLedgerEntriesWithinTolerance :=
+        TempVendorLedgerEntryMatchingBuffer.GetNoOfLedgerEntriesWithinRange(
+          MinAmount,MaxAmount,BankAccReconciliationLine."Transaction Date",UsePaymentDiscounts);
+      NoOfLedgerEntriesOutsideTolerance :=
+        TempVendorLedgerEntryMatchingBuffer.GetNoOfLedgerEntriesOutsideRange(
+          MinAmount,MaxAmount,BankAccReconciliationLine."Transaction Date",UsePaymentDiscounts);
+    END;
+
+    [External]
+    PROCEDURE MatchSingleLineBankAccountLedgerEntry@48(VAR BankPmtApplRule@1001 : Record "Bank Pmt. Appl. Rule";BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";AppliesToEntryNo@1000 : Integer;VAR NoOfLedgerEntriesWithinTolerance@1005 : Integer;VAR NoOfLedgerEntriesOutsideTolerance@1006 : Integer);
+    VAR
+      MinAmount@1004 : Decimal;
+      MaxAmount@1003 : Decimal;
+      AccountNo@1007 : Code[20];
+    BEGIN
+      ApplyEntries := false;
+      InitializeBankAccLedgerEntriesMatchingBuffer(BankAccReconciliationLine,TempBankAccLedgerEntryMatchingBuffer);
+      with TempBankAccLedgerEntryMatchingBuffer do
+        if not GET(AppliesToEntryNo,"Account Type"::"Bank Account") then;
+
+      FindMatchingEntry(
+        TempBankAccLedgerEntryMatchingBuffer,BankAccReconciliationLine,TempBankStatementMatchingBuffer."Account Type"::"Bank Account",
+        BankPmtApplRule);
+
+      AccountNo := TempBankAccLedgerEntryMatchingBuffer."Account No.";
+      BankAccReconciliationLine.GetAmountRangeForTolerance(MinAmount,MaxAmount);
+      TempBankAccLedgerEntryMatchingBuffer.RESET;
+      TempBankAccLedgerEntryMatchingBuffer.SETRANGE("Account No.",AccountNo);
+
+      NoOfLedgerEntriesWithinTolerance :=
+        TempBankAccLedgerEntryMatchingBuffer.GetNoOfLedgerEntriesWithinRange(
+          MinAmount,MaxAmount,BankAccReconciliationLine."Transaction Date",false);
+      NoOfLedgerEntriesOutsideTolerance :=
+        TempBankAccLedgerEntryMatchingBuffer.GetNoOfLedgerEntriesOutsideRange(
+          MinAmount,MaxAmount,BankAccReconciliationLine."Transaction Date",false);
+    END;
+
+    LOCAL PROCEDURE FindMatchingEntries@8(VAR TempBankAccReconciliationLine@1001 : TEMPORARY Record "Bank Acc. Reconciliation Line";VAR TempLedgerEntryMatchingBuffer@1003 : TEMPORARY Record "Ledger Entry Matching Buffer";AccountType@1000 : Option);
+    VAR
+      BankPmtApplRule@1002 : Record "Bank Pmt. Appl. Rule";
+    BEGIN
+      TempLedgerEntryMatchingBuffer.RESET;
+      if TempLedgerEntryMatchingBuffer.FINDFIRST then
+        repeat
+          FindMatchingEntry(TempLedgerEntryMatchingBuffer,TempBankAccReconciliationLine,AccountType,BankPmtApplRule);
+        until TempLedgerEntryMatchingBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindMatchingEntry@10(TempLedgerEntryMatchingBuffer@1004 : TEMPORARY Record "Ledger Entry Matching Buffer";VAR BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line";AccountType@1003 : Option;VAR BankPmtApplRule@1002 : Record "Bank Pmt. Appl. Rule");
+    VAR
+      Score@1001 : Integer;
+      RemainingAmount@1005 : Decimal;
+    BEGIN
+      if CanEntriesMatch(
+           BankAccReconciliationLine,TempLedgerEntryMatchingBuffer."Remaining Amount",TempLedgerEntryMatchingBuffer."Posting Date")
+      then begin
+        RelatedPartyMatching(BankPmtApplRule,TempLedgerEntryMatchingBuffer,BankAccReconciliationLine,AccountType);
+
+        if AccountType <> TempBankStatementMatchingBuffer."Account Type"::"Bank Account" then
+          DocumentMatching(BankPmtApplRule,BankAccReconciliationLine,
+            TempLedgerEntryMatchingBuffer."Document No.",TempLedgerEntryMatchingBuffer."External Document No.")
+        else
+          DocumentMatchingForBankLedgerEntry(BankPmtApplRule,BankAccReconciliationLine,TempLedgerEntryMatchingBuffer);
+
+        RemainingAmount := TempLedgerEntryMatchingBuffer.GetApplicableRemainingAmount(BankAccReconciliationLine,UsePaymentDiscounts);
+        AmountInclToleranceMatching(
+          BankPmtApplRule,BankAccReconciliationLine,AccountType,RemainingAmount);
+
+        Score := TempBankPmtApplRule.GetBestMatchScore(BankPmtApplRule);
+
+        if Score >= MinimumMatchScore then
+          TempBankStatementMatchingBuffer.AddMatchCandidate(
+            BankAccReconciliationLine."Statement Line No.",TempLedgerEntryMatchingBuffer."Entry No.",
+            Score,AccountType,
+            TempLedgerEntryMatchingBuffer."Account No.");
+
+        if BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" = BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::Yes then begin
+          TempBankStatementMatchingBuffer.InsertOrUpdateOneToManyRule(
+            TempLedgerEntryMatchingBuffer,
+            BankAccReconciliationLine."Statement Line No.",
+            BankPmtApplRule."Related Party Matched",AccountType,
+            RemainingAmount);
+
+          TempBankStmtMultipleMatchLine.InsertLine(
+            TempLedgerEntryMatchingBuffer,
+            BankAccReconciliationLine."Statement Line No.",AccountType);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE InitializeCustomerLedgerEntriesMatchingBuffer@23(VAR BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line";VAR TempLedgerEntryMatchingBuffer@1003 : TEMPORARY Record "Ledger Entry Matching Buffer");
+    VAR
+      CustLedgerEntry@1001 : Record "Cust. Ledger Entry";
+      GeneralLedgerSetup@1004 : Record "General Ledger Setup";
+      SalesReceivablesSetup@1002 : Record "Sales & Receivables Setup";
+    BEGIN
+      BankAccount.GET(BankAccReconciliationLine."Bank Account No.");
+      SalesReceivablesSetup.GET;
+
+      CustLedgerEntry.SETRANGE(Open,true);
+      CustLedgerEntry.SETFILTER("Document Type",'%1|%2|%3|%4|%5',
+        CustLedgerEntry."Document Type"::" ",
+        CustLedgerEntry."Document Type"::Invoice,
+        CustLedgerEntry."Document Type"::"Credit Memo",
+        CustLedgerEntry."Document Type"::"Finance Charge Memo",
+        CustLedgerEntry."Document Type"::Reminder);
+
+      if BankAccount.IsInLocalCurrency then begin
+        CustLedgerEntry.SETAUTOCALCFIELDS("Remaining Amt. (LCY)");
+        if SalesReceivablesSetup."Appln. between Currencies" = SalesReceivablesSetup."Appln. between Currencies"::None then begin
+          GeneralLedgerSetup.GET;
+          CustLedgerEntry.SETFILTER("Currency Code",'=%1|=%2','',GeneralLedgerSetup.GetCurrencyCode(''));
+        end;
+      end else begin
+        CustLedgerEntry.SETAUTOCALCFIELDS("Remaining Amount");
+        CustLedgerEntry.SETRANGE("Currency Code",BankAccount."Currency Code");
+      end;
+
+      if CustLedgerEntry.FINDSET then
+        repeat
+          TempLedgerEntryMatchingBuffer.InsertFromCustomerLedgerEntry(
+            CustLedgerEntry,BankAccount.IsInLocalCurrency,UsePaymentDiscounts);
+        until CustLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InitializeVendorLedgerEntriesMatchingBuffer@36(VAR BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line";VAR TempLedgerEntryMatchingBuffer@1004 : TEMPORARY Record "Ledger Entry Matching Buffer");
+    VAR
+      VendorLedgerEntry@1001 : Record "Vendor Ledger Entry";
+      GeneralLedgerSetup@1002 : Record "General Ledger Setup";
+      PurchasesPayablesSetup@1003 : Record "Purchases & Payables Setup";
+    BEGIN
+      BankAccount.GET(BankAccReconciliationLine."Bank Account No.");
+      PurchasesPayablesSetup.GET;
+
+      VendorLedgerEntry.SETRANGE(Open,true);
+      VendorLedgerEntry.SETFILTER("Document Type",'%1|%2|%3|%4|%5',
+        VendorLedgerEntry."Document Type"::" ",
+        VendorLedgerEntry."Document Type"::Invoice,
+        VendorLedgerEntry."Document Type"::"Credit Memo",
+        VendorLedgerEntry."Document Type"::"Finance Charge Memo",
+        VendorLedgerEntry."Document Type"::Reminder);
+
+      if BankAccount.IsInLocalCurrency then begin
+        VendorLedgerEntry.SETAUTOCALCFIELDS("Remaining Amt. (LCY)");
+        if PurchasesPayablesSetup."Appln. between Currencies" = PurchasesPayablesSetup."Appln. between Currencies"::None then begin
+          GeneralLedgerSetup.GET;
+          VendorLedgerEntry.SETFILTER("Currency Code",'=%1|=%2','',GeneralLedgerSetup.GetCurrencyCode(''));
+        end;
+      end else begin
+        VendorLedgerEntry.SETAUTOCALCFIELDS("Remaining Amount");
+        VendorLedgerEntry.SETRANGE("Currency Code",BankAccount."Currency Code");
+      end;
+
+      if VendorLedgerEntry.FINDSET then
+        repeat
+          TempLedgerEntryMatchingBuffer.InsertFromVendorLedgerEntry(
+            VendorLedgerEntry,BankAccount.IsInLocalCurrency,UsePaymentDiscounts);
+
+        until VendorLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InitializeBankAccLedgerEntriesMatchingBuffer@12(VAR BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line";VAR TempLedgerEntryMatchingBuffer@1004 : TEMPORARY Record "Ledger Entry Matching Buffer");
+    VAR
+      BankAccLedgerEntry@1001 : Record "Bank Account Ledger Entry";
+      GeneralLedgerSetup@1002 : Record "General Ledger Setup";
+      PurchasesPayablesSetup@1003 : Record "Purchases & Payables Setup";
+    BEGIN
+      BankAccount.GET(BankAccReconciliationLine."Bank Account No.");
+      PurchasesPayablesSetup.GET;
+
+      BankAccLedgerEntry.SETRANGE(Open,true);
+      BankAccLedgerEntry.SETRANGE("Bank Account No.",BankAccReconciliationLine."Bank Account No.");
+
+      if BankAccount.IsInLocalCurrency then
+        if PurchasesPayablesSetup."Appln. between Currencies" = PurchasesPayablesSetup."Appln. between Currencies"::None then begin
+          GeneralLedgerSetup.GET;
+          BankAccLedgerEntry.SETFILTER("Currency Code",'=%1|=%2','',GeneralLedgerSetup.GetCurrencyCode(''));
+        end else
+          BankAccLedgerEntry.SETRANGE("Currency Code",BankAccount."Currency Code");
+
+      if BankAccLedgerEntry.FINDSET then
+        repeat
+          TempLedgerEntryMatchingBuffer.InsertFromBankAccLedgerEntry(BankAccLedgerEntry);
+
+        until BankAccLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindTextMappings@16(VAR BankAccReconciliationLine@1004 : Record "Bank Acc. Reconciliation Line") : Boolean;
+    VAR
+      TextToAccMapping@1000 : Record "Text-to-Account Mapping";
+      BankAccLedgerEntry@1008 : Record "Bank Account Ledger Entry";
+      RecordMatchMgt@1002 : Codeunit "Record Match Mgt.";
+      Nearness@1005 : Integer;
+      Score@1001 : Integer;
+      AccountType@1009 : Option;
+      AccountNo@1003 : Code[20];
+      EntryNo@1006 : Integer;
+      TextMapperMatched@1007 : Boolean;
+    BEGIN
+      TextMapperMatched := false;
+      if TextToAccMapping.FINDSET then
+        repeat
+          Nearness := RecordMatchMgt.CalculateStringNearness(RecordMatchMgt.Trim(TextToAccMapping."Mapping Text"),
+              BankAccReconciliationLine."Transaction Text",STRLEN(TextToAccMapping."Mapping Text"),GetNormalizingFactor);
+
+          case TextToAccMapping."Bal. Source Type" of
+            TextToAccMapping."Bal. Source Type"::"G/L Account":
+              if BankAccReconciliationLine."Statement Amount" >= 0 then
+                AccountNo := TextToAccMapping."Debit Acc. No."
+              else
+                AccountNo := TextToAccMapping."Credit Acc. No.";
+            else // Customer or Vendor
+              AccountNo := TextToAccMapping."Bal. Source No.";
+          end;
+
+          if Nearness >= GetExactMatchTreshold then begin
+            if FindBankAccLedgerEntry(BankAccLedgerEntry,BankAccReconciliationLine,TextToAccMapping,AccountNo) then begin
+              EntryNo := BankAccLedgerEntry."Entry No.";
+              AccountType := TempBankStatementMatchingBuffer."Account Type"::"Bank Account";
+              AccountNo := BankAccLedgerEntry."Bank Account No.";
+            end else begin
+              EntryNo := -TextToAccMapping."Line No."; // mark negative to identify text-mapper
+              AccountType := TextToAccMapping."Bal. Source Type";
+            end;
+
+            Score := TempBankPmtApplRule.GetTextMapperScore;
+            TempBankStatementMatchingBuffer.AddMatchCandidate(
+              BankAccReconciliationLine."Statement Line No.",EntryNo,
+              Score,AccountType,AccountNo);
+            TextMapperMatched := true;
+          end;
+        until TextToAccMapping.NEXT = 0;
+      exit(TextMapperMatched)
+    END;
+
+    LOCAL PROCEDURE FindBankAccLedgerEntry@35(VAR BankAccLedgerEntry@1000 : Record "Bank Account Ledger Entry";BankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line";TextToAccountMapping@1002 : Record "Text-to-Account Mapping";BalAccountNo@1003 : Code[20]) : Boolean;
+    BEGIN
+      with BankAccLedgerEntry do begin
+        SETRANGE("Bank Account No.",BankAccReconciliationLine."Bank Account No.");
+        SETRANGE(Open,true);
+        SETRANGE("Bal. Account Type",TextToAccountMapping."Bal. Source Type");
+        SETRANGE("Bal. Account No.",BalAccountNo);
+        SETRANGE("Remaining Amount",BankAccReconciliationLine."Statement Amount");
+        exit(FINDFIRST);
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateAppliedEntries@28(BankAccReconciliation@1000 : Record "Bank Acc. Reconciliation");
+    VAR
+      BankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line";
+    BEGIN
+      TempBankStatementMatchingBuffer.RESET;
+      TempBankStatementMatchingBuffer.SETCURRENTKEY(Quality,"No. of Entries");
+      TempBankStatementMatchingBuffer.ASCENDING(false);
+
+      TempBankStmtMultipleMatchLine.SETCURRENTKEY("Due Date");
+
+      if TempBankStatementMatchingBuffer.FINDSET then
+        repeat
+          BankAccReconciliationLine.GET(
+            BankAccReconciliation."Statement Type",BankAccReconciliation."Bank Account No.",BankAccReconciliation."Statement No.",
+            TempBankStatementMatchingBuffer."Line No.");
+
+          if not StatementLineAlreadyApplied(TempBankStatementMatchingBuffer,BankAccReconciliationLine) then begin
+            PrepareLedgerEntryForApplication(BankAccReconciliationLine);
+            ApplyRecords(BankAccReconciliationLine,TempBankStatementMatchingBuffer);
+          end;
+        until TempBankStatementMatchingBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ApplyRecords@30(BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line";TempBankStatementMatchingBuffer@1002 : TEMPORARY Record "Bank Statement Matching Buffer") : Boolean;
+    VAR
+      AppliedPaymentEntry@1003 : Record "Applied Payment Entry";
+    BEGIN
+      if TempBankStatementMatchingBuffer.Quality = 0 then
+        exit(false);
+
+      if TempBankStatementMatchingBuffer."One to Many Match" then
+        ApplyOneToMany(BankAccReconciliationLine,TempBankStatementMatchingBuffer)
+      else begin
+        if EntryAlreadyApplied(TempBankStatementMatchingBuffer,BankAccReconciliationLine,TempBankStatementMatchingBuffer."Entry No.")
+        then
+          if not CanApplyManyToOne(TempBankStatementMatchingBuffer,BankAccReconciliationLine) then
+            exit(false);
+
+        AppliedPaymentEntry.ApplyFromBankStmtMatchingBuf(BankAccReconciliationLine,TempBankStatementMatchingBuffer,
+          BankAccReconciliationLine."Statement Amount",TempBankStatementMatchingBuffer."Entry No.");
+      end;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE ApplyOneToMany@18(BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line";TempBankStatementMatchingBuffer@1001 : TEMPORARY Record "Bank Statement Matching Buffer");
+    VAR
+      PaymentMatchingDetails@1003 : Record "Payment Matching Details";
+      AppliedPaymentEntry@1002 : Record "Applied Payment Entry";
+    BEGIN
+      TempBankStmtMultipleMatchLine.SETRANGE("Line No.",TempBankStatementMatchingBuffer."Line No.");
+      TempBankStmtMultipleMatchLine.SETRANGE("Account Type",TempBankStatementMatchingBuffer."Account Type");
+      TempBankStmtMultipleMatchLine.SETRANGE("Account No.",TempBankStatementMatchingBuffer."Account No.");
+      TempBankStmtMultipleMatchLine.FINDSET;
+
+      repeat
+        AppliedPaymentEntry.TransferFromBankAccReconLine(BankAccReconciliationLine);
+        if AppliedPaymentEntry.GetStmtLineRemAmtToApply = 0 then
+          PaymentMatchingDetails.CreatePaymentMatchingDetail(BankAccReconciliationLine,
+            STRSUBSTNO(CannotApplyDocumentNoOneToManyApplicationTxt,TempBankStmtMultipleMatchLine."Document No."))
+        else begin
+          CLEAR(AppliedPaymentEntry);
+          if not EntryAlreadyApplied(
+               TempBankStatementMatchingBuffer,BankAccReconciliationLine,TempBankStmtMultipleMatchLine."Entry No.")
+          then
+            AppliedPaymentEntry.ApplyFromBankStmtMatchingBuf(BankAccReconciliationLine,TempBankStatementMatchingBuffer,
+              BankAccReconciliationLine."Statement Amount",TempBankStmtMultipleMatchLine."Entry No.")
+        end;
+      until TempBankStmtMultipleMatchLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CanEntriesMatch@17(BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";Amount@1003 : Decimal;EntryPostingDate@1004 : Date) : Boolean;
+    BEGIN
+      if not ApplyEntries then
+        exit(true);
+
+      if BankAccReconciliationLine."Statement Amount" * Amount < 0 then
+        exit(false);
+
+      if ApplyEntries then begin
+        if BankAccReconciliationLine."Transaction Date" < EntryPostingDate then
+          exit(false);
+      end;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CanApplyManyToOne@6(TempBankStatementMatchingBuffer@1003 : TEMPORARY Record "Bank Statement Matching Buffer";TempBankAccReconciliationLine@1001 : TEMPORARY Record "Bank Acc. Reconciliation Line") : Boolean;
+    VAR
+      AppliedPaymentEntry@1000 : Record "Applied Payment Entry";
+      HasPositiveApplications@1004 : Boolean;
+      HasNegativeApplications@1005 : Boolean;
+    BEGIN
+      // Many to one application is possbile if previous applied are for same Account
+      SetFilterToRelatedApplications(AppliedPaymentEntry,TempBankStatementMatchingBuffer,
+        TempBankAccReconciliationLine);
+      if AppliedPaymentEntry.ISEMPTY then
+        exit(false);
+
+      // Not possible if positive and negative applications already exists
+      AppliedPaymentEntry.SETFILTER("Applied Amount",'>0');
+      HasPositiveApplications := not AppliedPaymentEntry.ISEMPTY;
+      AppliedPaymentEntry.SETFILTER("Applied Amount",'<0');
+      HasNegativeApplications := not AppliedPaymentEntry.ISEMPTY;
+      if HasPositiveApplications and HasNegativeApplications then
+        exit(false);
+
+      // Remaining amount should not be 0
+      exit(GetRemainingAmount(TempBankStatementMatchingBuffer,TempBankAccReconciliationLine) <> 0);
+    END;
+
+    LOCAL PROCEDURE RelatedPartyMatching@32(VAR BankPmtApplRule@1001 : Record "Bank Pmt. Appl. Rule";TempLedgerEntryMatchingBuffer@1003 : TEMPORARY Record "Ledger Entry Matching Buffer";BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";AccountType@1005 : Option);
+    BEGIN
+      case AccountType of
+        TempBankStatementMatchingBuffer."Account Type"::Customer:
+          CustomerMatching(BankPmtApplRule,TempLedgerEntryMatchingBuffer."Account No.",BankAccReconciliationLine,AccountType);
+        TempBankStatementMatchingBuffer."Account Type"::Vendor:
+          VendorMatching(BankPmtApplRule,TempLedgerEntryMatchingBuffer."Account No.",BankAccReconciliationLine,AccountType);
+        TempBankStatementMatchingBuffer."Account Type"::"Bank Account":
+          RelatedPartyMatchingForBankAccLedgEntry(BankPmtApplRule,TempLedgerEntryMatchingBuffer,BankAccReconciliationLine,AccountType);
+      end;
+    END;
+
+    LOCAL PROCEDURE CustomerMatching@39(VAR BankPmtApplRule@1001 : Record "Bank Pmt. Appl. Rule";AccountNo@1003 : Code[20];BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";AccountType@1005 : Option);
+    VAR
+      Customer@1000 : Record Customer;
+    BEGIN
+      if IsCustomerBankAccountMatching(
+           BankAccReconciliationLine."Related-Party Bank Acc. No.",AccountNo)
+      then begin
+        BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::Fully;
+        exit;
+      end;
+
+      Customer.GET(AccountNo);
+      RelatedPartyInfoMatching(BankPmtApplRule,BankAccReconciliationLine,Customer.Name,
+        Customer.Address + Customer."Address 2",Customer.City,AccountType);
+    END;
+
+    LOCAL PROCEDURE VendorMatching@47(VAR BankPmtApplRule@1001 : Record "Bank Pmt. Appl. Rule";AccountNo@1003 : Code[20];BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";AccountType@1005 : Option);
+    VAR
+      Vendor@1000 : Record Vendor;
+    BEGIN
+      Vendor.GET(AccountNo);
+      if IsVendorBankAccountMatching(BankAccReconciliationLine."Related-Party Bank Acc. No.",Vendor."No.") then begin
+        BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::Fully;
+        exit;
+      end;
+
+      RelatedPartyInfoMatching(BankPmtApplRule,BankAccReconciliationLine,Vendor.Name,
+        Vendor.Address + Vendor."Address 2",Vendor.City,AccountType);
+    END;
+
+    LOCAL PROCEDURE RelatedPartyMatchingForBankAccLedgEntry@57(VAR BankPmtApplRule@1003 : Record "Bank Pmt. Appl. Rule";TempLedgerEntryMatchingBuffer@1001 : TEMPORARY Record "Ledger Entry Matching Buffer";BankAccReconciliationLine@1004 : Record "Bank Acc. Reconciliation Line";AccountType@1000 : Option);
+    BEGIN
+      case TempLedgerEntryMatchingBuffer."Bal. Account Type" of
+        TempLedgerEntryMatchingBuffer."Bal. Account Type"::Customer:
+          CustomerMatching(BankPmtApplRule,TempLedgerEntryMatchingBuffer."Bal. Account No.",BankAccReconciliationLine,AccountType);
+        TempLedgerEntryMatchingBuffer."Bal. Account Type"::Vendor:
+          VendorMatching(BankPmtApplRule,TempLedgerEntryMatchingBuffer."Bal. Account No.",BankAccReconciliationLine,AccountType);
+        TempLedgerEntryMatchingBuffer."Bal. Account Type"::"Bank Account",
+        TempLedgerEntryMatchingBuffer."Bal. Account Type"::"G/L Account":
+          BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::No;
+      end;
+    END;
+
+    LOCAL PROCEDURE RelatedPartyInfoMatching@25(VAR BankPmtApplRule@1001 : Record "Bank Pmt. Appl. Rule";BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";Name@1000 : Text[50];Address@1003 : Text[100];City@1007 : Text[30];AccountType@1008 : Option);
+    VAR
+      USTRNameNearness@1009 : Integer;
+      STRNameNearness@1004 : Integer;
+    BEGIN
+      BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::No;
+
+      // If Strutured text present don't look at unstructured text
+      if BankAccReconciliationLine."Related-Party Name" <> '' then begin
+        // Use string nearness as names can be reversed, wrongly capitalized, etc
+        STRNameNearness := GetStringNearness(BankAccReconciliationLine."Related-Party Name",Name);
+        if STRNameNearness >= GetExactMatchTreshold then begin
+          BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::Partially;
+
+          // City and address should fully match
+          if (BankAccReconciliationLine."Related-Party City" = City) and
+             (BankAccReconciliationLine."Related-Party Address" = Address)
+          then begin
+            BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::Fully;
+            exit;
+          end;
+
+          if IsNameUnique(Name,AccountType) then begin
+            BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::Fully;
+            exit;
+          end;
+        end;
+
+        exit;
+      end;
+
+      // Unstructured text is using string nearness since user may shorten the name or mistype
+      USTRNameNearness := GetStringNearness(BankAccReconciliationLine."Transaction Text",Name);
+
+      if USTRNameNearness >= GetExactMatchTreshold then begin
+        BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::Partially;
+        if IsNameUnique(Name,AccountType) then begin
+          BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::Fully;
+          exit;
+        end;
+
+        exit;
+      end;
+
+      if USTRNameNearness >= GetCloseMatchTreshold then
+        BankPmtApplRule."Related Party Matched" := BankPmtApplRule."Related Party Matched"::Partially;
+    END;
+
+    LOCAL PROCEDURE DocumentMatching@41(VAR BankPmtApplRule@1001 : Record "Bank Pmt. Appl. Rule";BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";DocNo@1003 : Code[20];ExtDocNo@1004 : Code[35]);
+    VAR
+      SearchText@1007 : Text;
+    BEGIN
+      BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" := BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::No;
+
+      SearchText := UPPERCASE(BankAccReconciliationLine."Transaction Text" + ' ' +
+          BankAccReconciliationLine."Additional Transaction Info");
+
+      if DocNoMatching(SearchText,DocNo) then begin
+        BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" := BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::Yes;
+        exit;
+      end;
+
+      if DocNoMatching(SearchText,ExtDocNo) then
+        BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" := BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::Yes;
+    END;
+
+    LOCAL PROCEDURE DocumentMatchingForBankLedgerEntry@49(VAR BankPmtApplRule@1001 : Record "Bank Pmt. Appl. Rule";BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";TempLedgerEntryMatchingBuffer@1000 : TEMPORARY Record "Ledger Entry Matching Buffer");
+    VAR
+      CustLedgerEntry@1003 : Record "Cust. Ledger Entry";
+      CustLedgerEntry2@1004 : Record "Cust. Ledger Entry";
+      VendLedgerEntry@1005 : Record "Vendor Ledger Entry";
+      VendLedgerEntry2@1006 : Record "Vendor Ledger Entry";
+      SearchText@1007 : Text;
+    BEGIN
+      BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" := BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::No;
+
+      SearchText := UPPERCASE(BankAccReconciliationLine."Transaction Text" + ' ' +
+          BankAccReconciliationLine."Additional Transaction Info");
+
+      if DocNoMatching(SearchText,TempLedgerEntryMatchingBuffer."Document No.") then begin
+        BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" := BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::Yes;
+        exit;
+      end;
+
+      if DocNoMatching(SearchText,TempLedgerEntryMatchingBuffer."External Document No.") then begin
+        BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" := BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::Yes;
+        exit;
+      end;
+
+      CustLedgerEntry.SETRANGE("Document Type",TempLedgerEntryMatchingBuffer."Document Type");
+      CustLedgerEntry.SETRANGE("Document No.",TempLedgerEntryMatchingBuffer."Document No.");
+      CustLedgerEntry.SETRANGE("Posting Date",TempLedgerEntryMatchingBuffer."Posting Date");
+      if CustLedgerEntry.FINDSET then
+        repeat
+          CustLedgerEntry2.SETRANGE(Open,false);
+          CustLedgerEntry2.SETRANGE("Closed by Entry No.",CustLedgerEntry."Entry No.");
+          if CustLedgerEntry2.FINDFIRST then
+            if DocNoMatching(SearchText,CustLedgerEntry2."Document No.") then begin
+              BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" := BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::Yes;
+              exit;
+            end;
+        until CustLedgerEntry.NEXT = 0;
+
+      VendLedgerEntry.SETRANGE("Document Type",TempLedgerEntryMatchingBuffer."Document Type");
+      VendLedgerEntry.SETRANGE("Document No.",TempLedgerEntryMatchingBuffer."Document No.");
+      VendLedgerEntry.SETRANGE("Posting Date",TempLedgerEntryMatchingBuffer."Posting Date");
+      if VendLedgerEntry.FINDSET then
+        repeat
+          VendLedgerEntry2.SETRANGE(Open,false);
+          VendLedgerEntry2.SETRANGE("Closed by Entry No.",VendLedgerEntry."Entry No.");
+          if VendLedgerEntry2.FINDFIRST then
+            if DocNoMatching(SearchText,VendLedgerEntry2."Document No.") then begin
+              BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" := BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::Yes;
+              exit;
+            end;
+        until VendLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DocNoMatching@15(SearchText@1002 : Text;DocNo@1000 : Code[35]) : Boolean;
+    VAR
+      Position@1001 : Integer;
+    BEGIN
+      if STRLEN(DocNo) < GetMatchLengthTreshold then
+        exit(false);
+
+      Position := STRPOS(SearchText,DocNo);
+
+      case Position of
+        0:
+          exit(false);
+        1:
+          begin
+            if STRLEN(SearchText) = STRLEN(DocNo) then
+              exit(true);
+
+            exit(not IsAlphanumeric(SearchText[Position + STRLEN(DocNo)]));
+          end;
+        else begin
+          if STRLEN(SearchText) < Position + STRLEN(DocNo) then
+            exit(not IsAlphanumeric(SearchText[Position - 1]));
+
+          exit((not IsAlphanumeric(SearchText[Position - 1])) and
+            (not IsAlphanumeric(SearchText[Position + STRLEN(DocNo)])));
+        end;
+      end;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE AmountInclToleranceMatching@53(VAR BankPmtApplRule@1000 : Record "Bank Pmt. Appl. Rule";BankAccReconciliationLine@1003 : Record "Bank Acc. Reconciliation Line";AccountType@1006 : Option;RemainingAmount@1005 : Decimal);
+    VAR
+      NoOfEntries@1004 : Integer;
+      MinAmount@1002 : Decimal;
+      MaxAmount@1001 : Decimal;
+    BEGIN
+      BankAccReconciliationLine.GetAmountRangeForTolerance(MinAmount,MaxAmount);
+      BankPmtApplRule."Amount Incl. Tolerance Matched" := BankPmtApplRule."Amount Incl. Tolerance Matched"::"No Matches";
+
+      if (RemainingAmount < MinAmount) or
+         (RemainingAmount > MaxAmount)
+      then
+        exit;
+
+      NoOfEntries := 0;
+      BankPmtApplRule."Amount Incl. Tolerance Matched" := BankPmtApplRule."Amount Incl. Tolerance Matched"::"Multiple Matches";
+
+      // Check for Multiple Hits for One To Many  matches
+      if BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" =
+         BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::"Yes - Multiple"
+      then begin
+        OneToManyTempBankStatementMatchingBuffer.SETFILTER("Total Remaining Amount",'>=%1&<=%2',MinAmount,MaxAmount);
+        NoOfEntries += OneToManyTempBankStatementMatchingBuffer.COUNT;
+
+        if NoOfEntries > 1 then
+          exit;
+      end;
+
+      // Check is a single match for One to One Matches
+      case AccountType of
+        TempBankStatementMatchingBuffer."Account Type"::Customer:
+          NoOfEntries +=
+            TempCustomerLedgerEntryMatchingBuffer.GetNoOfLedgerEntriesWithinRange(
+              MinAmount,MaxAmount,BankAccReconciliationLine."Transaction Date",UsePaymentDiscounts);
+        TempBankStatementMatchingBuffer."Account Type"::Vendor:
+          NoOfEntries +=
+            TempVendorLedgerEntryMatchingBuffer.GetNoOfLedgerEntriesWithinRange(
+              MinAmount,MaxAmount,BankAccReconciliationLine."Transaction Date",UsePaymentDiscounts);
+        TempBankStatementMatchingBuffer."Account Type"::"Bank Account":
+          NoOfEntries +=
+            TempBankAccLedgerEntryMatchingBuffer.GetNoOfLedgerEntriesWithinRange(
+              MinAmount,MaxAmount,BankAccReconciliationLine."Transaction Date",false);
+      end;
+
+      if NoOfEntries = 1 then
+        BankPmtApplRule."Amount Incl. Tolerance Matched" := BankPmtApplRule."Amount Incl. Tolerance Matched"::"One Match"
+    END;
+
+    LOCAL PROCEDURE GetStringNearness@24(Description@1002 : Text;CustVendValue@1005 : Text) : Integer;
+    VAR
+      RecordMatchMgt@1000 : Codeunit "Record Match Mgt.";
+    BEGIN
+      Description := RecordMatchMgt.Trim(Description);
+
+      exit(RecordMatchMgt.CalculateStringNearness(CustVendValue,Description,GetMatchLengthTreshold,GetNormalizingFactor));
+    END;
+
+    LOCAL PROCEDURE IsCustomerBankAccountMatching@22(ValueFromBankStatement@1002 : Text;CustomerNo@1005 : Code[20]) : Boolean;
+    VAR
+      CustomerBankAccount@1001 : Record "Customer Bank Account";
+    BEGIN
+      ValueFromBankStatement := BankAccountNoWithoutSpecialChars(ValueFromBankStatement);
+      if ValueFromBankStatement = '' then
+        exit(false);
+
+      CustomerBankAccount.SETRANGE("Customer No.",CustomerNo);
+      if CustomerBankAccount.FINDSET then
+        repeat
+          if BankAccountNoWithoutSpecialChars(CustomerBankAccount.GetBankAccountNo) = ValueFromBankStatement then
+            exit(true);
+        until CustomerBankAccount.NEXT = 0;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE IsVendorBankAccountMatching@3(ValueFromBankStatement@1002 : Text;VendorNo@1005 : Code[20]) : Boolean;
+    VAR
+      VendorBankAccount@1003 : Record "Vendor Bank Account";
+    BEGIN
+      ValueFromBankStatement := BankAccountNoWithoutSpecialChars(ValueFromBankStatement);
+      if ValueFromBankStatement = '' then
+        exit(false);
+
+      VendorBankAccount.SETRANGE("Vendor No.",VendorNo);
+      if VendorBankAccount.FINDSET then
+        repeat
+          if BankAccountNoWithoutSpecialChars(VendorBankAccount.GetBankAccountNo) = ValueFromBankStatement then
+            exit(true);
+        until VendorBankAccount.NEXT = 0;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE BankAccountNoWithoutSpecialChars@11(Input@1000 : Text) : Text;
+    BEGIN
+      exit(UPPERCASE(DELCHR(Input,'=',DELCHR(UPPERCASE(Input),'=','ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'))));
+    END;
+
+    LOCAL PROCEDURE StatementLineAlreadyApplied@4(TempBankStatementMatchingBuffer@1001 : TEMPORARY Record "Bank Statement Matching Buffer";TempBankAccReconciliationLine@1002 : TEMPORARY Record "Bank Acc. Reconciliation Line") : Boolean;
+    VAR
+      AppliedPaymentEntry@1000 : Record "Applied Payment Entry";
+    BEGIN
+      SetFilterToBankAccReconciliation(AppliedPaymentEntry,TempBankAccReconciliationLine);
+      AppliedPaymentEntry.SETRANGE("Statement Line No.",TempBankStatementMatchingBuffer."Line No.");
+
+      exit(not AppliedPaymentEntry.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE EntryAlreadyApplied@9(TempBankStatementMatchingBuffer@1001 : TEMPORARY Record "Bank Statement Matching Buffer";TempBankAccReconciliationLine@1002 : TEMPORARY Record "Bank Acc. Reconciliation Line";EntryNo@1003 : Integer) : Boolean;
+    VAR
+      AppliedPaymentEntry@1000 : Record "Applied Payment Entry";
+    BEGIN
+      SetFilterToBankAccReconciliation(AppliedPaymentEntry,TempBankAccReconciliationLine);
+      AppliedPaymentEntry.SETRANGE("Account Type",TempBankStatementMatchingBuffer."Account Type");
+      AppliedPaymentEntry.SETRANGE("Applies-to Entry No.",EntryNo);
+
+      exit(not AppliedPaymentEntry.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE SetFilterToBankAccReconciliation@13(VAR AppliedPaymentEntry@1000 : Record "Applied Payment Entry";TempBankAccReconciliationLine@1001 : TEMPORARY Record "Bank Acc. Reconciliation Line");
+    BEGIN
+      AppliedPaymentEntry.FilterAppliedPmtEntry(TempBankAccReconciliationLine);
+      AppliedPaymentEntry.SETRANGE("Statement Line No.");
+    END;
+
+    LOCAL PROCEDURE SetFilterToRelatedApplications@2(VAR AppliedPaymentEntry@1000 : Record "Applied Payment Entry";TempBankStatementMatchingBuffer@1002 : TEMPORARY Record "Bank Statement Matching Buffer";TempBankAccReconciliationLine@1001 : TEMPORARY Record "Bank Acc. Reconciliation Line");
+    BEGIN
+      SetFilterToBankAccReconciliation(AppliedPaymentEntry,TempBankAccReconciliationLine);
+      AppliedPaymentEntry.SETRANGE("Account Type",TempBankStatementMatchingBuffer."Account Type");
+      AppliedPaymentEntry.SETRANGE("Account No.",TempBankStatementMatchingBuffer."Account No.");
+      AppliedPaymentEntry.SETRANGE("Applies-to Entry No.",TempBankStatementMatchingBuffer."Entry No.");
+    END;
+
+    LOCAL PROCEDURE GetRemainingAmount@33(TempBankStatementMatchingBuffer@1001 : TEMPORARY Record "Bank Statement Matching Buffer";TempBankAccReconciliationLine@1000 : TEMPORARY Record "Bank Acc. Reconciliation Line") : Decimal;
+    VAR
+      TempAppliedPaymentEntry@1002 : TEMPORARY Record "Applied Payment Entry";
+    BEGIN
+      TempAppliedPaymentEntry.TransferFromBankAccReconLine(TempBankAccReconciliationLine);
+      TempAppliedPaymentEntry."Account Type" := TempBankStatementMatchingBuffer."Account Type";
+      TempAppliedPaymentEntry."Account No." := TempBankStatementMatchingBuffer."Account No.";
+      TempAppliedPaymentEntry."Applies-to Entry No." := TempBankStatementMatchingBuffer."Entry No.";
+
+      exit(TempAppliedPaymentEntry.GetRemAmt - TempAppliedPaymentEntry.GetAmtAppliedToOtherStmtLines);
+    END;
+
+    LOCAL PROCEDURE ShowMatchSummary@5(BankAccReconciliation@1000 : Record "Bank Acc. Reconciliation");
+    VAR
+      BankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line";
+      MatchedCount@1003 : Integer;
+      TotalCount@1004 : Integer;
+      FinalText@1006 : Text;
+    BEGIN
+      BankAccReconciliationLine.SETRANGE("Statement Type",BankAccReconciliation."Statement Type"::"Payment Application");
+      BankAccReconciliationLine.SETRANGE("Bank Account No.",BankAccReconciliation."Bank Account No.");
+      BankAccReconciliationLine.SETRANGE("Statement No.",BankAccReconciliation."Statement No.");
+      TotalCount := BankAccReconciliationLine.COUNT;
+
+      BankAccReconciliationLine.SETFILTER("Applied Entries",'>0');
+      MatchedCount := BankAccReconciliationLine.COUNT;
+
+      FinalText := STRSUBSTNO(MatchSummaryMsg,MatchedCount,TotalCount);
+      MESSAGE(FinalText);
+    END;
+
+    LOCAL PROCEDURE UpdateOneToManyMatches@42(BankAccReconciliationLine@1003 : Record "Bank Acc. Reconciliation Line");
+    BEGIN
+      RemoveInvalidOneToManyMatches;
+      GetOneToManyMatches;
+      ScoreOneToManyMatches(BankAccReconciliationLine);
+    END;
+
+    LOCAL PROCEDURE ScoreOneToManyMatches@74(BankAccReconciliationLine@1005 : Record "Bank Acc. Reconciliation Line");
+    VAR
+      BankPmtApplRule@1003 : Record "Bank Pmt. Appl. Rule";
+      Score@1002 : Integer;
+    BEGIN
+      if TempBankStatementMatchingBuffer.FINDSET then begin
+        repeat
+          BankPmtApplRule."Doc. No./Ext. Doc. No. Matched" := BankPmtApplRule."Doc. No./Ext. Doc. No. Matched"::"Yes - Multiple";
+          BankPmtApplRule."Related Party Matched" := TempBankStatementMatchingBuffer."Related Party Matched";
+          BankAccReconciliationLine.GET(
+            BankAccReconciliationLine."Statement Type",BankAccReconciliationLine."Bank Account No.",
+            BankAccReconciliationLine."Statement No.",TempBankStatementMatchingBuffer."Line No.");
+          AmountInclToleranceMatching(
+            BankPmtApplRule,BankAccReconciliationLine,TempBankStatementMatchingBuffer."Account Type",
+            TempBankStatementMatchingBuffer."Total Remaining Amount");
+
+          Score := TempBankPmtApplRule.GetBestMatchScore(BankPmtApplRule);
+          TempBankStatementMatchingBuffer.Quality := Score;
+          TempBankStatementMatchingBuffer.MODIFY;
+        until TempBankStatementMatchingBuffer.NEXT = 0;
+      end;
+
+      TempBankStatementMatchingBuffer.RESET;
+    END;
+
+    LOCAL PROCEDURE RemoveInvalidOneToManyMatches@75();
+    BEGIN
+      TempBankStatementMatchingBuffer.RESET;
+      TempBankStatementMatchingBuffer.SETRANGE("One to Many Match",true);
+      TempBankStatementMatchingBuffer.SETFILTER("No. of Entries",'=1');
+      TempBankStatementMatchingBuffer.DELETEALL(true);
+      TempBankStatementMatchingBuffer.RESET;
+    END;
+
+    LOCAL PROCEDURE GetOneToManyMatches@51();
+    BEGIN
+      TempBankStatementMatchingBuffer.RESET;
+      TempBankStatementMatchingBuffer.SETRANGE("One to Many Match",true);
+      TempBankStatementMatchingBuffer.SETFILTER("No. of Entries",'>1');
+
+      if TempBankStatementMatchingBuffer.FINDSET then
+        repeat
+          OneToManyTempBankStatementMatchingBuffer := TempBankStatementMatchingBuffer;
+          OneToManyTempBankStatementMatchingBuffer.INSERT(true);
+        until TempBankStatementMatchingBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetExactMatchTreshold@20() : Decimal;
+    BEGIN
+      exit(0.95 * GetNormalizingFactor);
+    END;
+
+    [External]
+    PROCEDURE GetCloseMatchTreshold@21() : Decimal;
+    BEGIN
+      exit(0.65 * GetNormalizingFactor);
+    END;
+
+    LOCAL PROCEDURE GetMatchLengthTreshold@1062() : Decimal;
+    BEGIN
+      exit(4);
+    END;
+
+    [External]
+    PROCEDURE GetNormalizingFactor@1063() : Decimal;
+    BEGIN
+      exit(100);
+    END;
+
+    LOCAL PROCEDURE GetLowestMatchScore@44() : Integer;
+    VAR
+      Score@1000 : Integer;
+    BEGIN
+      if not ApplyEntries then
+        exit(0);
+
+      TempBankPmtApplRule.SETFILTER("Match Confidence",'<>%1',TempBankPmtApplRule."Match Confidence"::None);
+      TempBankPmtApplRule.SETCURRENTKEY(Score);
+      TempBankPmtApplRule.ASCENDING(false);
+      Score := 0;
+      if TempBankPmtApplRule.FINDLAST then
+        Score := TempBankPmtApplRule.Score;
+
+      TempBankPmtApplRule.RESET;
+      exit(Score);
+    END;
+
+    LOCAL PROCEDURE IsNameUnique@31(Name@1000 : Text[50];AccountType@1002 : Option) : Boolean;
+    VAR
+      Customer@1001 : Record Customer;
+      Vendor@1003 : Record Vendor;
+    BEGIN
+      case AccountType of
+        TempBankStatementMatchingBuffer."Account Type"::Customer:
+          begin
+            Customer.SETFILTER(Name,'%1','@*' + Name + '*');
+            exit(Customer.COUNT = 1);
+          end;
+        TempBankStatementMatchingBuffer."Account Type"::Vendor:
+          begin
+            Vendor.SETFILTER(Name,'%1','@*' + Name + '*');
+            exit(Vendor.COUNT = 1);
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE IsAlphanumeric@43(Character@1000 : Char) : Boolean;
+    BEGIN
+      exit((Character in ['0'..'9']) or (Character in ['A'..'Z']) or (Character in ['a'..'z']));
+    END;
+
+    [External]
+    PROCEDURE GetBankStatementMatchingBuffer@29(VAR TempBankStatementMatchingBuffer2@1000 : TEMPORARY Record "Bank Statement Matching Buffer");
+    BEGIN
+      TempBankStatementMatchingBuffer2.COPY(TempBankStatementMatchingBuffer,true);
+      TempBankStatementMatchingBuffer2.RESET;
+    END;
+
+    LOCAL PROCEDURE UpdatePaymentMatchDetails@26(VAR BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line");
+    VAR
+      BankAccReconciliationLine2@1001 : Record "Bank Acc. Reconciliation Line";
+    BEGIN
+      BankAccReconciliationLine2.COPYFILTERS(BankAccReconciliationLine);
+
+      if BankAccReconciliationLine2.FINDSET then
+        repeat
+          BankAccReconciliationLine2.CALCFIELDS("Match Confidence","Match Quality");
+          AddWarningsForTextMapperOverriden(BankAccReconciliationLine2);
+          AddWarningsForStatementCanBeAppliedToMultipleEntries(BankAccReconciliationLine2);
+          AddWarningsForMultipleStatementLinesCouldBeAppliedToEntry(BankAccReconciliationLine2);
+          if BankAccReconciliationLine2.Type <> BankAccReconciliationLine2.Type::Difference then
+            UpdateType(BankAccReconciliationLine2);
+        until BankAccReconciliationLine2.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DeletePaymentMatchDetails@27(BankAccReconciliation@1000 : Record "Bank Acc. Reconciliation");
+    VAR
+      PaymentMatchingDetails@1001 : Record "Payment Matching Details";
+    BEGIN
+      PaymentMatchingDetails.SETRANGE("Statement Type",BankAccReconciliation."Statement Type");
+      PaymentMatchingDetails.SETRANGE("Bank Account No.",BankAccReconciliation."Bank Account No.");
+      PaymentMatchingDetails.SETRANGE("Statement No.",BankAccReconciliation."Statement No.");
+      PaymentMatchingDetails.DELETEALL(true);
+    END;
+
+    LOCAL PROCEDURE DeleteAppliedPaymentEntries@54(BankAccReconciliation@1002 : Record "Bank Acc. Reconciliation");
+    VAR
+      AppliedPaymentEntry@1001 : Record "Applied Payment Entry";
+    BEGIN
+      AppliedPaymentEntry.SETRANGE("Statement Type",BankAccReconciliation."Statement Type");
+      AppliedPaymentEntry.SETRANGE("Bank Account No.",BankAccReconciliation."Bank Account No.");
+      AppliedPaymentEntry.SETRANGE("Statement No.",BankAccReconciliation."Statement No.");
+      AppliedPaymentEntry.DELETEALL(true);
+    END;
+
+    LOCAL PROCEDURE AddWarningsForTextMapperOverriden@37(VAR BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line");
+    VAR
+      PaymentMatchingDetails@1001 : Record "Payment Matching Details";
+      BankPmtApplRule@1002 : Record "Bank Pmt. Appl. Rule";
+    BEGIN
+      if BankAccReconciliationLine."Match Quality" <= BankPmtApplRule.GetTextMapperScore then
+        exit;
+
+      TempBankStatementMatchingBuffer.RESET;
+      TempBankStatementMatchingBuffer.SETRANGE("Line No.",BankAccReconciliationLine."Statement Line No.");
+      TempBankStatementMatchingBuffer.SETRANGE(Quality,BankPmtApplRule.GetTextMapperScore);
+
+      if TempBankStatementMatchingBuffer.COUNT > 0 then
+        PaymentMatchingDetails.CreatePaymentMatchingDetail(BankAccReconciliationLine,
+          STRSUBSTNO(TextMapperRulesOverridenTxt,TempBankStatementMatchingBuffer.COUNT,
+            BankAccReconciliationLine."Match Confidence"));
+    END;
+
+    LOCAL PROCEDURE AddWarningsForStatementCanBeAppliedToMultipleEntries@38(VAR BankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line");
+    VAR
+      PaymentMatchingDetails@1000 : Record "Payment Matching Details";
+      BankPmtApplRule@1002 : Record "Bank Pmt. Appl. Rule";
+      MinRangeValue@1003 : Integer;
+      MaxRangeValue@1004 : Integer;
+    BEGIN
+      if BankAccReconciliationLine."Match Confidence" = BankAccReconciliationLine."Match Confidence"::None then
+        exit;
+
+      if BankAccReconciliationLine."Match Quality" = BankPmtApplRule.GetTextMapperScore then
+        exit;
+
+      TempBankStatementMatchingBuffer.RESET;
+      TempBankStatementMatchingBuffer.SETRANGE("Line No.",BankAccReconciliationLine."Statement Line No.");
+
+      MinRangeValue := BankPmtApplRule.GetLowestScoreInRange(BankAccReconciliationLine."Match Quality");
+      MaxRangeValue := BankPmtApplRule.GetHighestScoreInRange(BankAccReconciliationLine."Match Quality");
+      TempBankStatementMatchingBuffer.SETRANGE(Quality,MinRangeValue,MaxRangeValue);
+
+      if TempBankStatementMatchingBuffer.COUNT > 1 then
+        PaymentMatchingDetails.CreatePaymentMatchingDetail(BankAccReconciliationLine,
+          STRSUBSTNO(MultipleEntriesWithSilarConfidenceFoundTxt,TempBankStatementMatchingBuffer.COUNT));
+    END;
+
+    LOCAL PROCEDURE AddWarningsForMultipleStatementLinesCouldBeAppliedToEntry@34(VAR BankAccReconciliationLine@1001 : Record "Bank Acc. Reconciliation Line");
+    VAR
+      PaymentMatchingDetails@1000 : Record "Payment Matching Details";
+      BankPmtApplRule@1002 : Record "Bank Pmt. Appl. Rule";
+      EntryNo@1005 : Integer;
+      MinRangeValue@1003 : Integer;
+      MaxRangeValue@1004 : Integer;
+    BEGIN
+      if BankAccReconciliationLine."Match Confidence" = BankAccReconciliationLine."Match Confidence"::None then
+        exit;
+
+      if BankAccReconciliationLine."Match Quality" = BankPmtApplRule.GetTextMapperScore then
+        exit;
+
+      TempBankStatementMatchingBuffer.RESET;
+
+      // Get Entry No.
+      TempBankStatementMatchingBuffer.SETRANGE("Line No.",BankAccReconciliationLine."Statement Line No.");
+      TempBankStatementMatchingBuffer.SETRANGE(Quality,BankAccReconciliationLine."Match Quality");
+      TempBankStatementMatchingBuffer.FINDFIRST;
+      EntryNo := TempBankStatementMatchingBuffer."Entry No.";
+
+      MinRangeValue := BankPmtApplRule.GetLowestScoreInRange(BankAccReconciliationLine."Match Quality");
+      MaxRangeValue := BankPmtApplRule.GetHighestScoreInRange(BankAccReconciliationLine."Match Quality");
+
+      TempBankStatementMatchingBuffer.RESET;
+      TempBankStatementMatchingBuffer.SETRANGE("Entry No.",EntryNo);
+      TempBankStatementMatchingBuffer.SETRANGE(Quality,MinRangeValue,MaxRangeValue);
+      TempBankStatementMatchingBuffer.SETFILTER("Line No.",'<>%1',BankAccReconciliationLine."Statement Line No.");
+      if TempBankStatementMatchingBuffer.COUNT > 1 then
+        PaymentMatchingDetails.CreatePaymentMatchingDetail(BankAccReconciliationLine,
+          STRSUBSTNO(MultipleStatementLinesWithSameConfidenceFoundTxt,TempBankStatementMatchingBuffer.COUNT));
+    END;
+
+    [External]
+    PROCEDURE SetApplyEntries@45(NewApplyEntries@1000 : Boolean);
+    BEGIN
+      ApplyEntries := NewApplyEntries;
+    END;
+
+    LOCAL PROCEDURE GetAvailableSplitLineNo@52(BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line";ParentLineNo@1001 : Integer) : Integer;
+    VAR
+      SplitLineNo@1002 : Integer;
+    BEGIN
+      SplitLineNo := BankAccReconciliationLine."Statement Line No." + 1;
+      BankAccReconciliationLine.SETRANGE("Parent Line No.",ParentLineNo);
+      if BankAccReconciliationLine.FINDLAST then
+        SplitLineNo := BankAccReconciliationLine."Statement Line No." + 1;
+      exit(SplitLineNo)
+    END;
+
+    LOCAL PROCEDURE GetParentLineNo@59(BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line") : Integer;
+    BEGIN
+      if BankAccReconciliationLine."Parent Line No." <> 0 then
+        exit(BankAccReconciliationLine."Parent Line No.");
+      exit(BankAccReconciliationLine."Statement Line No.");
+    END;
+
+    [External]
+    PROCEDURE UpdateType@55(VAR BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line");
+    VAR
+      AppliedPaymentEntry@1001 : Record "Applied Payment Entry";
+      CheckLedgerEntry@1002 : Record "Check Ledger Entry";
+    BEGIN
+      AppliedPaymentEntry.SETRANGE("Statement Type",BankAccReconciliationLine."Statement Type");
+      AppliedPaymentEntry.SETRANGE("Bank Account No.",BankAccReconciliationLine."Bank Account No.");
+      AppliedPaymentEntry.SETRANGE("Statement No.",BankAccReconciliationLine."Statement No.");
+      AppliedPaymentEntry.SETRANGE("Statement Line No.",BankAccReconciliationLine."Statement Line No.");
+      if AppliedPaymentEntry.FINDFIRST then begin
+        if AppliedPaymentEntry."Applies-to Entry No." = 0 then
+          exit;
+
+        CheckLedgerEntry.SETRANGE("Bank Account Ledger Entry No.",AppliedPaymentEntry."Applies-to Entry No.");
+        if CheckLedgerEntry.FINDFIRST then
+          BankAccReconciliationLine.Type := BankAccReconciliationLine.Type::"Check Ledger Entry"
+        else
+          BankAccReconciliationLine.Type := BankAccReconciliationLine.Type::"Bank Account Ledger Entry";
+
+        BankAccReconciliationLine.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE PrepareLedgerEntryForApplication@56(BankAccReconciliationLine@1000 : Record "Bank Acc. Reconciliation Line");
+    BEGIN
+      if TempBankStatementMatchingBuffer."Entry No." <= 0 then // text mapping has "Entry No." = -10000
+        exit;
+
+      SetApplicationDataInCVLedgEntry(
+        TempBankStatementMatchingBuffer."Account Type",TempBankStatementMatchingBuffer."Entry No.",
+        BankAccReconciliationLine.GetAppliesToID);
+    END;
+
+    [External]
+    PROCEDURE SetApplicationDataInCVLedgEntry@58(AccountType@1000 : Option;EntryNo@1001 : Integer;AppliesToID@1004 : Code[50]);
+    VAR
+      BankAccReconLine@1006 : Record "Bank Acc. Reconciliation Line";
+    BEGIN
+      if EntryNo = 0 then
+        exit;
+
+      case AccountType of
+        BankAccReconLine."Account Type"::Customer:
+          SetCustAppicationData(EntryNo,AppliesToID);
+        BankAccReconLine."Account Type"::Vendor:
+          SetVendAppicationData(EntryNo,AppliesToID);
+      end;
+    END;
+
+    LOCAL PROCEDURE SetCustAppicationData@60(EntryNo@1000 : Integer;AppliesToID@1001 : Code[50]);
+    VAR
+      CustLedgEntry@1002 : Record "Cust. Ledger Entry";
+    BEGIN
+      CustLedgEntry.GET(EntryNo);
+      CustLedgEntry.CALCFIELDS("Remaining Amount");
+      CustLedgEntry."Applies-to ID" := AppliesToID;
+      CustLedgEntry."Amount to Apply" := CustLedgEntry."Remaining Amount";
+      CODEUNIT.RUN(CODEUNIT::"Cust. Entry-Edit",CustLedgEntry);
+    END;
+
+    LOCAL PROCEDURE SetVendAppicationData@61(EntryNo@1002 : Integer;AppliesToID@1001 : Code[50]);
+    VAR
+      VendLedgEntry@1000 : Record "Vendor Ledger Entry";
+    BEGIN
+      VendLedgEntry.GET(EntryNo);
+      VendLedgEntry.CALCFIELDS("Remaining Amount");
+      VendLedgEntry."Applies-to ID" := AppliesToID;
+      VendLedgEntry."Amount to Apply" := VendLedgEntry."Remaining Amount";
+      CODEUNIT.RUN(CODEUNIT::"Vend. Entry-Edit",VendLedgEntry);
+    END;
+
+    LOCAL PROCEDURE RevertAcceptedPmtToleranceFromAppliedEntries@64(BankAccReconciliationLine@1002 : Record "Bank Acc. Reconciliation Line";Difference@1003 : Decimal);
+    VAR
+      AppliedPmtEntry@1001 : Record "Applied Payment Entry";
+      CustLedgerEntry@1004 : Record "Cust. Ledger Entry";
+      VendorLedgerEntry@1005 : Record "Vendor Ledger Entry";
+    BEGIN
+      if Difference = 0 then
+        exit;
+
+      AppliedPmtEntry.FilterAppliedPmtEntry(BankAccReconciliationLine);
+      if not AppliedPmtEntry.FINDSET then
+        exit;
+
+      repeat
+        case AppliedPmtEntry."Account Type" of
+          AppliedPmtEntry."Account Type"::Customer:
+            begin
+              CustLedgerEntry.GET(AppliedPmtEntry."Applies-to Entry No.");
+              if CustLedgerEntry."Accepted Payment Tolerance" <> 0 then begin
+                if -CustLedgerEntry."Accepted Payment Tolerance" > Difference then begin
+                  CustLedgerEntry."Accepted Payment Tolerance" += Difference;
+                  Difference := 0;
+                end else begin
+                  Difference += CustLedgerEntry."Accepted Payment Tolerance";
+                  CustLedgerEntry."Accepted Payment Tolerance" := 0;
+                end;
+                CustLedgerEntry.MODIFY;
+              end;
+            end;
+          AppliedPmtEntry."Account Type"::Vendor:
+            begin
+              VendorLedgerEntry.GET(AppliedPmtEntry."Applies-to Entry No.");
+              if VendorLedgerEntry."Accepted Payment Tolerance" <> 0 then begin
+                if VendorLedgerEntry."Accepted Payment Tolerance" > Difference then begin
+                  VendorLedgerEntry."Accepted Payment Tolerance" -= Difference;
+                  Difference := 0;
+                end else begin
+                  Difference -= VendorLedgerEntry."Accepted Payment Tolerance";
+                  VendorLedgerEntry."Accepted Payment Tolerance" := 0;
+                end;
+                VendorLedgerEntry.MODIFY;
+              end;
+            end;
+        end;
+      until (AppliedPmtEntry.NEXT = 0) or (Difference = 0);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

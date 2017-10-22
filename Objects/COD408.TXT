@@ -2,9 +2,9 @@ OBJECT Codeunit 408 DimensionManagement
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -54,7 +54,7 @@ OBJECT Codeunit 408 DimensionManagement
       HasGotGLSetup@1025 : Boolean;
       GLSetupShortcutDimCode@1026 : ARRAY [8] OF Code[20];
       DimSetFilterCtr@1036 : Integer;
-      LastDimSetIDInFilter@1037 : Integer;
+      OverflowDimFilterErr@1037 : TextConst 'ENU=Conversion of dimension filter results in a filter that becomes too long.';
 
     [External]
     PROCEDURE GetDimensionSetID@123(VAR DimSetEntry2@1000 : Record 480) : Integer;
@@ -638,6 +638,13 @@ OBJECT Codeunit 408 DimensionManagement
       EXIT(NewDimSetID);
     END;
 
+    [External]
+    PROCEDURE GetRecDefaultDimID@150(RecVariant@1011 : Variant;CurrFieldNo@1012 : Integer;TableID@1000 : ARRAY [10] OF Integer;No@1001 : ARRAY [10] OF Code[20];SourceCode@1002 : Code[20];VAR GlobalDim1Code@1003 : Code[20];VAR GlobalDim2Code@1004 : Code[20];InheritFromDimSetID@1014 : Integer;InheritFromTableNo@1015 : Integer) : Integer;
+    BEGIN
+      OnGetRecDefaultDimID(RecVariant,CurrFieldNo,TableID,No,SourceCode,InheritFromDimSetID,InheritFromTableNo);
+      EXIT(GetDefaultDimID(TableID,No,SourceCode,GlobalDim1Code,GlobalDim2Code,InheritFromDimSetID,InheritFromTableNo));
+    END;
+
     PROCEDURE AddFirstToTableIdArray@256(VAR TableID@1000 : ARRAY [10] OF Integer;VAR No@1001 : ARRAY [10] OF Code[20];NewTableId@1002 : Integer;NewNo@1003 : Code[20]);
     VAR
       Index@1004 : Integer;
@@ -667,7 +674,7 @@ OBJECT Codeunit 408 DimensionManagement
     END;
 
     [External]
-    PROCEDURE TypeToTableID1@11(Type@1000 : 'G/L Account,Customer,Vendor,Bank Account,Fixed Asset,IC Partner') : Integer;
+    PROCEDURE TypeToTableID1@11(Type@1000 : 'G/L Account,Customer,Vendor,Bank Account,Fixed Asset,IC Partner,Employee') : Integer;
     BEGIN
       CASE Type OF
         Type::"G/L Account":
@@ -676,6 +683,8 @@ OBJECT Codeunit 408 DimensionManagement
           EXIT(DATABASE::Customer);
         Type::Vendor:
           EXIT(DATABASE::Vendor);
+        Type::Employee:
+          EXIT(DATABASE::Employee);
         Type::"Bank Account":
           EXIT(DATABASE::"Bank Account");
         Type::"Fixed Asset":
@@ -1667,7 +1676,7 @@ OBJECT Codeunit 408 DimensionManagement
     END;
 
     [External]
-    PROCEDURE GetDimSetIDsForFilter@23(DimCode@1000 : Code[20];DimValueFilter@1001 : Text[250]);
+    PROCEDURE GetDimSetIDsForFilter@23(DimCode@1000 : Code[20];DimValueFilter@1001 : Text);
     VAR
       DimSetEntry2@1002 : Record 480;
     BEGIN
@@ -1711,31 +1720,19 @@ OBJECT Codeunit 408 DimensionManagement
     END;
 
     [External]
-    PROCEDURE GetNextDimSetFilterChunk@24(Length@1000 : Integer) DimSetFilterChunk : Text[1024];
-    VAR
-      EndLoop@1002 : Boolean;
+    PROCEDURE GetDimSetFilter@43() DimSetFilter : Text;
     BEGIN
-      IF Length > MAXSTRLEN(DimSetFilterChunk) THEN
-        Length := MAXSTRLEN(DimSetFilterChunk);
       TempDimSetEntry2.SETFILTER("Dimension Value ID",'%1',DimSetFilterCtr);
-      TempDimSetEntry2.SETFILTER("Dimension Set ID",'>%1',LastDimSetIDInFilter);
       IF TempDimSetEntry2.FINDSET THEN BEGIN
-        DimSetFilterChunk := FORMAT(TempDimSetEntry2."Dimension Set ID");
-        LastDimSetIDInFilter := TempDimSetEntry2."Dimension Set ID";
-        WHILE (STRLEN(DimSetFilterChunk) < Length) AND (NOT EndLoop) DO BEGIN
-          IF TempDimSetEntry2.NEXT <> 0 THEN BEGIN
-            IF STRLEN(DimSetFilterChunk + '|' + FORMAT(TempDimSetEntry2."Dimension Set ID")) <= Length THEN BEGIN
-              DimSetFilterChunk += '|' + FORMAT(TempDimSetEntry2."Dimension Set ID");
-              LastDimSetIDInFilter := TempDimSetEntry2."Dimension Set ID";
-            END ELSE
-              EndLoop := TRUE;
-          END ELSE
-            EndLoop := TRUE;
-        END;
+        DimSetFilter := FORMAT(TempDimSetEntry2."Dimension Set ID");
+        IF TempDimSetEntry2.NEXT <> 0 THEN
+          REPEAT
+            DimSetFilter += '|' + FORMAT(TempDimSetEntry2."Dimension Set ID");
+          UNTIL TempDimSetEntry2.NEXT = 0;
       END;
     END;
 
-    LOCAL PROCEDURE FilterIncludesBlank@25(DimCode@1001 : Code[20];DimValueFilter@1000 : Text[250]) : Boolean;
+    LOCAL PROCEDURE FilterIncludesBlank@25(DimCode@1001 : Code[20];DimValueFilter@1000 : Text) : Boolean;
     VAR
       TempDimSetEntry@1002 : TEMPORARY Record 480;
     BEGIN
@@ -1763,7 +1760,6 @@ OBJECT Codeunit 408 DimensionManagement
       TempDimSetEntry2.RESET;
       TempDimSetEntry2.DELETEALL;
       DimSetFilterCtr := 0;
-      LastDimSetIDInFilter := 0;
     END;
 
     [External]
@@ -1881,9 +1877,104 @@ OBJECT Codeunit 408 DimensionManagement
         UNTIL Dimension.NEXT = 0;
     END;
 
+    [External]
+    PROCEDURE ResolveDimValueFilter@47(VAR DimValueFilter@1001 : Text;DimensionCode@1000 : Code[20]);
+    VAR
+      TempDimensionValue@1002 : TEMPORARY Record 349;
+    BEGIN
+      GetDimValuesWithTotalings(TempDimensionValue,DimValueFilter,DimensionCode);
+      GetFilterFromDimValuesTable(TempDimensionValue,DimValueFilter);
+    END;
+
+    LOCAL PROCEDURE GetDimValuesWithTotalings@44(VAR TempDimensionValue@1004 : TEMPORARY Record 349;DimValueFilter@1002 : Text;DimensionCode@1000 : Code[20]);
+    VAR
+      DimensionValue@1001 : Record 349;
+    BEGIN
+      IF NOT TempDimensionValue.ISTEMPORARY OR (DimensionCode = '') THEN
+        EXIT;
+      DimensionValue.SETRANGE("Dimension Code",DimensionCode);
+      DimensionValue.SETFILTER(Code,DimValueFilter);
+      IF DimensionValue.FINDSET THEN
+        REPEAT
+          TempDimensionValue.INIT;
+          TempDimensionValue.Code := DimensionValue.Code;
+          TempDimensionValue."Dimension Code" := DimensionValue."Dimension Code";
+          TempDimensionValue."Dimension Value Type" := DimensionValue."Dimension Value Type";
+          IF TempDimensionValue.INSERT THEN
+            IF DimensionValue.Totaling <> '' THEN
+              GetDimValuesWithTotalings(TempDimensionValue,DimensionValue.Totaling,DimensionCode);
+        UNTIL DimensionValue.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetFilterFromDimValuesTable@42(VAR TempDimensionValue@1001 : TEMPORARY Record 349;VAR DimValueFilter@1000 : Text);
+    VAR
+      DimensionValue@1005 : Record 349;
+      RangeStartCode@1006 : Code[20];
+      PreviousCode@1002 : Code[20];
+      RangeStarted@1003 : Boolean;
+      Finished@1007 : Boolean;
+    BEGIN
+      WITH TempDimensionValue DO BEGIN
+        IF NOT ISTEMPORARY THEN
+          EXIT;
+        SETFILTER("Dimension Value Type",'%1|%2',"Dimension Value Type"::Standard,"Dimension Value Type"::Heading);
+        IF FINDSET THEN BEGIN
+          Finished := FALSE;
+          DimensionValue.SETRANGE("Dimension Code","Dimension Code");
+          DimensionValue.FINDSET;
+          DimValueFilter := '';
+          REPEAT
+            IF Code = DimensionValue.Code THEN BEGIN
+              IF NOT RangeStarted THEN BEGIN
+                RangeStarted := TRUE;
+                RangeStartCode := Code;
+              END;
+              PreviousCode := Code;
+              DimensionValue.NEXT;
+              IF NEXT = 0 THEN
+                Finished := TRUE;
+            END ELSE BEGIN
+              IF RangeStarted THEN BEGIN
+                AddRangeToFilter(DimValueFilter,RangeStartCode,PreviousCode);
+                RangeStarted := FALSE;
+              END;
+              REPEAT
+                DimensionValue.NEXT;
+              UNTIL DimensionValue.Code = Code;
+            END;
+          UNTIL Finished;
+          IF RangeStarted THEN
+            AddRangeToFilter(DimValueFilter,RangeStartCode,PreviousCode);
+        END
+      END
+    END;
+
+    LOCAL PROCEDURE AddRangeToFilter@24(VAR DimValueFilter@1000 : Text;RangeStartCode@1002 : Code[20];RangeEndCode@1001 : Code[20]);
+    BEGIN
+      IF DimValueFilter <> '' THEN BEGIN
+        IF STRLEN(DimValueFilter) + 1 > MAXSTRLEN(DimValueFilter) THEN
+          ERROR(OverflowDimFilterErr);
+        DimValueFilter := DimValueFilter + '|';
+      END;
+      IF RangeStartCode = RangeEndCode THEN BEGIN
+        IF STRLEN(DimValueFilter) + STRLEN(RangeStartCode) > MAXSTRLEN(DimValueFilter) THEN
+          ERROR(OverflowDimFilterErr);
+        DimValueFilter := DimValueFilter + RangeStartCode;
+      END ELSE BEGIN
+        IF STRLEN(DimValueFilter) + STRLEN(RangeStartCode) + 2 + STRLEN(RangeEndCode) > MAXSTRLEN(DimValueFilter) THEN
+          ERROR(OverflowDimFilterErr);
+        DimValueFilter := DimValueFilter + RangeStartCode + '..' + RangeEndCode;
+      END;
+    END;
+
     [Integration]
     [Internal]
     PROCEDURE OnAfterSetupObjectNoList@2(VAR TempAllObjWithCaption@1000 : TEMPORARY Record 2000000058);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnGetRecDefaultDimID@155(RecVariant@1011 : Variant;CurrFieldNo@1012 : Integer;VAR TableID@1000 : ARRAY [10] OF Integer;VAR No@1001 : ARRAY [10] OF Code[20];VAR SourceCode@1002 : Code[20];VAR InheritFromDimSetID@1004 : Integer;VAR InheritFromTableNo@1003 : Integer);
     BEGIN
     END;
 

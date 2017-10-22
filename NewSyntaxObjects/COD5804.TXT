@@ -1,0 +1,446 @@
+OBJECT Codeunit 5804 ItemCostManagement
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData Item=rm,
+                TableData "Stockkeeping Unit"=rm,
+                TableData "Value Entry"=r;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GLSetup@1000 : Record "General Ledger Setup";
+      Currency@1001 : Record Currency;
+      InvtSetup@1002 : Record "Inventory Setup";
+      CostCalcMgt@1003 : Codeunit "Cost Calculation Management";
+      InvoicedQty@1005 : Decimal;
+      RndgSetupRead@1004 : Boolean;
+      CalledFromAdjustment@1006 : Boolean;
+      InvtSetupRead@1007 : Boolean;
+      GLSetupRead@1008 : Boolean;
+
+    [External]
+    PROCEDURE UpdateUnitCost@7(VAR Item@1000 : Record Item;LocationCode@1001 : Code[10];VariantCode@1002 : Code[10];LastDirectCost@1003 : Decimal;NewStdCost@1004 : Decimal;UpdateSKU@1005 : Boolean;FilterSKU@1006 : Boolean;RecalcStdCost@1007 : Boolean;CalledByFieldNo@1009 : Integer);
+    VAR
+      CheckItem@1008 : Record Item;
+      AverageCost@1011 : Decimal;
+      AverageCostACY@1010 : Decimal;
+    BEGIN
+      with Item do begin
+        if NewStdCost <> 0 then
+          "Standard Cost" := NewStdCost;
+
+        if "Costing Method" = "Costing Method"::Standard then
+          "Unit Cost" := "Standard Cost"
+        else
+          if CalledFromAdjustment then begin
+            CostCalcMgt.GetRndgSetup(GLSetup,Currency,RndgSetupRead);
+            if CalculateAverageCost(Item,AverageCost,AverageCostACY) then begin
+              if AverageCost <> 0 then
+                "Unit Cost" := ROUND(AverageCost,GLSetup."Unit-Amount Rounding Precision");
+            end else begin
+              CalcLastAdjEntryAvgCost(Item,AverageCost,AverageCostACY);
+              if AverageCost <> 0 then
+                "Unit Cost" := ROUND(AverageCost,GLSetup."Unit-Amount Rounding Precision");
+            end;
+          end else
+            if ("Unit Cost" = 0) or ((InvoicedQty > 0) and (LastDirectCost <> 0)) then begin
+              CALCFIELDS("Net Invoiced Qty.");
+              if ("Net Invoiced Qty." > 0) and ("Net Invoiced Qty." <= InvoicedQty) then
+                "Unit Cost" := LastDirectCost;
+            end;
+
+        if RecalcStdCost then
+          RecalcStdCostItem(Item);
+
+        if LastDirectCost <> 0 then
+          "Last Direct Cost" := LastDirectCost;
+
+        VALIDATE("Price/Profit Calculation");
+
+        if CheckItem.GET("No.") then
+          if CalledByFieldNo <> 0 then
+            MODIFY(true)
+          else
+            MODIFY;
+
+        if UpdateSKU then
+          FindUpdateUnitCostSKU(Item,LocationCode,VariantCode,FilterSKU,LastDirectCost);
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdateStdCostShares@2(FromItem@1000 : Record Item);
+    VAR
+      Item@1001 : Record Item;
+    BEGIN
+      with FromItem do begin
+        Item.GET("No.");
+        Item.VALIDATE("Standard Cost","Standard Cost");
+        Item."Single-Level Material Cost" := "Single-Level Material Cost";
+        Item."Single-Level Capacity Cost" := "Single-Level Capacity Cost";
+        Item."Single-Level Subcontrd. Cost" := "Single-Level Subcontrd. Cost";
+        Item."Single-Level Cap. Ovhd Cost" := "Single-Level Cap. Ovhd Cost";
+        Item."Single-Level Mfg. Ovhd Cost" := "Single-Level Mfg. Ovhd Cost";
+        Item."Rolled-up Material Cost" := "Rolled-up Material Cost";
+        Item."Rolled-up Capacity Cost" := "Rolled-up Capacity Cost";
+        Item."Rolled-up Subcontracted Cost" := "Rolled-up Subcontracted Cost";
+        Item."Rolled-up Mfg. Ovhd Cost" := "Rolled-up Mfg. Ovhd Cost";
+        Item."Rolled-up Cap. Overhead Cost" := "Rolled-up Cap. Overhead Cost";
+        Item."Last Unit Cost Calc. Date" := "Last Unit Cost Calc. Date";
+        Item.MODIFY;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE UpdateUnitCostSKU@4(Item@1010 : Record Item;VAR SKU@1001 : Record "Stockkeeping Unit";LastDirectCost@1007 : Decimal;NewStdCost@1006 : Decimal;MatchSKU@1000 : Boolean;CalledByFieldNo@1004 : Integer);
+    VAR
+      ValueEntry@1005 : Record "Value Entry";
+      AverageCost@1003 : Decimal;
+      AverageCostACY@1002 : Decimal;
+    BEGIN
+      with SKU do begin
+        if NewStdCost <> 0 then
+          "Standard Cost" := NewStdCost;
+        if Item."Costing Method" <> Item."Costing Method"::Standard then begin
+          GetInvtSetup;
+          if InvtSetup."Average Cost Calc. Type" <> InvtSetup."Average Cost Calc. Type"::Item then begin
+            if CalledFromAdjustment then begin
+              ValueEntry."Item No." := Item."No.";
+              ValueEntry."Valuation Date" := DMY2DATE(31,12,9999);
+              ValueEntry."Location Code" := "Location Code";
+              ValueEntry."Variant Code" := "Variant Code";
+              ValueEntry.SumCostsTillValuationDate(ValueEntry);
+              if ValueEntry."Item Ledger Entry Quantity" <> 0 then begin
+                AverageCost :=
+                  (ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)") /
+                  ValueEntry."Item Ledger Entry Quantity";
+                if AverageCost < 0 then
+                  AverageCost := 0;
+              end else begin
+                Item.SETRANGE("Location Filter","Location Code");
+                Item.SETRANGE("Variant Filter","Variant Code");
+                CalcLastAdjEntryAvgCost(Item,AverageCost,AverageCostACY);
+              end;
+              if AverageCost <> 0 then
+                "Unit Cost" := ROUND(AverageCost,GLSetup."Unit-Amount Rounding Precision");
+            end else
+              if ("Unit Cost" = 0) or ((InvoicedQty > 0) and MatchSKU and (LastDirectCost <> 0)) then begin
+                Item.SETRANGE("Location Filter","Location Code");
+                Item.SETRANGE("Variant Filter","Variant Code");
+                Item.CALCFIELDS("Net Invoiced Qty.");
+                Item.SETRANGE("Location Filter");
+                Item.SETRANGE("Variant Filter");
+                if (Item."Net Invoiced Qty." > 0) and (Item."Net Invoiced Qty." <= InvoicedQty) then
+                  "Unit Cost" := LastDirectCost;
+              end;
+          end else
+            "Unit Cost" := Item."Unit Cost";
+        end else
+          "Unit Cost" := "Standard Cost";
+
+        if MatchSKU and (LastDirectCost <> 0) then
+          "Last Direct Cost" := LastDirectCost;
+
+        if CalledByFieldNo <> 0 then
+          MODIFY(true)
+        else
+          MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE RecalcStdCostItem@5(VAR Item@1000 : Record Item);
+    BEGIN
+      with Item do begin
+        "Single-Level Material Cost" := "Standard Cost";
+        "Single-Level Mfg. Ovhd Cost" := 0;
+        "Single-Level Capacity Cost" := 0;
+        "Single-Level Subcontrd. Cost" := 0;
+        "Single-Level Cap. Ovhd Cost" := 0;
+        "Rolled-up Material Cost" := "Standard Cost";
+        "Rolled-up Mfg. Ovhd Cost" := 0;
+        "Rolled-up Capacity Cost" := 0;
+        "Rolled-up Subcontracted Cost" := 0;
+        "Rolled-up Cap. Overhead Cost" := 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcLastAdjEntryAvgCost@18(VAR Item@1002 : Record Item;VAR AverageCost@1001 : Decimal;VAR AverageCostACY@1000 : Decimal);
+    VAR
+      ValueEntry@1003 : Record "Value Entry";
+      ItemLedgEntry@1004 : Record "Item Ledger Entry";
+      ComputeThisEntry@1005 : Boolean;
+      IsSubOptimal@1006 : Boolean;
+    BEGIN
+      AverageCost := 0;
+      AverageCostACY := 0;
+
+      if CalculateQuantity(Item) <> 0 then
+        exit;
+      if not HasOpenEntries(Item) then
+        exit;
+
+      with ValueEntry do begin
+        SetFilters(ValueEntry,Item);
+        if FIND('+') then
+          repeat
+            ComputeThisEntry := ("Item Ledger Entry Quantity" < 0) and not Adjustment and not "Drop Shipment";
+            if ComputeThisEntry then begin
+              ItemLedgEntry.GET("Item Ledger Entry No.");
+              IsSubOptimal :=
+                ItemLedgEntry.Correction or
+                ((Item."Costing Method" = Item."Costing Method"::Average) and not "Valued By Average Cost");
+
+              if not IsSubOptimal or (IsSubOptimal and (AverageCost = 0)) then begin
+                ItemLedgEntry.CALCFIELDS(
+                  "Cost Amount (Expected)","Cost Amount (Actual)",
+                  "Cost Amount (Expected) (ACY)","Cost Amount (Actual) (ACY)");
+                AverageCost :=
+                  (ItemLedgEntry."Cost Amount (Expected)" +
+                   ItemLedgEntry."Cost Amount (Actual)") /
+                  ItemLedgEntry.Quantity;
+                AverageCostACY :=
+                  (ItemLedgEntry."Cost Amount (Expected) (ACY)" +
+                   ItemLedgEntry."Cost Amount (Actual) (ACY)") /
+                  ItemLedgEntry.Quantity;
+
+                if (AverageCost <> 0) and not IsSubOptimal then
+                  exit;
+              end;
+            end;
+          until NEXT(-1) = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CalculateAverageCost@5801(VAR Item@1000 : Record Item;VAR AverageCost@1001 : Decimal;VAR AverageCostACY@1002 : Decimal) : Boolean;
+    VAR
+      AverageQty@1004 : Decimal;
+      CostAmt@1003 : Decimal;
+      CostAmtACY@1005 : Decimal;
+      NeedCalcPreciseAmt@1006 : Boolean;
+      NeedCalcPreciseAmtACY@1007 : Boolean;
+    BEGIN
+      AverageCost := 0;
+      AverageCostACY := 0;
+
+      if CalledFromAdjustment then
+        ExcludeOpenOutbndCosts(Item,AverageCost,AverageCostACY,AverageQty);
+      AverageQty := AverageQty + CalculateQuantity(Item);
+
+      if AverageQty <> 0 then begin
+        CostAmt := AverageCost + CalculateCostAmt(Item,true) + CalculateCostAmt(Item,false);
+        if (CostAmt <> 0) and (ABS(CostAmt) = GLSetup."Amount Rounding Precision") then begin
+          NeedCalcPreciseAmt := true;
+          CostAmt := AverageCost;
+        end;
+
+        GetGLSetup;
+        if GLSetup."Additional Reporting Currency" <> '' then begin
+          Currency.GET(GLSetup."Additional Reporting Currency");
+          CostAmtACY := AverageCostACY + CalculateCostAmtACY(Item,true) + CalculateCostAmtACY(Item,false);
+          if (CostAmtACY <> 0) and (ABS(CostAmtACY) = Currency."Amount Rounding Precision") then begin
+            NeedCalcPreciseAmtACY := true;
+            CostAmtACY := AverageCostACY;
+          end;
+        end;
+
+        if NeedCalcPreciseAmt or NeedCalcPreciseAmtACY then
+          CalculatePreciseCostAmounts(Item,NeedCalcPreciseAmt,NeedCalcPreciseAmtACY,CostAmt,CostAmtACY);
+
+        AverageCost := CostAmt / AverageQty;
+        AverageCostACY := CostAmtACY / AverageQty;
+
+        if AverageCost < 0 then
+          AverageCost := 0;
+        if AverageCostACY < 0 then
+          AverageCostACY := 0;
+      end else begin
+        AverageCost := 0;
+        AverageCostACY := 0;
+      end;
+      if AverageQty <= 0 then
+        exit(false);
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE SetFilters@1(VAR ValueEntry@1000 : Record "Value Entry";VAR Item@1001 : Record Item);
+    BEGIN
+      with ValueEntry do begin
+        RESET;
+        SETCURRENTKEY("Item No.","Valuation Date","Location Code","Variant Code");
+        SETRANGE("Item No.",Item."No.");
+        SETFILTER("Valuation Date",Item.GETFILTER("Date Filter"));
+        SETFILTER("Location Code",Item.GETFILTER("Location Filter"));
+        SETFILTER("Variant Code",Item.GETFILTER("Variant Filter"));
+      end;
+    END;
+
+    LOCAL PROCEDURE CalculateQuantity@9(VAR Item@1000 : Record Item) : Decimal;
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      with ValueEntry do begin
+        SetFilters(ValueEntry,Item);
+        CALCSUMS("Item Ledger Entry Quantity");
+        exit("Item Ledger Entry Quantity");
+      end;
+    END;
+
+    LOCAL PROCEDURE CalculateCostAmt@10(VAR Item@1000 : Record Item;Actual@1002 : Boolean) : Decimal;
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      with ValueEntry do begin
+        SetFilters(ValueEntry,Item);
+        if Actual then begin
+          CALCSUMS("Cost Amount (Actual)");
+          exit("Cost Amount (Actual)");
+        end;
+        CALCSUMS("Cost Amount (Expected)");
+        exit("Cost Amount (Expected)");
+      end;
+    END;
+
+    LOCAL PROCEDURE CalculateCostAmtACY@11(VAR Item@1000 : Record Item;Actual@1002 : Boolean) : Decimal;
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      with ValueEntry do begin
+        SetFilters(ValueEntry,Item);
+        if Actual then begin
+          CALCSUMS("Cost Amount (Actual) (ACY)");
+          exit("Cost Amount (Actual) (ACY)");
+        end;
+        CALCSUMS("Cost Amount (Expected) (ACY)");
+        exit("Cost Amount (Expected) (ACY)");
+      end;
+    END;
+
+    LOCAL PROCEDURE CalculatePreciseCostAmounts@14(VAR Item@1000 : Record Item;NeedCalcPreciseAmt@1002 : Boolean;NeedCalcPreciseAmtACY@1003 : Boolean;VAR PreciseAmt@1004 : Decimal;VAR PreciseAmtACY@1005 : Decimal);
+    VAR
+      ItemLedgerEntry@1001 : Record "Item Ledger Entry";
+    BEGIN
+      with ItemLedgerEntry do begin
+        SETRANGE("Item No.",Item."No.");
+        SETRANGE(Open,true);
+        SETRANGE(Positive,true);
+        SETFILTER("Location Code",Item.GETFILTER("Location Filter"));
+        SETFILTER("Variant Code",Item.GETFILTER("Variant Filter"));
+        if FINDSET then
+          repeat
+            if NeedCalcPreciseAmt then begin
+              CALCFIELDS("Cost Amount (Actual)","Cost Amount (Expected)");
+              PreciseAmt += ("Cost Amount (Actual)" + "Cost Amount (Expected)") / Quantity * "Remaining Quantity";
+            end;
+            if NeedCalcPreciseAmtACY then begin
+              CALCFIELDS("Cost Amount (Actual) (ACY)","Cost Amount (Expected) (ACY)");
+              PreciseAmtACY += ("Cost Amount (Actual) (ACY)" + "Cost Amount (Expected) (ACY)") / Quantity * "Remaining Quantity";
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE ExcludeOpenOutbndCosts@3(VAR Item@1000 : Record Item;VAR CostAmt@1001 : Decimal;VAR CostAmtACY@1002 : Decimal;VAR Quantity@1003 : Decimal);
+    VAR
+      OpenItemLedgEntry@1004 : Record "Item Ledger Entry";
+      OpenValueEntry@1005 : Record "Value Entry";
+    BEGIN
+      with OpenValueEntry do begin
+        OpenItemLedgEntry.SETCURRENTKEY("Item No.",Open,"Variant Code",Positive);
+        OpenItemLedgEntry.SETRANGE("Item No.",Item."No.");
+        OpenItemLedgEntry.SETRANGE(Open,true);
+        OpenItemLedgEntry.SETRANGE(Positive,false);
+        OpenItemLedgEntry.SETFILTER("Location Code",Item.GETFILTER("Location Filter"));
+        OpenItemLedgEntry.SETFILTER("Variant Code",Item.GETFILTER("Variant Filter"));
+        SETCURRENTKEY("Item Ledger Entry No.");
+        if OpenItemLedgEntry.FIND('-') then
+          repeat
+            SETRANGE("Item Ledger Entry No.",OpenItemLedgEntry."Entry No.");
+            if FIND('-') then
+              repeat
+                CostAmt := CostAmt - "Cost Amount (Actual)" - "Cost Amount (Expected)";
+                CostAmtACY := CostAmtACY - "Cost Amount (Actual) (ACY)" - "Cost Amount (Expected) (ACY)";
+                Quantity := Quantity - "Item Ledger Entry Quantity";
+              until NEXT = 0;
+          until OpenItemLedgEntry.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE HasOpenEntries@20(VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      ItemLedgEntry@1001 : Record "Item Ledger Entry";
+    BEGIN
+      with ItemLedgEntry do begin
+        RESET;
+        SETCURRENTKEY("Item No.",Open);
+        SETRANGE("Item No.",Item."No.");
+        SETRANGE(Open,true);
+        SETFILTER("Location Code",Item.GETFILTER("Location Filter"));
+        SETFILTER("Variant Code",Item.GETFILTER("Variant Filter"));
+        exit(not FINDFIRST)
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetProperties@6(NewCalledFromAdjustment@1000 : Boolean;NewInvoicedQty@1001 : Decimal);
+    BEGIN
+      CalledFromAdjustment := NewCalledFromAdjustment;
+      InvoicedQty := NewInvoicedQty;
+    END;
+
+    LOCAL PROCEDURE GetInvtSetup@8();
+    BEGIN
+      if not InvtSetupRead then
+        InvtSetup.GET;
+      InvtSetupRead := true;
+    END;
+
+    LOCAL PROCEDURE GetGLSetup@13();
+    BEGIN
+      if not GLSetupRead then
+        GLSetup.GET;
+      GLSetupRead := true;
+    END;
+
+    [External]
+    PROCEDURE FindUpdateUnitCostSKU@12(Item@1000 : Record Item;LocationCode@1001 : Code[10];VariantCode@1002 : Code[10];FilterSKU@1003 : Boolean;LastDirectCost@1004 : Decimal);
+    VAR
+      SKU@1005 : Record "Stockkeeping Unit";
+    BEGIN
+      GetInvtSetup;
+      with SKU do begin
+        SETRANGE("Item No.",Item."No.");
+        if InvtSetup."Average Cost Calc. Type" <> InvtSetup."Average Cost Calc. Type"::Item then
+          if FilterSKU then begin
+            SETFILTER("Location Code",'%1|%2','',LocationCode);
+            SETFILTER("Variant Code",'%1|%2','',VariantCode);
+          end else begin
+            SETFILTER("Location Code",Item.GETFILTER("Location Filter"));
+            SETFILTER("Variant Code",Item.GETFILTER("Variant Filter"));
+          end;
+        if FIND('-') then
+          repeat
+            UpdateUnitCostSKU(
+              Item,SKU,LastDirectCost,0,
+              ("Location Code" = LocationCode) and ("Variant Code" = VariantCode),0);
+          until NEXT = 0;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

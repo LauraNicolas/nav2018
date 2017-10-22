@@ -1,0 +1,2946 @@
+OBJECT Table 83 Item Journal Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               LOCKTABLE;
+               ItemJnlTemplate.GET("Journal Template Name");
+               ItemJnlBatch.GET("Journal Template Name","Journal Batch Name");
+
+               ValidateShortcutDimCode(1,"Shortcut Dimension 1 Code");
+               ValidateShortcutDimCode(2,"Shortcut Dimension 2 Code");
+               ValidateNewShortcutDimCode(1,"New Shortcut Dimension 1 Code");
+               ValidateNewShortcutDimCode(2,"New Shortcut Dimension 2 Code");
+
+               CheckPlanningAssignment;
+             END;
+
+    OnModify=BEGIN
+               OnBeforeVerifyReservedQty(Rec,xRec,0);
+               ReserveItemJnlLine.VerifyChange(Rec,xRec);
+               CheckPlanningAssignment;
+             END;
+
+    OnDelete=BEGIN
+               ReserveItemJnlLine.DeleteLine(Rec);
+
+               CALCFIELDS("Reserved Qty. (Base)");
+               TESTFIELD("Reserved Qty. (Base)",0);
+             END;
+
+    OnRename=BEGIN
+               ReserveItemJnlLine.RenameLine(Rec,xRec);
+             END;
+
+    CaptionML=ENU=Item Journal Line;
+    LookupPageID="Item Journal Lines";
+    DrillDownPageID="Item Journal Lines";
+  }
+  FIELDS
+  {
+    { 1   ;   ;Journal Template Name;Code10       ;TableRelation="Item Journal Template";
+                                                   CaptionML=ENU=Journal Template Name }
+    { 2   ;   ;Line No.            ;Integer       ;CaptionML=ENU=Line No. }
+    { 3   ;   ;Item No.            ;Code20        ;TableRelation=Item;
+                                                   OnValidate=VAR
+                                                                ProdOrderLine@1001 : Record "Prod. Order Line";
+                                                                ProdOrderComp@1000 : Record "Prod. Order Component";
+                                                              BEGIN
+                                                                if "Item No." <> xRec."Item No." then begin
+                                                                  "Variant Code" := '';
+                                                                  "Bin Code" := '';
+                                                                  if CurrFieldNo <> 0 then
+                                                                    WMSManagement.CheckItemJnlLineFieldChange(Rec,xRec,FIELDCAPTION("Item No."));
+                                                                  if ("Location Code" <> '') and ("Item No." <> '') then begin
+                                                                    GetLocation("Location Code");
+                                                                    if Location."Bin Mandatory" and not Location."Directed Put-away and Pick" then
+                                                                      WMSManagement.GetDefaultBin("Item No.","Variant Code","Location Code","Bin Code")
+                                                                  end;
+                                                                  if ("Entry Type" = "Entry Type"::Transfer) and ("Location Code" = "New Location Code") then
+                                                                    "New Bin Code" := "Bin Code";
+                                                                end;
+
+                                                                if "Entry Type" in ["Entry Type"::Consumption,"Entry Type"::Output] then
+                                                                  WhseValidateSourceLine.ItemLineVerifyChange(Rec,xRec);
+
+                                                                if "Item No." = '' then begin
+                                                                  CreateDim(
+                                                                    DATABASE::Item,"Item No.",
+                                                                    DATABASE::"Salesperson/Purchaser","Salespers./Purch. Code",
+                                                                    DATABASE::"Work Center","Work Center No.");
+                                                                  exit;
+                                                                end;
+
+                                                                GetItem;
+                                                                Item.TESTFIELD(Blocked,false);
+                                                                Item.TESTFIELD(Type,Item.Type::Inventory);
+                                                                if "Value Entry Type" = "Value Entry Type"::Revaluation then
+                                                                  Item.TESTFIELD("Inventory Value Zero",false);
+                                                                Description := Item.Description;
+                                                                "Inventory Posting Group" := Item."Inventory Posting Group";
+                                                                "Item Category Code" := Item."Item Category Code";
+                                                                "Product Group Code" := Item."Product Group Code";
+
+                                                                if ("Value Entry Type" <> "Value Entry Type"::"Direct Cost") or
+                                                                   ("Item Charge No." <> '')
+                                                                then begin
+                                                                  if "Item No." <> xRec."Item No." then begin
+                                                                    TESTFIELD("Partial Revaluation",false);
+                                                                    RetrieveCosts;
+                                                                    "Indirect Cost %" := 0;
+                                                                    "Overhead Rate" := 0;
+                                                                    "Inventory Value Per" := "Inventory Value Per"::" ";
+                                                                    VALIDATE("Applies-to Entry",0);
+                                                                    "Partial Revaluation" := false;
+                                                                  end;
+                                                                end else begin
+                                                                  "Indirect Cost %" := Item."Indirect Cost %";
+                                                                  "Overhead Rate" := Item."Overhead Rate";
+                                                                  if not "Phys. Inventory" or (Item."Costing Method" = Item."Costing Method"::Standard) then begin
+                                                                    RetrieveCosts;
+                                                                    "Unit Cost" := UnitCost;
+                                                                  end else
+                                                                    UnitCost := "Unit Cost";
+                                                                end;
+
+                                                                if (("Entry Type" = "Entry Type"::Output) and (WorkCenter."No." = '') and (MachineCenter."No." = '')) or
+                                                                   ("Entry Type" <> "Entry Type"::Output) or
+                                                                   ("Value Entry Type" = "Value Entry Type"::Revaluation)
+                                                                then
+                                                                  "Gen. Prod. Posting Group" := Item."Gen. Prod. Posting Group";
+
+                                                                case "Entry Type" of
+                                                                  "Entry Type"::Purchase,
+                                                                  "Entry Type"::Output,
+                                                                  "Entry Type"::"Assembly Output":
+                                                                    PurchPriceCalcMgt.FindItemJnlLinePrice(Rec,FIELDNO("Item No."));
+                                                                  "Entry Type"::"Positive Adjmt.",
+                                                                  "Entry Type"::"Negative Adjmt.",
+                                                                  "Entry Type"::Consumption,
+                                                                  "Entry Type"::"Assembly Consumption":
+                                                                    "Unit Amount" := UnitCost;
+                                                                  "Entry Type"::Sale:
+                                                                    SalesPriceCalcMgt.FindItemJnlLinePrice(Rec,FIELDNO("Item No."));
+                                                                  "Entry Type"::Transfer:
+                                                                    begin
+                                                                      "Unit Amount" := 0;
+                                                                      "Unit Cost" := 0;
+                                                                      Amount := 0;
+                                                                    end;
+                                                                end;
+
+                                                                case "Entry Type" of
+                                                                  "Entry Type"::Purchase:
+                                                                    "Unit of Measure Code" := Item."Purch. Unit of Measure";
+                                                                  "Entry Type"::Sale:
+                                                                    "Unit of Measure Code" := Item."Sales Unit of Measure";
+                                                                  "Entry Type"::Output:
+                                                                    begin
+                                                                      Item.TESTFIELD("Inventory Value Zero",false);
+                                                                      ProdOrderLine.SetFilterByReleasedOrderNo("Order No.");
+                                                                      ProdOrderLine.SETRANGE("Item No.","Item No.");
+                                                                      if ProdOrderLine.FINDFIRST then begin
+                                                                        "Routing No." := ProdOrderLine."Routing No.";
+                                                                        "Source Type" := "Source Type"::Item;
+                                                                        "Source No." := ProdOrderLine."Item No.";
+                                                                      end else
+                                                                        if ("Value Entry Type" <> "Value Entry Type"::Revaluation) and
+                                                                           (CurrFieldNo <> 0)
+                                                                        then
+                                                                          ERROR(Text031,"Item No.","Order No.");
+                                                                      if ProdOrderLine.COUNT = 1 then begin
+                                                                        VALIDATE("Order Line No.",ProdOrderLine."Line No.");
+                                                                        "Unit of Measure Code" := ProdOrderLine."Unit of Measure Code";
+                                                                        "Location Code" := ProdOrderLine."Location Code";
+                                                                        VALIDATE("Variant Code",ProdOrderLine."Variant Code");
+                                                                        VALIDATE("Bin Code",ProdOrderLine."Bin Code");
+                                                                      end else
+                                                                        "Unit of Measure Code" := Item."Base Unit of Measure";
+                                                                    end;
+                                                                  "Entry Type"::Consumption:
+                                                                    begin
+                                                                      ProdOrderComp.SetFilterByReleasedOrderNo("Order No.");
+                                                                      ProdOrderComp.SETRANGE("Item No.","Item No.");
+                                                                      if ProdOrderComp.COUNT = 1 then begin
+                                                                        ProdOrderComp.FINDFIRST;
+                                                                        VALIDATE("Order Line No.",ProdOrderComp."Prod. Order Line No.");
+                                                                        VALIDATE("Prod. Order Comp. Line No.",ProdOrderComp."Line No.");
+                                                                        "Unit of Measure Code" := ProdOrderComp."Unit of Measure Code";
+                                                                        "Location Code" := ProdOrderComp."Location Code";
+                                                                        VALIDATE("Variant Code",ProdOrderComp."Variant Code");
+                                                                        VALIDATE("Bin Code",ProdOrderComp."Bin Code");
+                                                                      end else begin
+                                                                        "Unit of Measure Code" := Item."Base Unit of Measure";
+                                                                        VALIDATE("Prod. Order Comp. Line No.",0);
+                                                                      end;
+                                                                    end;
+                                                                  else
+                                                                    "Unit of Measure Code" := Item."Base Unit of Measure";
+                                                                end;
+
+                                                                if "Value Entry Type" = "Value Entry Type"::Revaluation then
+                                                                  "Unit of Measure Code" := Item."Base Unit of Measure";
+                                                                VALIDATE("Unit of Measure Code");
+                                                                if "Variant Code" <> '' then
+                                                                  VALIDATE("Variant Code");
+
+                                                                OnAfterOnValidateItemNoAssignByEntryType(ItemJnlLine,Item);
+
+                                                                CheckItemAvailable(FIELDNO("Item No."));
+
+                                                                if ((not ("Order Type" in ["Order Type"::Production,"Order Type"::Assembly])) or ("Order No." = '')) and not "Phys. Inventory"
+                                                                then
+                                                                  CreateDim(
+                                                                    DATABASE::Item,"Item No.",
+                                                                    DATABASE::"Salesperson/Purchaser","Salespers./Purch. Code",
+                                                                    DATABASE::"Work Center","Work Center No.");
+
+                                                                OnBeforeVerifyReservedQty(Rec,xRec,FIELDNO("Item No."));
+                                                                ReserveItemJnlLine.VerifyChange(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=Item No. }
+    { 4   ;   ;Posting Date        ;Date          ;OnValidate=VAR
+                                                                CheckDateConflict@1000 : Codeunit "Reservation-Check Date Confl.";
+                                                              BEGIN
+                                                                VALIDATE("Document Date","Posting Date");
+                                                                CheckDateConflict.ItemJnlLineCheck(Rec,CurrFieldNo <> 0);
+                                                              END;
+
+                                                   CaptionML=ENU=Posting Date }
+    { 5   ;   ;Entry Type          ;Option        ;OnValidate=BEGIN
+                                                                if not ("Entry Type" in ["Entry Type"::"Positive Adjmt.","Entry Type"::"Negative Adjmt."]) then
+                                                                  TESTFIELD("Phys. Inventory",false);
+
+                                                                if CurrFieldNo <> 0 then
+                                                                  WMSManagement.CheckItemJnlLineFieldChange(Rec,xRec,FIELDCAPTION("Entry Type"));
+
+                                                                case "Entry Type" of
+                                                                  "Entry Type"::Purchase:
+                                                                    if UserMgt.GetRespCenter(1,'') <> '' then
+                                                                      "Location Code" := UserMgt.GetLocation(1,'',UserMgt.GetPurchasesFilter);
+                                                                  "Entry Type"::Sale:
+                                                                    begin
+                                                                      if UserMgt.GetRespCenter(0,'') <> '' then
+                                                                        "Location Code" := UserMgt.GetLocation(0,'',UserMgt.GetSalesFilter);
+                                                                      CheckItemAvailable(FIELDNO("Entry Type"));
+                                                                    end;
+                                                                  "Entry Type"::Consumption,"Entry Type"::Output:
+                                                                    VALIDATE("Order Type","Order Type"::Production);
+                                                                  "Entry Type"::"Assembly Consumption","Entry Type"::"Assembly Output":
+                                                                    VALIDATE("Order Type","Order Type"::Assembly);
+                                                                end;
+
+                                                                if xRec."Location Code" = '' then
+                                                                  if Location.GET("Location Code") then
+                                                                    if  Location."Directed Put-away and Pick" then
+                                                                      "Location Code" := '';
+
+                                                                if "Item No." <> '' then
+                                                                  VALIDATE("Location Code");
+
+                                                                VALIDATE("Item No.");
+                                                                if "Entry Type" <> "Entry Type"::Transfer then begin
+                                                                  "New Location Code" := '';
+                                                                  "New Bin Code" := '';
+                                                                end;
+
+                                                                if "Entry Type" <> "Entry Type"::Output then
+                                                                  Type := Type::" ";
+
+                                                                ReserveItemJnlLine.VerifyChange(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=Entry Type;
+                                                   OptionCaptionML=ENU=Purchase,Sale,Positive Adjmt.,Negative Adjmt.,Transfer,Consumption,Output, ,Assembly Consumption,Assembly Output;
+                                                   OptionString=Purchase,Sale,"Positive Adjmt.","Negative Adjmt.",Transfer,Consumption,Output," ","Assembly Consumption","Assembly Output" }
+    { 6   ;   ;Source No.          ;Code20        ;TableRelation=IF ("Source Type"=CONST(Customer)) Customer
+                                                                 ELSE IF ("Source Type"=CONST(Vendor)) Vendor
+                                                                 ELSE IF ("Source Type"=CONST(Item)) Item;
+                                                   CaptionML=ENU=Source No.;
+                                                   Editable=false }
+    { 7   ;   ;Document No.        ;Code20        ;CaptionML=ENU=Document No. }
+    { 8   ;   ;Description         ;Text50        ;CaptionML=ENU=Description }
+    { 9   ;   ;Location Code       ;Code10        ;TableRelation=Location;
+                                                   OnValidate=BEGIN
+                                                                if "Entry Type" <= "Entry Type"::Transfer then
+                                                                  TESTFIELD("Item No.");
+
+                                                                if ("Value Entry Type" = "Value Entry Type"::"Direct Cost") and
+                                                                   ("Item Charge No." = '') and
+                                                                   ("No." = '')
+                                                                then begin
+                                                                  GetUnitAmount(FIELDNO("Location Code"));
+                                                                  "Unit Cost" := UnitCost;
+                                                                  VALIDATE("Unit Amount");
+                                                                  CheckItemAvailable(FIELDNO("Location Code"));
+                                                                end;
+
+                                                                if "Entry Type" in ["Entry Type"::Consumption,"Entry Type"::Output] then
+                                                                  WhseValidateSourceLine.ItemLineVerifyChange(Rec,xRec);
+
+                                                                if "Location Code" <> xRec."Location Code" then begin
+                                                                  "Bin Code" := '';
+                                                                  if CurrFieldNo <> 0 then
+                                                                    WMSManagement.CheckItemJnlLineFieldChange(Rec,xRec,FIELDCAPTION("Location Code"));
+                                                                  if ("Location Code" <> '') and ("Item No." <> '') then begin
+                                                                    GetLocation("Location Code");
+                                                                    if Location."Bin Mandatory" and not Location."Directed Put-away and Pick" then
+                                                                      WMSManagement.GetDefaultBin("Item No.","Variant Code","Location Code","Bin Code");
+                                                                  end;
+                                                                  if "Entry Type" = "Entry Type"::Transfer then begin
+                                                                    "New Location Code" := "Location Code";
+                                                                    "New Bin Code" := "Bin Code";
+                                                                  end;
+                                                                end;
+
+                                                                VALIDATE("Unit of Measure Code");
+
+                                                                ReserveItemJnlLine.VerifyChange(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=Location Code }
+    { 10  ;   ;Inventory Posting Group;Code20     ;TableRelation="Inventory Posting Group";
+                                                   CaptionML=ENU=Inventory Posting Group;
+                                                   Editable=false }
+    { 11  ;   ;Source Posting Group;Code20        ;TableRelation=IF ("Source Type"=CONST(Customer)) "Customer Posting Group"
+                                                                 ELSE IF ("Source Type"=CONST(Vendor)) "Vendor Posting Group"
+                                                                 ELSE IF ("Source Type"=CONST(Item)) "Inventory Posting Group";
+                                                   CaptionML=ENU=Source Posting Group;
+                                                   Editable=false }
+    { 13  ;   ;Quantity            ;Decimal       ;OnValidate=VAR
+                                                                CallWhseCheck@1000 : Boolean;
+                                                              BEGIN
+                                                                if ("Entry Type" <= "Entry Type"::Transfer) and (Quantity <> 0) then
+                                                                  TESTFIELD("Item No.");
+
+                                                                if not PhysInvtEntered then
+                                                                  TESTFIELD("Phys. Inventory",false);
+
+                                                                CallWhseCheck :=
+                                                                  ("Entry Type" = "Entry Type"::"Assembly Consumption") or
+                                                                  ("Entry Type" = "Entry Type"::Consumption) or
+                                                                  ("Entry Type" = "Entry Type"::Output) and
+                                                                  LastOutputOperation(Rec);
+                                                                if CallWhseCheck then
+                                                                  WhseValidateSourceLine.ItemLineVerifyChange(Rec,xRec);
+
+                                                                if CurrFieldNo <> 0 then
+                                                                  WMSManagement.CheckItemJnlLineFieldChange(Rec,xRec,FIELDCAPTION(Quantity));
+
+                                                                "Quantity (Base)" := CalcBaseQty(Quantity);
+                                                                if ("Entry Type" = "Entry Type"::Output) and
+                                                                   ("Value Entry Type" <> "Value Entry Type"::Revaluation)
+                                                                then
+                                                                  "Invoiced Quantity" := 0
+                                                                else
+                                                                  "Invoiced Quantity" := Quantity;
+                                                                "Invoiced Qty. (Base)" := CalcBaseQty("Invoiced Quantity");
+
+                                                                GetUnitAmount(FIELDNO(Quantity));
+                                                                UpdateAmount;
+
+                                                                CheckItemAvailable(FIELDNO(Quantity));
+
+                                                                if "Entry Type" = "Entry Type"::Transfer then begin
+                                                                  "Qty. (Calculated)" := 0;
+                                                                  "Qty. (Phys. Inventory)" := 0;
+                                                                  "Last Item Ledger Entry No." := 0;
+                                                                end;
+
+                                                                CALCFIELDS("Reserved Qty. (Base)");
+                                                                if ABS("Quantity (Base)") < ABS("Reserved Qty. (Base)") then
+                                                                  ERROR(Text001,FIELDCAPTION("Reserved Qty. (Base)"));
+
+                                                                if Item."Item Tracking Code" <> '' then
+                                                                  ReserveItemJnlLine.VerifyQuantity(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=Quantity;
+                                                   DecimalPlaces=0:5 }
+    { 15  ;   ;Invoiced Quantity   ;Decimal       ;CaptionML=ENU=Invoiced Quantity;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 16  ;   ;Unit Amount         ;Decimal       ;OnValidate=BEGIN
+                                                                UpdateAmount;
+                                                                if "Item No." <> '' then
+                                                                  if "Value Entry Type" = "Value Entry Type"::Revaluation then
+                                                                    "Unit Cost" := "Unit Amount"
+                                                                  else
+                                                                    case "Entry Type" of
+                                                                      "Entry Type"::Purchase,
+                                                                      "Entry Type"::"Positive Adjmt.",
+                                                                      "Entry Type"::"Assembly Output":
+                                                                        begin
+                                                                          if "Entry Type" = "Entry Type"::"Positive Adjmt." then begin
+                                                                            GetItem;
+                                                                            if (CurrFieldNo = FIELDNO("Unit Amount")) and
+                                                                               (Item."Costing Method" = Item."Costing Method"::Standard)
+                                                                            then
+                                                                              ERROR(
+                                                                                Text002,
+                                                                                FIELDCAPTION("Unit Amount"),Item.FIELDCAPTION("Costing Method"),Item."Costing Method");
+                                                                          end;
+
+                                                                          ReadGLSetup;
+                                                                          if "Entry Type" = "Entry Type"::Purchase then
+                                                                            "Unit Cost" := "Unit Amount";
+                                                                          if "Entry Type" = "Entry Type"::"Positive Adjmt." then
+                                                                            "Unit Cost" :=
+                                                                              ROUND(
+                                                                                "Unit Amount" * (1 + "Indirect Cost %" / 100),GLSetup."Unit-Amount Rounding Precision") +
+                                                                              "Overhead Rate" * "Qty. per Unit of Measure";
+                                                                          if ("Value Entry Type" = "Value Entry Type"::"Direct Cost") and
+                                                                             ("Item Charge No." = '')
+                                                                          then
+                                                                            VALIDATE("Unit Cost");
+                                                                        end;
+                                                                      "Entry Type"::"Negative Adjmt.",
+                                                                      "Entry Type"::Consumption,
+                                                                      "Entry Type"::"Assembly Consumption":
+                                                                        begin
+                                                                          GetItem;
+                                                                          if (CurrFieldNo = FIELDNO("Unit Amount")) and
+                                                                             (Item."Costing Method" = Item."Costing Method"::Standard)
+                                                                          then
+                                                                            ERROR(
+                                                                              Text002,
+                                                                              FIELDCAPTION("Unit Amount"),Item.FIELDCAPTION("Costing Method"),Item."Costing Method");
+                                                                          "Unit Cost" := "Unit Amount";
+                                                                          if ("Value Entry Type" = "Value Entry Type"::"Direct Cost") and
+                                                                             ("Item Charge No." = '')
+                                                                          then
+                                                                            VALIDATE("Unit Cost");
+                                                                        end;
+                                                                    end;
+                                                              END;
+
+                                                   CaptionML=ENU=Unit Amount;
+                                                   AutoFormatType=2 }
+    { 17  ;   ;Unit Cost           ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD("Item No.");
+                                                                RetrieveCosts;
+                                                                if "Entry Type" in ["Entry Type"::Purchase,"Entry Type"::"Positive Adjmt.","Entry Type"::Consumption] then
+                                                                  if Item."Costing Method" = Item."Costing Method"::Standard then begin
+                                                                    if CurrFieldNo = FIELDNO("Unit Cost") then
+                                                                      ERROR(
+                                                                        Text002,
+                                                                        FIELDCAPTION("Unit Cost"),Item.FIELDCAPTION("Costing Method"),Item."Costing Method");
+                                                                    "Unit Cost" := ROUND(UnitCost * "Qty. per Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+                                                                  end;
+
+                                                                if ("Item Charge No." = '') and
+                                                                   ("Value Entry Type" = "Value Entry Type"::"Direct Cost") and
+                                                                   (CurrFieldNo = FIELDNO("Unit Cost"))
+                                                                then begin
+                                                                  case "Entry Type" of
+                                                                    "Entry Type"::Purchase:
+                                                                      "Unit Amount" := "Unit Cost";
+                                                                    "Entry Type"::"Positive Adjmt.",
+                                                                    "Entry Type"::"Assembly Output":
+                                                                      begin
+                                                                        ReadGLSetup;
+                                                                        "Unit Amount" :=
+                                                                          ROUND(
+                                                                            ("Unit Cost" - "Overhead Rate" * "Qty. per Unit of Measure") / (1 + "Indirect Cost %" / 100),
+                                                                            GLSetup."Unit-Amount Rounding Precision")
+                                                                      end;
+                                                                    "Entry Type"::"Negative Adjmt.",
+                                                                    "Entry Type"::Consumption,
+                                                                    "Entry Type"::"Assembly Consumption":
+                                                                      begin
+                                                                        if Item."Costing Method" = Item."Costing Method"::Standard then
+                                                                          ERROR(
+                                                                            Text002,
+                                                                            FIELDCAPTION("Unit Cost"),Item.FIELDCAPTION("Costing Method"),Item."Costing Method");
+                                                                        "Unit Amount" := "Unit Cost";
+                                                                      end;
+                                                                  end;
+                                                                  UpdateAmount;
+                                                                end;
+                                                              END;
+
+                                                   CaptionML=ENU=Unit Cost;
+                                                   AutoFormatType=2 }
+    { 18  ;   ;Amount              ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD(Quantity);
+                                                                "Unit Amount" := Amount / Quantity;
+                                                                VALIDATE("Unit Amount");
+                                                                ReadGLSetup;
+                                                                "Unit Amount" := ROUND("Unit Amount",GLSetup."Unit-Amount Rounding Precision");
+                                                              END;
+
+                                                   CaptionML=ENU=Amount;
+                                                   AutoFormatType=1 }
+    { 22  ;   ;Discount Amount     ;Decimal       ;CaptionML=ENU=Discount Amount;
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 23  ;   ;Salespers./Purch. Code;Code20      ;TableRelation="Salesperson/Purchaser";
+                                                   OnValidate=BEGIN
+                                                                if ("Order Type" <> "Order Type"::Production) or ("Order No." = '') then
+                                                                  CreateDim(
+                                                                    DATABASE::"Salesperson/Purchaser","Salespers./Purch. Code",
+                                                                    DATABASE::Item,"Item No.",
+                                                                    DATABASE::"Work Center","Work Center No.");
+                                                              END;
+
+                                                   CaptionML=ENU=Salespers./Purch. Code }
+    { 26  ;   ;Source Code         ;Code10        ;TableRelation="Source Code";
+                                                   CaptionML=ENU=Source Code;
+                                                   Editable=false }
+    { 29  ;   ;Applies-to Entry    ;Integer       ;OnValidate=VAR
+                                                                ItemLedgEntry@1000 : Record "Item Ledger Entry";
+                                                                ItemTrackingLines@1001 : Page "Item Tracking Lines";
+                                                              BEGIN
+                                                                if "Applies-to Entry" <> 0 then begin
+                                                                  ItemLedgEntry.GET("Applies-to Entry");
+
+                                                                  if "Value Entry Type" = "Value Entry Type"::Revaluation then begin
+                                                                    if "Inventory Value Per" <> "Inventory Value Per"::" " then
+                                                                      ERROR(Text006,FIELDCAPTION("Applies-to Entry"));
+
+                                                                    if "Inventory Value Per" = "Inventory Value Per"::" " then
+                                                                      if not RevaluationPerEntryAllowed("Item No.") then
+                                                                        ERROR(Text034);
+
+                                                                    InitRevalJnlLine(ItemLedgEntry);
+                                                                    ItemLedgEntry.TESTFIELD(Positive,true);
+                                                                  end else begin
+                                                                    TESTFIELD(Quantity);
+                                                                    if Signed(Quantity) * ItemLedgEntry.Quantity > 0 then begin
+                                                                      if Quantity > 0 then
+                                                                        FIELDERROR(Quantity,Text030);
+                                                                      if Quantity < 0 then
+                                                                        FIELDERROR(Quantity,Text029);
+                                                                    end;
+                                                                    if ItemLedgEntry.TrackingExists then
+                                                                      ERROR(Text033,FIELDCAPTION("Applies-to Entry"),ItemTrackingLines.CAPTION);
+
+                                                                    if not ItemLedgEntry.Open then
+                                                                      MESSAGE(Text032,"Applies-to Entry");
+
+                                                                    if "Entry Type" = "Entry Type"::Output then begin
+                                                                      ItemLedgEntry.TESTFIELD("Order Type","Order Type"::Production);
+                                                                      ItemLedgEntry.TESTFIELD("Order No.","Order No.");
+                                                                      ItemLedgEntry.TESTFIELD("Order Line No.","Order Line No.");
+                                                                      ItemLedgEntry.TESTFIELD("Entry Type","Entry Type");
+                                                                    end;
+                                                                  end;
+
+                                                                  "Location Code" := ItemLedgEntry."Location Code";
+                                                                  "Variant Code" := ItemLedgEntry."Variant Code";
+                                                                end else
+                                                                  if "Value Entry Type" = "Value Entry Type"::Revaluation then begin
+                                                                    VALIDATE("Unit Amount",0);
+                                                                    VALIDATE(Quantity,0);
+                                                                    "Inventory Value (Calculated)" := 0;
+                                                                    "Inventory Value (Revalued)" := 0;
+                                                                    "Location Code" := '';
+                                                                    "Variant Code" := '';
+                                                                    "Bin Code" := '';
+                                                                  end;
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              SelectItemEntry(FIELDNO("Applies-to Entry"));
+                                                            END;
+
+                                                   CaptionML=ENU=Applies-to Entry }
+    { 32  ;   ;Item Shpt. Entry No.;Integer       ;CaptionML=ENU=Item Shpt. Entry No.;
+                                                   Editable=false }
+    { 34  ;   ;Shortcut Dimension 1 Code;Code20   ;TableRelation="Dimension Value".Code WHERE ("Global Dimension No."=CONST(1));
+                                                   OnValidate=BEGIN
+                                                                ValidateShortcutDimCode(1,"Shortcut Dimension 1 Code");
+                                                              END;
+
+                                                   CaptionML=ENU=Shortcut Dimension 1 Code;
+                                                   CaptionClass='1,2,1' }
+    { 35  ;   ;Shortcut Dimension 2 Code;Code20   ;TableRelation="Dimension Value".Code WHERE ("Global Dimension No."=CONST(2));
+                                                   OnValidate=BEGIN
+                                                                ValidateShortcutDimCode(2,"Shortcut Dimension 2 Code");
+                                                              END;
+
+                                                   CaptionML=ENU=Shortcut Dimension 2 Code;
+                                                   CaptionClass='1,2,2' }
+    { 37  ;   ;Indirect Cost %     ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD("Item No.");
+                                                                TESTFIELD("Value Entry Type","Value Entry Type"::"Direct Cost");
+                                                                TESTFIELD("Item Charge No.",'');
+                                                                if "Entry Type" in ["Entry Type"::Sale,"Entry Type"::"Negative Adjmt."] then
+                                                                  ERROR(
+                                                                    Text002,
+                                                                    FIELDCAPTION("Indirect Cost %"),FIELDCAPTION("Entry Type"),"Entry Type");
+
+                                                                GetItem;
+                                                                if Item."Costing Method" = Item."Costing Method"::Standard then
+                                                                  ERROR(
+                                                                    Text002,
+                                                                    FIELDCAPTION("Indirect Cost %"),Item.FIELDCAPTION("Costing Method"),Item."Costing Method");
+
+                                                                if "Entry Type" <> "Entry Type"::Purchase then
+                                                                  "Unit Cost" :=
+                                                                    ROUND(
+                                                                      "Unit Amount" * (1 + "Indirect Cost %" / 100) +
+                                                                      "Overhead Rate" * "Qty. per Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+                                                              END;
+
+                                                   CaptionML=ENU=Indirect Cost %;
+                                                   DecimalPlaces=0:5;
+                                                   MinValue=0 }
+    { 39  ;   ;Source Type         ;Option        ;CaptionML=ENU=Source Type;
+                                                   OptionCaptionML=ENU=" ,Customer,Vendor,Item";
+                                                   OptionString=" ",Customer,Vendor,Item;
+                                                   Editable=false }
+    { 41  ;   ;Journal Batch Name  ;Code10        ;TableRelation="Item Journal Batch".Name WHERE ("Journal Template Name"=FIELD("Journal Template Name"));
+                                                   CaptionML=ENU=Journal Batch Name }
+    { 42  ;   ;Reason Code         ;Code10        ;TableRelation="Reason Code";
+                                                   CaptionML=ENU=Reason Code }
+    { 43  ;   ;Recurring Method    ;Option        ;CaptionML=ENU=Recurring Method;
+                                                   OptionCaptionML=ENU=,Fixed,Variable;
+                                                   OptionString=,Fixed,Variable;
+                                                   BlankZero=true }
+    { 44  ;   ;Expiration Date     ;Date          ;CaptionML=ENU=Expiration Date }
+    { 45  ;   ;Recurring Frequency ;DateFormula   ;CaptionML=ENU=Recurring Frequency }
+    { 46  ;   ;Drop Shipment       ;Boolean       ;AccessByPermission=TableData "Drop Shpt. Post. Buffer"=R;
+                                                   CaptionML=ENU=Drop Shipment;
+                                                   Editable=false }
+    { 47  ;   ;Transaction Type    ;Code10        ;TableRelation="Transaction Type";
+                                                   CaptionML=ENU=Transaction Type }
+    { 48  ;   ;Transport Method    ;Code10        ;TableRelation="Transport Method";
+                                                   CaptionML=ENU=Transport Method }
+    { 49  ;   ;Country/Region Code ;Code10        ;TableRelation="Country/Region";
+                                                   CaptionML=ENU=Country/Region Code }
+    { 50  ;   ;New Location Code   ;Code10        ;TableRelation=Location;
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD("Entry Type","Entry Type"::Transfer);
+                                                                if "New Location Code" <> xRec."New Location Code" then begin
+                                                                  "New Bin Code" := '';
+                                                                  if ("New Location Code" <> '') and ("Item No." <> '') then begin
+                                                                    GetLocation("New Location Code");
+                                                                    if Location."Bin Mandatory" and not Location."Directed Put-away and Pick" then
+                                                                      WMSManagement.GetDefaultBin("Item No.","Variant Code","New Location Code","New Bin Code")
+                                                                  end;
+                                                                end;
+
+                                                                ReserveItemJnlLine.VerifyChange(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=New Location Code }
+    { 51  ;   ;New Shortcut Dimension 1 Code;Code20;
+                                                   TableRelation="Dimension Value".Code WHERE ("Global Dimension No."=CONST(1));
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD("Entry Type","Entry Type"::Transfer);
+                                                                ValidateNewShortcutDimCode(1,"New Shortcut Dimension 1 Code");
+                                                              END;
+
+                                                   CaptionML=ENU=New Shortcut Dimension 1 Code;
+                                                   CaptionClass='1,2,1,' + Text007 }
+    { 52  ;   ;New Shortcut Dimension 2 Code;Code20;
+                                                   TableRelation="Dimension Value".Code WHERE ("Global Dimension No."=CONST(2));
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD("Entry Type","Entry Type"::Transfer);
+                                                                ValidateNewShortcutDimCode(2,"New Shortcut Dimension 2 Code");
+                                                              END;
+
+                                                   CaptionML=ENU=New Shortcut Dimension 2 Code;
+                                                   CaptionClass='1,2,2,' + Text007 }
+    { 53  ;   ;Qty. (Calculated)   ;Decimal       ;OnValidate=BEGIN
+                                                                VALIDATE("Qty. (Phys. Inventory)");
+                                                              END;
+
+                                                   CaptionML=ENU=Qty. (Calculated);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 54  ;   ;Qty. (Phys. Inventory);Decimal     ;OnValidate=BEGIN
+                                                                TESTFIELD("Phys. Inventory",true);
+
+                                                                if CurrFieldNo <> 0 then
+                                                                  WMSManagement.CheckItemJnlLineFieldChange(Rec,xRec,FIELDCAPTION("Qty. (Phys. Inventory)"));
+
+                                                                PhysInvtEntered := true;
+                                                                Quantity := 0;
+                                                                if "Qty. (Phys. Inventory)" >= "Qty. (Calculated)" then begin
+                                                                  VALIDATE("Entry Type","Entry Type"::"Positive Adjmt.");
+                                                                  VALIDATE(Quantity,"Qty. (Phys. Inventory)" - "Qty. (Calculated)");
+                                                                end else begin
+                                                                  VALIDATE("Entry Type","Entry Type"::"Negative Adjmt.");
+                                                                  VALIDATE(Quantity,"Qty. (Calculated)" - "Qty. (Phys. Inventory)");
+                                                                end;
+                                                                PhysInvtEntered := false;
+                                                              END;
+
+                                                   CaptionML=ENU=Qty. (Phys. Inventory);
+                                                   DecimalPlaces=0:5 }
+    { 55  ;   ;Last Item Ledger Entry No.;Integer ;TableRelation="Item Ledger Entry";
+                                                   TestTableRelation=false;
+                                                   CaptionML=ENU=Last Item Ledger Entry No.;
+                                                   Editable=false }
+    { 56  ;   ;Phys. Inventory     ;Boolean       ;CaptionML=ENU=Phys. Inventory;
+                                                   Editable=false }
+    { 57  ;   ;Gen. Bus. Posting Group;Code20     ;TableRelation="Gen. Business Posting Group";
+                                                   CaptionML=ENU=Gen. Bus. Posting Group }
+    { 58  ;   ;Gen. Prod. Posting Group;Code20    ;TableRelation="Gen. Product Posting Group";
+                                                   CaptionML=ENU=Gen. Prod. Posting Group }
+    { 59  ;   ;Entry/Exit Point    ;Code10        ;TableRelation="Entry/Exit Point";
+                                                   CaptionML=ENU=Entry/Exit Point }
+    { 60  ;   ;Document Date       ;Date          ;CaptionML=ENU=Document Date }
+    { 62  ;   ;External Document No.;Code35       ;CaptionML=ENU=External Document No. }
+    { 63  ;   ;Area                ;Code10        ;TableRelation=Area;
+                                                   CaptionML=ENU=Area }
+    { 64  ;   ;Transaction Specification;Code10   ;TableRelation="Transaction Specification";
+                                                   CaptionML=ENU=Transaction Specification }
+    { 65  ;   ;Posting No. Series  ;Code20        ;TableRelation="No. Series";
+                                                   CaptionML=ENU=Posting No. Series }
+    { 68  ;   ;Reserved Quantity   ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Reservation Entry".Quantity WHERE ("Source ID"=FIELD("Journal Template Name"),
+                                                                                                       "Source Ref. No."=FIELD("Line No."),
+                                                                                                       "Source Type"=CONST(83),
+                                                                                                       "Source Subtype"=FIELD("Entry Type"),
+                                                                                                       "Source Batch Name"=FIELD("Journal Batch Name"),
+                                                                                                       "Source Prod. Order Line"=CONST(0),
+                                                                                                       "Reservation Status"=CONST(Reservation)));
+                                                   AccessByPermission=TableData "Purch. Rcpt. Header"=R;
+                                                   CaptionML=ENU=Reserved Quantity;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 72  ;   ;Unit Cost (ACY)     ;Decimal       ;CaptionML=ENU=Unit Cost (ACY);
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 73  ;   ;Source Currency Code;Code10        ;TableRelation=Currency;
+                                                   AccessByPermission=TableData "Drop Shpt. Post. Buffer"=R;
+                                                   CaptionML=ENU=Source Currency Code;
+                                                   Editable=false }
+    { 79  ;   ;Document Type       ;Option        ;CaptionML=ENU=Document Type;
+                                                   OptionCaptionML=ENU=" ,Sales Shipment,Sales Invoice,Sales Return Receipt,Sales Credit Memo,Purchase Receipt,Purchase Invoice,Purchase Return Shipment,Purchase Credit Memo,Transfer Shipment,Transfer Receipt,Service Shipment,Service Invoice,Service Credit Memo,Posted Assembly";
+                                                   OptionString=" ","Sales Shipment","Sales Invoice","Sales Return Receipt","Sales Credit Memo","Purchase Receipt","Purchase Invoice","Purchase Return Shipment","Purchase Credit Memo","Transfer Shipment","Transfer Receipt","Service Shipment","Service Invoice","Service Credit Memo","Posted Assembly" }
+    { 80  ;   ;Document Line No.   ;Integer       ;CaptionML=ENU=Document Line No. }
+    { 90  ;   ;Order Type          ;Option        ;OnValidate=BEGIN
+                                                                if "Order Type" = xRec."Order Type" then
+                                                                  exit;
+                                                                VALIDATE("Order No.",'');
+                                                                "Order Line No." := 0;
+                                                              END;
+
+                                                   CaptionML=ENU=Order Type;
+                                                   OptionCaptionML=ENU=" ,Production,Transfer,Service,Assembly";
+                                                   OptionString=" ",Production,Transfer,Service,Assembly;
+                                                   Editable=false }
+    { 91  ;   ;Order No.           ;Code20        ;TableRelation=IF ("Order Type"=CONST(Production)) "Production Order"."No." WHERE (Status=CONST(Released));
+                                                   OnValidate=VAR
+                                                                AssemblyHeader@1000 : Record "Assembly Header";
+                                                                ProdOrder@1001 : Record "Production Order";
+                                                                ProdOrderLine@1002 : Record "Prod. Order Line";
+                                                              BEGIN
+                                                                case "Order Type" of
+                                                                  "Order Type"::Production,"Order Type"::Assembly:
+                                                                    begin
+                                                                      if "Order No." = '' then begin
+                                                                        case "Order Type" of
+                                                                          "Order Type"::Production:
+                                                                            CreateProdDim;
+                                                                          "Order Type"::Assembly:
+                                                                            CreateAssemblyDim;
+                                                                        end;
+                                                                        exit;
+                                                                      end;
+
+                                                                      case "Order Type" of
+                                                                        "Order Type"::Production:
+                                                                          begin
+                                                                            GetMfgSetup;
+                                                                            if MfgSetup."Doc. No. Is Prod. Order No." then
+                                                                              "Document No." := "Order No.";
+                                                                            ProdOrder.GET(ProdOrder.Status::Released,"Order No.");
+                                                                            ProdOrder.TESTFIELD(Blocked,false);
+                                                                            Description := ProdOrder.Description;
+                                                                          end;
+                                                                        "Order Type"::Assembly:
+                                                                          begin
+                                                                            AssemblyHeader.GET(AssemblyHeader."Document Type"::Order,"Order No.");
+                                                                            Description := AssemblyHeader.Description;
+                                                                          end;
+                                                                      end;
+
+                                                                      "Gen. Bus. Posting Group" := ProdOrder."Gen. Bus. Posting Group";
+                                                                      case true of
+                                                                        "Entry Type" = "Entry Type"::Output:
+                                                                          begin
+                                                                            "Inventory Posting Group" := ProdOrder."Inventory Posting Group";
+                                                                            "Gen. Prod. Posting Group" := ProdOrder."Gen. Prod. Posting Group";
+                                                                          end;
+                                                                        "Entry Type" = "Entry Type"::"Assembly Output":
+                                                                          begin
+                                                                            "Inventory Posting Group" := AssemblyHeader."Inventory Posting Group";
+                                                                            "Gen. Prod. Posting Group" := AssemblyHeader."Gen. Prod. Posting Group";
+                                                                          end;
+                                                                        "Entry Type" = "Entry Type"::Consumption:
+                                                                          begin
+                                                                            ProdOrderLine.SetFilterByReleasedOrderNo("Order No.");
+                                                                            if ProdOrderLine.COUNT = 1 then begin
+                                                                              ProdOrderLine.FINDFIRST;
+                                                                              VALIDATE("Order Line No.",ProdOrderLine."Line No.");
+                                                                            end;
+                                                                          end;
+                                                                      end;
+
+                                                                      if ("Order No." <> xRec."Order No.") or ("Order Type" <> xRec."Order Type") then
+                                                                        case "Order Type" of
+                                                                          "Order Type"::Production:
+                                                                            CreateProdDim;
+                                                                          "Order Type"::Assembly:
+                                                                            CreateAssemblyDim;
+                                                                        end;
+                                                                    end;
+                                                                  "Order Type"::Transfer,"Order Type"::Service,"Order Type"::" ":
+                                                                    ERROR(Text002,FIELDCAPTION("Order No."),FIELDCAPTION("Order Type"),"Order Type");
+                                                                end;
+                                                              END;
+
+                                                   CaptionML=ENU=Order No. }
+    { 92  ;   ;Order Line No.      ;Integer       ;TableRelation=IF ("Order Type"=CONST(Production)) "Prod. Order Line"."Line No." WHERE (Status=CONST(Released),
+                                                                                                                                          "Prod. Order No."=FIELD("Order No."));
+                                                   OnValidate=VAR
+                                                                ProdOrderLine@1000 : Record "Prod. Order Line";
+                                                              BEGIN
+                                                                TESTFIELD("Order No.");
+                                                                case "Order Type" of
+                                                                  "Order Type"::Production,"Order Type"::Assembly:
+                                                                    begin
+                                                                      if "Order Type" = "Order Type"::Production then begin
+                                                                        ProdOrderLine.SetFilterByReleasedOrderNo("Order No.");
+                                                                        ProdOrderLine.SETRANGE("Line No.","Order Line No.");
+                                                                        if ProdOrderLine.FINDFIRST then begin
+                                                                          "Source Type" := "Source Type"::Item;
+                                                                          "Source No." := ProdOrderLine."Item No.";
+                                                                          "Order Line No." := ProdOrderLine."Line No.";
+                                                                          "Routing No." := ProdOrderLine."Routing No.";
+                                                                          "Routing Reference No." := ProdOrderLine."Routing Reference No.";
+                                                                          if "Entry Type" = "Entry Type"::Output then begin
+                                                                            "Location Code" := ProdOrderLine."Location Code";
+                                                                            "Bin Code" := ProdOrderLine."Bin Code";
+                                                                          end;
+                                                                        end;
+                                                                      end;
+
+                                                                      if "Order Line No." <> xRec."Order Line No." then
+                                                                        case "Order Type" of
+                                                                          "Order Type"::Production:
+                                                                            CreateProdDim;
+                                                                          "Order Type"::Assembly:
+                                                                            CreateAssemblyDim;
+                                                                        end;
+                                                                    end;
+                                                                end;
+                                                              END;
+
+                                                   CaptionML=ENU=Order Line No. }
+    { 480 ;   ;Dimension Set ID    ;Integer       ;TableRelation="Dimension Set Entry";
+                                                   OnValidate=BEGIN
+                                                                DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              ShowDimensions;
+                                                            END;
+
+                                                   CaptionML=ENU=Dimension Set ID;
+                                                   Editable=false }
+    { 481 ;   ;New Dimension Set ID;Integer       ;TableRelation="Dimension Set Entry";
+                                                   OnLookup=BEGIN
+                                                              ShowDimensions;
+                                                            END;
+
+                                                   CaptionML=ENU=New Dimension Set ID;
+                                                   Editable=false }
+    { 904 ;   ;Assemble to Order   ;Boolean       ;CaptionML=ENU=Assemble to Order;
+                                                   Editable=false }
+    { 1000;   ;Job No.             ;Code20        ;CaptionML=ENU=Job No. }
+    { 1001;   ;Job Task No.        ;Code20        ;CaptionML=ENU=Job Task No. }
+    { 1002;   ;Job Purchase        ;Boolean       ;CaptionML=ENU=Job Purchase }
+    { 1030;   ;Job Contract Entry No.;Integer     ;CaptionML=ENU=Job Contract Entry No.;
+                                                   Editable=false }
+    { 5402;   ;Variant Code        ;Code10        ;TableRelation="Item Variant".Code WHERE ("Item No."=FIELD("Item No."));
+                                                   OnValidate=BEGIN
+                                                                if "Entry Type" in ["Entry Type"::Consumption,"Entry Type"::Output] then
+                                                                  WhseValidateSourceLine.ItemLineVerifyChange(Rec,xRec);
+
+                                                                if "Variant Code" <> xRec."Variant Code" then begin
+                                                                  "Bin Code" := '';
+                                                                  if CurrFieldNo <> 0 then
+                                                                    WMSManagement.CheckItemJnlLineFieldChange(Rec,xRec,FIELDCAPTION("Variant Code"));
+                                                                  if ("Location Code" <> '') and ("Item No." <> '') then begin
+                                                                    GetLocation("Location Code");
+                                                                    if Location."Bin Mandatory" and not Location."Directed Put-away and Pick" then
+                                                                      WMSManagement.GetDefaultBin("Item No.","Variant Code","Location Code","Bin Code")
+                                                                  end;
+                                                                  if ("Entry Type" = "Entry Type"::Transfer) and ("Location Code" = "New Location Code") then
+                                                                    "New Bin Code" := "Bin Code";
+                                                                end;
+                                                                if ("Value Entry Type" = "Value Entry Type"::"Direct Cost") and
+                                                                   ("Item Charge No." = '')
+                                                                then begin
+                                                                  GetUnitAmount(FIELDNO("Variant Code"));
+                                                                  "Unit Cost" := UnitCost;
+                                                                  VALIDATE("Unit Amount");
+                                                                  VALIDATE("Unit of Measure Code");
+                                                                  ReserveItemJnlLine.VerifyChange(Rec,xRec);
+                                                                end;
+
+                                                                if "Variant Code" <> '' then begin
+                                                                  ItemVariant.GET("Item No.","Variant Code");
+                                                                  Description := ItemVariant.Description;
+                                                                end else begin
+                                                                  GetItem;
+                                                                  Description := Item.Description;
+                                                                end;
+                                                              END;
+
+                                                   CaptionML=ENU=Variant Code }
+    { 5403;   ;Bin Code            ;Code20        ;TableRelation=IF ("Entry Type"=FILTER(Purchase|"Positive Adjmt."|Output),
+                                                                     Quantity=FILTER(>=0)) Bin.Code WHERE ("Location Code"=FIELD("Location Code"),
+                                                                                                           "Item Filter"=FIELD("Item No."),
+                                                                                                           "Variant Filter"=FIELD("Variant Code"))
+                                                                                                           ELSE IF ("Entry Type"=FILTER(Purchase|"Positive Adjmt."|Output),
+                                                                                                                    Quantity=FILTER(<0)) "Bin Content"."Bin Code" WHERE ("Location Code"=FIELD("Location Code"),
+                                                                                                                                                                         "Item No."=FIELD("Item No."),
+                                                                                                                                                                         "Variant Code"=FIELD("Variant Code"))
+                                                                                                                                                                         ELSE IF ("Entry Type"=FILTER(Sale|"Negative Adjmt."|Transfer|Consumption),
+                                                                                                                                                                                  Quantity=FILTER(>0)) "Bin Content"."Bin Code" WHERE ("Location Code"=FIELD("Location Code"),
+                                                                                                                                                                                                                                       "Item No."=FIELD("Item No."),
+                                                                                                                                                                                                                                       "Variant Code"=FIELD("Variant Code"))
+                                                                                                                                                                                                                                       ELSE IF ("Entry Type"=FILTER(Sale|"Negative Adjmt."|Transfer|Consumption),
+                                                                                                                                                                                                                                                Quantity=FILTER(<=0)) Bin.Code WHERE ("Location Code"=FIELD("Location Code"),
+                                                                                                                                                                                                                                                                                      "Item Filter"=FIELD("Item No."),
+                                                                                                                                                                                                                                                                                      "Variant Filter"=FIELD("Variant Code"));
+                                                   OnValidate=VAR
+                                                                ProdOrderComp@1001 : Record "Prod. Order Component";
+                                                                WhseIntegrationMgt@1000 : Codeunit "Whse. Integration Management";
+                                                              BEGIN
+                                                                if "Bin Code" <> xRec."Bin Code" then begin
+                                                                  TESTFIELD("Location Code");
+                                                                  if "Bin Code" <> '' then begin
+                                                                    GetBin("Location Code","Bin Code");
+                                                                    GetLocation("Location Code");
+                                                                    Location.TESTFIELD("Bin Mandatory");
+                                                                    if CurrFieldNo <> 0 then
+                                                                      WMSManagement.CheckItemJnlLineFieldChange(Rec,xRec,FIELDCAPTION("Bin Code"));
+                                                                    TESTFIELD("Location Code",Bin."Location Code");
+                                                                    WhseIntegrationMgt.CheckBinTypeCode(DATABASE::"Item Journal Line",
+                                                                      FIELDCAPTION("Bin Code"),
+                                                                      "Location Code",
+                                                                      "Bin Code",
+                                                                      "Entry Type");
+                                                                  end;
+                                                                  if ("Entry Type" = "Entry Type"::Transfer) and ("Location Code" = "New Location Code") then
+                                                                    "New Bin Code" := "Bin Code";
+
+                                                                  if ("Entry Type" = "Entry Type"::Consumption) and
+                                                                     ("Bin Code" <> '') and ("Prod. Order Comp. Line No." <> 0)
+                                                                  then begin
+                                                                    TESTFIELD("Order Type","Order Type"::Production);
+                                                                    TESTFIELD("Order No.");
+                                                                    ProdOrderComp.GET(ProdOrderComp.Status::Released,"Order No.","Order Line No.","Prod. Order Comp. Line No.");
+                                                                    if (ProdOrderComp."Bin Code" <> '') and (ProdOrderComp."Bin Code" <> "Bin Code") then
+                                                                      if not CONFIRM(
+                                                                           Text021,
+                                                                           false,
+                                                                           "Bin Code",
+                                                                           ProdOrderComp."Bin Code",
+                                                                           "Order No.")
+                                                                      then
+                                                                        ERROR(Text012);
+                                                                  end;
+                                                                end;
+
+                                                                ReserveItemJnlLine.VerifyChange(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=Bin Code }
+    { 5404;   ;Qty. per Unit of Measure;Decimal   ;InitValue=1;
+                                                   CaptionML=ENU=Qty. per Unit of Measure;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 5406;   ;New Bin Code        ;Code20        ;TableRelation=Bin.Code WHERE ("Location Code"=FIELD("New Location Code"),
+                                                                                 "Item Filter"=FIELD("Item No."),
+                                                                                 "Variant Filter"=FIELD("Variant Code"));
+                                                   OnValidate=VAR
+                                                                WhseIntegrationMgt@1000 : Codeunit "Whse. Integration Management";
+                                                              BEGIN
+                                                                TESTFIELD("Entry Type","Entry Type"::Transfer);
+                                                                if "New Bin Code" <> xRec."New Bin Code" then begin
+                                                                  TESTFIELD("New Location Code");
+                                                                  if "New Bin Code" <> '' then begin
+                                                                    GetBin("New Location Code","New Bin Code");
+                                                                    GetLocation("New Location Code");
+                                                                    Location.TESTFIELD("Bin Mandatory");
+                                                                    if CurrFieldNo <> 0 then
+                                                                      WMSManagement.CheckItemJnlLineFieldChange(Rec,xRec,FIELDCAPTION("New Bin Code"));
+                                                                    TESTFIELD("New Location Code",Bin."Location Code");
+                                                                    WhseIntegrationMgt.CheckBinTypeCode(DATABASE::"Item Journal Line",
+                                                                      FIELDCAPTION("New Bin Code"),
+                                                                      "New Location Code",
+                                                                      "New Bin Code",
+                                                                      "Entry Type");
+                                                                  end;
+                                                                end;
+
+                                                                ReserveItemJnlLine.VerifyChange(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=New Bin Code }
+    { 5407;   ;Unit of Measure Code;Code10        ;TableRelation="Item Unit of Measure".Code WHERE ("Item No."=FIELD("Item No."));
+                                                   OnValidate=BEGIN
+                                                                GetItem;
+                                                                "Qty. per Unit of Measure" := UOMMgt.GetQtyPerUnitOfMeasure(Item,"Unit of Measure Code");
+
+                                                                if "Entry Type" in ["Entry Type"::Consumption,"Entry Type"::Output] then
+                                                                  WhseValidateSourceLine.ItemLineVerifyChange(Rec,xRec);
+
+                                                                if CurrFieldNo <> 0 then
+                                                                  WMSManagement.CheckItemJnlLineFieldChange(Rec,xRec,FIELDCAPTION("Unit of Measure Code"));
+
+                                                                GetUnitAmount(FIELDNO("Unit of Measure Code"));
+                                                                if "Value Entry Type" = "Value Entry Type"::Revaluation then
+                                                                  TESTFIELD("Qty. per Unit of Measure",1);
+
+                                                                ReadGLSetup;
+                                                                "Unit Cost" := ROUND(UnitCost * "Qty. per Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+
+                                                                if "Entry Type" = "Entry Type"::Consumption then begin
+                                                                  "Indirect Cost %" := ROUND(Item."Indirect Cost %" * "Qty. per Unit of Measure",1);
+                                                                  "Overhead Rate" :=
+                                                                    ROUND(Item."Overhead Rate" * "Qty. per Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+                                                                  "Unit Amount" := ROUND(UnitCost * "Qty. per Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+                                                                end;
+
+                                                                if "No." <> '' then
+                                                                  VALIDATE("Cap. Unit of Measure Code");
+
+                                                                VALIDATE("Unit Amount");
+
+                                                                if "Entry Type" = "Entry Type"::Output then begin
+                                                                  VALIDATE("Output Quantity");
+                                                                  VALIDATE("Scrap Quantity");
+                                                                end else
+                                                                  VALIDATE(Quantity);
+
+                                                                CheckItemAvailable(FIELDNO("Unit of Measure Code"));
+                                                              END;
+
+                                                   CaptionML=ENU=Unit of Measure Code }
+    { 5408;   ;Derived from Blanket Order;Boolean ;CaptionML=ENU=Derived from Blanket Order;
+                                                   Editable=false }
+    { 5413;   ;Quantity (Base)     ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD("Qty. per Unit of Measure",1);
+                                                                VALIDATE(Quantity,"Quantity (Base)");
+                                                              END;
+
+                                                   CaptionML=ENU=Quantity (Base);
+                                                   DecimalPlaces=0:5 }
+    { 5415;   ;Invoiced Qty. (Base);Decimal       ;CaptionML=ENU=Invoiced Qty. (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 5468;   ;Reserved Qty. (Base);Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Reservation Entry"."Quantity (Base)" WHERE ("Source ID"=FIELD("Journal Template Name"),
+                                                                                                                "Source Ref. No."=FIELD("Line No."),
+                                                                                                                "Source Type"=CONST(83),
+                                                                                                                "Source Subtype"=FIELD("Entry Type"),
+                                                                                                                "Source Batch Name"=FIELD("Journal Batch Name"),
+                                                                                                                "Source Prod. Order Line"=CONST(0),
+                                                                                                                "Reservation Status"=CONST(Reservation)));
+                                                   AccessByPermission=TableData "Purch. Rcpt. Header"=R;
+                                                   CaptionML=ENU=Reserved Qty. (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 5560;   ;Level               ;Integer       ;CaptionML=ENU=Level;
+                                                   Editable=false }
+    { 5561;   ;Flushing Method     ;Option        ;CaptionML=ENU=Flushing Method;
+                                                   OptionCaptionML=ENU=Manual,Forward,Backward,Pick + Forward,Pick + Backward;
+                                                   OptionString=Manual,Forward,Backward,"Pick + Forward","Pick + Backward";
+                                                   Editable=false }
+    { 5562;   ;Changed by User     ;Boolean       ;CaptionML=ENU=Changed by User;
+                                                   Editable=false }
+    { 5700;   ;Cross-Reference No. ;Code20        ;CaptionML=ENU=Cross-Reference No. }
+    { 5701;   ;Originally Ordered No.;Code20      ;TableRelation=Item;
+                                                   AccessByPermission=TableData "Item Substitution"=R;
+                                                   CaptionML=ENU=Originally Ordered No. }
+    { 5702;   ;Originally Ordered Var. Code;Code10;TableRelation="Item Variant".Code WHERE ("Item No."=FIELD("Originally Ordered No."));
+                                                   AccessByPermission=TableData "Item Substitution"=R;
+                                                   CaptionML=ENU=Originally Ordered Var. Code }
+    { 5703;   ;Out-of-Stock Substitution;Boolean  ;CaptionML=ENU=Out-of-Stock Substitution }
+    { 5704;   ;Item Category Code  ;Code20        ;TableRelation="Item Category";
+                                                   CaptionML=ENU=Item Category Code }
+    { 5705;   ;Nonstock            ;Boolean       ;CaptionML=ENU=Nonstock }
+    { 5706;   ;Purchasing Code     ;Code10        ;TableRelation=Purchasing;
+                                                   AccessByPermission=TableData "Drop Shpt. Post. Buffer"=R;
+                                                   CaptionML=ENU=Purchasing Code }
+    { 5707;   ;Product Group Code  ;Code10        ;TableRelation="Product Group".Code WHERE ("Item Category Code"=FIELD("Item Category Code"));
+                                                   ValidateTableRelation=false;
+                                                   CaptionML=ENU=Product Group Code }
+    { 5791;   ;Planned Delivery Date;Date         ;CaptionML=ENU=Planned Delivery Date }
+    { 5793;   ;Order Date          ;Date          ;CaptionML=ENU=Order Date }
+    { 5800;   ;Value Entry Type    ;Option        ;CaptionML=ENU=Value Entry Type;
+                                                   OptionCaptionML=ENU=Direct Cost,Revaluation,Rounding,Indirect Cost,Variance;
+                                                   OptionString="Direct Cost",Revaluation,Rounding,"Indirect Cost",Variance }
+    { 5801;   ;Item Charge No.     ;Code20        ;TableRelation="Item Charge";
+                                                   CaptionML=ENU=Item Charge No. }
+    { 5802;   ;Inventory Value (Calculated);Decimal;
+                                                   OnValidate=BEGIN
+                                                                ReadGLSetup;
+                                                                "Unit Cost (Calculated)" :=
+                                                                  ROUND("Inventory Value (Calculated)" / Quantity,GLSetup."Unit-Amount Rounding Precision");
+                                                              END;
+
+                                                   CaptionML=ENU=Inventory Value (Calculated);
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 5803;   ;Inventory Value (Revalued);Decimal ;OnValidate=BEGIN
+                                                                TESTFIELD("Value Entry Type","Value Entry Type"::Revaluation);
+                                                                VALIDATE(Amount,"Inventory Value (Revalued)" - "Inventory Value (Calculated)");
+                                                                ReadGLSetup;
+                                                                if ("Unit Cost (Revalued)" <> xRec."Unit Cost (Revalued)") or
+                                                                   ("Inventory Value (Revalued)" <> xRec."Inventory Value (Revalued)")
+                                                                then begin
+                                                                  if CurrFieldNo <> FIELDNO("Unit Cost (Revalued)") then
+                                                                    "Unit Cost (Revalued)" :=
+                                                                      ROUND("Inventory Value (Revalued)" / Quantity,GLSetup."Unit-Amount Rounding Precision");
+
+                                                                  if CurrFieldNo <> 0 then
+                                                                    ClearSingleAndRolledUpCosts;
+                                                                end
+                                                              END;
+
+                                                   CaptionML=ENU=Inventory Value (Revalued);
+                                                   MinValue=0;
+                                                   AutoFormatType=1 }
+    { 5804;   ;Variance Type       ;Option        ;CaptionML=ENU=Variance Type;
+                                                   OptionCaptionML=ENU=" ,Purchase,Material,Capacity,Capacity Overhead,Manufacturing Overhead";
+                                                   OptionString=" ",Purchase,Material,Capacity,"Capacity Overhead","Manufacturing Overhead" }
+    { 5805;   ;Inventory Value Per ;Option        ;CaptionML=ENU=Inventory Value Per;
+                                                   OptionCaptionML=ENU=" ,Item,Location,Variant,Location and Variant";
+                                                   OptionString=" ",Item,Location,Variant,"Location and Variant";
+                                                   Editable=false }
+    { 5806;   ;Partial Revaluation ;Boolean       ;CaptionML=ENU=Partial Revaluation;
+                                                   Editable=false }
+    { 5807;   ;Applies-from Entry  ;Integer       ;OnValidate=VAR
+                                                                ItemLedgEntry@1000 : Record "Item Ledger Entry";
+                                                                ItemTrackingLines@1001 : Page "Item Tracking Lines";
+                                                              BEGIN
+                                                                if "Applies-from Entry" <> 0 then begin
+                                                                  TESTFIELD(Quantity);
+                                                                  if Signed(Quantity) < 0 then begin
+                                                                    if Quantity > 0 then
+                                                                      FIELDERROR(Quantity,Text030);
+                                                                    if Quantity < 0 then
+                                                                      FIELDERROR(Quantity,Text029);
+                                                                  end;
+                                                                  ItemLedgEntry.GET("Applies-from Entry");
+                                                                  ItemLedgEntry.TESTFIELD(Positive,false);
+                                                                  if ItemLedgEntry.TrackingExists then
+                                                                    ERROR(Text033,FIELDCAPTION("Applies-from Entry"),ItemTrackingLines.CAPTION);
+                                                                  "Unit Cost" := CalcUnitCost(ItemLedgEntry);
+                                                                end;
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              SelectItemEntry(FIELDNO("Applies-from Entry"));
+                                                            END;
+
+                                                   CaptionML=ENU=Applies-from Entry;
+                                                   MinValue=0 }
+    { 5808;   ;Invoice No.         ;Code20        ;CaptionML=ENU=Invoice No. }
+    { 5809;   ;Unit Cost (Calculated);Decimal     ;OnValidate=BEGIN
+                                                                TESTFIELD("Value Entry Type","Value Entry Type"::Revaluation);
+                                                              END;
+
+                                                   CaptionML=ENU=Unit Cost (Calculated);
+                                                   Editable=false;
+                                                   AutoFormatType=2 }
+    { 5810;   ;Unit Cost (Revalued);Decimal       ;OnValidate=BEGIN
+                                                                ReadGLSetup;
+                                                                TESTFIELD("Value Entry Type","Value Entry Type"::Revaluation);
+                                                                if "Unit Cost (Revalued)" <> xRec."Unit Cost (Revalued)" then
+                                                                  VALIDATE(
+                                                                    "Inventory Value (Revalued)",
+                                                                    ROUND(
+                                                                      "Unit Cost (Revalued)" * Quantity,GLSetup."Amount Rounding Precision"));
+                                                              END;
+
+                                                   CaptionML=ENU=Unit Cost (Revalued);
+                                                   MinValue=0;
+                                                   AutoFormatType=2 }
+    { 5811;   ;Applied Amount      ;Decimal       ;CaptionML=ENU=Applied Amount;
+                                                   Editable=false;
+                                                   AutoFormatType=1 }
+    { 5812;   ;Update Standard Cost;Boolean       ;OnValidate=BEGIN
+                                                                TESTFIELD("Inventory Value Per");
+                                                                GetItem;
+                                                                Item.TESTFIELD("Costing Method",Item."Costing Method"::Standard);
+                                                              END;
+
+                                                   CaptionML=ENU=Update Standard Cost }
+    { 5813;   ;Amount (ACY)        ;Decimal       ;CaptionML=ENU=Amount (ACY);
+                                                   AutoFormatType=1 }
+    { 5817;   ;Correction          ;Boolean       ;CaptionML=ENU=Correction }
+    { 5818;   ;Adjustment          ;Boolean       ;CaptionML=ENU=Adjustment }
+    { 5819;   ;Applies-to Value Entry;Integer     ;CaptionML=ENU=Applies-to Value Entry }
+    { 5820;   ;Invoice-to Source No.;Code20       ;TableRelation=IF ("Source Type"=CONST(Customer)) Customer
+                                                                 ELSE IF ("Source Type"=CONST(Vendor)) Vendor;
+                                                   CaptionML=ENU=Invoice-to Source No. }
+    { 5830;   ;Type                ;Option        ;OnValidate=BEGIN
+                                                                if Type = Type::Resource then
+                                                                  TESTFIELD("Entry Type","Entry Type"::"Assembly Output")
+                                                                else
+                                                                  TESTFIELD("Entry Type","Entry Type"::Output);
+                                                                VALIDATE("No.",'');
+                                                              END;
+
+                                                   AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Type;
+                                                   OptionCaptionML=ENU=Work Center,Machine Center, ,Resource;
+                                                   OptionString="Work Center","Machine Center"," ",Resource }
+    { 5831;   ;No.                 ;Code20        ;TableRelation=IF (Type=CONST("Machine Center")) "Machine Center"
+                                                                 ELSE IF (Type=CONST("Work Center")) "Work Center"
+                                                                 ELSE IF (Type=CONST(Resource)) Resource;
+                                                   OnValidate=VAR
+                                                                Resource@1000 : Record Resource;
+                                                              BEGIN
+                                                                if Type = Type::Resource then
+                                                                  TESTFIELD("Entry Type","Entry Type"::"Assembly Output")
+                                                                else
+                                                                  TESTFIELD("Entry Type","Entry Type"::Output);
+                                                                if "No." = '' then begin
+                                                                  "Work Center No." := '';
+                                                                  "Work Center Group Code" := '';
+                                                                  VALIDATE("Item No.");
+                                                                  if Type in [Type::"Work Center",Type::"Machine Center"] then
+                                                                    CreateDimWithProdOrderLine
+                                                                  else
+                                                                    CreateDim(
+                                                                      DATABASE::"Work Center","Work Center No.",
+                                                                      DATABASE::Item,"Item No.",
+                                                                      DATABASE::"Salesperson/Purchaser","Salespers./Purch. Code");
+                                                                  exit;
+                                                                end;
+
+                                                                case Type of
+                                                                  Type::"Work Center":
+                                                                    begin
+                                                                      WorkCenter.GET("No.");
+                                                                      WorkCenter.TESTFIELD(Blocked,false);
+                                                                      "Work Center No." := WorkCenter."No.";
+                                                                      Description := WorkCenter.Name;
+                                                                      "Gen. Prod. Posting Group" := WorkCenter."Gen. Prod. Posting Group";
+                                                                      "Unit Cost Calculation" := WorkCenter."Unit Cost Calculation";
+                                                                    end;
+                                                                  Type::"Machine Center":
+                                                                    begin
+                                                                      MachineCenter.GET("No.");
+                                                                      MachineCenter.TESTFIELD(Blocked,false);
+                                                                      "Work Center No." := MachineCenter."Work Center No.";
+                                                                      Description := MachineCenter.Name;
+                                                                      WorkCenter.GET("Work Center No.");
+                                                                      WorkCenter.TESTFIELD(Blocked,false);
+                                                                      "Gen. Prod. Posting Group" := MachineCenter."Gen. Prod. Posting Group";
+                                                                      "Unit Cost Calculation" := "Unit Cost Calculation"::Time;
+                                                                    end;
+                                                                  Type::Resource:
+                                                                    begin
+                                                                      Resource.GET("No.");
+                                                                      Resource.TESTFIELD(Blocked,false);
+                                                                    end;
+                                                                end;
+
+                                                                if Type in [Type::"Work Center",Type::"Machine Center"] then begin
+                                                                  "Work Center No." := WorkCenter."No.";
+                                                                  "Work Center Group Code" := WorkCenter."Work Center Group Code"; // NAVCZ
+                                                                  VALIDATE("Cap. Unit of Measure Code",WorkCenter."Unit of Measure Code");
+                                                                end;
+
+                                                                if "Work Center No." <> '' then
+                                                                  CreateDimWithProdOrderLine;
+                                                              END;
+
+                                                   CaptionML=ENU=No. }
+    { 5838;   ;Operation No.       ;Code10        ;TableRelation=IF ("Order Type"=CONST(Production)) "Prod. Order Routing Line"."Operation No." WHERE (Status=CONST(Released),
+                                                                                                                                                       "Prod. Order No."=FIELD("Order No."),
+                                                                                                                                                       "Routing No."=FIELD("Routing No."),
+                                                                                                                                                       "Routing Reference No."=FIELD("Routing Reference No."));
+                                                   OnValidate=VAR
+                                                                ProdOrderRtngLine@1000 : Record "Prod. Order Routing Line";
+                                                              BEGIN
+                                                                TESTFIELD("Entry Type","Entry Type"::Output);
+                                                                if "Operation No." = '' then
+                                                                  exit;
+
+                                                                TESTFIELD("Order Type","Order Type"::Production);
+                                                                TESTFIELD("Order No.");
+                                                                TESTFIELD("Item No.");
+
+                                                                GetProdOrderRtngLine(ProdOrderRtngLine);
+
+                                                                case ProdOrderRtngLine.Type of
+                                                                  ProdOrderRtngLine.Type::"Work Center":
+                                                                    Type := Type::"Work Center";
+                                                                  ProdOrderRtngLine.Type::"Machine Center":
+                                                                    Type := Type::"Machine Center";
+                                                                end;
+                                                                VALIDATE("No.",ProdOrderRtngLine."No.");
+                                                                Description := ProdOrderRtngLine.Description;
+                                                              END;
+
+                                                   CaptionML=ENU=Operation No. }
+    { 5839;   ;Work Center No.     ;Code20        ;TableRelation="Work Center";
+                                                   CaptionML=ENU=Work Center No.;
+                                                   Editable=false }
+    { 5841;   ;Setup Time          ;Decimal       ;OnValidate=BEGIN
+                                                                if SubcontractingWorkCenterUsed and ("Setup Time" <> 0) then
+                                                                  ERROR(STRSUBSTNO(SubcontractedErr,FIELDCAPTION("Setup Time"),"Line No."));
+                                                                "Setup Time (Base)" := CalcBaseTime("Setup Time");
+                                                              END;
+
+                                                   AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Setup Time;
+                                                   DecimalPlaces=0:5 }
+    { 5842;   ;Run Time            ;Decimal       ;OnValidate=BEGIN
+                                                                if SubcontractingWorkCenterUsed and ("Run Time" <> 0) then
+                                                                  ERROR(STRSUBSTNO(SubcontractedErr,FIELDCAPTION("Run Time"),"Line No."));
+
+                                                                "Run Time (Base)" := CalcBaseTime("Run Time");
+                                                              END;
+
+                                                   AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Run Time;
+                                                   DecimalPlaces=0:5 }
+    { 5843;   ;Stop Time           ;Decimal       ;OnValidate=BEGIN
+                                                                "Stop Time (Base)" := CalcBaseTime("Stop Time");
+                                                              END;
+
+                                                   AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Stop Time;
+                                                   DecimalPlaces=0:5 }
+    { 5846;   ;Output Quantity     ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD("Entry Type","Entry Type"::Output);
+                                                                if SubcontractingWorkCenterUsed and ("Output Quantity" <> 0) then
+                                                                  ERROR(STRSUBSTNO(SubcontractedErr,FIELDCAPTION("Output Quantity"),"Line No."));
+
+                                                                if LastOutputOperation(Rec) then
+                                                                  WhseValidateSourceLine.ItemLineVerifyChange(Rec,xRec);
+
+                                                                "Output Quantity (Base)" := CalcBaseQty("Output Quantity");
+
+                                                                VALIDATE(Quantity,"Output Quantity");
+                                                              END;
+
+                                                   AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Output Quantity;
+                                                   DecimalPlaces=0:5 }
+    { 5847;   ;Scrap Quantity      ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD("Entry Type","Entry Type"::Output);
+                                                                "Scrap Quantity (Base)" := CalcBaseQty("Scrap Quantity");
+                                                              END;
+
+                                                   AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Scrap Quantity;
+                                                   DecimalPlaces=0:5 }
+    { 5849;   ;Concurrent Capacity ;Decimal       ;OnValidate=VAR
+                                                                TotalTime@1000 : Integer;
+                                                              BEGIN
+                                                                TESTFIELD("Entry Type","Entry Type"::Output);
+                                                                if "Concurrent Capacity" = 0 then
+                                                                  exit;
+
+                                                                TESTFIELD("Starting Time");
+                                                                TESTFIELD("Ending Time");
+                                                                TotalTime := CalendarMgt.CalcTimeDelta("Ending Time","Starting Time");
+                                                                if "Ending Time" < "Starting Time" then
+                                                                  TotalTime := TotalTime + 86400000;
+                                                                TESTFIELD("Work Center No.");
+                                                                WorkCenter.GET("Work Center No.");
+                                                                VALIDATE("Setup Time",0);
+                                                                VALIDATE(
+                                                                  "Run Time",
+                                                                  ROUND(
+                                                                    TotalTime / CalendarMgt.TimeFactor("Cap. Unit of Measure Code") *
+                                                                    "Concurrent Capacity",WorkCenter."Calendar Rounding Precision"));
+                                                              END;
+
+                                                   AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Concurrent Capacity;
+                                                   DecimalPlaces=0:5 }
+    { 5851;   ;Setup Time (Base)   ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD("Qty. per Cap. Unit of Measure",1);
+                                                                VALIDATE("Setup Time","Setup Time (Base)");
+                                                              END;
+
+                                                   CaptionML=ENU=Setup Time (Base);
+                                                   DecimalPlaces=0:5 }
+    { 5852;   ;Run Time (Base)     ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD("Qty. per Cap. Unit of Measure",1);
+                                                                VALIDATE("Run Time","Run Time (Base)");
+                                                              END;
+
+                                                   CaptionML=ENU=Run Time (Base);
+                                                   DecimalPlaces=0:5 }
+    { 5853;   ;Stop Time (Base)    ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD("Qty. per Cap. Unit of Measure",1);
+                                                                VALIDATE("Stop Time","Stop Time (Base)");
+                                                              END;
+
+                                                   CaptionML=ENU=Stop Time (Base);
+                                                   DecimalPlaces=0:5 }
+    { 5856;   ;Output Quantity (Base);Decimal     ;OnValidate=BEGIN
+                                                                TESTFIELD("Qty. per Unit of Measure",1);
+                                                                VALIDATE("Output Quantity","Output Quantity (Base)");
+                                                              END;
+
+                                                   CaptionML=ENU=Output Quantity (Base);
+                                                   DecimalPlaces=0:5 }
+    { 5857;   ;Scrap Quantity (Base);Decimal      ;OnValidate=BEGIN
+                                                                TESTFIELD("Qty. per Unit of Measure",1);
+                                                                VALIDATE("Scrap Quantity","Scrap Quantity (Base)");
+                                                              END;
+
+                                                   CaptionML=ENU=Scrap Quantity (Base);
+                                                   DecimalPlaces=0:5 }
+    { 5858;   ;Cap. Unit of Measure Code;Code10   ;TableRelation=IF (Type=CONST(Resource)) "Resource Unit of Measure".Code WHERE ("Resource No."=FIELD("No."))
+                                                                 ELSE "Capacity Unit of Measure";
+                                                   OnValidate=VAR
+                                                                ProdOrderRtngLine@1000 : Record "Prod. Order Routing Line";
+                                                              BEGIN
+                                                                if Type <> Type::Resource then begin
+                                                                  "Qty. per Cap. Unit of Measure" :=
+                                                                    ROUND(
+                                                                      CalendarMgt.QtyperTimeUnitofMeasure(
+                                                                        "Work Center No.","Cap. Unit of Measure Code"),
+                                                                      0.00001);
+
+                                                                  VALIDATE("Setup Time");
+                                                                  VALIDATE("Run Time");
+                                                                  VALIDATE("Stop Time");
+                                                                end;
+
+                                                                if "Order No." <> '' then
+                                                                  case "Order Type" of
+                                                                    "Order Type"::Production:
+                                                                      begin
+                                                                        GetProdOrderRtngLine(ProdOrderRtngLine);
+                                                                        "Unit Cost" := ProdOrderRtngLine."Unit Cost per";
+
+                                                                        CostCalcMgt.RoutingCostPerUnit(
+                                                                          Type,"No.","Unit Amount","Indirect Cost %","Overhead Rate","Unit Cost","Unit Cost Calculation");
+                                                                      end;
+                                                                    "Order Type"::Assembly:
+                                                                      CostCalcMgt.ResourceCostPerUnit("No.","Unit Amount","Indirect Cost %","Overhead Rate","Unit Cost");
+                                                                  end;
+
+                                                                ReadGLSetup;
+                                                                "Unit Cost" :=
+                                                                  ROUND("Unit Cost" * "Qty. per Cap. Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+                                                                "Unit Amount" :=
+                                                                  ROUND("Unit Amount" * "Qty. per Cap. Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+                                                                VALIDATE("Unit Amount");
+                                                              END;
+
+                                                   CaptionML=ENU=Cap. Unit of Measure Code }
+    { 5859;   ;Qty. per Cap. Unit of Measure;Decimal;
+                                                   CaptionML=ENU=Qty. per Cap. Unit of Measure;
+                                                   DecimalPlaces=0:5 }
+    { 5873;   ;Starting Time       ;Time          ;OnValidate=BEGIN
+                                                                if "Ending Time" < "Starting Time" then
+                                                                  "Ending Time" := "Starting Time";
+
+                                                                VALIDATE("Concurrent Capacity");
+                                                              END;
+
+                                                   AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Starting Time }
+    { 5874;   ;Ending Time         ;Time          ;OnValidate=BEGIN
+                                                                VALIDATE("Concurrent Capacity");
+                                                              END;
+
+                                                   AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Ending Time }
+    { 5882;   ;Routing No.         ;Code20        ;TableRelation="Routing Header";
+                                                   CaptionML=ENU=Routing No.;
+                                                   Editable=false }
+    { 5883;   ;Routing Reference No.;Integer      ;CaptionML=ENU=Routing Reference No. }
+    { 5884;   ;Prod. Order Comp. Line No.;Integer ;TableRelation=IF ("Order Type"=CONST(Production)) "Prod. Order Component"."Line No." WHERE (Status=CONST(Released),
+                                                                                                                                               "Prod. Order No."=FIELD("Order No."),
+                                                                                                                                               "Prod. Order Line No."=FIELD("Order Line No."));
+                                                   OnValidate=BEGIN
+                                                                if "Prod. Order Comp. Line No." <> xRec."Prod. Order Comp. Line No." then
+                                                                  CreateProdDim;
+                                                              END;
+
+                                                   CaptionML=ENU=Prod. Order Comp. Line No. }
+    { 5885;   ;Finished            ;Boolean       ;AccessByPermission=TableData "Machine Center"=R;
+                                                   CaptionML=ENU=Finished }
+    { 5887;   ;Unit Cost Calculation;Option       ;CaptionML=ENU=Unit Cost Calculation;
+                                                   OptionCaptionML=ENU=Time,Units;
+                                                   OptionString=Time,Units }
+    { 5888;   ;Subcontracting      ;Boolean       ;CaptionML=ENU=Subcontracting }
+    { 5895;   ;Stop Code           ;Code10        ;TableRelation=Stop;
+                                                   CaptionML=ENU=Stop Code }
+    { 5896;   ;Scrap Code          ;Code10        ;TableRelation=Scrap;
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD(Type,Type::"Machine Center");
+                                                              END;
+
+                                                   CaptionML=ENU=Scrap Code }
+    { 5898;   ;Work Center Group Code;Code10      ;TableRelation="Work Center Group";
+                                                   CaptionML=ENU=Work Center Group Code;
+                                                   Editable=false }
+    { 5899;   ;Work Shift Code     ;Code10        ;TableRelation="Work Shift";
+                                                   CaptionML=ENU=Work Shift Code }
+    { 6500;   ;Serial No.          ;Code20        ;CaptionML=ENU=Serial No.;
+                                                   Editable=false }
+    { 6501;   ;Lot No.             ;Code20        ;CaptionML=ENU=Lot No.;
+                                                   Editable=false }
+    { 6502;   ;Warranty Date       ;Date          ;CaptionML=ENU=Warranty Date;
+                                                   Editable=false }
+    { 6503;   ;New Serial No.      ;Code20        ;CaptionML=ENU=New Serial No.;
+                                                   Editable=false }
+    { 6504;   ;New Lot No.         ;Code20        ;CaptionML=ENU=New Lot No.;
+                                                   Editable=false }
+    { 6505;   ;New Item Expiration Date;Date      ;CaptionML=ENU=New Item Expiration Date }
+    { 6506;   ;Item Expiration Date;Date          ;CaptionML=ENU=Item Expiration Date;
+                                                   Editable=false }
+    { 6600;   ;Return Reason Code  ;Code10        ;TableRelation="Return Reason";
+                                                   CaptionML=ENU=Return Reason Code }
+    { 7315;   ;Warehouse Adjustment;Boolean       ;CaptionML=ENU=Warehouse Adjustment }
+    { 7380;   ;Phys Invt Counting Period Code;Code10;
+                                                   TableRelation="Phys. Invt. Counting Period";
+                                                   CaptionML=ENU=Phys Invt Counting Period Code;
+                                                   Editable=false }
+    { 7381;   ;Phys Invt Counting Period Type;Option;
+                                                   CaptionML=ENU=Phys Invt Counting Period Type;
+                                                   OptionCaptionML=ENU=" ,Item,SKU";
+                                                   OptionString=" ",Item,SKU;
+                                                   Editable=false }
+    { 99000755;;Overhead Rate      ;Decimal       ;OnValidate=BEGIN
+                                                                if ("Value Entry Type" <> "Value Entry Type"::"Direct Cost") or
+                                                                   ("Item Charge No." <> '')
+                                                                then begin
+                                                                  "Overhead Rate" := 0;
+                                                                  VALIDATE("Indirect Cost %",0);
+                                                                end else
+                                                                  VALIDATE("Indirect Cost %");
+                                                              END;
+
+                                                   CaptionML=ENU=Overhead Rate;
+                                                   DecimalPlaces=0:5 }
+    { 99000756;;Single-Level Material Cost;Decimal;CaptionML=ENU=Single-Level Material Cost;
+                                                   AutoFormatType=1 }
+    { 99000757;;Single-Level Capacity Cost;Decimal;CaptionML=ENU=Single-Level Capacity Cost;
+                                                   AutoFormatType=1 }
+    { 99000758;;Single-Level Subcontrd. Cost;Decimal;
+                                                   CaptionML=ENU=Single-Level Subcontrd. Cost;
+                                                   AutoFormatType=1 }
+    { 99000759;;Single-Level Cap. Ovhd Cost;Decimal;
+                                                   CaptionML=ENU=Single-Level Cap. Ovhd Cost;
+                                                   AutoFormatType=1 }
+    { 99000760;;Single-Level Mfg. Ovhd Cost;Decimal;
+                                                   CaptionML=ENU=Single-Level Mfg. Ovhd Cost;
+                                                   AutoFormatType=1 }
+    { 99000761;;Rolled-up Material Cost;Decimal   ;CaptionML=ENU=Rolled-up Material Cost;
+                                                   AutoFormatType=1 }
+    { 99000762;;Rolled-up Capacity Cost;Decimal   ;CaptionML=ENU=Rolled-up Capacity Cost;
+                                                   AutoFormatType=1 }
+    { 99000763;;Rolled-up Subcontracted Cost;Decimal;
+                                                   CaptionML=ENU=Rolled-up Subcontracted Cost;
+                                                   AutoFormatType=1 }
+    { 99000764;;Rolled-up Mfg. Ovhd Cost;Decimal  ;CaptionML=ENU=Rolled-up Mfg. Ovhd Cost;
+                                                   AutoFormatType=1 }
+    { 99000765;;Rolled-up Cap. Overhead Cost;Decimal;
+                                                   CaptionML=ENU=Rolled-up Cap. Overhead Cost;
+                                                   AutoFormatType=1 }
+  }
+  KEYS
+  {
+    {    ;"Journal Template Name","Journal Batch Name","Line No.";
+                                                   MaintainSIFTIndex=false;
+                                                   Clustered=true }
+    {    ;"Entry Type","Item No.","Variant Code","Location Code","Bin Code","Posting Date";
+                                                   SumIndexFields="Quantity (Base)";
+                                                   MaintainSIFTIndex=false }
+    {    ;"Entry Type","Item No.","Variant Code","New Location Code","New Bin Code","Posting Date";
+                                                   SumIndexFields="Quantity (Base)";
+                                                   MaintainSIFTIndex=false }
+    {    ;"Item No.","Posting Date"                }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text001@1001 : TextConst 'ENU=%1 must be reduced.';
+      Text002@1002 : TextConst 'ENU=You cannot change %1 when %2 is %3.';
+      Text006@1005 : TextConst 'ENU=You must not enter %1 in a revaluation sum line.';
+      ItemJnlTemplate@1007 : Record "Item Journal Template";
+      ItemJnlBatch@1008 : Record "Item Journal Batch";
+      ItemJnlLine@1009 : Record "Item Journal Line";
+      Item@1010 : Record Item;
+      ItemVariant@1012 : Record "Item Variant";
+      GLSetup@1014 : Record "General Ledger Setup";
+      MfgSetup@1034 : Record "Manufacturing Setup";
+      WorkCenter@1040 : Record "Work Center";
+      MachineCenter@1039 : Record "Machine Center";
+      Location@1048 : Record Location;
+      Bin@1030 : Record Bin;
+      ItemCheckAvail@1021 : Codeunit "Item-Check Avail.";
+      ReserveItemJnlLine@1022 : Codeunit "Item Jnl. Line-Reserve";
+      NoSeriesMgt@1023 : Codeunit NoSeriesManagement;
+      UOMMgt@1024 : Codeunit "Unit of Measure Management";
+      DimMgt@1027 : Codeunit DimensionManagement;
+      UserMgt@1033 : Codeunit "User Setup Management";
+      CalendarMgt@1041 : Codeunit CalendarManagement;
+      CostCalcMgt@1042 : Codeunit "Cost Calculation Management";
+      PurchPriceCalcMgt@1020 : Codeunit "Purch. Price Calc. Mgt.";
+      SalesPriceCalcMgt@1025 : Codeunit "Sales Price Calc. Mgt.";
+      WMSManagement@1026 : Codeunit "WMS Management";
+      WhseValidateSourceLine@1032 : Codeunit "Whse. Validate Source Line";
+      PhysInvtEntered@1028 : Boolean;
+      GLSetupRead@1029 : Boolean;
+      MfgSetupRead@1035 : Boolean;
+      UnitCost@1031 : Decimal;
+      Text007@1006 : TextConst 'ENU="New "';
+      Text012@1045 : TextConst 'ENU=The update has been interrupted to respect the warning.';
+      Text021@1051 : TextConst 'ENU=The entered bin code %1 is different from the bin code %2 in production order component %3.\\Are you sure that you want to post the consumption from bin code %1?';
+      Text029@1047 : TextConst 'ENU=must be positive';
+      Text030@1046 : TextConst 'ENU=must be negative';
+      Text031@1043 : TextConst 'ENU=You can not insert item number %1 because it is not produced on released production order %2.';
+      Text032@1000 : TextConst 'ENU=When posting, the entry %1 will be opened first.';
+      Text033@1049 : TextConst 'ENU=If the item carries serial or lot numbers, then you must use the %1 field in the %2 window.';
+      Text034@1050 : TextConst 'ENU=You cannot revalue individual item ledger entries for items that use the average costing method.';
+      SubcontractedErr@1003 : TextConst '@@@=%1 - Field Caption, %2 - Line No.;ENU=%1 must be zero in line number %2 because it is linked to the subcontracted work center.';
+
+    [External]
+    PROCEDURE EmptyLine@5() : Boolean;
+    BEGIN
+      exit(
+        (Quantity = 0) and
+        ((TimeIsEmpty and ("Item No." = '')) or
+         ("Value Entry Type" = "Value Entry Type"::Revaluation)));
+    END;
+
+    [External]
+    PROCEDURE IsValueEntryForDeletedItem@22() : Boolean;
+    BEGIN
+      exit(
+        (("Entry Type" = "Entry Type"::Output) or ("Value Entry Type" = "Value Entry Type"::Rounding)) and
+        ("Item No." = '') and ("Item Charge No." = '') and ("Invoiced Qty. (Base)" <> 0));
+    END;
+
+    LOCAL PROCEDURE CalcBaseQty@14(Qty@1000 : Decimal) : Decimal;
+    BEGIN
+      TESTFIELD("Qty. per Unit of Measure");
+      exit(ROUND(Qty * "Qty. per Unit of Measure",0.00001));
+    END;
+
+    LOCAL PROCEDURE CalcBaseTime@28(Qty@1000 : Decimal) : Decimal;
+    BEGIN
+      if "Run Time" <> 0 then
+        TESTFIELD("Qty. per Cap. Unit of Measure");
+      exit(ROUND(Qty * "Qty. per Cap. Unit of Measure",0.00001));
+    END;
+
+    LOCAL PROCEDURE UpdateAmount@23();
+    BEGIN
+      Amount := ROUND(Quantity * "Unit Amount");
+    END;
+
+    LOCAL PROCEDURE SelectItemEntry@3(CurrentFieldNo@1000 : Integer);
+    VAR
+      ItemLedgEntry@1001 : Record "Item Ledger Entry";
+      ItemJnlLine2@1002 : Record "Item Journal Line";
+    BEGIN
+      if ("Entry Type" = "Entry Type"::Output) and
+         ("Value Entry Type" <> "Value Entry Type"::Revaluation) and
+         (CurrentFieldNo = FIELDNO("Applies-to Entry"))
+      then begin
+        ItemLedgEntry.SETCURRENTKEY(
+          "Order Type","Order No.","Order Line No.","Entry Type","Prod. Order Comp. Line No.");
+        ItemLedgEntry.SETRANGE("Order Type","Order Type"::Production);
+        ItemLedgEntry.SETRANGE("Order No.","Order No.");
+        ItemLedgEntry.SETRANGE("Order Line No.","Order Line No.");
+        ItemLedgEntry.SETRANGE("Entry Type","Entry Type");
+        ItemLedgEntry.SETRANGE("Prod. Order Comp. Line No.",0);
+      end else begin
+        ItemLedgEntry.SETCURRENTKEY("Item No.",Positive);
+        ItemLedgEntry.SETRANGE("Item No.","Item No.");
+      end;
+
+      if "Location Code" <> '' then
+        ItemLedgEntry.SETRANGE("Location Code","Location Code");
+
+      if CurrentFieldNo = FIELDNO("Applies-to Entry") then begin
+        ItemLedgEntry.SETRANGE(Positive,(Signed(Quantity) < 0) or ("Value Entry Type" = "Value Entry Type"::Revaluation));
+        if "Value Entry Type" <> "Value Entry Type"::Revaluation then begin
+          ItemLedgEntry.SETCURRENTKEY("Item No.",Open);
+          ItemLedgEntry.SETRANGE(Open,true);
+        end;
+      end else
+        ItemLedgEntry.SETRANGE(Positive,false);
+
+      if PAGE.RUNMODAL(PAGE::"Item Ledger Entries",ItemLedgEntry) = ACTION::LookupOK then begin
+        ItemJnlLine2 := Rec;
+        if CurrentFieldNo = FIELDNO("Applies-to Entry") then
+          ItemJnlLine2.VALIDATE("Applies-to Entry",ItemLedgEntry."Entry No.")
+        else
+          ItemJnlLine2.VALIDATE("Applies-from Entry",ItemLedgEntry."Entry No.");
+        CheckItemAvailable(CurrentFieldNo);
+        Rec := ItemJnlLine2;
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckItemAvailable@1(CalledByFieldNo@1000 : Integer);
+    BEGIN
+      if (CurrFieldNo = 0) or (CurrFieldNo <> CalledByFieldNo) then // Prevent two checks on quantity
+        exit;
+
+      if (CurrFieldNo <> 0) and ("Item No." <> '') and (Quantity <> 0) and
+         ("Value Entry Type" = "Value Entry Type"::"Direct Cost") and ("Item Charge No." = '')
+      then
+        if ItemCheckAvail.ItemJnlCheckLine(Rec) then
+          ItemCheckAvail.RaiseUpdateInterruptedError;
+    END;
+
+    LOCAL PROCEDURE GetItem@2();
+    BEGIN
+      if Item."No." <> "Item No." then
+        Item.GET("Item No.");
+    END;
+
+    [External]
+    PROCEDURE SetUpNewLine@8(LastItemJnlLine@1000 : Record "Item Journal Line");
+    BEGIN
+      MfgSetup.GET;
+      ItemJnlTemplate.GET("Journal Template Name");
+      ItemJnlBatch.GET("Journal Template Name","Journal Batch Name");
+      ItemJnlLine.SETRANGE("Journal Template Name","Journal Template Name");
+      ItemJnlLine.SETRANGE("Journal Batch Name","Journal Batch Name");
+      if ItemJnlLine.FINDFIRST then begin
+        "Posting Date" := LastItemJnlLine."Posting Date";
+        "Document Date" := LastItemJnlLine."Posting Date";
+        if (ItemJnlTemplate.Type in
+            [ItemJnlTemplate.Type::Consumption,ItemJnlTemplate.Type::Output])
+        then begin
+          if not MfgSetup."Doc. No. Is Prod. Order No." then
+            "Document No." := LastItemJnlLine."Document No."
+        end else
+          "Document No." := LastItemJnlLine."Document No.";
+      end else begin
+        "Posting Date" := WORKDATE;
+        "Document Date" := WORKDATE;
+        if ItemJnlBatch."No. Series" <> '' then begin
+          CLEAR(NoSeriesMgt);
+          "Document No." := NoSeriesMgt.TryGetNextNo(ItemJnlBatch."No. Series","Posting Date");
+        end;
+        if (ItemJnlTemplate.Type in
+            [ItemJnlTemplate.Type::Consumption,ItemJnlTemplate.Type::Output]) and
+           not MfgSetup."Doc. No. Is Prod. Order No."
+        then
+          if ItemJnlBatch."No. Series" <> '' then begin
+            CLEAR(NoSeriesMgt);
+            "Document No." := NoSeriesMgt.GetNextNo(ItemJnlBatch."No. Series","Posting Date",false);
+          end;
+      end;
+      "Recurring Method" := LastItemJnlLine."Recurring Method";
+      "Entry Type" := LastItemJnlLine."Entry Type";
+      "Source Code" := ItemJnlTemplate."Source Code";
+      "Reason Code" := ItemJnlBatch."Reason Code";
+      "Posting No. Series" := ItemJnlBatch."Posting No. Series";
+      if ItemJnlTemplate.Type = ItemJnlTemplate.Type::Revaluation then begin
+        "Value Entry Type" := "Value Entry Type"::Revaluation;
+        "Entry Type" := "Entry Type"::"Positive Adjmt.";
+      end;
+
+      case "Entry Type" of
+        "Entry Type"::Purchase:
+          "Location Code" := UserMgt.GetLocation(1,'',UserMgt.GetPurchasesFilter);
+        "Entry Type"::Sale:
+          "Location Code" := UserMgt.GetLocation(0,'',UserMgt.GetSalesFilter);
+        "Entry Type"::Output:
+          CLEAR(DimMgt);
+      end;
+
+      if Location.GET("Location Code") then
+        if  Location."Directed Put-away and Pick" then
+          "Location Code" := '';
+
+      OnAfterSetupNewLine(Rec,LastItemJnlLine);
+    END;
+
+    [External]
+    PROCEDURE SetDocNos@165(DocType@1000 : Option;DocNo@1001 : Code[20];ExtDocNo@1002 : Text[35];PostingNos@1003 : Code[10]);
+    BEGIN
+      "Document Type" := DocType;
+      "Document No." := DocNo;
+      "External Document No." := ExtDocNo;
+      "Posting No. Series" := PostingNos;
+    END;
+
+    LOCAL PROCEDURE GetUnitAmount@6(CalledByFieldNo@1000 : Integer);
+    VAR
+      UnitCostValue@1001 : Decimal;
+    BEGIN
+      RetrieveCosts;
+      if ("Value Entry Type" <> "Value Entry Type"::"Direct Cost") or
+         ("Item Charge No." <> '')
+      then
+        exit;
+
+      UnitCostValue := UnitCost;
+      if (CalledByFieldNo = FIELDNO(Quantity)) and
+         (Item."No." <> '') and (Item."Costing Method" <> Item."Costing Method"::Standard)
+      then
+        UnitCostValue := "Unit Cost" / UOMMgt.GetQtyPerUnitOfMeasure(Item,"Unit of Measure Code");
+
+      case "Entry Type" of
+        "Entry Type"::Purchase:
+          PurchPriceCalcMgt.FindItemJnlLinePrice(Rec,CalledByFieldNo);
+        "Entry Type"::Sale:
+          SalesPriceCalcMgt.FindItemJnlLinePrice(Rec,CalledByFieldNo);
+        "Entry Type"::"Positive Adjmt.":
+          "Unit Amount" :=
+            ROUND(
+              ((UnitCostValue - "Overhead Rate") * "Qty. per Unit of Measure") / (1 + "Indirect Cost %" / 100),
+              GLSetup."Unit-Amount Rounding Precision");
+        "Entry Type"::"Negative Adjmt.":
+          "Unit Amount" := UnitCostValue * "Qty. per Unit of Measure";
+        "Entry Type"::Transfer:
+          "Unit Amount" := 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE Signed@20(Value@1000 : Decimal) : Decimal;
+    BEGIN
+      case "Entry Type" of
+        "Entry Type"::Purchase,
+        "Entry Type"::"Positive Adjmt.",
+        "Entry Type"::Output,
+        "Entry Type"::"Assembly Output":
+          exit(Value);
+        "Entry Type"::Sale,
+        "Entry Type"::"Negative Adjmt.",
+        "Entry Type"::Consumption,
+        "Entry Type"::Transfer,
+        "Entry Type"::"Assembly Consumption":
+          exit(-Value);
+      end;
+    END;
+
+    [External]
+    PROCEDURE IsInbound@31() : Boolean;
+    BEGIN
+      exit((Signed(Quantity) > 0) or (Signed("Invoiced Quantity") > 0));
+    END;
+
+    [External]
+    PROCEDURE OpenItemTrackingLines@6500(IsReclass@1000 : Boolean);
+    BEGIN
+      ReserveItemJnlLine.CallItemTracking(Rec,IsReclass);
+    END;
+
+    LOCAL PROCEDURE PickDimension@48(TableArray@1005 : ARRAY [10] OF Integer;CodeArray@1004 : ARRAY [10] OF Code[20];InheritFromDimSetID@1003 : Integer;InheritFromTableNo@1002 : Integer);
+    VAR
+      ItemJournalTemplate@1001 : Record "Item Journal Template";
+      SourceCode@1000 : Code[10];
+    BEGIN
+      SourceCode := "Source Code";
+      if SourceCode = '' then
+        if ItemJournalTemplate.GET("Journal Template Name") then
+          SourceCode := ItemJournalTemplate."Source Code";
+
+      "Shortcut Dimension 1 Code" := '';
+      "Shortcut Dimension 2 Code" := '';
+      "Dimension Set ID" :=
+        DimMgt.GetRecDefaultDimID(
+          Rec,CurrFieldNo,TableArray,CodeArray,SourceCode,
+          "Shortcut Dimension 1 Code","Shortcut Dimension 2 Code",InheritFromDimSetID,InheritFromTableNo);
+      DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+
+      if "Entry Type" = "Entry Type"::Transfer then begin
+        "New Dimension Set ID" := "Dimension Set ID";
+        "New Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        "New Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateCodeArray@55(VAR CodeArray@1003 : ARRAY [10] OF Code[20];No1@1002 : Code[20];No2@1001 : Code[20];No3@1000 : Code[20]);
+    BEGIN
+      CLEAR(CodeArray);
+      CodeArray[1] := No1;
+      CodeArray[2] := No2;
+      CodeArray[3] := No3;
+    END;
+
+    LOCAL PROCEDURE CreateTableArray@56(VAR TableID@1001 : ARRAY [10] OF Integer;Type1@1000 : Integer;Type2@1002 : Integer;Type3@1007 : Integer);
+    BEGIN
+      CLEAR(TableID);
+      TableID[1] := Type1;
+      TableID[2] := Type2;
+      TableID[3] := Type3;
+    END;
+
+    LOCAL PROCEDURE CreateDim@13(Type1@1000 : Integer;No1@1001 : Code[20];Type2@1002 : Integer;No2@1003 : Code[20];Type3@1007 : Integer;No3@1006 : Code[20]);
+    VAR
+      TableID@1004 : ARRAY [10] OF Integer;
+      No@1005 : ARRAY [10] OF Code[20];
+    BEGIN
+      CreateTableArray(TableID,Type1,Type2,Type3);
+      CreateCodeArray(No,No1,No2,No3);
+      OnAfterCreateDimTableIDs(Rec,CurrFieldNo,TableID,No);
+      PickDimension(TableID,No,0,0);
+    END;
+
+    [External]
+    PROCEDURE CopyDim@46(DimesionSetID@1000 : Integer);
+    VAR
+      DimSetEntry@1002 : Record "Dimension Set Entry";
+    BEGIN
+      ReadGLSetup;
+      "Dimension Set ID" := DimesionSetID;
+      DimSetEntry.SETRANGE("Dimension Set ID",DimesionSetID);
+      DimSetEntry.SETRANGE("Dimension Code",GLSetup."Global Dimension 1 Code");
+      if DimSetEntry.FINDFIRST then
+        "Shortcut Dimension 1 Code" := DimSetEntry."Dimension Value Code"
+      else
+        "Shortcut Dimension 1 Code" := '';
+      DimSetEntry.SETRANGE("Dimension Code",GLSetup."Global Dimension 2 Code");
+      if DimSetEntry.FINDFIRST then
+        "Shortcut Dimension 2 Code" := DimSetEntry."Dimension Value Code"
+      else
+        "Shortcut Dimension 2 Code" := '';
+    END;
+
+    LOCAL PROCEDURE CreateProdDim@25();
+    VAR
+      ProdOrder@1008 : Record "Production Order";
+      ProdOrderLine@1009 : Record "Prod. Order Line";
+      ProdOrderComp@1010 : Record "Prod. Order Component";
+      DimSetIDArr@1001 : ARRAY [10] OF Integer;
+      i@1000 : Integer;
+    BEGIN
+      "Shortcut Dimension 1 Code" := '';
+      "Shortcut Dimension 2 Code" := '';
+      "Dimension Set ID" := 0;
+      if ("Order Type" <> "Order Type"::Production) or ("Order No." = '') then
+        exit;
+      ProdOrder.GET(ProdOrder.Status::Released,"Order No.");
+      i := 1;
+      DimSetIDArr[i] := ProdOrder."Dimension Set ID";
+      if "Order Line No." <> 0 then begin
+        i := i + 1;
+        ProdOrderLine.GET(ProdOrderLine.Status::Released,"Order No.","Order Line No.");
+        DimSetIDArr[i] := ProdOrderLine."Dimension Set ID";
+      end;
+      if "Prod. Order Comp. Line No." <> 0 then begin
+        i := i + 1;
+        ProdOrderComp.GET(ProdOrderLine.Status::Released,"Order No.","Order Line No.","Prod. Order Comp. Line No.");
+        DimSetIDArr[i] := ProdOrderComp."Dimension Set ID";
+      end;
+      "Dimension Set ID" := DimMgt.GetCombinedDimensionSetID(DimSetIDArr,"Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyDim@42();
+    VAR
+      AssemblyHeader@1008 : Record "Assembly Header";
+      AssemblyLine@1009 : Record "Assembly Line";
+      DimSetIDArr@1001 : ARRAY [10] OF Integer;
+      i@1000 : Integer;
+    BEGIN
+      "Shortcut Dimension 1 Code" := '';
+      "Shortcut Dimension 2 Code" := '';
+      "Dimension Set ID" := 0;
+      if ("Order Type" <> "Order Type"::Assembly) or ("Order No." = '') then
+        exit;
+      AssemblyHeader.GET(AssemblyHeader."Document Type"::Order,"Order No.");
+      i := 1;
+      DimSetIDArr[i] := AssemblyHeader."Dimension Set ID";
+      if "Order Line No." <> 0 then begin
+        i := i + 1;
+        AssemblyLine.GET(AssemblyLine."Document Type"::Order,"Order No.","Order Line No.");
+        DimSetIDArr[i] := AssemblyLine."Dimension Set ID";
+      end;
+      "Dimension Set ID" := DimMgt.GetCombinedDimensionSetID(DimSetIDArr,"Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+    END;
+
+    LOCAL PROCEDURE CreateDimWithProdOrderLine@54();
+    VAR
+      ProdOrderLine@1005 : Record "Prod. Order Line";
+      InheritFromDimSetID@1004 : Integer;
+      TableID@1001 : ARRAY [10] OF Integer;
+      No@1000 : ARRAY [10] OF Code[20];
+    BEGIN
+      if "Order Type" = "Order Type"::Production then
+        if ProdOrderLine.GET(ProdOrderLine.Status::Released,"Order No.","Order Line No.") then
+          InheritFromDimSetID := ProdOrderLine."Dimension Set ID";
+
+      CreateTableArray(TableID,DATABASE::"Work Center",DATABASE::"Salesperson/Purchaser",0);
+      CreateCodeArray(No,"Work Center No.","Salespers./Purch. Code",'');
+      OnAfterCreateDimTableIDs(Rec,CurrFieldNo,TableID,No);
+      PickDimension(TableID,No,InheritFromDimSetID,DATABASE::Item);
+    END;
+
+    [External]
+    PROCEDURE ValidateShortcutDimCode@9(FieldNumber@1000 : Integer;VAR ShortcutDimCode@1001 : Code[20]);
+    BEGIN
+      DimMgt.ValidateShortcutDimValues(FieldNumber,ShortcutDimCode,"Dimension Set ID");
+    END;
+
+    [External]
+    PROCEDURE LookupShortcutDimCode@18(FieldNumber@1000 : Integer;VAR ShortcutDimCode@1001 : Code[20]);
+    BEGIN
+      DimMgt.LookupDimValueCode(FieldNumber,ShortcutDimCode);
+      DimMgt.ValidateShortcutDimValues(FieldNumber,ShortcutDimCode,"Dimension Set ID");
+    END;
+
+    [External]
+    PROCEDURE ShowShortcutDimCode@15(VAR ShortcutDimCode@1000 : ARRAY [8] OF Code[20]);
+    BEGIN
+      DimMgt.GetShortcutDimensions("Dimension Set ID",ShortcutDimCode);
+    END;
+
+    [External]
+    PROCEDURE ValidateNewShortcutDimCode@19(FieldNumber@1000 : Integer;VAR NewShortcutDimCode@1001 : Code[20]);
+    BEGIN
+      DimMgt.ValidateShortcutDimValues(FieldNumber,NewShortcutDimCode,"New Dimension Set ID");
+    END;
+
+    [External]
+    PROCEDURE LookupNewShortcutDimCode@21(FieldNumber@1000 : Integer;VAR NewShortcutDimCode@1001 : Code[20]);
+    BEGIN
+      DimMgt.LookupDimValueCode(FieldNumber,NewShortcutDimCode);
+      DimMgt.ValidateShortcutDimValues(FieldNumber,NewShortcutDimCode,"New Dimension Set ID");
+    END;
+
+    [External]
+    PROCEDURE ShowNewShortcutDimCode@16(VAR NewShortcutDimCode@1000 : ARRAY [8] OF Code[20]);
+    BEGIN
+      DimMgt.GetShortcutDimensions("New Dimension Set ID",NewShortcutDimCode);
+    END;
+
+    LOCAL PROCEDURE InitRevalJnlLine@5800(ItemLedgEntry2@1000 : Record "Item Ledger Entry");
+    VAR
+      ItemApplnEntry@1002 : Record "Item Application Entry";
+      ValueEntry@1001 : Record "Value Entry";
+      CostAmtActual@1003 : Decimal;
+    BEGIN
+      if "Value Entry Type" <> "Value Entry Type"::Revaluation then
+        exit;
+
+      ItemLedgEntry2.TESTFIELD("Item No.","Item No.");
+      ItemLedgEntry2.TESTFIELD("Completely Invoiced",true);
+      ItemLedgEntry2.TESTFIELD(Positive,true);
+      ItemApplnEntry.CheckAppliedFromEntryToAdjust(ItemLedgEntry2."Entry No.");
+
+      VALIDATE("Entry Type",ItemLedgEntry2."Entry Type");
+      "Posting Date" := ItemLedgEntry2."Posting Date";
+      VALIDATE("Unit Amount",0);
+      VALIDATE(Quantity,ItemLedgEntry2."Invoiced Quantity");
+
+      ValueEntry.RESET;
+      ValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgEntry2."Entry No.");
+      ValueEntry.SETFILTER("Entry Type",'<>%1',ValueEntry."Entry Type"::Rounding);
+      ValueEntry.FIND('-');
+      repeat
+        if not (ValueEntry."Expected Cost" or ValueEntry."Partial Revaluation") then
+          CostAmtActual := CostAmtActual + ValueEntry."Cost Amount (Actual)";
+      until ValueEntry.NEXT = 0;
+
+      VALIDATE("Inventory Value (Calculated)",CostAmtActual);
+      VALIDATE("Inventory Value (Revalued)",CostAmtActual);
+
+      "Location Code" := ItemLedgEntry2."Location Code";
+      "Variant Code" := ItemLedgEntry2."Variant Code";
+      "Applies-to Entry" := ItemLedgEntry2."Entry No.";
+      CopyDim(ItemLedgEntry2."Dimension Set ID");
+    END;
+
+    [External]
+    PROCEDURE CopyDocumentFields@129(DocType@1004 : Option;DocNo@1003 : Code[20];ExtDocNo@1002 : Text[35];SourceCode@1001 : Code[10];NoSeriesCode@1000 : Code[20]);
+    BEGIN
+      "Document Type" := DocType;
+      "Document No." := DocNo;
+      "External Document No." := ExtDocNo;
+      "Source Code" := SourceCode;
+      if NoSeriesCode <> '' then
+        "Posting No. Series" := NoSeriesCode;
+    END;
+
+    [External]
+    PROCEDURE CopyFromSalesHeader@58(SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+      "Posting Date" := SalesHeader."Posting Date";
+      "Document Date" := SalesHeader."Document Date";
+      "Order Date" := SalesHeader."Order Date";
+      "Source Posting Group" := SalesHeader."Customer Posting Group";
+      "Salespers./Purch. Code" := SalesHeader."Salesperson Code";
+      "Reason Code" := SalesHeader."Reason Code";
+      "Source Currency Code" := SalesHeader."Currency Code";
+
+      OnAfterCopyItemJnlLineFromSalesHeader(Rec,SalesHeader);
+    END;
+
+    [External]
+    PROCEDURE CopyFromSalesLine@12(SalesLine@1000 : Record "Sales Line");
+    BEGIN
+      "Item No." := SalesLine."No.";
+      Description := SalesLine.Description;
+      "Shortcut Dimension 1 Code" := SalesLine."Shortcut Dimension 1 Code";
+      "Shortcut Dimension 2 Code" := SalesLine."Shortcut Dimension 2 Code";
+      "Dimension Set ID" := SalesLine."Dimension Set ID";
+      "Location Code" := SalesLine."Location Code";
+      "Bin Code" := SalesLine."Bin Code";
+      "Variant Code" := SalesLine."Variant Code";
+      "Inventory Posting Group" := SalesLine."Posting Group";
+      "Gen. Bus. Posting Group" := SalesLine."Gen. Bus. Posting Group";
+      "Gen. Prod. Posting Group" := SalesLine."Gen. Prod. Posting Group";
+      "Transaction Type" := SalesLine."Transaction Type";
+      "Transport Method" := SalesLine."Transport Method";
+      "Entry/Exit Point" := SalesLine."Exit Point";
+      Area := SalesLine.Area;
+      "Transaction Specification" := SalesLine."Transaction Specification";
+      "Drop Shipment" := SalesLine."Drop Shipment";
+      "Entry Type" := "Entry Type"::Sale;
+      "Unit of Measure Code" := SalesLine."Unit of Measure Code";
+      "Qty. per Unit of Measure" := SalesLine."Qty. per Unit of Measure";
+      "Derived from Blanket Order" := SalesLine."Blanket Order No." <> '';
+      "Cross-Reference No." := SalesLine."Cross-Reference No.";
+      "Originally Ordered No." := SalesLine."Originally Ordered No.";
+      "Originally Ordered Var. Code" := SalesLine."Originally Ordered Var. Code";
+      "Out-of-Stock Substitution" := SalesLine."Out-of-Stock Substitution";
+      "Item Category Code" := SalesLine."Item Category Code";
+      Nonstock := SalesLine.Nonstock;
+      "Purchasing Code" := SalesLine."Purchasing Code";
+      "Product Group Code" := SalesLine."Product Group Code";
+      "Return Reason Code" := SalesLine."Return Reason Code";
+      "Planned Delivery Date" := SalesLine."Planned Delivery Date";
+      "Document Line No." := SalesLine."Line No.";
+      "Unit Cost" := SalesLine."Unit Cost (LCY)";
+      "Unit Cost (ACY)" := SalesLine."Unit Cost";
+      "Value Entry Type" := "Value Entry Type"::"Direct Cost";
+      "Source Type" := "Source Type"::Customer;
+      "Source No." := SalesLine."Sell-to Customer No.";
+      "Invoice-to Source No." := SalesLine."Bill-to Customer No.";
+
+      OnAfterCopyItemJnlLineFromSalesLine(Rec,SalesLine);
+    END;
+
+    [External]
+    PROCEDURE CopyFromPurchHeader@57(PurchHeader@1000 : Record "Purchase Header");
+    BEGIN
+      "Posting Date" := PurchHeader."Posting Date";
+      "Document Date" := PurchHeader."Document Date";
+      "Source Posting Group" := PurchHeader."Vendor Posting Group";
+      "Salespers./Purch. Code" := PurchHeader."Purchaser Code";
+      "Country/Region Code" := PurchHeader."Buy-from Country/Region Code";
+      "Reason Code" := PurchHeader."Reason Code";
+      "Source Currency Code" := PurchHeader."Currency Code";
+
+      OnAfterCopyItemJnlLineFromPurchHeader(Rec,PurchHeader);
+    END;
+
+    [External]
+    PROCEDURE CopyFromPurchLine@160(PurchLine@1000 : Record "Purchase Line");
+    BEGIN
+      "Item No." := PurchLine."No.";
+      Description := PurchLine.Description;
+      "Shortcut Dimension 1 Code" := PurchLine."Shortcut Dimension 1 Code";
+      "Shortcut Dimension 2 Code" := PurchLine."Shortcut Dimension 2 Code";
+      "Dimension Set ID" := PurchLine."Dimension Set ID";
+      "Location Code" := PurchLine."Location Code";
+      "Bin Code" := PurchLine."Bin Code";
+      "Variant Code" := PurchLine."Variant Code";
+      "Item Category Code" := PurchLine."Item Category Code";
+      "Product Group Code" := PurchLine."Product Group Code";
+      "Inventory Posting Group" := PurchLine."Posting Group";
+      "Gen. Bus. Posting Group" := PurchLine."Gen. Bus. Posting Group";
+      "Gen. Prod. Posting Group" := PurchLine."Gen. Prod. Posting Group";
+      "Job No." := PurchLine."Job No.";
+      "Job Task No." := PurchLine."Job Task No.";
+      if "Job No." <> '' then
+        "Job Purchase" := true;
+      "Applies-to Entry" := PurchLine."Appl.-to Item Entry";
+      "Transaction Type" := PurchLine."Transaction Type";
+      "Transport Method" := PurchLine."Transport Method";
+      "Entry/Exit Point" := PurchLine."Entry Point";
+      Area := PurchLine.Area;
+      "Transaction Specification" := PurchLine."Transaction Specification";
+      "Drop Shipment" := PurchLine."Drop Shipment";
+      "Entry Type" := "Entry Type"::Purchase;
+      if PurchLine."Prod. Order No." <> '' then begin
+        "Order Type" := "Order Type"::Production;
+        "Order No." := PurchLine."Prod. Order No.";
+        "Order Line No." := PurchLine."Prod. Order Line No.";
+      end;
+      "Unit of Measure Code" := PurchLine."Unit of Measure Code";
+      "Qty. per Unit of Measure" := PurchLine."Qty. per Unit of Measure";
+      "Cross-Reference No." := PurchLine."Cross-Reference No.";
+      "Document Line No." := PurchLine."Line No.";
+      "Unit Cost" := PurchLine."Unit Cost (LCY)";
+      "Unit Cost (ACY)" := PurchLine."Unit Cost";
+      "Value Entry Type" := "Value Entry Type"::"Direct Cost";
+      "Source Type" := "Source Type"::Vendor;
+      "Source No." := PurchLine."Buy-from Vendor No.";
+      "Invoice-to Source No." := PurchLine."Pay-to Vendor No.";
+      "Purchasing Code" := PurchLine."Purchasing Code";
+      "Indirect Cost %" := PurchLine."Indirect Cost %";
+      "Overhead Rate" := PurchLine."Overhead Rate";
+      "Return Reason Code" := PurchLine."Return Reason Code";
+
+      OnAfterCopyItemJnlLineFromPurchLine(Rec,PurchLine);
+    END;
+
+    [External]
+    PROCEDURE CopyFromServHeader@59(ServiceHeader@1000 : Record "Service Header");
+    BEGIN
+      "Document Date" := ServiceHeader."Document Date";
+      "Order Date" := ServiceHeader."Order Date";
+      "Source Posting Group" := ServiceHeader."Customer Posting Group";
+      "Salespers./Purch. Code" := ServiceHeader."Salesperson Code";
+      "Country/Region Code" := ServiceHeader."VAT Country/Region Code";
+      "Reason Code" := ServiceHeader."Reason Code";
+      "Source Type" := "Source Type"::Customer;
+      "Source No." := ServiceHeader."Customer No.";
+
+      OnAfterCopyItemJnlLineFromServHeader(Rec,ServiceHeader);
+    END;
+
+    [External]
+    PROCEDURE CopyFromServLine@17(ServiceLine@1000 : Record "Service Line");
+    BEGIN
+      "Item No." := ServiceLine."No.";
+      "Posting Date" := ServiceLine."Posting Date";
+      Description := ServiceLine.Description;
+      "Shortcut Dimension 1 Code" := ServiceLine."Shortcut Dimension 1 Code";
+      "Shortcut Dimension 2 Code" := ServiceLine."Shortcut Dimension 2 Code";
+      "Dimension Set ID" := ServiceLine."Dimension Set ID";
+      "Location Code" := ServiceLine."Location Code";
+      "Bin Code" := ServiceLine."Bin Code";
+      "Variant Code" := ServiceLine."Variant Code";
+      "Inventory Posting Group" := ServiceLine."Posting Group";
+      "Gen. Bus. Posting Group" := ServiceLine."Gen. Bus. Posting Group";
+      "Gen. Prod. Posting Group" := ServiceLine."Gen. Prod. Posting Group";
+      "Applies-to Entry" := ServiceLine."Appl.-to Item Entry";
+      "Transaction Type" := ServiceLine."Transaction Type";
+      "Transport Method" := ServiceLine."Transport Method";
+      "Entry/Exit Point" := ServiceLine."Exit Point";
+      Area := ServiceLine.Area;
+      "Transaction Specification" := ServiceLine."Transaction Specification";
+      "Entry Type" := "Entry Type"::Sale;
+      "Unit of Measure Code" := ServiceLine."Unit of Measure Code";
+      "Qty. per Unit of Measure" := ServiceLine."Qty. per Unit of Measure";
+      "Derived from Blanket Order" := false;
+      "Item Category Code" := ServiceLine."Item Category Code";
+      Nonstock := ServiceLine.Nonstock;
+      "Product Group Code" := ServiceLine."Product Group Code";
+      "Return Reason Code" := ServiceLine."Return Reason Code";
+      "Order Type" := "Order Type"::Service;
+      "Order No." := ServiceLine."Document No.";
+      "Order Line No." := ServiceLine."Line No.";
+      "Job No." := ServiceLine."Job No.";
+      "Job Task No." := ServiceLine."Job Task No.";
+
+      OnAfterCopyItemJnlLineFromServLine(Rec,ServiceLine);
+    END;
+
+    [External]
+    PROCEDURE CopyFromServShptHeader@53(ServShptHeader@1000 : Record "Service Shipment Header");
+    BEGIN
+      "Document Date" := ServShptHeader."Document Date";
+      "Order Date" := ServShptHeader."Order Date";
+      "Country/Region Code" := ServShptHeader."VAT Country/Region Code";
+      "Source Posting Group" := ServShptHeader."Customer Posting Group";
+      "Salespers./Purch. Code" := ServShptHeader."Salesperson Code";
+      "Reason Code" := ServShptHeader."Reason Code";
+
+      OnAfterCopyItemJnlLineFromServShptHeader(Rec,ServShptHeader);
+    END;
+
+    [External]
+    PROCEDURE CopyFromServShptLine@51(ServShptLine@1000 : Record "Service Shipment Line");
+    BEGIN
+      "Item No." := ServShptLine."No.";
+      Description := ServShptLine.Description;
+      "Gen. Bus. Posting Group" := ServShptLine."Gen. Bus. Posting Group";
+      "Gen. Prod. Posting Group" := ServShptLine."Gen. Prod. Posting Group";
+      "Inventory Posting Group" := ServShptLine."Posting Group";
+      "Location Code" := ServShptLine."Location Code";
+      "Unit of Measure Code" := ServShptLine."Unit of Measure Code";
+      "Qty. per Unit of Measure" := ServShptLine."Qty. per Unit of Measure";
+      "Variant Code" := ServShptLine."Variant Code";
+      "Bin Code" := ServShptLine."Bin Code";
+      "Shortcut Dimension 1 Code" := ServShptLine."Shortcut Dimension 1 Code";
+      "Shortcut Dimension 2 Code" := ServShptLine."Shortcut Dimension 2 Code";
+      "Dimension Set ID" := ServShptLine."Dimension Set ID";
+      "Entry/Exit Point" := ServShptLine."Exit Point";
+      "Value Entry Type" := ItemJnlLine."Value Entry Type"::"Direct Cost";
+      "Transaction Type" := ServShptLine."Transaction Type";
+      "Transport Method" := ServShptLine."Transport Method";
+      Area := ServShptLine.Area;
+      "Transaction Specification" := ServShptLine."Transaction Specification";
+      "Qty. per Unit of Measure" := ServShptLine."Qty. per Unit of Measure";
+      "Item Category Code" := ServShptLine."Item Category Code";
+      Nonstock := ServShptLine.Nonstock;
+      "Product Group Code" := ServShptLine."Product Group Code";
+      "Return Reason Code" := ServShptLine."Return Reason Code";
+
+      OnAfterCopyItemJnlLineFromServShptLine(Rec,ServShptLine);
+    END;
+
+    [External]
+    PROCEDURE CopyFromServShptLineUndo@60(ServShptLine@1000 : Record "Service Shipment Line");
+    BEGIN
+      "Item No." := ServShptLine."No.";
+      "Posting Date" := ServShptLine."Posting Date";
+      "Order Date" := ServShptLine."Order Date";
+      "Inventory Posting Group" := ServShptLine."Posting Group";
+      "Gen. Bus. Posting Group" := ServShptLine."Gen. Bus. Posting Group";
+      "Gen. Prod. Posting Group" := ServShptLine."Gen. Prod. Posting Group";
+      "Location Code" := ServShptLine."Location Code";
+      "Variant Code" := ServShptLine."Variant Code";
+      "Bin Code" := ServShptLine."Bin Code";
+      "Entry/Exit Point" := ServShptLine."Exit Point";
+      "Shortcut Dimension 1 Code" := ServShptLine."Shortcut Dimension 1 Code";
+      "Shortcut Dimension 2 Code" := ServShptLine."Shortcut Dimension 2 Code";
+      "Dimension Set ID" := ServShptLine."Dimension Set ID";
+      "Value Entry Type" := "Value Entry Type"::"Direct Cost";
+      "Item No." := ServShptLine."No.";
+      Description := ServShptLine.Description;
+      "Location Code" := ServShptLine."Location Code";
+      "Variant Code" := ServShptLine."Variant Code";
+      "Transaction Type" := ServShptLine."Transaction Type";
+      "Transport Method" := ServShptLine."Transport Method";
+      Area := ServShptLine.Area;
+      "Transaction Specification" := ServShptLine."Transaction Specification";
+      "Unit of Measure Code" := ServShptLine."Unit of Measure Code";
+      "Qty. per Unit of Measure" := ServShptLine."Qty. per Unit of Measure";
+      "Derived from Blanket Order" := false;
+      "Item Category Code" := ServShptLine."Item Category Code";
+      Nonstock := ServShptLine.Nonstock;
+      "Product Group Code" := ServShptLine."Product Group Code";
+      "Return Reason Code" := ServShptLine."Return Reason Code";
+
+      OnAfterCopyItemJnlLineFromServShptLineUndo(Rec,ServShptLine);
+    END;
+
+    [External]
+    PROCEDURE CopyFromJobJnlLine@76(JobJnlLine@1000 : Record "Job Journal Line");
+    BEGIN
+      "Line No." := JobJnlLine."Line No.";
+      "Item No." := JobJnlLine."No.";
+      "Posting Date" := JobJnlLine."Posting Date";
+      "Document Date" := JobJnlLine."Document Date";
+      "Document No." := JobJnlLine."Document No.";
+      "External Document No." := JobJnlLine."External Document No.";
+      Description := JobJnlLine.Description;
+      "Location Code" := JobJnlLine."Location Code";
+      "Applies-to Entry" := JobJnlLine."Applies-to Entry";
+      "Applies-from Entry" := JobJnlLine."Applies-from Entry";
+      "Shortcut Dimension 1 Code" := JobJnlLine."Shortcut Dimension 1 Code";
+      "Shortcut Dimension 2 Code" := JobJnlLine."Shortcut Dimension 2 Code";
+      "Dimension Set ID" := JobJnlLine."Dimension Set ID";
+      "Country/Region Code" := JobJnlLine."Country/Region Code";
+      "Entry Type" := "Entry Type"::"Negative Adjmt.";
+      "Source Code" := JobJnlLine."Source Code";
+      "Gen. Bus. Posting Group" := JobJnlLine."Gen. Bus. Posting Group";
+      "Gen. Prod. Posting Group" := JobJnlLine."Gen. Prod. Posting Group";
+      "Posting No. Series" := JobJnlLine."Posting No. Series";
+      "Variant Code" := JobJnlLine."Variant Code";
+      "Bin Code" := JobJnlLine."Bin Code";
+      "Unit of Measure Code" := JobJnlLine."Unit of Measure Code";
+      "Reason Code" := JobJnlLine."Reason Code";
+      "Transaction Type" := JobJnlLine."Transaction Type";
+      "Transport Method" := JobJnlLine."Transport Method";
+      "Entry/Exit Point" := JobJnlLine."Entry/Exit Point";
+      Area := JobJnlLine.Area;
+      "Transaction Specification" := JobJnlLine."Transaction Specification";
+      "Invoiced Quantity" := JobJnlLine.Quantity;
+      "Invoiced Qty. (Base)" := JobJnlLine."Quantity (Base)";
+      "Source Currency Code" := JobJnlLine."Source Currency Code";
+      Quantity := JobJnlLine.Quantity;
+      "Quantity (Base)" := JobJnlLine."Quantity (Base)";
+      "Qty. per Unit of Measure" := JobJnlLine."Qty. per Unit of Measure";
+      "Unit Cost" := JobJnlLine."Unit Cost (LCY)";
+      "Unit Cost (ACY)" := JobJnlLine."Unit Cost";
+      Amount := JobJnlLine."Total Cost (LCY)";
+      "Amount (ACY)" := JobJnlLine."Total Cost";
+      "Value Entry Type" := "Value Entry Type"::"Direct Cost";
+      "Job No." := JobJnlLine."Job No.";
+      "Job Task No." := JobJnlLine."Job Task No.";
+
+      OnAfterCopyItemJnlLineFromJobJnlLine(Rec,JobJnlLine);
+    END;
+
+    LOCAL PROCEDURE ReadGLSetup@5801();
+    BEGIN
+      if not GLSetupRead then begin
+        GLSetup.GET;
+        GLSetupRead := true;
+      end;
+    END;
+
+    LOCAL PROCEDURE RetrieveCosts@5803();
+    VAR
+      StockkeepingUnit@1000 : Record "Stockkeeping Unit";
+    BEGIN
+      if ("Value Entry Type" <> "Value Entry Type"::"Direct Cost") or
+         ("Item Charge No." <> '')
+      then
+        exit;
+
+      ReadGLSetup;
+      GetItem;
+      if StockkeepingUnit.GET("Location Code","Item No.","Variant Code") then
+        UnitCost := StockkeepingUnit."Unit Cost"
+      else
+        UnitCost := Item."Unit Cost";
+
+      if "Entry Type" = "Entry Type"::Transfer then
+        UnitCost := 0
+      else
+        if Item."Costing Method" <> Item."Costing Method"::Standard then
+          UnitCost := ROUND(UnitCost,GLSetup."Unit-Amount Rounding Precision");
+    END;
+
+    LOCAL PROCEDURE CalcUnitCost@5804(ItemLedgEntry@1000 : Record "Item Ledger Entry") : Decimal;
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+      UnitCost@1002 : Decimal;
+    BEGIN
+      with ValueEntry do begin
+        RESET;
+        SETCURRENTKEY("Item Ledger Entry No.");
+        SETRANGE("Item Ledger Entry No.",ItemLedgEntry."Entry No.");
+        CALCSUMS("Cost Amount (Expected)","Cost Amount (Actual)");
+        UnitCost :=
+          ("Cost Amount (Expected)" + "Cost Amount (Actual)") / ItemLedgEntry.Quantity;
+      end;
+      exit(ABS(UnitCost * "Qty. per Unit of Measure"));
+    END;
+
+    LOCAL PROCEDURE ClearSingleAndRolledUpCosts@4();
+    BEGIN
+      "Single-Level Material Cost" := "Unit Cost (Revalued)";
+      "Single-Level Capacity Cost" := 0;
+      "Single-Level Subcontrd. Cost" := 0;
+      "Single-Level Cap. Ovhd Cost" := 0;
+      "Single-Level Mfg. Ovhd Cost" := 0;
+      "Rolled-up Material Cost" := "Unit Cost (Revalued)";
+      "Rolled-up Capacity Cost" := 0;
+      "Rolled-up Subcontracted Cost" := 0;
+      "Rolled-up Mfg. Ovhd Cost" := 0;
+      "Rolled-up Cap. Overhead Cost" := 0;
+    END;
+
+    LOCAL PROCEDURE GetMfgSetup@7();
+    BEGIN
+      if not MfgSetupRead then
+        MfgSetup.GET;
+      MfgSetupRead := true;
+    END;
+
+    LOCAL PROCEDURE GetProdOrderRtngLine@27(VAR ProdOrderRtngLine@1000 : Record "Prod. Order Routing Line");
+    BEGIN
+      TESTFIELD("Order Type","Order Type"::Production);
+      TESTFIELD("Order No.");
+      TESTFIELD("Operation No.");
+
+      ProdOrderRtngLine.GET(
+        ProdOrderRtngLine.Status::Released,
+        "Order No.","Routing Reference No.","Routing No.","Operation No.");
+    END;
+
+    [External]
+    PROCEDURE OnlyStopTime@24() : Boolean;
+    BEGIN
+      exit(("Setup Time" = 0) and ("Run Time" = 0) and ("Stop Time" <> 0));
+    END;
+
+    [External]
+    PROCEDURE OutputValuePosting@29() : Boolean;
+    BEGIN
+      exit(TimeIsEmpty and ("Invoiced Quantity" <> 0) and not Subcontracting);
+    END;
+
+    [External]
+    PROCEDURE TimeIsEmpty@26() : Boolean;
+    BEGIN
+      exit(("Setup Time" = 0) and ("Run Time" = 0) and ("Stop Time" = 0));
+    END;
+
+    [External]
+    PROCEDURE RowID1@44() : Text[250];
+    VAR
+      ItemTrackingMgt@1000 : Codeunit "Item Tracking Management";
+    BEGIN
+      exit(
+        ItemTrackingMgt.ComposeRowID(DATABASE::"Item Journal Line","Entry Type",
+          "Journal Template Name","Journal Batch Name",0,"Line No."));
+    END;
+
+    LOCAL PROCEDURE GetLocation@7300(LocationCode@1000 : Code[10]);
+    BEGIN
+      if LocationCode = '' then
+        CLEAR(Location)
+      else
+        if Location.Code <> LocationCode then
+          Location.GET(LocationCode);
+    END;
+
+    LOCAL PROCEDURE GetBin@36(LocationCode@1000 : Code[10];BinCode@1001 : Code[20]);
+    BEGIN
+      if BinCode = '' then
+        CLEAR(Bin)
+      else
+        if (Bin.Code <> BinCode) or (Bin."Location Code" <> LocationCode) then
+          Bin.GET(LocationCode,BinCode);
+    END;
+
+    [External]
+    PROCEDURE ItemPosting@33() : Boolean;
+    VAR
+      ProdOrderRtngLine@1000 : Record "Prod. Order Routing Line";
+    BEGIN
+      if ("Entry Type" = "Entry Type"::Output) and
+         ("Output Quantity" <> 0) and
+         ("Operation No." <> '')
+      then begin
+        ProdOrderRtngLine.GET(
+          ProdOrderRtngLine.Status::Released,
+          "Order No.",
+          "Routing Reference No.",
+          "Routing No.",
+          "Operation No.");
+        exit(ProdOrderRtngLine."Next Operation No." = '');
+      end;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CheckPlanningAssignment@34();
+    BEGIN
+      if ("Quantity (Base)" <> 0) and ("Item No." <> '') and ("Posting Date" <> 0D) and
+         ("Entry Type" in ["Entry Type"::"Negative Adjmt.","Entry Type"::"Positive Adjmt.","Entry Type"::Transfer])
+      then begin
+        if ("Entry Type" = "Entry Type"::Transfer) and ("Location Code" = "New Location Code") then
+          exit;
+
+        ReserveItemJnlLine.AssignForPlanning(Rec);
+      end;
+    END;
+
+    [External]
+    PROCEDURE LastOutputOperation@35(ItemJnlLine@1000 : Record "Item Journal Line") : Boolean;
+    VAR
+      ProdOrderRtngLine@1002 : Record "Prod. Order Routing Line";
+      ItemJnlPostLine@1001 : Codeunit "Item Jnl.-Post Line";
+      Operation@1003 : Boolean;
+    BEGIN
+      with ItemJnlLine do begin
+        if "Operation No." <> '' then begin
+          TESTFIELD("Routing No.");
+          if not ProdOrderRtngLine.GET(
+               ProdOrderRtngLine.Status::Released,"Order No.",
+               "Routing Reference No.","Routing No.","Operation No.")
+          then
+            ProdOrderRtngLine.GET(
+              ProdOrderRtngLine.Status::Finished,"Order No.",
+              "Routing Reference No.","Routing No.","Operation No.");
+          if Finished then
+            ProdOrderRtngLine."Routing Status" := ProdOrderRtngLine."Routing Status"::Finished
+          else
+            ProdOrderRtngLine."Routing Status" := ProdOrderRtngLine."Routing Status"::"In Progress";
+          Operation := not ItemJnlPostLine.NextOperationExist(ProdOrderRtngLine);
+        end else
+          Operation := true;
+      end;
+      exit(Operation);
+    END;
+
+    [External]
+    PROCEDURE LookupItemNo@37();
+    VAR
+      ItemList@1000 : Page "Item List";
+    BEGIN
+      case "Entry Type" of
+        "Entry Type"::Consumption:
+          LookupProdOrderComp;
+        "Entry Type"::Output:
+          LookupProdOrderLine;
+        else begin
+          ItemList.LOOKUPMODE := true;
+          if ItemList.RUNMODAL = ACTION::LookupOK then begin
+            ItemList.GETRECORD(Item);
+            VALIDATE("Item No.",Item."No.");
+          end;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE LookupProdOrderLine@32();
+    VAR
+      ProdOrderLine@1004 : Record "Prod. Order Line";
+      ProdOrderLineList@1001 : Page "Prod. Order Line List";
+    BEGIN
+      ProdOrderLine.SetFilterByReleasedOrderNo("Order No.");
+      ProdOrderLine.Status := ProdOrderLine.Status::Released;
+      ProdOrderLine."Prod. Order No." := "Order No.";
+      ProdOrderLine."Line No." := "Order Line No.";
+      ProdOrderLine."Item No." := "Item No.";
+
+      ProdOrderLineList.LOOKUPMODE(true);
+      ProdOrderLineList.SETTABLEVIEW(ProdOrderLine);
+      ProdOrderLineList.SETRECORD(ProdOrderLine);
+
+      if ProdOrderLineList.RUNMODAL = ACTION::LookupOK then begin
+        ProdOrderLineList.GETRECORD(ProdOrderLine);
+        VALIDATE("Item No.",ProdOrderLine."Item No.");
+        if "Order Line No." <> ProdOrderLine."Line No." then
+          VALIDATE("Order Line No.",ProdOrderLine."Line No.");
+      end;
+    END;
+
+    LOCAL PROCEDURE LookupProdOrderComp@11();
+    VAR
+      ProdOrderComp@1004 : Record "Prod. Order Component";
+      ProdOrderCompLineList@1001 : Page "Prod. Order Comp. Line List";
+    BEGIN
+      ProdOrderComp.SetFilterByReleasedOrderNo("Order No.");
+      if "Order Line No." <> 0 then
+        ProdOrderComp.SETRANGE("Prod. Order Line No.","Order Line No.");
+      ProdOrderComp.Status := ProdOrderComp.Status::Released;
+      ProdOrderComp."Prod. Order No." := "Order No.";
+      ProdOrderComp."Prod. Order Line No." := "Order Line No.";
+      ProdOrderComp."Line No." := "Prod. Order Comp. Line No.";
+      ProdOrderComp."Item No." := "Item No.";
+
+      ProdOrderCompLineList.LOOKUPMODE(true);
+      ProdOrderCompLineList.SETTABLEVIEW(ProdOrderComp);
+      ProdOrderCompLineList.SETRECORD(ProdOrderComp);
+
+      if ProdOrderCompLineList.RUNMODAL = ACTION::LookupOK then begin
+        ProdOrderCompLineList.GETRECORD(ProdOrderComp);
+        if "Prod. Order Comp. Line No." <> ProdOrderComp."Line No." then begin
+          VALIDATE("Item No.",ProdOrderComp."Item No.");
+          VALIDATE("Prod. Order Comp. Line No.",ProdOrderComp."Line No.");
+        end;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE RecalculateUnitAmount@38();
+    VAR
+      ItemJnlLine1@1000 : Record "Item Journal Line";
+    BEGIN
+      GetItem;
+
+      if ("Value Entry Type" <> "Value Entry Type"::"Direct Cost") or
+         ("Item Charge No." <> '')
+      then begin
+        "Indirect Cost %" := 0;
+        "Overhead Rate" := 0;
+      end else begin
+        "Indirect Cost %" := Item."Indirect Cost %";
+        "Overhead Rate" := Item."Overhead Rate";
+      end;
+
+      "Qty. per Unit of Measure" := UOMMgt.GetQtyPerUnitOfMeasure(Item,"Unit of Measure Code");
+      GetUnitAmount(FIELDNO("Unit of Measure Code"));
+
+      ReadGLSetup;
+
+      UpdateAmount;
+
+      case "Entry Type" of
+        "Entry Type"::Purchase:
+          begin
+            ItemJnlLine1.COPY(Rec);
+            PurchPriceCalcMgt.FindItemJnlLinePrice(ItemJnlLine1,FIELDNO("Unit of Measure Code"));
+            "Unit Cost" := ROUND(ItemJnlLine1."Unit Amount" * "Qty. per Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+          end;
+        "Entry Type"::Sale:
+          "Unit Cost" := ROUND(UnitCost * "Qty. per Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+        "Entry Type"::"Positive Adjmt.":
+          "Unit Cost" :=
+            ROUND(
+              "Unit Amount" * (1 + "Indirect Cost %" / 100),GLSetup."Unit-Amount Rounding Precision") +
+            "Overhead Rate" * "Qty. per Unit of Measure";
+        "Entry Type"::"Negative Adjmt.":
+          if not "Phys. Inventory" then
+            "Unit Cost" := UnitCost * "Qty. per Unit of Measure";
+      end;
+
+      if "Entry Type" in ["Entry Type"::Purchase,"Entry Type"::"Positive Adjmt."] then begin
+        if Item."Costing Method" = Item."Costing Method"::Standard then
+          "Unit Cost" := ROUND(UnitCost * "Qty. per Unit of Measure",GLSetup."Unit-Amount Rounding Precision");
+      end;
+    END;
+
+    [External]
+    PROCEDURE IsReclass@40(ItemJnlLine@1000 : Record "Item Journal Line") : Boolean;
+    BEGIN
+      if (ItemJnlLine."Entry Type" = ItemJnlLine."Entry Type"::Transfer) and
+         ((ItemJnlLine."Order Type" <> ItemJnlLine."Order Type"::Transfer) or (ItemJnlLine."Order No." = ''))
+      then
+        exit(true);
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE CheckWhse@39(LocationCode@1000 : Code[20];VAR QtyToPost@1002 : Decimal);
+    VAR
+      Location@1001 : Record Location;
+    BEGIN
+      Location.GET(LocationCode);
+      if Location."Require Put-away" and
+         (not Location."Directed Put-away and Pick") and
+         (not Location."Require Receive")
+      then
+        QtyToPost := 0;
+    END;
+
+    [External]
+    PROCEDURE ShowDimensions@41();
+    BEGIN
+      "Dimension Set ID" :=
+        DimMgt.EditDimensionSet2(
+          "Dimension Set ID",STRSUBSTNO('%1 %2 %3',"Journal Template Name","Journal Batch Name","Line No."),
+          "Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+    END;
+
+    [External]
+    PROCEDURE ShowReclasDimensions@30();
+    BEGIN
+      DimMgt.EditReclasDimensionSet2(
+        "Dimension Set ID","New Dimension Set ID",STRSUBSTNO('%1 %2 %3',"Journal Template Name","Journal Batch Name","Line No."),
+        "Shortcut Dimension 1 Code","Shortcut Dimension 2 Code","New Shortcut Dimension 1 Code","New Shortcut Dimension 2 Code");
+    END;
+
+    [External]
+    PROCEDURE PostingItemJnlFromProduction@43(Print@1000 : Boolean);
+    VAR
+      ProductionOrder@1001 : Record "Production Order";
+    BEGIN
+      if ("Order Type" = "Order Type"::Production) and ("Order No." <> '') then
+        ProductionOrder.GET(ProductionOrder.Status::Released,"Order No.");
+      if Print then
+        CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post+Print",Rec)
+      else
+        CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post",Rec);
+    END;
+
+    [External]
+    PROCEDURE IsAssemblyResourceConsumpLine@87() : Boolean;
+    BEGIN
+      exit(("Entry Type" = "Entry Type"::"Assembly Output") and (Type = Type::Resource));
+    END;
+
+    [External]
+    PROCEDURE IsAssemblyOutputLine@89() : Boolean;
+    BEGIN
+      exit(("Entry Type" = "Entry Type"::"Assembly Output") and (Type = Type::" "));
+    END;
+
+    [External]
+    PROCEDURE IsATOCorrection@10() : Boolean;
+    VAR
+      ItemLedgEntry@1000 : Record "Item Ledger Entry";
+      PostedATOLink@1001 : Record "Posted Assemble-to-Order Link";
+    BEGIN
+      if not Correction then
+        exit(false);
+      if "Entry Type" <> "Entry Type"::Sale then
+        exit(false);
+      if not ItemLedgEntry.GET("Applies-to Entry") then
+        exit(false);
+      if ItemLedgEntry."Entry Type" <> ItemLedgEntry."Entry Type"::Sale then
+        exit(false);
+      PostedATOLink.SETCURRENTKEY("Document Type","Document No.","Document Line No.");
+      PostedATOLink.SETRANGE("Document Type",PostedATOLink."Document Type"::"Sales Shipment");
+      PostedATOLink.SETRANGE("Document No.",ItemLedgEntry."Document No.");
+      PostedATOLink.SETRANGE("Document Line No.",ItemLedgEntry."Document Line No.");
+      exit(not PostedATOLink.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE RevaluationPerEntryAllowed@45(ItemNo@1000 : Code[20]) : Boolean;
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      GetItem;
+      if Item."Costing Method" <> Item."Costing Method"::Average then
+        exit(true);
+
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.SETRANGE("Entry Type",ValueEntry."Entry Type"::Revaluation);
+      ValueEntry.SETRANGE("Partial Revaluation",true);
+      exit(ValueEntry.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE ClearTracking@63();
+    BEGIN
+      "Serial No." := '';
+      "Lot No." := '';
+    END;
+
+    [External]
+    PROCEDURE CopyTrackingFromSpec@62(TrackingSpecification@1000 : Record "Tracking Specification");
+    BEGIN
+      "Serial No." := TrackingSpecification."Serial No.";
+      "Lot No." := TrackingSpecification."Lot No.";
+    END;
+
+    [External]
+    PROCEDURE TrackingExists@47() : Boolean;
+    BEGIN
+      exit(("Serial No." <> '') or ("Lot No." <> ''));
+    END;
+
+    [External]
+    PROCEDURE TestItemFields@61(ItemNo@1000 : Code[20];VariantCode@1001 : Code[10];LocationCode@1002 : Code[10]);
+    BEGIN
+      TESTFIELD("Item No.",ItemNo);
+      TESTFIELD("Variant Code",VariantCode);
+      TESTFIELD("Location Code",LocationCode);
+    END;
+
+    [External]
+    PROCEDURE IsPurchaseReturn@49() : Boolean;
+    BEGIN
+      exit(
+        ("Document Type" in ["Document Type"::"Purchase Credit Memo",
+                             "Document Type"::"Purchase Return Shipment",
+                             "Document Type"::"Purchase Invoice",
+                             "Document Type"::"Purchase Receipt"]) and
+        (Quantity < 0));
+    END;
+
+    [External]
+    PROCEDURE IsOpenedFromBatch@50() : Boolean;
+    VAR
+      ItemJournalBatch@1002 : Record "Item Journal Batch";
+      TemplateFilter@1001 : Text;
+      BatchFilter@1000 : Text;
+    BEGIN
+      BatchFilter := GETFILTER("Journal Batch Name");
+      if BatchFilter <> '' then begin
+        TemplateFilter := GETFILTER("Journal Template Name");
+        if TemplateFilter <> '' then
+          ItemJournalBatch.SETFILTER("Journal Template Name",TemplateFilter);
+        ItemJournalBatch.SETFILTER(Name,BatchFilter);
+        ItemJournalBatch.FINDFIRST;
+      end;
+
+      exit((("Journal Batch Name" <> '') and ("Journal Template Name" = '')) or (BatchFilter <> ''));
+    END;
+
+    [External]
+    PROCEDURE SubcontractingWorkCenterUsed@52() : Boolean;
+    VAR
+      WorkCenter@1000 : Record "Work Center";
+    BEGIN
+      if Type = Type::"Work Center" then
+        if WorkCenter.GET("Work Center No.") then
+          exit(WorkCenter."Subcontractor No." <> '');
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE CheckItemJournalLineRestriction@161();
+    BEGIN
+      OnCheckItemJournalLinePostRestrictions;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterSetupNewLine@71(VAR ItemJournalLine@1000 : Record "Item Journal Line";VAR LastItemJournalLine@1001 : Record "Item Journal Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromSalesHeader@64(VAR ItemJnlLine@1001 : Record "Item Journal Line";SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromSalesLine@65(VAR ItemJnlLine@1001 : Record "Item Journal Line";SalesLine@1000 : Record "Sales Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromPurchHeader@66(VAR ItemJnlLine@1001 : Record "Item Journal Line";PurchHeader@1000 : Record "Purchase Header");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromPurchLine@67(VAR ItemJnlLine@1001 : Record "Item Journal Line";PurchLine@1000 : Record "Purchase Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromServHeader@69(VAR ItemJnlLine@1001 : Record "Item Journal Line";ServHeader@1000 : Record "Service Header");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromServLine@70(VAR ItemJnlLine@1001 : Record "Item Journal Line";ServLine@1000 : Record "Service Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromServShptHeader@72(VAR ItemJnlLine@1001 : Record "Item Journal Line";ServShptHeader@1000 : Record "Service Shipment Header");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromServShptLine@73(VAR ItemJnlLine@1001 : Record "Item Journal Line";ServShptLine@1000 : Record "Service Shipment Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromServShptLineUndo@74(VAR ItemJnlLine@1001 : Record "Item Journal Line";ServShptLine@1000 : Record "Service Shipment Line");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyItemJnlLineFromJobJnlLine@75(VAR ItemJournalLine@1001 : Record "Item Journal Line";JobJournalLine@1000 : Record "Job Journal Line");
+    BEGIN
+    END;
+
+    [Integration(DEFAULT,TRUE)]
+    LOCAL PROCEDURE OnAfterOnValidateItemNoAssignByEntryType@68(VAR ItemJournalLine@1000 : Record "Item Journal Line";VAR Item@1001 : Record Item);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateDimTableIDs@164(VAR ItemJournalLine@1000 : Record "Item Journal Line";FieldNo@1001 : Integer;TableID@1003 : ARRAY [10] OF Integer;No@1002 : ARRAY [10] OF Code[20]);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeVerifyReservedQty@77(VAR ItemJournalLine@1000 : Record "Item Journal Line";xItemJournalLine@1001 : Record "Item Journal Line";CalledByFieldNo@1002 : Integer);
+    BEGIN
+    END;
+
+    [Integration(TRUE)]
+    LOCAL PROCEDURE OnCheckItemJournalLinePostRestrictions@90();
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

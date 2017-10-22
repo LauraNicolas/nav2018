@@ -1,0 +1,398 @@
+OBJECT Codeunit 40 LogInManagement
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "G/L Entry"=r,
+                TableData Customer=r,
+                TableData Vendor=r,
+                TableData Item=r,
+                TableData "User Time Register"=rimd,
+                TableData "My Customer"=rimd,
+                TableData "My Vendor"=rimd,
+                TableData "My Item"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PartnerAgreementNotAcceptedErr@1001 : TextConst 'ENU=Partner Agreement has not been accepted.';
+      PasswordChangeNeededErr@1007 : TextConst 'ENU=You must change the password before you can continue.';
+      GLSetup@1011 : Record "General Ledger Setup";
+      User@1003 : Record User SECURITYFILTERING(Filtered);
+      LogInWorkDate@1006 : Date;
+      LogInDate@1005 : Date;
+      LogInTime@1004 : Time;
+      GLSetupRead@1012 : Boolean;
+
+    [Internal]
+    PROCEDURE CompanyOpen@1();
+    BEGIN
+      if GUIALLOWED then
+        LogInStart;
+    END;
+
+    [External]
+    PROCEDURE CompanyClose@2();
+    BEGIN
+      if GUIALLOWED then
+        LogInEnd;
+    END;
+
+    LOCAL PROCEDURE LogInStart@3();
+    VAR
+      Language@1005 : Record "Windows Language";
+      LicenseAgreement@1008 : Record "License Agreement";
+      ApplicationAreaSetup@1007 : Record "Application Area Setup";
+      ApplicationManagement@1009 : Codeunit ApplicationManagement;
+      IdentityManagement@1002 : Codeunit "Identity Management";
+      CompanyInformationMgt@1000 : Codeunit "Company Information Mgt.";
+    BEGIN
+      if not CompanyInformationMgt.IsDemoCompany then
+        if LicenseAgreement.GET then
+          if LicenseAgreement.GetActive and not LicenseAgreement.Accepted then begin
+            PAGE.RUNMODAL(PAGE::"Additional Customer Terms");
+            LicenseAgreement.GET;
+            if not LicenseAgreement.Accepted then
+              ERROR(PartnerAgreementNotAcceptedErr)
+          end;
+
+      Language.SETRANGE("Localization Exist",true);
+      Language.SETRANGE("Globally Enabled",true);
+      Language."Language ID" := GLOBALLANGUAGE;
+      if not Language.FIND then begin
+        Language."Language ID" := WINDOWSLANGUAGE;
+        if not Language.FIND then
+          Language."Language ID" := ApplicationManagement.ApplicationLanguage;
+      end;
+      GLOBALLANGUAGE := Language."Language ID";
+
+      // Check if the logged in user must change login before allowing access.
+      if not User.ISEMPTY then begin
+        if IdentityManagement.IsUserNamePasswordAuthentication then begin
+          User.SETRANGE("User Security ID",USERSECURITYID);
+          User.FINDFIRST;
+          if User."Change Password" then begin
+            PAGE.RUNMODAL(PAGE::"Change Password");
+            SELECTLATESTVERSION;
+            User.FINDFIRST;
+            if User."Change Password" then
+              ERROR(PasswordChangeNeededErr);
+          end;
+        end;
+
+        User.SETRANGE("User Security ID");
+      end;
+
+      InitializeCompany;
+      UpdateUserPersonalization;
+      CreateProfiles;
+
+      LogInDate := TODAY;
+      LogInTime := TIME;
+      LogInWorkDate := 0D;
+
+      WORKDATE := GetDefaultWorkDate;
+
+      SetupMyRecords;
+
+      ApplicationAreaSetup.SetupApplicationArea;
+
+      OnAfterLogInStart;
+    END;
+
+    LOCAL PROCEDURE LogInEnd@4();
+    VAR
+      UserSetup@1000 : Record "User Setup";
+      UserTimeRegister@1001 : Record "User Time Register";
+      LogOutDate@1002 : Date;
+      LogOutTime@1003 : Time;
+      Minutes@1004 : Integer;
+      UserSetupFound@1005 : Boolean;
+      RegisterTime@1006 : Boolean;
+    BEGIN
+      if LogInWorkDate <> 0D then
+        if LogInWorkDate = LogInDate then
+          WORKDATE := TODAY
+        else
+          WORKDATE := LogInWorkDate;
+
+      if USERID <> '' then begin
+        if UserSetup.GET(USERID) then begin
+          UserSetupFound := true;
+          RegisterTime := UserSetup."Register Time";
+        end;
+        if not UserSetupFound then
+          if GetGLSetup then
+            RegisterTime := GLSetup."Register Time";
+        if RegisterTime then begin
+          LogOutDate := TODAY;
+          LogOutTime := TIME;
+          if (LogOutDate > LogInDate) or (LogOutDate = LogInDate) and (LogOutTime > LogInTime) then
+            Minutes := ROUND((1440 * (LogOutDate - LogInDate)) + ((LogOutTime - LogInTime) / 60000),1);
+          if Minutes = 0 then
+            Minutes := 1;
+          UserTimeRegister.INIT;
+          UserTimeRegister."User ID" := USERID;
+          UserTimeRegister.Date := LogInDate;
+          if UserTimeRegister.FIND then begin
+            UserTimeRegister.Minutes := UserTimeRegister.Minutes + Minutes;
+            UserTimeRegister.MODIFY;
+          end else begin
+            UserTimeRegister.Minutes := Minutes;
+            UserTimeRegister.INSERT;
+          end;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE InitializeCompany@10();
+    BEGIN
+      if not GLSetup.GET then
+        CODEUNIT.RUN(CODEUNIT::"Company-Initialize");
+    END;
+
+    [External]
+    PROCEDURE CreateProfiles@12();
+    VAR
+      Profile@1001 : Record Profile;
+    BEGIN
+      if Profile.ISEMPTY then begin
+        CODEUNIT.RUN(CODEUNIT::"Conf./Personalization Mgt.");
+        COMMIT;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetGLSetup@5() : Boolean;
+    BEGIN
+      if not GLSetupRead then
+        GLSetupRead := GLSetup.GET;
+      exit(GLSetupRead);
+    END;
+
+    [External]
+    PROCEDURE GetDefaultWorkDate@6() : Date;
+    VAR
+      GLEntry@1000 : Record "G/L Entry";
+      CompanyInformationMgt@1002 : Codeunit "Company Information Mgt.";
+    BEGIN
+      if CompanyInformationMgt.IsDemoCompany then
+        if GLEntry.READPERMISSION then begin
+          GLEntry.SETCURRENTKEY("Posting Date");
+          if GLEntry.FINDLAST then begin
+            LogInWorkDate := NORMALDATE(GLEntry."Posting Date");
+            exit(NORMALDATE(GLEntry."Posting Date"));
+          end;
+        end;
+
+      exit(WORKDATE);
+    END;
+
+    LOCAL PROCEDURE SetupMyRecords@17();
+    VAR
+      CompanyInformationMgt@1000 : Codeunit "Company Information Mgt.";
+    BEGIN
+      if not CompanyInformationMgt.IsDemoCompany then
+        exit;
+
+      if SetupMyCustomer then
+        exit;
+
+      if SetupMyItem then
+        exit;
+
+      if SetupMyVendor then
+        exit;
+
+      SetupMyAccount;
+    END;
+
+    LOCAL PROCEDURE SetupMyCustomer@7() : Boolean;
+    VAR
+      Customer@1000 : Record Customer;
+      MyCustomer@1001 : Record "My Customer";
+      MaxCustomersToAdd@1002 : Integer;
+      I@1003 : Integer;
+    BEGIN
+      if not Customer.READPERMISSION then
+        exit;
+
+      MyCustomer.SETRANGE("User ID",USERID);
+      if not MyCustomer.ISEMPTY then
+        exit(true);
+
+      I := 0;
+      MaxCustomersToAdd := 5;
+      Customer.SETFILTER(Balance,'<>0');
+      if Customer.FINDSET then
+        repeat
+          I += 1;
+          MyCustomer."User ID" := USERID;
+          MyCustomer.VALIDATE("Customer No.",Customer."No.");
+          if MyCustomer.INSERT then;
+        until (Customer.NEXT = 0) or (I >= MaxCustomersToAdd);
+    END;
+
+    LOCAL PROCEDURE SetupMyItem@8() : Boolean;
+    VAR
+      Item@1000 : Record Item;
+      MyItem@1001 : Record "My Item";
+      MaxItemsToAdd@1002 : Integer;
+      I@1003 : Integer;
+    BEGIN
+      if not Item.READPERMISSION then
+        exit;
+
+      MyItem.SETRANGE("User ID",USERID);
+      if not MyItem.ISEMPTY then
+        exit(true);
+
+      I := 0;
+      MaxItemsToAdd := 5;
+
+      Item.SETFILTER("Unit Price",'<>0');
+      if Item.FINDSET then
+        repeat
+          I += 1;
+          MyItem."User ID" := USERID;
+          MyItem.VALIDATE("Item No.",Item."No.");
+          if MyItem.INSERT then;
+        until (Item.NEXT = 0) or (I >= MaxItemsToAdd);
+    END;
+
+    LOCAL PROCEDURE SetupMyVendor@9() : Boolean;
+    VAR
+      Vendor@1000 : Record Vendor;
+      MyVendor@1001 : Record "My Vendor";
+      MaxVendorsToAdd@1002 : Integer;
+      I@1003 : Integer;
+    BEGIN
+      if not Vendor.READPERMISSION then
+        exit;
+
+      MyVendor.SETRANGE("User ID",USERID);
+      if not MyVendor.ISEMPTY then
+        exit(true);
+
+      I := 0;
+      MaxVendorsToAdd := 5;
+      Vendor.SETFILTER(Balance,'<>0');
+      if Vendor.FINDSET then
+        repeat
+          I += 1;
+          MyVendor."User ID" := USERID;
+          MyVendor.VALIDATE("Vendor No.",Vendor."No.");
+          if MyVendor.INSERT then;
+        until (Vendor.NEXT = 0) or (I >= MaxVendorsToAdd);
+    END;
+
+    LOCAL PROCEDURE SetupMyAccount@11() : Boolean;
+    VAR
+      GLAccount@1000 : Record "G/L Account";
+      MyAccount@1001 : Record "My Account";
+      MaxAccountsToAdd@1002 : Integer;
+      I@1003 : Integer;
+    BEGIN
+      if not GLAccount.READPERMISSION then
+        exit;
+
+      MyAccount.SETRANGE("User ID",USERID);
+      if not MyAccount.ISEMPTY then
+        exit(true);
+
+      I := 0;
+      MaxAccountsToAdd := 5;
+      GLAccount.SETRANGE("Reconciliation Account",true);
+      if GLAccount.FINDSET then
+        repeat
+          I += 1;
+          MyAccount."User ID" := USERID;
+          MyAccount.VALIDATE("Account No.",GLAccount."No.");
+          if MyAccount.INSERT then;
+        until (GLAccount.NEXT = 0) or (I >= MaxAccountsToAdd);
+    END;
+
+    [External]
+    PROCEDURE UserLogonExistsWithinPeriod@13(PeriodType@1000 : 'Day,Week,Month,Quarter,Year,"Accounting Period"';NoOfPeriods@1001 : Integer) : Boolean;
+    VAR
+      SessionEvent@1002 : Record "Session Event";
+      PeriodFormManagement@1003 : Codeunit PeriodFormManagement;
+      FromEventDateTime@1004 : DateTime;
+    BEGIN
+      FromEventDateTime := CREATEDATETIME(PeriodFormManagement.MoveDateByPeriod(TODAY,PeriodType,-NoOfPeriods),TIME);
+      SessionEvent.SETRANGE("Event Datetime",FromEventDateTime,CURRENTDATETIME);
+      SessionEvent.SETRANGE("Event Type",SessionEvent."Event Type"::Logon);
+      // Filter out sessions of type Web Service, Client Service, NAS, Background and Management Client
+      SessionEvent.SETFILTER("Client Type",'<%1|>%2',
+        SessionEvent."Client Type"::"Web Service",SessionEvent."Client Type"::"Management Client");
+      SessionEvent.SETRANGE("Database Name",GetDatabase);
+      exit(not SessionEvent.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE GetDatabase@14() : Text[250];
+    VAR
+      ActiveSession@1000 : Record "Active Session";
+    BEGIN
+      ActiveSession.GET(SERVICEINSTANCEID,SESSIONID);
+      exit(ActiveSession."Database Name");
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterLogInStart@16();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE UpdateUserPersonalization@15();
+    VAR
+      UserPersonalization@1001 : Record "User Personalization";
+      Profile@1002 : Record "All Profile";
+      AllObjWithCaption@1003 : Record AllObjWithCaption;
+      PermissionManager@1004 : Codeunit "Permission Manager";
+      ProfileScope@1005 : 'System,Tenant';
+      AppID@1006 : GUID;
+    BEGIN
+      if not UserPersonalization.GET(USERSECURITYID) then
+        exit;
+
+      if Profile.GET(UserPersonalization.Scope,UserPersonalization."App ID",UserPersonalization."Profile ID") then begin
+        AllObjWithCaption.SETRANGE("Object Type",AllObjWithCaption."Object Type"::Page);
+        AllObjWithCaption.SETRANGE("Object Subtype",'RoleCenter');
+        AllObjWithCaption.SETRANGE("Object ID",Profile."Role Center ID");
+        if AllObjWithCaption.ISEMPTY then begin
+          UserPersonalization."Profile ID" := '';
+          UserPersonalization.MODIFY;
+          COMMIT;
+        end;
+      end else
+        if PermissionManager.SoftwareAsAService then begin
+          Profile.RESET;
+          PermissionManager.GetDefaultProfileID(USERSECURITYID,Profile);
+
+          if not Profile.ISEMPTY then begin
+            UserPersonalization."Profile ID" := Profile."Profile ID";
+            UserPersonalization.Scope := Profile.Scope;
+            UserPersonalization."App ID" := Profile."App ID";
+            UserPersonalization.MODIFY;
+          end else begin
+            UserPersonalization."Profile ID" := '';
+            UserPersonalization.Scope := ProfileScope::System;
+            UserPersonalization."App ID" := AppID;
+            UserPersonalization.MODIFY;
+          end;
+        end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

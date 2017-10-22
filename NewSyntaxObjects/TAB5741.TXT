@@ -1,0 +1,1135 @@
+OBJECT Table 5741 Transfer Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnInsert=VAR
+               TransLine2@1000 : Record "Transfer Line";
+             BEGIN
+               TestStatusOpen;
+               TransLine2.RESET;
+               TransLine2.SETFILTER("Document No.",TransHeader."No.");
+               if TransLine2.FINDLAST then
+                 "Line No." := TransLine2."Line No." + 10000;
+               ReserveTransferLine.VerifyQuantity(Rec,xRec);
+             END;
+
+    OnModify=BEGIN
+               ReserveTransferLine.VerifyChange(Rec,xRec);
+             END;
+
+    OnDelete=VAR
+               ItemChargeAssgntPurch@1000 : Record "Item Charge Assignment (Purch)";
+             BEGIN
+               TestStatusOpen;
+
+               TESTFIELD("Quantity Shipped","Quantity Received");
+               TESTFIELD("Qty. Shipped (Base)","Qty. Received (Base)");
+               CALCFIELDS("Reserved Qty. Inbnd. (Base)","Reserved Qty. Outbnd. (Base)");
+               TESTFIELD("Reserved Qty. Inbnd. (Base)",0);
+               TESTFIELD("Reserved Qty. Outbnd. (Base)",0);
+
+               ReserveTransferLine.DeleteLine(Rec);
+               WhseValidateSourceLine.TransLineDelete(Rec);
+
+               ItemChargeAssgntPurch.SETCURRENTKEY(
+                 "Applies-to Doc. Type","Applies-to Doc. No.","Applies-to Doc. Line No.");
+               ItemChargeAssgntPurch.SETRANGE("Applies-to Doc. Type",ItemChargeAssgntPurch."Applies-to Doc. Type"::"Transfer Receipt");
+               ItemChargeAssgntPurch.SETRANGE("Applies-to Doc. No.","Document No.");
+               ItemChargeAssgntPurch.SETRANGE("Applies-to Doc. Line No.","Line No.");
+               ItemChargeAssgntPurch.DELETEALL(true);
+             END;
+
+    OnRename=BEGIN
+               ERROR(Text001,TABLECAPTION);
+             END;
+
+    CaptionML=ENU=Transfer Line;
+    LookupPageID="Transfer Lines";
+    DrillDownPageID="Transfer Lines";
+  }
+  FIELDS
+  {
+    { 1   ;   ;Document No.        ;Code20        ;CaptionML=ENU=Document No. }
+    { 2   ;   ;Line No.            ;Integer       ;CaptionML=ENU=Line No. }
+    { 3   ;   ;Item No.            ;Code20        ;TableRelation=Item WHERE (Type=CONST(Inventory));
+                                                   OnValidate=VAR
+                                                                TempTransferLine@1000 : TEMPORARY Record "Transfer Line";
+                                                                ReturnValue@1001 : Text[50];
+                                                              BEGIN
+                                                                TESTFIELD("Quantity Shipped",0);
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                Item.TryGetItemNo(ReturnValue,"Item No.",true);
+                                                                "Item No." := COPYSTR(ReturnValue,1,MAXSTRLEN("Item No."));
+                                                                ReserveTransferLine.VerifyChange(Rec,xRec);
+                                                                CALCFIELDS("Reserved Qty. Inbnd. (Base)");
+                                                                TESTFIELD("Reserved Qty. Inbnd. (Base)",0);
+                                                                WhseValidateSourceLine.TransLineVerifyChange(Rec,xRec);
+
+                                                                TempTransferLine := Rec;
+                                                                INIT;
+                                                                "Item No." := TempTransferLine."Item No.";
+                                                                if "Item No." = '' then
+                                                                  exit;
+
+                                                                GetTransHeader;
+                                                                GetItem;
+                                                                GetDefaultBin("Transfer-from Code","Transfer-to Code");
+
+                                                                Item.TESTFIELD(Blocked,false);
+                                                                Item.TESTFIELD(Type,Item.Type::Inventory);
+
+                                                                VALIDATE(Description,Item.Description);
+                                                                VALIDATE("Gen. Prod. Posting Group",Item."Gen. Prod. Posting Group");
+                                                                VALIDATE("Inventory Posting Group",Item."Inventory Posting Group");
+                                                                VALIDATE("Unit of Measure Code",Item."Base Unit of Measure");
+                                                                VALIDATE("Gross Weight",Item."Gross Weight");
+                                                                VALIDATE("Net Weight",Item."Net Weight");
+                                                                VALIDATE("Unit Volume",Item."Unit Volume");
+                                                                VALIDATE("Units per Parcel",Item."Units per Parcel");
+                                                                VALIDATE("Description 2",Item."Description 2");
+                                                                VALIDATE(Quantity,xRec.Quantity);
+                                                                "Item Category Code" := Item."Item Category Code";
+                                                                "Product Group Code" := Item."Product Group Code";
+
+                                                                CreateDim(DATABASE::Item,"Item No.");
+                                                                DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+                                                              END;
+
+                                                   ValidateTableRelation=false;
+                                                   CaptionML=ENU=Item No. }
+    { 4   ;   ;Quantity            ;Decimal       ;OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                if Quantity <> 0 then
+                                                                  TESTFIELD("Item No.");
+                                                                "Quantity (Base)" := CalcBaseQty(Quantity);
+                                                                if ((Quantity * "Quantity Shipped") < 0) or
+                                                                   (ABS(Quantity) < ABS("Quantity Shipped"))
+                                                                then
+                                                                  FIELDERROR(Quantity,STRSUBSTNO(Text002,FIELDCAPTION("Quantity Shipped")));
+                                                                if (("Quantity (Base)" * "Qty. Shipped (Base)") < 0) or
+                                                                   (ABS("Quantity (Base)") < ABS("Qty. Received (Base)"))
+                                                                then
+                                                                  FIELDERROR("Quantity (Base)",STRSUBSTNO(Text002,FIELDCAPTION("Qty. Shipped (Base)")));
+                                                                InitQtyInTransit;
+                                                                InitOutstandingQty;
+                                                                InitQtyToShip;
+                                                                InitQtyToReceive;
+                                                                CheckItemAvailable(FIELDNO(Quantity));
+
+                                                                ReserveTransferLine.VerifyQuantity(Rec,xRec);
+
+                                                                UpdateWithWarehouseShipReceive;
+
+                                                                WhseValidateSourceLine.TransLineVerifyChange(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=Quantity;
+                                                   DecimalPlaces=0:5;
+                                                   MinValue=0 }
+    { 5   ;   ;Unit of Measure     ;Text10        ;OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                              END;
+
+                                                   CaptionML=ENU=Unit of Measure }
+    { 6   ;   ;Qty. to Ship        ;Decimal       ;OnValidate=BEGIN
+                                                                GetLocation("Transfer-from Code");
+                                                                if CurrFieldNo <> 0 then begin
+                                                                  if Location."Require Shipment" and
+                                                                     ("Qty. to Ship" <> 0)
+                                                                  then
+                                                                    CheckWarehouse("Transfer-from Code",false);
+                                                                  WhseValidateSourceLine.TransLineVerifyChange(Rec,xRec);
+                                                                end;
+
+                                                                if "Qty. to Ship" > "Outstanding Quantity" then
+                                                                  if "Outstanding Quantity" > 0 then
+                                                                    ERROR(
+                                                                      Text005,
+                                                                      "Outstanding Quantity")
+                                                                  else
+                                                                    ERROR(Text006);
+                                                                "Qty. to Ship (Base)" := CalcBaseQty("Qty. to Ship");
+
+                                                                if ("In-Transit Code" = '') and ("Quantity Shipped" = "Quantity Received") then
+                                                                  VALIDATE("Qty. to Receive","Qty. to Ship");
+                                                              END;
+
+                                                   CaptionML=ENU=Qty. to Ship;
+                                                   DecimalPlaces=0:5;
+                                                   MinValue=0 }
+    { 7   ;   ;Qty. to Receive     ;Decimal       ;OnValidate=BEGIN
+                                                                GetLocation("Transfer-to Code");
+                                                                if CurrFieldNo <> 0 then begin
+                                                                  if Location."Require Receive" and
+                                                                     ("Qty. to Receive" <> 0)
+                                                                  then
+                                                                    CheckWarehouse("Transfer-to Code",true);
+                                                                  WhseValidateSourceLine.TransLineVerifyChange(Rec,xRec);
+                                                                end;
+
+                                                                GetTransferHeaderNoVerification;
+
+                                                                if not TransHeader."Direct Transfer" then
+                                                                  if "Qty. to Receive" > "Qty. in Transit" then
+                                                                    if "Qty. in Transit" > 0 then
+                                                                      ERROR(
+                                                                        Text008,
+                                                                        "Qty. in Transit")
+                                                                    else
+                                                                      ERROR(Text009);
+                                                                "Qty. to Receive (Base)" := CalcBaseQty("Qty. to Receive");
+                                                              END;
+
+                                                   CaptionML=ENU=Qty. to Receive;
+                                                   DecimalPlaces=0:5;
+                                                   MinValue=0 }
+    { 8   ;   ;Quantity Shipped    ;Decimal       ;OnValidate=BEGIN
+                                                                "Qty. Shipped (Base)" := CalcBaseQty("Quantity Shipped");
+                                                                InitQtyInTransit;
+                                                                InitOutstandingQty;
+                                                                InitQtyToShip;
+                                                                InitQtyToReceive;
+                                                              END;
+
+                                                   CaptionML=ENU=Quantity Shipped;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 9   ;   ;Quantity Received   ;Decimal       ;OnValidate=BEGIN
+                                                                "Qty. Received (Base)" := CalcBaseQty("Quantity Received");
+                                                                InitQtyInTransit;
+                                                                InitOutstandingQty;
+                                                                InitQtyToReceive;
+                                                              END;
+
+                                                   CaptionML=ENU=Quantity Received;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 10  ;   ;Status              ;Option        ;CaptionML=ENU=Status;
+                                                   OptionCaptionML=ENU=Open,Released;
+                                                   OptionString=Open,Released;
+                                                   Editable=false }
+    { 11  ;   ;Shortcut Dimension 1 Code;Code20   ;TableRelation="Dimension Value".Code WHERE ("Global Dimension No."=CONST(1));
+                                                   OnValidate=BEGIN
+                                                                ValidateShortcutDimCode(1,"Shortcut Dimension 1 Code");
+                                                              END;
+
+                                                   CaptionML=ENU=Shortcut Dimension 1 Code;
+                                                   CaptionClass='1,2,1' }
+    { 12  ;   ;Shortcut Dimension 2 Code;Code20   ;TableRelation="Dimension Value".Code WHERE ("Global Dimension No."=CONST(2));
+                                                   OnValidate=BEGIN
+                                                                ValidateShortcutDimCode(2,"Shortcut Dimension 2 Code");
+                                                              END;
+
+                                                   CaptionML=ENU=Shortcut Dimension 2 Code;
+                                                   CaptionClass='1,2,2' }
+    { 13  ;   ;Description         ;Text50        ;TableRelation=Item WHERE (Type=CONST(Inventory));
+                                                   OnValidate=VAR
+                                                                Item@1001 : Record Item;
+                                                                ReturnValue@1003 : Text[50];
+                                                                ItemDescriptionIsNo@1000 : Boolean;
+                                                              BEGIN
+                                                                if (STRLEN(Description) <= MAXSTRLEN(Item."No.")) and ("Item No." <> '') then
+                                                                  ItemDescriptionIsNo := Item.GET(Description);
+
+                                                                if ("Item No." <> '') and (not ItemDescriptionIsNo) and (Description <> '') then begin
+                                                                  Item.SETFILTER(Description,'''@' + CONVERTSTR(Description,'''','?') + '*''');
+                                                                  if not Item.FINDFIRST then
+                                                                    exit;
+                                                                  if Item."No." = "Item No." then
+                                                                    exit;
+                                                                  if CONFIRM(AnotherItemWithSameDescrQst,false,Item."No.",Item.Description) then
+                                                                    VALIDATE("Item No.",Item."No.");
+                                                                  exit;
+                                                                end;
+
+                                                                if Item.TryGetItemNoOpenCard(ReturnValue,Description,false,true,true) then
+                                                                  case ReturnValue of
+                                                                    '':
+                                                                      Description := xRec.Description;
+                                                                    "Item No.":
+                                                                      Description := xRec.Description;
+                                                                    else begin
+                                                                      CurrFieldNo := FIELDNO("Item No.");
+                                                                      VALIDATE("Item No.",COPYSTR(ReturnValue,1,MAXSTRLEN(Item."No.")));
+                                                                    end;
+                                                                  end;
+
+                                                                if "Item No." <> '' then
+                                                                  GetItem;
+                                                              END;
+
+                                                   ValidateTableRelation=false;
+                                                   CaptionML=ENU=Description }
+    { 14  ;   ;Gen. Prod. Posting Group;Code20    ;TableRelation="Gen. Product Posting Group";
+                                                   OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                              END;
+
+                                                   CaptionML=ENU=Gen. Prod. Posting Group }
+    { 15  ;   ;Inventory Posting Group;Code20     ;TableRelation="Inventory Posting Group";
+                                                   OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                              END;
+
+                                                   CaptionML=ENU=Inventory Posting Group }
+    { 16  ;   ;Quantity (Base)     ;Decimal       ;OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                TESTFIELD("Qty. per Unit of Measure",1);
+                                                                VALIDATE(Quantity,"Quantity (Base)");
+                                                              END;
+
+                                                   CaptionML=ENU=Quantity (Base);
+                                                   DecimalPlaces=0:5;
+                                                   MinValue=0 }
+    { 17  ;   ;Outstanding Qty. (Base);Decimal    ;CaptionML=ENU=Outstanding Qty. (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 18  ;   ;Qty. to Ship (Base) ;Decimal       ;OnValidate=BEGIN
+                                                                TESTFIELD("Qty. per Unit of Measure",1);
+                                                                VALIDATE("Qty. to Ship","Qty. to Ship (Base)");
+                                                              END;
+
+                                                   CaptionML=ENU=Qty. to Ship (Base);
+                                                   DecimalPlaces=0:5;
+                                                   MinValue=0 }
+    { 19  ;   ;Qty. Shipped (Base) ;Decimal       ;CaptionML=ENU=Qty. Shipped (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 20  ;   ;Qty. to Receive (Base);Decimal     ;OnValidate=BEGIN
+                                                                TESTFIELD("Qty. per Unit of Measure",1);
+                                                                VALIDATE("Qty. to Receive","Qty. to Receive (Base)");
+                                                              END;
+
+                                                   CaptionML=ENU=Qty. to Receive (Base);
+                                                   DecimalPlaces=0:5;
+                                                   MinValue=0 }
+    { 21  ;   ;Qty. Received (Base);Decimal       ;CaptionML=ENU=Qty. Received (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 22  ;   ;Qty. per Unit of Measure;Decimal   ;InitValue=1;
+                                                   CaptionML=ENU=Qty. per Unit of Measure;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 23  ;   ;Unit of Measure Code;Code10        ;TableRelation="Item Unit of Measure".Code WHERE ("Item No."=FIELD("Item No."));
+                                                   OnValidate=VAR
+                                                                UnitOfMeasure@1000 : Record "Unit of Measure";
+                                                                UOMMgt@1001 : Codeunit "Unit of Measure Management";
+                                                              BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                TESTFIELD("Quantity Shipped",0);
+                                                                TESTFIELD("Qty. Shipped (Base)",0);
+                                                                TESTFIELD("Quantity Received",0);
+                                                                TESTFIELD("Qty. Received (Base)",0);
+                                                                ReserveTransferLine.VerifyChange(Rec,xRec);
+                                                                WhseValidateSourceLine.TransLineVerifyChange(Rec,xRec);
+                                                                if "Unit of Measure Code" = '' then
+                                                                  "Unit of Measure" := ''
+                                                                else begin
+                                                                  if not UnitOfMeasure.GET("Unit of Measure Code") then
+                                                                    UnitOfMeasure.INIT;
+                                                                  "Unit of Measure" := UnitOfMeasure.Description;
+                                                                end;
+                                                                GetItem;
+                                                                VALIDATE("Qty. per Unit of Measure",UOMMgt.GetQtyPerUnitOfMeasure(Item,"Unit of Measure Code"));
+                                                                "Gross Weight" := Item."Gross Weight" * "Qty. per Unit of Measure";
+                                                                "Net Weight" := Item."Net Weight" * "Qty. per Unit of Measure";
+                                                                "Unit Volume" := Item."Unit Volume" * "Qty. per Unit of Measure";
+                                                                "Units per Parcel" := ROUND(Item."Units per Parcel" / "Qty. per Unit of Measure",0.00001);
+                                                                VALIDATE(Quantity);
+                                                              END;
+
+                                                   CaptionML=ENU=Unit of Measure Code }
+    { 24  ;   ;Outstanding Quantity;Decimal       ;CaptionML=ENU=Outstanding Quantity;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 25  ;   ;Gross Weight        ;Decimal       ;CaptionML=ENU=Gross Weight;
+                                                   DecimalPlaces=0:5 }
+    { 26  ;   ;Net Weight          ;Decimal       ;CaptionML=ENU=Net Weight;
+                                                   DecimalPlaces=0:5 }
+    { 27  ;   ;Unit Volume         ;Decimal       ;CaptionML=ENU=Unit Volume;
+                                                   DecimalPlaces=0:5 }
+    { 30  ;   ;Variant Code        ;Code10        ;TableRelation="Item Variant".Code WHERE ("Item No."=FIELD("Item No."));
+                                                   OnValidate=VAR
+                                                                ItemVariant@1000 : Record "Item Variant";
+                                                              BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                ReserveTransferLine.VerifyChange(Rec,xRec);
+                                                                WhseValidateSourceLine.TransLineVerifyChange(Rec,xRec);
+
+                                                                if "Variant Code" = '' then
+                                                                  exit;
+
+                                                                GetDefaultBin("Transfer-from Code","Transfer-to Code");
+                                                                ItemVariant.GET("Item No.","Variant Code");
+                                                                Description := ItemVariant.Description;
+                                                                "Description 2" := ItemVariant."Description 2";
+
+                                                                CheckItemAvailable(FIELDNO("Variant Code"));
+                                                              END;
+
+                                                   CaptionML=ENU=Variant Code }
+    { 31  ;   ;Units per Parcel    ;Decimal       ;CaptionML=ENU=Units per Parcel;
+                                                   DecimalPlaces=0:5 }
+    { 32  ;   ;Description 2       ;Text50        ;CaptionML=ENU=Description 2 }
+    { 33  ;   ;In-Transit Code     ;Code10        ;TableRelation=Location WHERE ("Use As In-Transit"=CONST(true));
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD("Quantity Shipped",0);
+                                                              END;
+
+                                                   CaptionML=ENU=In-Transit Code;
+                                                   Editable=false }
+    { 34  ;   ;Qty. in Transit     ;Decimal       ;CaptionML=ENU=Qty. in Transit;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 35  ;   ;Qty. in Transit (Base);Decimal     ;CaptionML=ENU=Qty. in Transit (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 36  ;   ;Transfer-from Code  ;Code10        ;TableRelation=Location;
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD("Quantity Shipped",0);
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                if "Transfer-from Code" <> xRec."Transfer-from Code" then begin
+                                                                  "Transfer-from Bin Code" := '';
+                                                                  GetDefaultBin("Transfer-from Code",'');
+                                                                end;
+
+                                                                CheckItemAvailable(FIELDNO("Transfer-from Code"));
+                                                                ReserveTransferLine.VerifyChange(Rec,xRec);
+                                                                UpdateWithWarehouseShipReceive;
+                                                                WhseValidateSourceLine.TransLineVerifyChange(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=Transfer-from Code;
+                                                   Editable=false }
+    { 37  ;   ;Transfer-to Code    ;Code10        ;TableRelation=Location;
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD("Quantity Shipped",0);
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                if "Transfer-to Code" <> xRec."Transfer-to Code" then begin
+                                                                  "Transfer-To Bin Code" := '';
+                                                                  GetDefaultBin('',"Transfer-to Code");
+                                                                end;
+
+                                                                ReserveTransferLine.VerifyChange(Rec,xRec);
+                                                                UpdateWithWarehouseShipReceive;
+                                                                WhseValidateSourceLine.TransLineVerifyChange(Rec,xRec);
+                                                              END;
+
+                                                   CaptionML=ENU=Transfer-to Code;
+                                                   Editable=false }
+    { 38  ;   ;Shipment Date       ;Date          ;OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                TransferRoute.CalcReceiptDate("Shipment Date","Receipt Date",
+                                                                  "Shipping Time","Outbound Whse. Handling Time","Inbound Whse. Handling Time",
+                                                                  "Transfer-from Code","Transfer-to Code","Shipping Agent Code","Shipping Agent Service Code");
+                                                                CheckItemAvailable(FIELDNO("Shipment Date"));
+                                                                DateConflictCheck;
+                                                              END;
+
+                                                   CaptionML=ENU=Shipment Date }
+    { 39  ;   ;Receipt Date        ;Date          ;OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                TransferRoute.CalcShipmentDate("Shipment Date","Receipt Date",
+                                                                  "Shipping Time","Outbound Whse. Handling Time","Inbound Whse. Handling Time",
+                                                                  "Transfer-from Code","Transfer-to Code","Shipping Agent Code","Shipping Agent Service Code");
+                                                                CheckItemAvailable(FIELDNO("Shipment Date"));
+                                                                DateConflictCheck;
+                                                              END;
+
+                                                   CaptionML=ENU=Receipt Date }
+    { 40  ;   ;Derived From Line No.;Integer      ;TableRelation="Transfer Line"."Line No." WHERE ("Document No."=FIELD("Document No."));
+                                                   CaptionML=ENU=Derived From Line No. }
+    { 41  ;   ;Shipping Agent Code ;Code10        ;TableRelation="Shipping Agent";
+                                                   OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                if "Shipping Agent Code" <> xRec."Shipping Agent Code" then
+                                                                  VALIDATE("Shipping Agent Service Code",'');
+                                                              END;
+
+                                                   AccessByPermission=TableData "Shipping Agent Services"=R;
+                                                   CaptionML=ENU=Shipping Agent Code }
+    { 42  ;   ;Shipping Agent Service Code;Code10 ;TableRelation="Shipping Agent Services".Code WHERE ("Shipping Agent Code"=FIELD("Shipping Agent Code"));
+                                                   OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                TransferRoute.GetShippingTime(
+                                                                  "Transfer-from Code","Transfer-to Code",
+                                                                  "Shipping Agent Code","Shipping Agent Service Code",
+                                                                  "Shipping Time");
+                                                                TransferRoute.CalcReceiptDate("Shipment Date","Receipt Date",
+                                                                  "Shipping Time","Outbound Whse. Handling Time","Inbound Whse. Handling Time",
+                                                                  "Transfer-from Code","Transfer-to Code","Shipping Agent Code","Shipping Agent Service Code");
+                                                                CheckItemAvailable(FIELDNO("Shipping Agent Service Code"));
+                                                                DateConflictCheck;
+                                                              END;
+
+                                                   CaptionML=ENU=Shipping Agent Service Code }
+    { 43  ;   ;Appl.-to Item Entry ;Integer       ;OnValidate=VAR
+                                                                ItemLedgEntry@1000 : Record "Item Ledger Entry";
+                                                                ItemTrackingLines@1001 : Page "Item Tracking Lines";
+                                                              BEGIN
+                                                                if "Appl.-to Item Entry" <> 0 then begin
+                                                                  TESTFIELD(Quantity);
+                                                                  ItemLedgEntry.GET("Appl.-to Item Entry");
+                                                                  ItemLedgEntry.TESTFIELD(Positive,true);
+                                                                  if (ItemLedgEntry."Lot No." <> '') or (ItemLedgEntry."Serial No." <> '') then
+                                                                    ERROR(MustUseTrackingErr,ItemTrackingLines.CAPTION,FIELDCAPTION("Appl.-to Item Entry"));
+                                                                  if ABS("Qty. to Ship (Base)") > ItemLedgEntry.Quantity then
+                                                                    ERROR(ShippingMoreUnitsThanReceivedErr,ItemLedgEntry.Quantity,ItemLedgEntry."Document No.");
+
+                                                                  ItemLedgEntry.TESTFIELD("Location Code","Transfer-from Code");
+                                                                  if not ItemLedgEntry.Open then
+                                                                    MESSAGE(LedgEntryWillBeOpenedMsg,"Appl.-to Item Entry");
+                                                                end;
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              SelectItemEntry(FIELDNO("Appl.-to Item Entry"));
+                                                            END;
+
+                                                   AccessByPermission=TableData Item=R;
+                                                   CaptionML=ENU=Appl.-to Item Entry }
+    { 50  ;   ;Reserved Quantity Inbnd.;Decimal   ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Reservation Entry".Quantity WHERE ("Source ID"=FIELD("Document No."),
+                                                                                                       "Source Ref. No."=FIELD("Line No."),
+                                                                                                       "Source Type"=CONST(5741),
+                                                                                                       "Source Subtype"=CONST("1"),
+                                                                                                       "Source Prod. Order Line"=FIELD("Derived From Line No."),
+                                                                                                       "Reservation Status"=CONST(Reservation)));
+                                                   CaptionML=ENU=Reserved Quantity Inbnd.;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 51  ;   ;Reserved Quantity Outbnd.;Decimal  ;FieldClass=FlowField;
+                                                   CalcFormula=-Sum("Reservation Entry".Quantity WHERE ("Source ID"=FIELD("Document No."),
+                                                                                                        "Source Ref. No."=FIELD("Line No."),
+                                                                                                        "Source Type"=CONST(5741),
+                                                                                                        "Source Subtype"=CONST("0"),
+                                                                                                        "Source Prod. Order Line"=FIELD("Derived From Line No."),
+                                                                                                        "Reservation Status"=CONST(Reservation)));
+                                                   CaptionML=ENU=Reserved Quantity Outbnd.;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 52  ;   ;Reserved Qty. Inbnd. (Base);Decimal;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Reservation Entry"."Quantity (Base)" WHERE ("Source ID"=FIELD("Document No."),
+                                                                                                                "Source Ref. No."=FIELD("Line No."),
+                                                                                                                "Source Type"=CONST(5741),
+                                                                                                                "Source Subtype"=CONST("1"),
+                                                                                                                "Source Prod. Order Line"=FIELD("Derived From Line No."),
+                                                                                                                "Reservation Status"=CONST(Reservation)));
+                                                   CaptionML=ENU=Reserved Qty. Inbnd. (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 53  ;   ;Reserved Qty. Outbnd. (Base);Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=-Sum("Reservation Entry"."Quantity (Base)" WHERE ("Source ID"=FIELD("Document No."),
+                                                                                                                 "Source Ref. No."=FIELD("Line No."),
+                                                                                                                 "Source Type"=CONST(5741),
+                                                                                                                 "Source Subtype"=CONST("0"),
+                                                                                                                 "Source Prod. Order Line"=FIELD("Derived From Line No."),
+                                                                                                                 "Reservation Status"=CONST(Reservation)));
+                                                   CaptionML=ENU=Reserved Qty. Outbnd. (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 54  ;   ;Shipping Time       ;DateFormula   ;OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                TransferRoute.CalcReceiptDate("Shipment Date","Receipt Date",
+                                                                  "Shipping Time","Outbound Whse. Handling Time","Inbound Whse. Handling Time",
+                                                                  "Transfer-from Code","Transfer-to Code","Shipping Agent Code","Shipping Agent Service Code");
+                                                                DateConflictCheck;
+                                                              END;
+
+                                                   AccessByPermission=TableData "Shipping Agent Services"=R;
+                                                   CaptionML=ENU=Shipping Time }
+    { 55  ;   ;Reserved Quantity Shipped;Decimal  ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Reservation Entry".Quantity WHERE ("Source ID"=FIELD("Document No."),
+                                                                                                       "Source Ref. No."=FILTER(<>0),
+                                                                                                       "Source Type"=CONST(5741),
+                                                                                                       "Source Subtype"=CONST("1"),
+                                                                                                       "Source Prod. Order Line"=FIELD("Line No."),
+                                                                                                       "Reservation Status"=CONST(Reservation)));
+                                                   CaptionML=ENU=Reserved Quantity Shipped;
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 56  ;   ;Reserved Qty. Shipped (Base);Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Reservation Entry"."Quantity (Base)" WHERE ("Source ID"=FIELD("Document No."),
+                                                                                                                "Source Ref. No."=FILTER(<>0),
+                                                                                                                "Source Type"=CONST(5741),
+                                                                                                                "Source Subtype"=CONST("1"),
+                                                                                                                "Source Prod. Order Line"=FIELD("Line No."),
+                                                                                                                "Reservation Status"=CONST(Reservation)));
+                                                   CaptionML=ENU=Reserved Qty. Shipped (Base);
+                                                   DecimalPlaces=0:5;
+                                                   Editable=false }
+    { 70  ;   ;Direct Transfer     ;Boolean       ;CaptionML=ENU=Direct Transfer }
+    { 480 ;   ;Dimension Set ID    ;Integer       ;TableRelation="Dimension Set Entry";
+                                                   OnValidate=BEGIN
+                                                                DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              ShowDimensions;
+                                                            END;
+
+                                                   CaptionML=ENU=Dimension Set ID;
+                                                   Editable=false }
+    { 5704;   ;Item Category Code  ;Code20        ;TableRelation="Item Category";
+                                                   CaptionML=ENU=Item Category Code }
+    { 5707;   ;Product Group Code  ;Code10        ;TableRelation="Product Group".Code WHERE ("Item Category Code"=FIELD("Item Category Code"));
+                                                   ValidateTableRelation=false;
+                                                   CaptionML=ENU=Product Group Code }
+    { 5750;   ;Whse. Inbnd. Otsdg. Qty (Base);Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Warehouse Receipt Line"."Qty. Outstanding (Base)" WHERE ("Source Type"=CONST(5741),
+                                                                                                                             "Source Subtype"=CONST("1"),
+                                                                                                                             "Source No."=FIELD("Document No."),
+                                                                                                                             "Source Line No."=FIELD("Line No.")));
+                                                   CaptionML=ENU=Whse. Inbnd. Otsdg. Qty (Base);
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=true;
+                                                   Editable=false }
+    { 5751;   ;Whse Outbnd. Otsdg. Qty (Base);Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Warehouse Shipment Line"."Qty. Outstanding (Base)" WHERE ("Source Type"=CONST(5741),
+                                                                                                                              "Source Subtype"=CONST("0"),
+                                                                                                                              "Source No."=FIELD("Document No."),
+                                                                                                                              "Source Line No."=FIELD("Line No.")));
+                                                   CaptionML=ENU=Whse Outbnd. Otsdg. Qty (Base);
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=true;
+                                                   Editable=false }
+    { 5752;   ;Completely Shipped  ;Boolean       ;CaptionML=ENU=Completely Shipped;
+                                                   Editable=false }
+    { 5753;   ;Completely Received ;Boolean       ;CaptionML=ENU=Completely Received;
+                                                   Editable=false }
+    { 5793;   ;Outbound Whse. Handling Time;DateFormula;
+                                                   OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                TransferRoute.CalcReceiptDate("Shipment Date","Receipt Date",
+                                                                  "Shipping Time","Outbound Whse. Handling Time","Inbound Whse. Handling Time",
+                                                                  "Transfer-from Code","Transfer-to Code","Shipping Agent Code","Shipping Agent Service Code");
+                                                                DateConflictCheck;
+                                                              END;
+
+                                                   CaptionML=ENU=Outbound Whse. Handling Time }
+    { 5794;   ;Inbound Whse. Handling Time;DateFormula;
+                                                   OnValidate=BEGIN
+                                                                if CurrFieldNo <> 0 then
+                                                                  TestStatusOpen;
+                                                                TransferRoute.CalcReceiptDate("Shipment Date","Receipt Date",
+                                                                  "Shipping Time","Outbound Whse. Handling Time","Inbound Whse. Handling Time",
+                                                                  "Transfer-from Code","Transfer-to Code","Shipping Agent Code","Shipping Agent Service Code");
+                                                                DateConflictCheck;
+                                                              END;
+
+                                                   CaptionML=ENU=Inbound Whse. Handling Time }
+    { 7300;   ;Transfer-from Bin Code;Code20      ;TableRelation="Bin Content"."Bin Code" WHERE ("Location Code"=FIELD("Transfer-from Code"),
+                                                                                                 "Item No."=FIELD("Item No."),
+                                                                                                 "Variant Code"=FIELD("Variant Code"));
+                                                   OnValidate=BEGIN
+                                                                if "Transfer-from Bin Code" <> xRec."Transfer-from Bin Code" then begin
+                                                                  TESTFIELD("Transfer-from Code");
+                                                                  if "Transfer-from Bin Code" <> '' then begin
+                                                                    GetLocation("Transfer-from Code");
+                                                                    Location.TESTFIELD("Bin Mandatory");
+                                                                    Location.TESTFIELD("Directed Put-away and Pick",false);
+                                                                    GetBin("Transfer-from Code","Transfer-from Bin Code");
+                                                                    TESTFIELD("Transfer-from Code",Bin."Location Code");
+                                                                    HandleDedicatedBin(true);
+                                                                  end;
+                                                                end;
+                                                              END;
+
+                                                   CaptionML=ENU=Transfer-from Bin Code }
+    { 7301;   ;Transfer-To Bin Code;Code20        ;TableRelation=Bin.Code WHERE ("Location Code"=FIELD("Transfer-to Code"));
+                                                   OnValidate=BEGIN
+                                                                if "Transfer-To Bin Code" <> xRec."Transfer-To Bin Code" then begin
+                                                                  TESTFIELD("Transfer-to Code");
+                                                                  if "Transfer-To Bin Code" <> '' then begin
+                                                                    GetLocation("Transfer-to Code");
+                                                                    Location.TESTFIELD("Bin Mandatory");
+                                                                    Location.TESTFIELD("Directed Put-away and Pick",false);
+                                                                    GetBin("Transfer-to Code","Transfer-To Bin Code");
+                                                                    TESTFIELD("Transfer-to Code",Bin."Location Code");
+                                                                  end;
+                                                                end;
+                                                              END;
+
+                                                   CaptionML=ENU=Transfer-To Bin Code }
+    { 99000755;;Planning Flexibility;Option       ;OnValidate=BEGIN
+                                                                if "Planning Flexibility" <> xRec."Planning Flexibility" then
+                                                                  ReserveTransferLine.UpdatePlanningFlexibility(Rec);
+                                                              END;
+
+                                                   CaptionML=ENU=Planning Flexibility;
+                                                   OptionCaptionML=ENU=Unlimited,None;
+                                                   OptionString=Unlimited,None }
+  }
+  KEYS
+  {
+    {    ;"Document No.","Line No."               ;Clustered=true }
+    {    ;"Transfer-to Code",Status,"Derived From Line No.","Item No.","Variant Code","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code","Receipt Date","In-Transit Code";
+                                                   SumIndexFields="Qty. in Transit (Base)","Outstanding Qty. (Base)";
+                                                   MaintainSIFTIndex=false }
+    {    ;"Transfer-from Code",Status,"Derived From Line No.","Item No.","Variant Code","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code","Shipment Date","In-Transit Code";
+                                                   SumIndexFields="Outstanding Qty. (Base)";
+                                                   MaintainSIFTIndex=false }
+    {    ;"Item No.","Variant Code"                }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text001@1001 : TextConst 'ENU=You cannot rename a %1.';
+      Text002@1002 : TextConst 'ENU=must not be less than %1';
+      Text003@1003 : TextConst 'ENU="Warehouse %1 is required for %2 = %3."';
+      Text004@1004 : TextConst 'ENU=\The entered information may be disregarded by warehouse operations.';
+      Text005@1005 : TextConst 'ENU=You cannot ship more than %1 units.';
+      Text006@1006 : TextConst 'ENU=All items have been shipped.';
+      Text008@1008 : TextConst 'ENU=You cannot receive more than %1 units.';
+      Text009@1009 : TextConst 'ENU=No items are currently in transit.';
+      Text011@1011 : TextConst 'ENU=Outbound,Inbound';
+      Text012@1020 : TextConst 'ENU=You have changed one or more dimensions on the %1, which is already shipped. When you post the line with the changed dimension to General Ledger, amounts on the Inventory Interim account will be out of balance when reported per dimension.\\Do you want to keep the changed dimension?';
+      Text013@1017 : TextConst 'ENU=Cancelled.';
+      TransferRoute@1012 : Record "Transfer Route";
+      Item@1013 : Record Item;
+      TransHeader@1014 : Record "Transfer Header";
+      Location@1016 : Record Location;
+      Bin@1000 : Record Bin;
+      DimMgt@1019 : Codeunit DimensionManagement;
+      WhseValidateSourceLine@1022 : Codeunit "Whse. Validate Source Line";
+      ReserveTransferLine@1024 : Codeunit "Transfer Line-Reserve";
+      CheckDateConflict@1025 : Codeunit "Reservation-Check Date Confl.";
+      WMSManagement@1015 : Codeunit "WMS Management";
+      Reservation@1018 : Page Reservation;
+      TrackingBlocked@1007 : Boolean;
+      MustUseTrackingErr@1023 : TextConst '@@@="%1 = Form Name, %2 = Value to Enter";ENU=You must use the %1 page to specify the %2, if you use item tracking.';
+      LedgEntryWillBeOpenedMsg@1021 : TextConst '@@@="%1 = Entry No.";ENU=When posting the Applied to Ledger Entry %1 will be opened first.';
+      ShippingMoreUnitsThanReceivedErr@1010 : TextConst '@@@="%1 = Quantity Value, %2 = Document No.";ENU=You cannot ship more than the %1 units that you have received for document no. %2.';
+      AnotherItemWithSameDescrQst@1026 : TextConst '@@@="%1=Item no., %2=item description";ENU=We found an item with the description "%2" (No. %1).\Did you mean to change the current item to %1?';
+
+    LOCAL PROCEDURE InitOutstandingQty@16();
+    BEGIN
+      "Outstanding Quantity" := Quantity - "Quantity Shipped";
+      "Outstanding Qty. (Base)" := "Quantity (Base)" - "Qty. Shipped (Base)";
+      "Completely Shipped" := (Quantity <> 0) and ("Outstanding Quantity" = 0);
+    END;
+
+    LOCAL PROCEDURE InitQtyToShip@15();
+    BEGIN
+      "Qty. to Ship" := "Outstanding Quantity";
+      "Qty. to Ship (Base)" := "Outstanding Qty. (Base)";
+    END;
+
+    LOCAL PROCEDURE InitQtyToReceive@2();
+    BEGIN
+      if "In-Transit Code" <> '' then begin
+        "Qty. to Receive" := "Qty. in Transit";
+        "Qty. to Receive (Base)" := "Qty. in Transit (Base)";
+      end;
+      if ("In-Transit Code" = '') and ("Quantity Shipped" = "Quantity Received") then begin
+        "Qty. to Receive" := "Qty. to Ship";
+        "Qty. to Receive (Base)" := "Qty. to Ship (Base)";
+      end;
+    END;
+
+    LOCAL PROCEDURE InitQtyInTransit@4();
+    BEGIN
+      if "In-Transit Code" <> '' then begin
+        "Qty. in Transit" := "Quantity Shipped" - "Quantity Received";
+        "Qty. in Transit (Base)" := "Qty. Shipped (Base)" - "Qty. Received (Base)";
+      end else begin
+        "Qty. in Transit" := 0;
+        "Qty. in Transit (Base)" := 0;
+      end;
+      "Completely Received" := (Quantity <> 0) and (Quantity = "Quantity Received");
+    END;
+
+    PROCEDURE ResetPostedQty@6();
+    BEGIN
+      "Quantity Shipped" := 0;
+      "Qty. Shipped (Base)" := 0;
+      "Quantity Received" := 0;
+      "Qty. Received (Base)" := 0;
+      "Qty. in Transit" := 0;
+      "Qty. in Transit (Base)" := 0;
+    END;
+
+    LOCAL PROCEDURE CalcBaseQty@14(Qty@1000 : Decimal) : Decimal;
+    BEGIN
+      TESTFIELD("Qty. per Unit of Measure");
+      exit(ROUND(Qty * "Qty. per Unit of Measure",0.00001));
+    END;
+
+    LOCAL PROCEDURE GetTransHeader@1();
+    BEGIN
+      GetTransferHeaderNoVerification;
+
+      TransHeader.TESTFIELD("Shipment Date");
+      TransHeader.TESTFIELD("Receipt Date");
+      TransHeader.TESTFIELD("Transfer-from Code");
+      TransHeader.TESTFIELD("Transfer-to Code");
+      if not TransHeader."Direct Transfer" then
+        TransHeader.TESTFIELD("In-Transit Code");
+      "In-Transit Code" := TransHeader."In-Transit Code";
+      "Transfer-from Code" := TransHeader."Transfer-from Code";
+      "Transfer-to Code" := TransHeader."Transfer-to Code";
+      "Shipment Date" := TransHeader."Shipment Date";
+      "Receipt Date" := TransHeader."Receipt Date";
+      "Shipping Agent Code" := TransHeader."Shipping Agent Code";
+      "Shipping Agent Service Code" := TransHeader."Shipping Agent Service Code";
+      "Shipping Time" := TransHeader."Shipping Time";
+      "Outbound Whse. Handling Time" := TransHeader."Outbound Whse. Handling Time";
+      "Inbound Whse. Handling Time" := TransHeader."Inbound Whse. Handling Time";
+      Status := TransHeader.Status;
+      "Direct Transfer" := TransHeader."Direct Transfer";
+    END;
+
+    LOCAL PROCEDURE GetItem@9();
+    BEGIN
+      TESTFIELD("Item No.");
+      if "Item No." <> Item."No." then
+        Item.GET("Item No.");
+    END;
+
+    PROCEDURE BlockDynamicTracking@23(SetBlock@1000 : Boolean);
+    BEGIN
+      TrackingBlocked := SetBlock;
+      ReserveTransferLine.Block(SetBlock);
+    END;
+
+    [External]
+    PROCEDURE ShowDimensions@25();
+    BEGIN
+      "Dimension Set ID" :=
+        DimMgt.EditDimensionSet("Dimension Set ID",STRSUBSTNO('%1 %2 %3',TABLECAPTION,"Document No.","Line No."));
+      VerifyItemLineDim;
+      DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+    END;
+
+    LOCAL PROCEDURE CreateDim@26(Type1@1000 : Integer;No1@1001 : Code[20]);
+    VAR
+      SourceCodeSetup@1002 : Record "Source Code Setup";
+      TableID@1003 : ARRAY [10] OF Integer;
+      No@1004 : ARRAY [10] OF Code[20];
+    BEGIN
+      SourceCodeSetup.GET;
+      TableID[1] := Type1;
+      No[1] := No1;
+      OnAfterCreateDimTableIDs(Rec,CurrFieldNo,TableID,No);
+
+      "Shortcut Dimension 1 Code" := '';
+      "Shortcut Dimension 2 Code" := '';
+      "Dimension Set ID" :=
+        DimMgt.GetRecDefaultDimID(
+          Rec,CurrFieldNo,TableID,No,SourceCodeSetup.Transfer,
+          "Shortcut Dimension 1 Code","Shortcut Dimension 2 Code",TransHeader."Dimension Set ID",DATABASE::Item);
+    END;
+
+    PROCEDURE ValidateShortcutDimCode@29(FieldNumber@1000 : Integer;VAR ShortcutDimCode@1001 : Code[20]);
+    BEGIN
+      DimMgt.ValidateShortcutDimValues(FieldNumber,ShortcutDimCode,"Dimension Set ID");
+      VerifyItemLineDim;
+    END;
+
+    [External]
+    PROCEDURE LookupShortcutDimCode@28(FieldNumber@1000 : Integer;VAR ShortcutDimCode@1001 : Code[20]);
+    BEGIN
+      DimMgt.LookupDimValueCode(FieldNumber,ShortcutDimCode);
+      ValidateShortcutDimCode(FieldNumber,ShortcutDimCode);
+    END;
+
+    [External]
+    PROCEDURE ShowShortcutDimCode@27(VAR ShortcutDimCode@1000 : ARRAY [8] OF Code[20]);
+    BEGIN
+      DimMgt.GetShortcutDimensions("Dimension Set ID",ShortcutDimCode);
+    END;
+
+    LOCAL PROCEDURE CheckItemAvailable@3(CalledByFieldNo@1000 : Integer);
+    VAR
+      ItemCheckAvail@1001 : Codeunit "Item-Check Avail.";
+    BEGIN
+      if (CurrFieldNo <> 0) and
+         (CurrFieldNo = CalledByFieldNo) and
+         ("Item No." <> '') and
+         ("Outstanding Quantity" > 0)
+      then
+        if ItemCheckAvail.TransferLineCheck(Rec) then
+          ItemCheckAvail.RaiseUpdateInterruptedError;
+    END;
+
+    PROCEDURE OpenItemTrackingLines@6500(Direction@1002 : 'Outbound,Inbound');
+    BEGIN
+      TESTFIELD("Item No.");
+      TESTFIELD("Quantity (Base)");
+
+      ReserveTransferLine.CallItemTracking(Rec,Direction);
+    END;
+
+    LOCAL PROCEDURE TestStatusOpen@37();
+    BEGIN
+      TESTFIELD("Document No.");
+      if TransHeader."No." <> "Document No." then
+        TransHeader.GET("Document No.");
+      TransHeader.TESTFIELD(Status,TransHeader.Status::Open);
+    END;
+
+    PROCEDURE ShowReservation@10();
+    VAR
+      OptionNumber@1000 : Integer;
+    BEGIN
+      TESTFIELD("Item No.");
+      CLEAR(Reservation);
+      OptionNumber := STRMENU(Text011);
+      if OptionNumber > 0 then begin
+        Reservation.SetTransLine(Rec,OptionNumber - 1);
+        Reservation.RUNMODAL;
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdateWithWarehouseShipReceive@41();
+    BEGIN
+      if Location.RequireShipment("Transfer-from Code") then
+        VALIDATE("Qty. to Ship",0)
+      else
+        VALIDATE("Qty. to Ship","Outstanding Quantity");
+
+      if Location.RequireReceive("Transfer-to Code") then
+        VALIDATE("Qty. to Receive",0)
+      else begin
+        if "In-Transit Code" <> '' then
+          VALIDATE("Qty. to Receive","Qty. in Transit");
+        if ("In-Transit Code" = '') and ("Quantity Shipped" = "Quantity Received") then
+          VALIDATE("Qty. to Receive","Qty. to Ship");
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckWarehouse@47(LocationCode@1003 : Code[10];Receive@1004 : Boolean);
+    VAR
+      ShowDialog@1001 : '" ",Message,Error';
+      DialogText@1000 : Text[50];
+    BEGIN
+      GetLocation(LocationCode);
+      if Location."Directed Put-away and Pick" then begin
+        ShowDialog := ShowDialog::Error;
+        if Receive then
+          DialogText := Location.GetRequirementText(Location.FIELDNO("Require Receive"))
+        else
+          DialogText := Location.GetRequirementText(Location.FIELDNO("Require Shipment"));
+      end else begin
+        if Receive and (Location."Require Receive" or Location."Require Put-away") then begin
+          if WhseValidateSourceLine.WhseLinesExist(
+               DATABASE::"Transfer Line",
+               1,
+               "Document No.",
+               "Line No.",
+               0,
+               Quantity)
+          then
+            ShowDialog := ShowDialog::Error
+          else
+            if Location."Require Receive" then
+              ShowDialog := ShowDialog::Message;
+          if Location."Require Receive" then
+            DialogText := Location.GetRequirementText(Location.FIELDNO("Require Receive"))
+          else
+            DialogText := Location.GetRequirementText(Location.FIELDNO("Require Put-away"));
+        end;
+
+        if not Receive and (Location."Require Shipment" or Location."Require Pick") then begin
+          if WhseValidateSourceLine.WhseLinesExist(
+               DATABASE::"Transfer Line",
+               0,
+               "Document No.",
+               "Line No.",
+               0,
+               Quantity)
+          then
+            ShowDialog := ShowDialog::Error
+          else
+            if Location."Require Shipment" then
+              ShowDialog := ShowDialog::Message;
+          if Location."Require Shipment" then
+            DialogText := Location.GetRequirementText(Location.FIELDNO("Require Shipment"))
+          else
+            DialogText := Location.GetRequirementText(Location.FIELDNO("Require Pick"));
+        end;
+      end;
+
+      case ShowDialog of
+        ShowDialog::Message:
+          MESSAGE(Text003 + Text004,DialogText,FIELDCAPTION("Line No."),"Line No.");
+        ShowDialog::Error:
+          ERROR(Text003,DialogText,FIELDCAPTION("Line No."),"Line No.");
+      end;
+    END;
+
+    LOCAL PROCEDURE GetLocation@44(LocationCode@1000 : Code[10]);
+    BEGIN
+      if Location.Code <> LocationCode then
+        Location.GET(LocationCode);
+    END;
+
+    LOCAL PROCEDURE GetBin@36(LocationCode@1000 : Code[10];BinCode@1001 : Code[20]);
+    BEGIN
+      if BinCode = '' then
+        CLEAR(Bin)
+      else
+        if Bin.Code <> BinCode then
+          Bin.GET(LocationCode,BinCode);
+    END;
+
+    LOCAL PROCEDURE GetDefaultBin@5(FromLocationCode@1000 : Code[10];ToLocationCode@1001 : Code[10]);
+    BEGIN
+      if (FromLocationCode <> '') and ("Item No." <> '') then begin
+        GetLocation(FromLocationCode);
+        if Location."Bin Mandatory" and not Location."Directed Put-away and Pick" then begin
+          WMSManagement.GetDefaultBin("Item No.","Variant Code",FromLocationCode,"Transfer-from Bin Code");
+          HandleDedicatedBin(false);
+        end;
+      end;
+
+      if (ToLocationCode <> '') and ("Item No." <> '') then begin
+        GetLocation(ToLocationCode);
+        if Location."Bin Mandatory" and not Location."Directed Put-away and Pick" then
+          WMSManagement.GetDefaultBin("Item No.","Variant Code",ToLocationCode,"Transfer-To Bin Code");
+      end;
+    END;
+
+    PROCEDURE IsInbound@8() : Boolean;
+    BEGIN
+      exit("Quantity (Base)" < 0);
+    END;
+
+    LOCAL PROCEDURE HandleDedicatedBin@7(IssueWarning@1000 : Boolean);
+    VAR
+      WhseIntegrationMgt@1001 : Codeunit "Whse. Integration Management";
+    BEGIN
+      if not IsInbound and ("Quantity (Base)" <> 0) then
+        WhseIntegrationMgt.CheckIfBinDedicatedOnSrcDoc("Transfer-from Code","Transfer-from Bin Code",IssueWarning);
+    END;
+
+    PROCEDURE FilterLinesWithItemToPlan@70(VAR Item@1000 : Record Item;IsReceipt@1001 : Boolean;IsSupplyForPlanning@1002 : Boolean);
+    BEGIN
+      RESET;
+      SETCURRENTKEY("Item No.");
+      SETRANGE("Item No.",Item."No.");
+      SETFILTER("Variant Code",Item.GETFILTER("Variant Filter"));
+      if not IsSupplyForPlanning then
+        SETRANGE("Derived From Line No.",0);
+      if IsReceipt then begin
+        SETFILTER("Transfer-to Code",Item.GETFILTER("Location Filter"));
+        SETFILTER("Receipt Date",Item.GETFILTER("Date Filter"))
+      end else begin
+        SETFILTER("Transfer-from Code",Item.GETFILTER("Location Filter"));
+        SETFILTER("Shipment Date",Item.GETFILTER("Date Filter"));
+        SETFILTER("Outstanding Qty. (Base)",'<>0');
+      end;
+      SETFILTER("Shortcut Dimension 1 Code",Item.GETFILTER("Global Dimension 1 Filter"));
+      SETFILTER("Shortcut Dimension 2 Code",Item.GETFILTER("Global Dimension 2 Filter"));
+    END;
+
+    [External]
+    PROCEDURE FindLinesWithItemToPlan@68(VAR Item@1000 : Record Item;IsReceipt@1001 : Boolean;IsSupplyForPlanning@1002 : Boolean) : Boolean;
+    BEGIN
+      FilterLinesWithItemToPlan(Item,IsReceipt,IsSupplyForPlanning);
+      exit(FIND('-'));
+    END;
+
+    [External]
+    PROCEDURE LinesWithItemToPlanExist@67(VAR Item@1000 : Record Item;IsReceipt@1001 : Boolean) : Boolean;
+    BEGIN
+      FilterLinesWithItemToPlan(Item,IsReceipt,false);
+      exit(not ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE VerifyItemLineDim@87();
+    BEGIN
+      if IsShippedDimChanged then
+        ConfirmShippedDimChange;
+    END;
+
+    PROCEDURE IsShippedDimChanged@105() : Boolean;
+    BEGIN
+      exit(("Dimension Set ID" <> xRec."Dimension Set ID") and
+        (("Quantity Shipped" <> 0) or ("Qty. Shipped (Base)" <> 0)));
+    END;
+
+    [External]
+    PROCEDURE ConfirmShippedDimChange@106() : Boolean;
+    BEGIN
+      if not CONFIRM(Text012,false,TABLECAPTION) then
+        ERROR(Text013);
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE SelectItemEntry@11(CurrentFieldNo@1000 : Integer);
+    VAR
+      ItemLedgEntry@1001 : Record "Item Ledger Entry";
+      TransferLine2@1002 : Record "Transfer Line";
+    BEGIN
+      ItemLedgEntry.SETRANGE("Item No.","Item No.");
+      if "Transfer-from Code" <> '' then
+        ItemLedgEntry.SETRANGE("Location Code","Transfer-from Code");
+      ItemLedgEntry.SETRANGE("Variant Code","Variant Code");
+
+      ItemLedgEntry.SETRANGE(Positive,true);
+      ItemLedgEntry.SETRANGE(Open,true);
+
+      if PAGE.RUNMODAL(PAGE::"Item Ledger Entries",ItemLedgEntry) = ACTION::LookupOK then begin
+        TransferLine2 := Rec;
+        TransferLine2.VALIDATE("Appl.-to Item Entry",ItemLedgEntry."Entry No.");
+        CheckItemAvailable(CurrentFieldNo);
+        Rec := TransferLine2;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetTransferHeaderNoVerification@112();
+    BEGIN
+      TESTFIELD("Document No.");
+      if "Document No." <> TransHeader."No." then
+        TransHeader.GET("Document No.");
+    END;
+
+    [External]
+    PROCEDURE DateConflictCheck@13();
+    BEGIN
+      if not TrackingBlocked then
+        CheckDateConflict.TransferLineCheck(Rec);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreateDimTableIDs@138(VAR TransferLine@1000 : Record "Transfer Line";FieldNo@1001 : Integer;TableID@1003 : ARRAY [10] OF Integer;No@1002 : ARRAY [10] OF Code[20]);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

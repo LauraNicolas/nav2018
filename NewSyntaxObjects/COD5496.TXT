@@ -1,0 +1,522 @@
+OBJECT Codeunit 5496 Graph Mgt - Sales Order Buffer
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      DocumentIDNotSpecifiedErr@1000 : TextConst '@@@={Locked};ENU=You must specify a document id to get the lines.';
+      DocumentDoesNotExistErr@1001 : TextConst '@@@={Locked};ENU=No document with the specified ID exists.';
+      MultipleDocumentsFoundForIdErr@1006 : TextConst '@@@={Locked};ENU=Multiple documents have been found for the specified criteria.';
+      CannotInsertALineThatAlreadyExistsErr@1003 : TextConst '@@@={Locked};ENU=You cannot insert a line because a line already exists.';
+      CannotModifyALineThatDoesntExistErr@1004 : TextConst '@@@={Locked};ENU=You cannot modify a line that does not exist.';
+      GraphMgtGeneralTools@1007 : Codeunit "Graph Mgt - General Tools";
+
+    [EventSubscriber(Table,36,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnAfterInsertSalesHeader@2(VAR Rec@1000 : Record "Sales Header";RunTrigger@1001 : Boolean);
+    BEGIN
+      if not CheckValidRecord(Rec) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesHeader(Rec);
+    END;
+
+    [EventSubscriber(Table,36,OnAfterModifyEvent)]
+    LOCAL PROCEDURE OnAfterModifySalesHeader@3(VAR Rec@1000 : Record "Sales Header";VAR xRec@1001 : Record "Sales Header";RunTrigger@1002 : Boolean);
+    BEGIN
+      if not CheckValidRecord(Rec) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesHeader(Rec);
+    END;
+
+    [EventSubscriber(Table,36,OnAfterDeleteEvent)]
+    LOCAL PROCEDURE OnAfterDeleteSalesHeader@5(VAR Rec@1000 : Record "Sales Header";RunTrigger@1001 : Boolean);
+    VAR
+      SalesOrderEntityBuffer@1002 : Record "Sales Order Entity Buffer";
+    BEGIN
+      if not CheckValidRecord(Rec) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      if not SalesOrderEntityBuffer.GET(Rec."No.") then
+        exit;
+      SalesOrderEntityBuffer.DELETE;
+    END;
+
+    [EventSubscriber(Codeunit,56,OnAfterResetRecalculateInvoiceDisc)]
+    LOCAL PROCEDURE OnAfterResetRecalculateInvoiceDisc@41(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+      if not CheckValidRecord(SalesHeader) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesHeader(SalesHeader);
+    END;
+
+    [EventSubscriber(Table,37,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnAfterInsertSalesLine@71(VAR Rec@1000 : Record "Sales Line";RunTrigger@1001 : Boolean);
+    BEGIN
+      if not CheckValidLineRecord(Rec) then
+        exit;
+
+      UpdateCompletelyShipped(Rec);
+      ModifyTotalsSalesLine(Rec,true);
+    END;
+
+    [EventSubscriber(Table,37,OnAfterModifyEvent)]
+    LOCAL PROCEDURE OnAfterModifySalesLine@72(VAR Rec@1000 : Record "Sales Line";VAR xRec@1001 : Record "Sales Line";RunTrigger@1002 : Boolean);
+    BEGIN
+      if not CheckValidLineRecord(Rec) then
+        exit;
+
+      UpdateCompletelyShipped(Rec);
+      ModifyTotalsSalesLine(Rec,Rec."Recalculate Invoice Disc.");
+    END;
+
+    [EventSubscriber(Table,37,OnAfterDeleteEvent)]
+    LOCAL PROCEDURE OnAfterDeleteSalesLine@73(VAR Rec@1000 : Record "Sales Line";RunTrigger@1001 : Boolean);
+    VAR
+      SalesLine@1003 : Record "Sales Line";
+    BEGIN
+      if not CheckValidLineRecord(Rec) then
+        exit;
+
+      UpdateCompletelyShipped(Rec);
+
+      SalesLine.SETRANGE("Document No.",Rec."Document No.");
+      SalesLine.SETRANGE("Document Type",Rec."Document Type");
+      SalesLine.SETRANGE("Recalculate Invoice Disc.",true);
+
+      if SalesLine.FINDFIRST then begin
+        ModifyTotalsSalesLine(SalesLine,true);
+        exit;
+      end;
+
+      SalesLine.SETRANGE("Recalculate Invoice Disc.");
+
+      if not SalesLine.FINDFIRST then
+        BlankTotals(Rec."Document No.");
+    END;
+
+    [EventSubscriber(Codeunit,60,OnAfterCalcSalesDiscount)]
+    LOCAL PROCEDURE OnAfterCalculateSalesDiscountOnSalesHeader@36(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+      if not CheckValidRecord(SalesHeader) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesHeader(SalesHeader);
+    END;
+
+    PROCEDURE PropagateOnInsert@15(VAR SalesOrderEntityBuffer@1000 : Record "Sales Order Entity Buffer";VAR TempFieldBuffer@1003 : TEMPORARY Record "Field Buffer");
+    VAR
+      SalesHeader@1001 : Record "Sales Header";
+      TypeHelper@1002 : Codeunit "Type Helper";
+      TargetRecordRef@1004 : RecordRef;
+      DocTypeFieldRef@1006 : FieldRef;
+      NoFieldRef@1007 : FieldRef;
+    BEGIN
+      if SalesOrderEntityBuffer.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      TargetRecordRef.OPEN(DATABASE::"Sales Header");
+
+      DocTypeFieldRef := TargetRecordRef.FIELD(SalesHeader.FIELDNO("Document Type"));
+      DocTypeFieldRef.VALUE(SalesHeader."Document Type"::Order);
+
+      NoFieldRef := TargetRecordRef.FIELD(SalesHeader.FIELDNO("No."));
+
+      TypeHelper.TransferFieldsWithValidate(TempFieldBuffer,SalesOrderEntityBuffer,TargetRecordRef);
+
+      TargetRecordRef.INSERT(true);
+
+      SalesOrderEntityBuffer."No." := NoFieldRef.VALUE;
+      SalesOrderEntityBuffer.FIND;
+    END;
+
+    PROCEDURE PropagateOnModify@16(VAR SalesOrderEntityBuffer@1000 : Record "Sales Order Entity Buffer";VAR TempFieldBuffer@1004 : TEMPORARY Record "Field Buffer");
+    VAR
+      SalesHeader@1001 : Record "Sales Header";
+      TypeHelper@1002 : Codeunit "Type Helper";
+      TargetRecordRef@1005 : RecordRef;
+      Exists@1003 : Boolean;
+    BEGIN
+      if SalesOrderEntityBuffer.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      Exists := SalesHeader.GET(SalesHeader."Document Type"::Order,SalesOrderEntityBuffer."No.");
+      if Exists then
+        TargetRecordRef.GETTABLE(SalesHeader)
+      else
+        TargetRecordRef.OPEN(DATABASE::"Sales Header");
+
+      TypeHelper.TransferFieldsWithValidate(TempFieldBuffer,SalesOrderEntityBuffer,TargetRecordRef);
+
+      if Exists then
+        TargetRecordRef.MODIFY(true)
+      else
+        TargetRecordRef.INSERT(true);
+    END;
+
+    PROCEDURE PropagateOnDelete@17(VAR SalesOrderEntityBuffer@1000 : Record "Sales Order Entity Buffer");
+    VAR
+      SalesHeader@1002 : Record "Sales Header";
+    BEGIN
+      if SalesOrderEntityBuffer.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      SalesHeader.GET(SalesHeader."Document Type"::Order,SalesOrderEntityBuffer."No.");
+      SalesHeader.DELETE(true);
+    END;
+
+    PROCEDURE UpdateBufferTableRecords@35();
+    VAR
+      SalesHeader@1000 : Record "Sales Header";
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Order);
+      if SalesHeader.FINDSET then
+        repeat
+          InsertOrModifyFromSalesHeader(SalesHeader);
+        until SalesHeader.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertOrModifyFromSalesHeader@39(VAR SalesHeader@1000 : Record "Sales Header");
+    VAR
+      SalesOrderEntityBuffer@1002 : Record "Sales Order Entity Buffer";
+      RecordExists@1001 : Boolean;
+    BEGIN
+      SalesOrderEntityBuffer.LOCKTABLE;
+      RecordExists := SalesOrderEntityBuffer.GET(SalesHeader."No.");
+
+      SalesOrderEntityBuffer.TRANSFERFIELDS(SalesHeader,true);
+      SetStatusOptionFromSalesHeader(SalesHeader,SalesOrderEntityBuffer);
+      AssignTotalsFromSalesHeader(SalesHeader,SalesOrderEntityBuffer);
+      SalesOrderEntityBuffer.UpdateReferencedRecordIds;
+
+      if RecordExists then
+        SalesOrderEntityBuffer.MODIFY(true)
+      else
+        SalesOrderEntityBuffer.INSERT(true);
+    END;
+
+    LOCAL PROCEDURE SetStatusOptionFromSalesHeader@47(VAR SalesHeader@1000 : Record "Sales Header";VAR SalesOrderEntityBuffer@1001 : Record "Sales Order Entity Buffer");
+    BEGIN
+      if (not GraphMgtGeneralTools.IsApiEnabled) and (not SalesHeader.ISTEMPORARY) then
+        exit;
+
+      if SalesHeader.Status = SalesHeader.Status::"Pending Approval" then begin
+        SalesOrderEntityBuffer.Status := SalesOrderEntityBuffer.Status::"In Review";
+        exit;
+      end;
+
+      if (SalesHeader.Status = SalesHeader.Status::Released) or
+         (SalesHeader.Status = SalesHeader.Status::"Pending Prepayment")
+      then begin
+        SalesOrderEntityBuffer.Status := SalesOrderEntityBuffer.Status::Open;
+        exit;
+      end;
+
+      SalesOrderEntityBuffer.Status := SalesOrderEntityBuffer.Status::Draft;
+    END;
+
+    LOCAL PROCEDURE AssignTotalsFromSalesHeader@58(VAR SalesHeader@1000 : Record "Sales Header";VAR SalesOrderEntityBuffer@1001 : Record "Sales Order Entity Buffer");
+    VAR
+      SalesLine@1006 : Record "Sales Line";
+    BEGIN
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+
+      if not SalesLine.FINDFIRST then begin
+        BlankTotals(SalesLine."Document No.");
+        exit;
+      end;
+
+      AssignTotalsFromSalesLine(SalesLine,SalesOrderEntityBuffer,SalesHeader);
+    END;
+
+    LOCAL PROCEDURE AssignTotalsFromSalesLine@76(VAR SalesLine@1000 : Record "Sales Line";VAR SalesOrderEntityBuffer@1001 : Record "Sales Order Entity Buffer";VAR SalesHeader@1002 : Record "Sales Header");
+    VAR
+      TotalSalesLine@1003 : Record "Sales Line";
+      DocumentTotals@1004 : Codeunit "Document Totals";
+      VATAmount@1005 : Decimal;
+    BEGIN
+      if SalesLine."VAT Calculation Type" = SalesLine."VAT Calculation Type"::"Sales Tax" then begin
+        SalesOrderEntityBuffer."Discount Applied Before Tax" := true;
+        SalesOrderEntityBuffer."Prices Including VAT" := false;
+      end else
+        SalesOrderEntityBuffer."Discount Applied Before Tax" := not SalesHeader."Prices Including VAT";
+
+      DocumentTotals.CalculateSalesTotals(TotalSalesLine,VATAmount,SalesLine);
+
+      SalesOrderEntityBuffer."Invoice Discount Amount" := TotalSalesLine."Inv. Discount Amount";
+      SalesOrderEntityBuffer.Amount := TotalSalesLine.Amount;
+      SalesOrderEntityBuffer."Total Tax Amount" := VATAmount;
+      SalesOrderEntityBuffer."Amount Including VAT" := TotalSalesLine."Amount Including VAT";
+    END;
+
+    LOCAL PROCEDURE BlankTotals@25(DocumentNo@1000 : Code[20]);
+    VAR
+      SalesOrderEntityBuffer@1002 : Record "Sales Order Entity Buffer";
+    BEGIN
+      if not SalesOrderEntityBuffer.GET(DocumentNo) then
+        exit;
+
+      SalesOrderEntityBuffer."Invoice Discount Amount" := 0;
+      SalesOrderEntityBuffer."Total Tax Amount" := 0;
+
+      SalesOrderEntityBuffer.Amount := 0;
+      SalesOrderEntityBuffer."Amount Including VAT" := 0;
+      SalesOrderEntityBuffer.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CheckValidRecord@8(VAR SalesHeader@1000 : Record "Sales Header") : Boolean;
+    BEGIN
+      if SalesHeader.ISTEMPORARY then
+        exit(false);
+
+      if SalesHeader."Document Type" <> SalesHeader."Document Type"::Order then
+        exit(false);
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CheckValidLineRecord@21(VAR SalesLine@1000 : Record "Sales Line") : Boolean;
+    BEGIN
+      if SalesLine.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit(false);
+
+      if SalesLine."Document Type" <> SalesLine."Document Type"::Order then
+        exit(false);
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE ModifyTotalsSalesLine@12(VAR SalesLine@1000 : Record "Sales Line";RecalculateInvoiceDiscount@1002 : Boolean);
+    VAR
+      SalesOrderEntityBuffer@1001 : Record "Sales Order Entity Buffer";
+      SalesHeader@1003 : Record "Sales Header";
+    BEGIN
+      if not SalesOrderEntityBuffer.GET(SalesLine."Document No.") then
+        exit;
+
+      if not RecalculateInvoiceDiscount then
+        exit;
+
+      SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+      AssignTotalsFromSalesLine(SalesLine,SalesOrderEntityBuffer,SalesHeader);
+      SalesOrderEntityBuffer.MODIFY(true);
+    END;
+
+    LOCAL PROCEDURE TransferSalesInvoiceLineAggregateToSalesLine@37(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";VAR SalesLine@1001 : Record "Sales Line";VAR TempFieldBuffer@1002 : TEMPORARY Record "Field Buffer");
+    VAR
+      TypeHelper@1004 : Codeunit "Type Helper";
+      SalesLineRecordRef@1003 : RecordRef;
+    BEGIN
+      SalesLine."Document Type" := SalesLine."Document Type"::Order;
+      SalesLineRecordRef.GETTABLE(SalesLine);
+
+      TypeHelper.TransferFieldsWithValidate(TempFieldBuffer,SalesInvoiceLineAggregate,SalesLineRecordRef);
+
+      SalesLineRecordRef.SETTABLE(SalesLine);
+    END;
+
+    PROCEDURE RedistributeInvoiceDiscounts@31(VAR SalesOrderEntityBuffer@1002 : Record "Sales Order Entity Buffer");
+    VAR
+      SalesLine@1001 : Record "Sales Line";
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SalesLine.SETRANGE("Document No.",SalesOrderEntityBuffer."No.");
+      SalesLine.SETRANGE("Recalculate Invoice Disc.",true);
+      if SalesLine.FINDFIRST then
+        CODEUNIT.RUN(CODEUNIT::"Sales - Calc Discount By Type",SalesLine);
+
+      SalesOrderEntityBuffer.FIND;
+    END;
+
+    PROCEDURE LoadLines@1(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";DocumentIdFilter@1007 : Text);
+    VAR
+      SalesOrderEntityBuffer@1004 : Record "Sales Order Entity Buffer";
+    BEGIN
+      if DocumentIdFilter = '' then
+        ERROR(DocumentIDNotSpecifiedErr);
+
+      SalesOrderEntityBuffer.SETFILTER(Id,DocumentIdFilter);
+      if not SalesOrderEntityBuffer.FINDFIRST then
+        exit;
+
+      LoadSalesLines(SalesInvoiceLineAggregate,SalesOrderEntityBuffer);
+    END;
+
+    LOCAL PROCEDURE LoadSalesLines@38(VAR SalesInvoiceLineAggregate@1002 : Record "Sales Invoice Line Aggregate";VAR SalesOrderEntityBuffer@1000 : Record "Sales Order Entity Buffer");
+    VAR
+      SalesLine@1001 : Record "Sales Line";
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SalesLine.SETRANGE("Document No.",SalesOrderEntityBuffer."No.");
+
+      if SalesLine.FINDSET(false,false) then
+        repeat
+          TransferFromSalesLine(SalesInvoiceLineAggregate,SalesOrderEntityBuffer,SalesLine);
+          SalesInvoiceLineAggregate.INSERT(true);
+        until SalesLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE TransferFromSalesLine@40(VAR SalesInvoiceLineAggregate@1002 : Record "Sales Invoice Line Aggregate";VAR SalesOrderEntityBuffer@1000 : Record "Sales Order Entity Buffer";VAR SalesLine@1001 : Record "Sales Line");
+    VAR
+      SalesInvoiceAggregator@1005 : Codeunit "Sales Invoice Aggregator";
+    BEGIN
+      CLEAR(SalesInvoiceLineAggregate);
+      SalesInvoiceLineAggregate.TRANSFERFIELDS(SalesLine,true);
+      SalesInvoiceLineAggregate."Document Id" := SalesOrderEntityBuffer.Id;
+      SalesInvoiceAggregator.SetTaxGroupIdAndCode(
+        SalesInvoiceLineAggregate,
+        SalesLine."Tax Group Code",
+        SalesLine."VAT Prod. Posting Group",
+        SalesLine."VAT Identifier");
+      SalesInvoiceLineAggregate."VAT %" := SalesLine."VAT %";
+      SalesInvoiceLineAggregate."Tax Amount" := SalesLine."Amount Including VAT" - SalesLine."VAT Base Amount";
+      SalesInvoiceLineAggregate.UpdateReferencedRecordIds;
+      UpdateLineAmountsFromSalesLine(SalesInvoiceLineAggregate,SalesLine);
+    END;
+
+    PROCEDURE PropagateInsertLine@7(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";VAR TempFieldBuffer@1005 : TEMPORARY Record "Field Buffer");
+    VAR
+      SalesOrderEntityBuffer@1001 : Record "Sales Order Entity Buffer";
+      SalesLine@1002 : Record "Sales Line";
+      LastUsedSalesLine@1004 : Record "Sales Line";
+    BEGIN
+      VerifyCRUDIsPossibleForLine(SalesInvoiceLineAggregate,SalesOrderEntityBuffer);
+
+      SalesLine."Document Type" := SalesLine."Document Type"::Order;
+      SalesLine."Document No." := SalesOrderEntityBuffer."No.";
+
+      if SalesInvoiceLineAggregate."Line No." = 0 then begin
+        LastUsedSalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+        LastUsedSalesLine.SETRANGE("Document No.",SalesOrderEntityBuffer."No.");
+        if LastUsedSalesLine.FINDLAST then
+          SalesInvoiceLineAggregate."Line No." := LastUsedSalesLine."Line No." + 10000
+        else
+          SalesInvoiceLineAggregate."Line No." := 10000;
+
+        SalesLine."Line No." := SalesInvoiceLineAggregate."Line No.";
+      end else
+        if SalesLine.GET(SalesLine."Document Type"::Order,SalesOrderEntityBuffer."No.",SalesInvoiceLineAggregate."Line No.") then
+          ERROR(CannotInsertALineThatAlreadyExistsErr);
+
+      TransferSalesInvoiceLineAggregateToSalesLine(SalesInvoiceLineAggregate,SalesLine,TempFieldBuffer);
+      SalesLine.INSERT(true);
+
+      RedistributeInvoiceDiscounts(SalesOrderEntityBuffer);
+
+      SalesLine.FIND;
+      TransferFromSalesLine(SalesInvoiceLineAggregate,SalesOrderEntityBuffer,SalesLine);
+    END;
+
+    PROCEDURE PropagateModifyLine@24(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";VAR TempFieldBuffer@1004 : TEMPORARY Record "Field Buffer");
+    VAR
+      SalesOrderEntityBuffer@1001 : Record "Sales Order Entity Buffer";
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      VerifyCRUDIsPossibleForLine(SalesInvoiceLineAggregate,SalesOrderEntityBuffer);
+
+      if not SalesLine.GET(SalesLine."Document Type"::Order,SalesOrderEntityBuffer."No.",SalesInvoiceLineAggregate."Line No.") then
+        ERROR(CannotModifyALineThatDoesntExistErr);
+
+      TransferSalesInvoiceLineAggregateToSalesLine(SalesInvoiceLineAggregate,SalesLine,TempFieldBuffer);
+
+      SalesLine.MODIFY(true);
+
+      RedistributeInvoiceDiscounts(SalesOrderEntityBuffer);
+
+      SalesLine.FIND;
+      TransferFromSalesLine(SalesInvoiceLineAggregate,SalesOrderEntityBuffer,SalesLine);
+    END;
+
+    PROCEDURE PropagateDeleteLine@6(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate");
+    VAR
+      SalesOrderEntityBuffer@1003 : Record "Sales Order Entity Buffer";
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      VerifyCRUDIsPossibleForLine(SalesInvoiceLineAggregate,SalesOrderEntityBuffer);
+
+      if SalesLine.GET(SalesLine."Document Type"::Order,SalesOrderEntityBuffer."No.",SalesInvoiceLineAggregate."Line No.") then begin
+        SalesLine.DELETE(true);
+        RedistributeInvoiceDiscounts(SalesOrderEntityBuffer);
+      end;
+    END;
+
+    LOCAL PROCEDURE VerifyCRUDIsPossibleForLine@60(VAR SalesInvoiceLineAggregate@1001 : Record "Sales Invoice Line Aggregate";VAR SalesOrderEntityBuffer@1000 : Record "Sales Order Entity Buffer");
+    VAR
+      SearchSalesOrderEntityBuffer@1002 : Record "Sales Order Entity Buffer";
+      DocumentIDFilter@1003 : Text;
+    BEGIN
+      if ISNULLGUID(SalesInvoiceLineAggregate."Document Id") then begin
+        DocumentIDFilter := SalesInvoiceLineAggregate.GETFILTER("Document Id");
+        if DocumentIDFilter = '' then
+          ERROR(DocumentIDNotSpecifiedErr);
+        SalesOrderEntityBuffer.SETFILTER(Id,DocumentIDFilter);
+      end else
+        SalesOrderEntityBuffer.SETRANGE(Id,SalesInvoiceLineAggregate."Document Id");
+
+      if not SalesOrderEntityBuffer.FINDFIRST then
+        ERROR(DocumentDoesNotExistErr);
+
+      SearchSalesOrderEntityBuffer.COPY(SalesOrderEntityBuffer);
+      if SearchSalesOrderEntityBuffer.NEXT <> 0 then
+        ERROR(MultipleDocumentsFoundForIdErr);
+    END;
+
+    LOCAL PROCEDURE UpdateCompletelyShipped@4(VAR SalesLine@1000 : Record "Sales Line");
+    VAR
+      SearchSalesLine@1001 : Record "Sales Line";
+      SalesOrderEntityBuffer@1003 : Record "Sales Order Entity Buffer";
+      CompletelyShipped@1002 : Boolean;
+    BEGIN
+      SearchSalesLine.COPY(SalesLine);
+      SearchSalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SearchSalesLine.SETRANGE("Document No.",SalesLine."Document No.");
+      SearchSalesLine.SETFILTER(Type,'<>%1',SalesLine.Type::" ");
+      SearchSalesLine.SETRANGE("Location Code",SalesLine."Location Code");
+      SearchSalesLine.SETRANGE("Completely Shipped",false);
+
+      CompletelyShipped := not SearchSalesLine.FINDFIRST;
+
+      if not SalesOrderEntityBuffer.GET(SalesLine."Document No.") then
+        exit;
+      if SalesOrderEntityBuffer."Completely Shipped" <> CompletelyShipped then begin
+        SalesOrderEntityBuffer."Completely Shipped" := CompletelyShipped;
+        SalesOrderEntityBuffer.MODIFY(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateLineAmountsFromSalesLine@44(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";VAR SalesLine@1001 : Record "Sales Line");
+    BEGIN
+      SalesInvoiceLineAggregate."Line Amount Excluding Tax" := SalesLine.GetLineAmountExclVAT;
+      SalesInvoiceLineAggregate."Line Amount Including Tax" := SalesLine.GetLineAmountInclVAT;
+      SalesInvoiceLineAggregate."Line Tax Amount" :=
+        SalesInvoiceLineAggregate."Line Amount Including Tax" - SalesInvoiceLineAggregate."Line Amount Excluding Tax";
+      UpdateInvoiceDiscountAmount(SalesInvoiceLineAggregate);
+    END;
+
+    LOCAL PROCEDURE UpdateInvoiceDiscountAmount@48(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate");
+    BEGIN
+      if SalesInvoiceLineAggregate."Prices Including Tax" then
+        SalesInvoiceLineAggregate."Inv. Discount Amount Excl. VAT" :=
+          SalesInvoiceLineAggregate."Line Amount Excluding Tax" - SalesInvoiceLineAggregate.Amount
+      else
+        SalesInvoiceLineAggregate."Inv. Discount Amount Excl. VAT" := SalesInvoiceLineAggregate."Inv. Discount Amount";
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

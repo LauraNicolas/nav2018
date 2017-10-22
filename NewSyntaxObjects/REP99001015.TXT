@@ -1,0 +1,234 @@
+OBJECT Report 99001015 Calculate Subcontracts
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Calculate Subcontracts;
+    ProcessingOnly=true;
+    OnInitReport=BEGIN
+                   MfgSetup.GET;
+                 END;
+
+    OnPreReport=BEGIN
+                  ReqWkshTmpl.GET(ReqLine."Worksheet Template Name");
+                  ReqWkShName.GET(ReqLine."Worksheet Template Name",ReqLine."Journal Batch Name");
+                  ReqLine.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+                  ReqLine.SETRANGE("Journal Batch Name",ReqLine."Journal Batch Name");
+                  ReqLine.LOCKTABLE;
+
+                  if ReqLine.FINDLAST then
+                    ReqLine.INIT;
+                  Window.OPEN(Text000 + Text001);
+                END;
+
+  }
+  DATASET
+  {
+    { 8481;    ;DataItem;Work Center         ;
+               DataItemTable="Work Center";
+               DataItemTableView=SORTING("No.");
+               OnPreDataItem=BEGIN
+                               ReqLine.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+                               ReqLine.SETRANGE("Journal Batch Name",ReqLine."Journal Batch Name");
+                               ReqLine.DELETEALL;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  if "Subcontractor No." = '' then
+                                    CurrReport.SKIP;
+
+                                  Window.UPDATE(1,"No.");
+                                END;
+
+               ReqFilterFields="No.","Subcontractor No." }
+
+    { 4877;1   ;DataItem;Prod. Order Routing Line;
+               DataItemTable="Prod. Order Routing Line";
+               DataItemTableView=SORTING(Type,"No.") WHERE(Status=CONST(Released),Type=CONST("Work Center"),"Routing Status"=FILTER(<Finished));
+               OnAfterGetRecord=BEGIN
+                                  Window.UPDATE(2,"Prod. Order No.");
+
+                                  ProdOrderLine.SETCURRENTKEY(Status,"Prod. Order No.","Routing No.","Routing Reference No.");
+                                  ProdOrderLine.SETRANGE(Status,Status);
+                                  ProdOrderLine.SETRANGE("Prod. Order No.","Prod. Order No.");
+                                  ProdOrderLine.SETRANGE("Routing No.","Routing No.");
+                                  ProdOrderLine.SETRANGE("Routing Reference No.","Routing Reference No.");
+                                  if ProdOrderLine.FIND('-') then begin
+                                    DeleteRepeatedReqLines;
+                                    repeat
+                                      BaseQtyToPurch :=
+                                        CostCalcMgt.CalcQtyAdjdForRoutingScrap(
+                                          CostCalcMgt.CalcQtyAdjdForBOMScrap(
+                                            ProdOrderLine."Quantity (Base)",ProdOrderLine."Scrap %"),
+                                          "Scrap Factor % (Accumulated)","Fixed Scrap Qty. (Accum.)") -
+                                        (CostCalcMgt.CalcOutputQtyBaseOnPurchOrder(ProdOrderLine,"Prod. Order Routing Line") +
+                                         CostCalcMgt.CalcActOutputQtyBase(ProdOrderLine,"Prod. Order Routing Line"));
+                                      QtyToPurch := ROUND(BaseQtyToPurch / ProdOrderLine."Qty. per Unit of Measure",0.00001);
+                                      if QtyToPurch > 0 then
+                                        InsertReqWkshLine;
+                                    until ProdOrderLine.NEXT = 0;
+                                  end;
+                                END;
+
+               ReqFilterFields="Prod. Order No.","Starting Date";
+               DataItemLink="No."=FIELD("No.") }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Processing Work Centers   #1##########\';
+      Text001@1001 : TextConst 'ENU="Processing Orders         #2########## "';
+      MfgSetup@1002 : Record "Manufacturing Setup";
+      ReqWkshTmpl@1003 : Record "Req. Wksh. Template";
+      ReqWkShName@1004 : Record "Requisition Wksh. Name";
+      ReqLine@1005 : Record "Requisition Line";
+      ProdOrderLine@1006 : Record "Prod. Order Line";
+      GLSetup@1013 : Record "General Ledger Setup";
+      PurchLine@1014 : Record "Purchase Line";
+      CostCalcMgt@1007 : Codeunit "Cost Calculation Management";
+      Window@1008 : Dialog;
+      BaseQtyToPurch@1010 : Decimal;
+      QtyToPurch@1011 : Decimal;
+      GLSetupRead@1012 : Boolean;
+
+    [External]
+    PROCEDURE SetWkShLine@1(NewReqLine@1000 : Record "Requisition Line");
+    BEGIN
+      ReqLine := NewReqLine;
+    END;
+
+    LOCAL PROCEDURE InsertReqWkshLine@3();
+    BEGIN
+      ProdOrderLine.CALCFIELDS("Total Exp. Oper. Output (Qty.)");
+
+      with ReqLine do begin
+        SetSubcontracting(true);
+        BlockDynamicTracking(true);
+
+        INIT;
+        "Line No." := "Line No." + 10000;
+        VALIDATE(Type,Type::Item);
+        VALIDATE("No.",ProdOrderLine."Item No.");
+        VALIDATE("Variant Code",ProdOrderLine."Variant Code");
+        VALIDATE("Unit of Measure Code",ProdOrderLine."Unit of Measure Code");
+        VALIDATE(Quantity,QtyToPurch);
+        GetGLSetup;
+        if Quantity <> 0 then begin
+          if "Work Center"."Unit Cost Calculation" = "Work Center"."Unit Cost Calculation"::Units then
+            VALIDATE(
+              "Direct Unit Cost",
+              ROUND(
+                "Prod. Order Routing Line"."Direct Unit Cost" *
+                ProdOrderLine."Qty. per Unit of Measure",
+                GLSetup."Unit-Amount Rounding Precision"))
+          else
+            VALIDATE(
+              "Direct Unit Cost",
+              ROUND(
+                ("Prod. Order Routing Line"."Expected Operation Cost Amt." -
+                 "Prod. Order Routing Line"."Expected Capacity Ovhd. Cost") /
+                ProdOrderLine."Total Exp. Oper. Output (Qty.)",
+                GLSetup."Unit-Amount Rounding Precision"));
+        end else
+          VALIDATE("Direct Unit Cost",0);
+        "Qty. per Unit of Measure" := 0;
+        "Quantity (Base)" := 0;
+        "Prod. Order No." := ProdOrderLine."Prod. Order No.";
+        "Prod. Order Line No." := ProdOrderLine."Line No.";
+        "Due Date" := "Prod. Order Routing Line"."Ending Date";
+        "Requester ID" := USERID;
+        "Location Code" := ProdOrderLine."Location Code";
+        "Bin Code" := ProdOrderLine."Bin Code";
+        "Routing Reference No." := "Prod. Order Routing Line"."Routing Reference No.";
+        "Routing No." := "Prod. Order Routing Line"."Routing No.";
+        "Operation No." := "Prod. Order Routing Line"."Operation No.";
+        "Work Center No." := "Prod. Order Routing Line"."Work Center No.";
+        VALIDATE("Vendor No.","Work Center"."Subcontractor No.");
+        Description := "Prod. Order Routing Line".Description;
+
+        // If purchase order already exist we will change this if possible
+        PurchLine.RESET;
+        PurchLine.SETCURRENTKEY("Document Type",Type,"Prod. Order No.","Prod. Order Line No.","Routing No.","Operation No.");
+        PurchLine.SETRANGE("Document Type",PurchLine."Document Type"::Order);
+        PurchLine.SETRANGE(Type,PurchLine.Type::Item);
+        PurchLine.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+        PurchLine.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+        PurchLine.SETRANGE("Routing No.","Prod. Order Routing Line"."Routing No.");
+        PurchLine.SETRANGE("Operation No.","Prod. Order Routing Line"."Operation No.");
+        PurchLine.SETRANGE("Planning Flexibility",PurchLine."Planning Flexibility"::Unlimited);
+        PurchLine.SETRANGE("Quantity Received",0);
+        if PurchLine.FINDFIRST then begin
+          VALIDATE(Quantity,Quantity + PurchLine."Outstanding Quantity");
+          "Quantity (Base)" := 0;
+          "Replenishment System" := "Replenishment System"::Purchase;
+          "Ref. Order No." := PurchLine."Document No.";
+          "Ref. Order Type" := "Ref. Order Type"::Purchase;
+          "Ref. Line No." := PurchLine."Line No.";
+          if PurchLine."Expected Receipt Date" = "Due Date" then
+            "Action Message" := "Action Message"::"Change Qty."
+          else
+            "Action Message" := "Action Message"::"Resched. & Chg. Qty.";
+          "Accept Action Message" := true;
+        end else begin
+          "Ref. Order No." := ProdOrderLine."Prod. Order No.";
+          "Ref. Order Type" := "Ref. Order Type"::"Prod. Order";
+          "Ref. Order Status" := ProdOrderLine.Status;
+          "Ref. Line No." := ProdOrderLine."Line No.";
+          "Action Message" := "Action Message"::New;
+          "Accept Action Message" := true;
+        end;
+
+        if "Ref. Order No." <> '' then
+          GetDimFromRefOrderLine(true);
+
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetGLSetup@14();
+    BEGIN
+      if not GLSetupRead then
+        GLSetup.GET;
+      GLSetupRead := true;
+    END;
+
+    LOCAL PROCEDURE DeleteRepeatedReqLines@2();
+    VAR
+      RequisitionLine@1000 : Record "Requisition Line";
+    BEGIN
+      with RequisitionLine do begin
+        SETRANGE(Type,Type::Item);
+        SETRANGE("No.",ProdOrderLine."Item No.");
+        SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+        SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+        SETRANGE("Operation No.","Prod. Order Routing Line"."Operation No.");
+        DELETEALL(true);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

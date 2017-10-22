@@ -1,0 +1,1339 @@
+OBJECT Codeunit 99000831 Reservation Engine Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Item Ledger Entry"=rm,
+                TableData "Reservation Entry"=rimd,
+                TableData "Action Message Entry"=rid;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=%1 must be greater than 0.';
+      Text001@1001 : TextConst 'ENU=%1 must be less than 0.';
+      Text002@1002 : TextConst 'ENU=Use Cancel Reservation.';
+      Text003@1003 : TextConst 'ENU=%1 can only be reduced.';
+      Text005@1004 : TextConst 'ENU=Outbound,Inbound';
+      DummySalesLine@1005 : Record "Sales Line";
+      DummyPurchLine@1012 : Record "Purchase Line";
+      DummyItemJnlLine@1006 : Record "Item Journal Line";
+      DummyProdOrderLine@1007 : Record "Prod. Order Line";
+      CalcAsmHeader@1023 : Record "Assembly Header";
+      CalcAsmLine@1024 : Record "Assembly Line";
+      Item@1009 : Record Item;
+      TempSurplusEntry@1010 : TEMPORARY Record "Reservation Entry";
+      TempSortRec1@1016 : TEMPORARY Record "Reservation Entry";
+      TempSortRec2@1015 : TEMPORARY Record "Reservation Entry";
+      TempSortRec3@1014 : TEMPORARY Record "Reservation Entry";
+      TempSortRec4@1013 : TEMPORARY Record "Reservation Entry";
+      Text006@1011 : TextConst 'ENU=Signing mismatch.';
+      Text007@1017 : TextConst 'ENU=Renaming reservation entries...';
+      DummyJobJnlLine@1018 : Record "Job Journal Line";
+      ReservMgt@1008 : Codeunit "Reservation Management";
+      LostReservationQty@1019 : Decimal;
+      Text008@1020 : TextConst 'ENU="You cannot state %1 or %2 on a demand when it is linked to a supply by %3 = %4."';
+      ReservationsModified@1021 : Boolean;
+
+    [External]
+    PROCEDURE CancelReservation@9(ReservEntry@1002 : Record "Reservation Entry");
+    VAR
+      ReservEntry3@1003 : Record "Reservation Entry";
+    BEGIN
+      ReservEntry.TESTFIELD("Reservation Status",ReservEntry."Reservation Status"::Reservation);
+      ReservEntry.TESTFIELD("Disallow Cancellation",false);
+
+      ReservEntry3.GET(ReservEntry."Entry No.",not ReservEntry.Positive);
+      if ReservEntry3.TrackingExists or ReservEntry.TrackingExists then begin
+        ReservEntry."Reservation Status" := ReservEntry."Reservation Status"::Surplus;
+        ReservEntry.Binding := ReservEntry.Binding::" ";
+        ReservEntry3."Reservation Status" := ReservEntry3."Reservation Status"::Surplus;
+        ReservEntry3.Binding := ReservEntry3.Binding::" ";
+        RevertDateToSourceDate(ReservEntry);
+        ReservEntry.MODIFY;
+        ReservEntry3.DELETE;
+        ReservEntry3."Entry No." := 0;
+        RevertDateToSourceDate(ReservEntry3);
+        ReservEntry3.INSERT;
+        TempSurplusEntry.DELETEALL;
+        UpdateTempSurplusEntry(ReservEntry);
+        UpdateTempSurplusEntry(ReservEntry3);
+        UpdateOrderTracking(TempSurplusEntry);
+      end else
+        CloseReservEntry(ReservEntry,true,false);
+    END;
+
+    LOCAL PROCEDURE RevertDateToSourceDate@49(VAR ReservEntry@1000 : Record "Reservation Entry");
+    VAR
+      SalesLine@1002 : Record "Sales Line";
+      PurchaseLine@1003 : Record "Purchase Line";
+      TransferLine@1004 : Record "Transfer Line";
+      ServiceLine@1005 : Record "Service Line";
+      ProdOrderLine@1006 : Record "Prod. Order Line";
+      ProdOrderComponent@1008 : Record "Prod. Order Component";
+      PlanningComponent@1009 : Record "Planning Component";
+      ItemLedgerEntry@1013 : Record "Item Ledger Entry";
+    BEGIN
+      with ReservEntry do
+        case "Source Type" of
+          DATABASE::"Sales Line":
+            begin
+              SalesLine.GET("Source Subtype","Source ID","Source Ref. No.");
+              if Positive then
+                ChangeDateFieldOnResEntry(ReservEntry,"Expected Receipt Date",0D)
+              else
+                ChangeDateFieldOnResEntry(ReservEntry,0D,SalesLine."Shipment Date");
+            end;
+          DATABASE::"Purchase Line":
+            begin
+              PurchaseLine.GET("Source Subtype","Source ID","Source Ref. No.");
+              if Positive then
+                ChangeDateFieldOnResEntry(ReservEntry,PurchaseLine."Expected Receipt Date",0D)
+              else
+                ChangeDateFieldOnResEntry(ReservEntry,0D,"Shipment Date");
+            end;
+          DATABASE::"Planning Component":
+            begin
+              PlanningComponent.GET("Source ID","Source Batch Name","Source Prod. Order Line","Source Ref. No.");
+              ChangeDateFieldOnResEntry(ReservEntry,0D,PlanningComponent."Due Date")
+            end;
+          DATABASE::"Item Ledger Entry":
+            begin
+              ItemLedgerEntry.GET("Source Ref. No.");
+              ChangeDateFieldOnResEntry(ReservEntry,ItemLedgerEntry."Posting Date",0D);
+            end;
+          DATABASE::"Prod. Order Line":
+            begin
+              ProdOrderLine.GET("Source Subtype","Source ID","Source Prod. Order Line");
+              ChangeDateFieldOnResEntry(ReservEntry,ProdOrderLine."Due Date",0D);
+            end;
+          DATABASE::"Prod. Order Component":
+            begin
+              ProdOrderComponent.GET("Source Subtype","Source ID","Source Prod. Order Line","Source Ref. No.");
+              ChangeDateFieldOnResEntry(ReservEntry,0D,ProdOrderComponent."Due Date");
+              exit;
+            end;
+          DATABASE::"Transfer Line":
+            begin
+              TransferLine.GET("Source ID","Source Ref. No.");
+              if Positive then
+                ChangeDateFieldOnResEntry(ReservEntry,TransferLine."Receipt Date",0D)
+              else
+                ChangeDateFieldOnResEntry(ReservEntry,0D,TransferLine."Shipment Date");
+            end;
+          DATABASE::"Service Line":
+            begin
+              ServiceLine.GET("Source Subtype","Source ID","Source Ref. No.");
+              ChangeDateFieldOnResEntry(ReservEntry,0D,ServiceLine."Needed by Date");
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE ChangeDateFieldOnResEntry@50(VAR ReservEntry@1000 : Record "Reservation Entry";ExpectedReceiptDate@1002 : Date;ShipmentDate@1001 : Date);
+    BEGIN
+      ReservEntry."Expected Receipt Date" := ExpectedReceiptDate;
+      ReservEntry."Shipment Date" := ShipmentDate;
+    END;
+
+    [External]
+    PROCEDURE CloseReservEntry@20(ReservEntry@1000 : Record "Reservation Entry";ReTrack@1001 : Boolean;DeleteAll@1002 : Boolean);
+    VAR
+      ReservEntry2@1003 : Record "Reservation Entry";
+      SurplusReservEntry@1004 : Record "Reservation Entry";
+      DummyReservEntry@1005 : Record "Reservation Entry";
+      TotalQty@1006 : Decimal;
+      AvailabilityDate@1007 : Date;
+    BEGIN
+      ReservEntry.DELETE;
+      if ReservEntry."Reservation Status" = ReservEntry."Reservation Status"::Prospect then
+        exit;
+
+      ModifyActionMessage(ReservEntry);
+
+      if ReservEntry."Reservation Status" <> ReservEntry."Reservation Status"::Surplus then begin
+        GetItem(ReservEntry."Item No.");
+        ReservEntry2.GET(ReservEntry."Entry No.",not ReservEntry.Positive);
+        if (Item."Order Tracking Policy" = Item."Order Tracking Policy"::None) and
+           (not TransferLineWithItemTracking(ReservEntry2)) and
+           (((ReservEntry.Binding = ReservEntry.Binding::"Order-to-Order") and ReservEntry2.Positive ) or
+            (ReservEntry2."Source Type" = DATABASE::"Item Ledger Entry") or not ReservEntry2.TrackingExists)
+        then
+          ReservEntry2.DELETE
+        else begin
+          ReservEntry2."Reservation Status" := ReservEntry2."Reservation Status"::Surplus;
+
+          if ReservEntry2.Positive then begin
+            AvailabilityDate := ReservEntry2."Expected Receipt Date";
+            ReservEntry2."Shipment Date" := 0D
+          end else begin
+            AvailabilityDate := ReservEntry2."Shipment Date";
+            ReservEntry2."Expected Receipt Date" := 0D;
+          end;
+          ReservEntry2.MODIFY;
+          ReservEntry2."Quantity (Base)" :=
+            ReservMgt.MatchSurplus(ReservEntry2,SurplusReservEntry,ReservEntry2."Quantity (Base)",not ReservEntry2.Positive,
+              AvailabilityDate,Item."Order Tracking Policy");
+          if ReservEntry2."Quantity (Base)" = 0 then begin
+            ReservEntry2.DELETE(true);
+          end else begin
+            ReservEntry2.VALIDATE("Quantity (Base)");
+            ReservEntry2.VALIDATE(Binding,ReservEntry2.Binding::" ");
+            ReservEntry2.MODIFY;
+
+            if Item."Order Tracking Policy" = Item."Order Tracking Policy"::"Tracking & Action Msg." then begin
+              ModifyActionMessageDating(ReservEntry2);
+              if DeleteAll then
+                ReservMgt.IssueActionMessage(ReservEntry2,false,ReservEntry)
+              else
+                ReservMgt.IssueActionMessage(ReservEntry2,false,DummyReservEntry);
+            end;
+          end;
+        end;
+      end;
+
+      if ReTrack then begin
+        TotalQty := ReservMgt.SourceQuantity(ReservEntry,true);
+        ReservMgt.AutoTrack(TotalQty);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CloseSurplusTrackingEntry@33(ReservEntry@1000 : Record "Reservation Entry");
+    VAR
+      ReservEntry2@1003 : Record "Reservation Entry";
+    BEGIN
+      ReservEntry.DELETE;
+      GetItem(ReservEntry."Item No.");
+      if ReservEntry."Reservation Status" = ReservEntry."Reservation Status"::Prospect then
+        exit;
+
+      ModifyActionMessage(ReservEntry);
+      if ReservEntry."Reservation Status" <> ReservEntry."Reservation Status"::Surplus then begin
+        ReservEntry2.GET(ReservEntry."Entry No.",not ReservEntry.Positive);
+        if not TransferLineWithItemTracking(ReservEntry2) and
+           ((ReservEntry2."Source Type" = DATABASE::"Item Ledger Entry") or not ReservEntry2.TrackingExists)
+        then
+          ReservEntry2.DELETE
+        else begin
+          ReservEntry2."Reservation Status" := ReservEntry2."Reservation Status"::Surplus;
+          ReservEntry2.MODIFY;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ModifyReservEntry@68(ReservEntry@1000 : Record "Reservation Entry";NewQuantity@1001 : Decimal;NewDescription@1002 : Text[50];ModifyReserved@1003 : Boolean);
+    VAR
+      TotalQty@1004 : Decimal;
+    BEGIN
+      ReservEntry.TESTFIELD("Reservation Status",ReservEntry."Reservation Status"::Reservation);
+      if NewQuantity * ReservEntry."Quantity (Base)" < 0 then
+        if NewQuantity < 0 then
+          ERROR(Text000,ReservEntry.FIELDCAPTION("Quantity (Base)"))
+        else
+          ERROR(Text001,ReservEntry.FIELDCAPTION("Quantity (Base)"));
+      if NewQuantity = 0 then
+        ERROR(Text002);
+      if ABS(NewQuantity) > ABS(ReservEntry."Quantity (Base)") then
+        ERROR(Text003,ReservEntry.FIELDCAPTION("Quantity (Base)"));
+
+      if ModifyReserved then begin
+        if ReservEntry."Item No." <> Item."No." then
+          GetItem(ReservEntry."Item No.");
+
+        ReservEntry.GET(ReservEntry."Entry No.",ReservEntry.Positive); // Get existing entry
+        ReservEntry.VALIDATE("Quantity (Base)",NewQuantity);
+        ReservEntry.Description := NewDescription;
+        ReservEntry."Changed By" := USERID;
+        ReservEntry.MODIFY;
+        if Item."Order Tracking Policy" > Item."Order Tracking Policy"::None then begin
+          TotalQty := ReservMgt.SourceQuantity(ReservEntry,true);
+          ReservMgt.AutoTrack(TotalQty);
+        end;
+
+        if ReservEntry.GET(ReservEntry."Entry No.",not ReservEntry.Positive) then begin // Get related entry
+          ReservEntry.VALIDATE("Quantity (Base)",-NewQuantity);
+          ReservEntry.Description := NewDescription;
+          ReservEntry."Changed By" := USERID;
+          ReservEntry.MODIFY;
+          if Item."Order Tracking Policy" > Item."Order Tracking Policy"::None then begin
+            TotalQty := ReservMgt.SourceQuantity(ReservEntry,true);
+            ReservMgt.AutoTrack(TotalQty);
+          end;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CreateForText@70(ReservEntry@1000 : Record "Reservation Entry") : Text[80];
+    BEGIN
+      if ReservEntry.GET(ReservEntry."Entry No.",false) then
+        exit(CreateText(ReservEntry));
+
+      exit('');
+    END;
+
+    [External]
+    PROCEDURE CreateFromText@69(ReservEntry@1000 : Record "Reservation Entry") : Text[80];
+    BEGIN
+      if ReservEntry.GET(ReservEntry."Entry No.",true) then
+        exit(CreateText(ReservEntry));
+
+      exit('');
+    END;
+
+    LOCAL PROCEDURE CreateText@1(ReservEntry@1001 : Record "Reservation Entry") : Text[80];
+    VAR
+      SourceType@1002 : '" ",Sales,"Requisition Line",Purchase,"Item Journal","BOM Journal","Item Ledger Entry","Prod. Order Line","Prod. Order Component","Planning Line","Planning Component",Transfer,Service,"Job Journal",Job,"Assembly Header","Assembly Line"';
+      SourceTypeText@1003 : TextConst 'ENU=Sales,Requisition Line,Purchase,Item Journal,BOM Journal,Item Ledger Entry,Prod. Order Line,Prod. Order Component,Planning Line,Planning Component,Transfer,Service,Job Journal,Job,Assembly Header,Assembly Line';
+    BEGIN
+      with ReservEntry do begin
+        case "Source Type" of
+          DATABASE::"Sales Line":
+            begin
+              SourceType := SourceType::Sales;
+              DummySalesLine."Document Type" := "Source Subtype";
+              exit(STRSUBSTNO('%1 %2 %3',SELECTSTR(SourceType,SourceTypeText),
+                  DummySalesLine."Document Type","Source ID"));
+            end;
+          DATABASE::"Purchase Line":
+            begin
+              SourceType := SourceType::Purchase;
+              DummyPurchLine."Document Type" := "Source Subtype";
+              exit(STRSUBSTNO('%1 %2 %3',SELECTSTR(SourceType,SourceTypeText),
+                  DummyPurchLine."Document Type","Source ID"));
+            end;
+          DATABASE::"Requisition Line":
+            begin
+              SourceType := SourceType::"Requisition Line";
+              exit(STRSUBSTNO('%1 %2 %3',SELECTSTR(SourceType,SourceTypeText),
+                  "Source ID","Source Batch Name"));
+            end;
+          DATABASE::"Planning Component":
+            begin
+              SourceType := SourceType::"Planning Component";
+              exit(STRSUBSTNO('%1 %2 %3',SELECTSTR(SourceType,SourceTypeText),
+                  "Source ID","Source Batch Name"));
+            end;
+          DATABASE::"Item Journal Line":
+            begin
+              SourceType := SourceType::"Item Journal";
+              DummyItemJnlLine."Entry Type" := "Source Subtype";
+              exit(STRSUBSTNO('%1 %2 %3 %4',SELECTSTR(SourceType,SourceTypeText),
+                  DummyItemJnlLine."Entry Type","Source ID","Source Batch Name"));
+            end;
+          DATABASE::"Job Journal Line":
+            begin
+              SourceType := SourceType::"Job Journal";
+              exit(STRSUBSTNO('%1 %2 %3 %4',SELECTSTR(SourceType,SourceTypeText),
+                  DummyJobJnlLine."Entry Type","Source ID","Source Batch Name"));
+            end;
+          DATABASE::"Item Ledger Entry":
+            begin
+              SourceType := SourceType::"Item Ledger Entry";
+              exit(STRSUBSTNO('%1 %2',SELECTSTR(SourceType,SourceTypeText),"Source Ref. No."));
+            end;
+          DATABASE::"Prod. Order Line":
+            begin
+              SourceType := SourceType::"Prod. Order Line";
+              DummyProdOrderLine.Status := "Source Subtype";
+              exit(STRSUBSTNO('%1 %2 %3',SELECTSTR(SourceType,SourceTypeText),
+                  DummyProdOrderLine.Status,"Source ID"));
+            end;
+          DATABASE::"Prod. Order Component":
+            begin
+              SourceType := SourceType::"Prod. Order Component";
+              DummyProdOrderLine.Status := "Source Subtype";
+              exit(STRSUBSTNO('%1 %2 %3',SELECTSTR(SourceType,SourceTypeText),
+                  DummyProdOrderLine.Status,"Source ID"));
+            end;
+          DATABASE::"Transfer Line":
+            begin
+              SourceType := SourceType::Transfer;
+              exit(STRSUBSTNO('%1 %2, %3',SELECTSTR(SourceType,SourceTypeText),
+                  "Source ID",SELECTSTR("Source Subtype" + 1,Text005)));
+            end;
+          DATABASE::"Service Line":
+            begin
+              SourceType := SourceType::Service;
+              exit(STRSUBSTNO('%1 %2',SELECTSTR(SourceType,SourceTypeText),"Source ID"));
+            end;
+          DATABASE::"Job Planning Line":
+            begin
+              SourceType := SourceType::Job;
+              exit(STRSUBSTNO('%1 %2',SELECTSTR(SourceType,SourceTypeText),"Source ID"));
+            end;
+          DATABASE::"Assembly Header":
+            begin
+              CalcAsmHeader.INIT;
+              SourceType := SourceType::"Assembly Header";
+              CalcAsmHeader."Document Type" := "Source Subtype";
+              exit(
+                STRSUBSTNO('%1 %2 %3',SELECTSTR(SourceType,SourceTypeText),
+                  CalcAsmHeader."Document Type","Source ID"));
+            end;
+          DATABASE::"Assembly Line":
+            begin
+              CalcAsmLine.INIT;
+              SourceType := SourceType::"Assembly Line";
+              CalcAsmLine."Document Type" := "Source Subtype";
+              exit(
+                STRSUBSTNO('%1 %2 %3',SELECTSTR(SourceType,SourceTypeText),
+                  CalcAsmLine."Document Type","Source ID"));
+            end;
+        end;
+
+        exit('');
+      end;
+    END;
+
+    [External]
+    PROCEDURE ModifyShipmentDate@78(VAR ReservEntry@1000 : Record "Reservation Entry";NewShipmentDate@1001 : Date);
+    VAR
+      ReservEntry2@1002 : Record "Reservation Entry";
+    BEGIN
+      ReservEntry2 := ReservEntry;
+      ReservEntry2."Shipment Date" := NewShipmentDate;
+      ReservEntry2."Changed By" := USERID;
+      ReservEntry2.MODIFY;
+
+      if ReservEntry2.GET(ReservEntry2."Entry No.",not ReservEntry2.Positive) then begin // Get related entry
+        ReservEntry2."Shipment Date" := NewShipmentDate;
+        ReservEntry2."Changed By" := USERID;
+        ReservEntry2.MODIFY;
+
+        ModifyActionMessageDating(ReservEntry2);
+      end;
+    END;
+
+    LOCAL PROCEDURE ModifyActionMessage@35(ReservEntry@1000 : Record "Reservation Entry");
+    BEGIN
+      GetItem(ReservEntry."Item No.");
+      if ReservEntry."Reservation Status" = ReservEntry."Reservation Status"::Surplus then begin
+        if Item."Order Tracking Policy" = Item."Order Tracking Policy"::"Tracking & Action Msg." then
+          ReservMgt.ModifyActionMessage(ReservEntry."Entry No.",0,true); // Delete related action messages
+      end else
+        if ReservEntry.Binding = ReservEntry.Binding::"Order-to-Order" then
+          if Item."Order Tracking Policy" = Item."Order Tracking Policy"::"Tracking & Action Msg." then
+            ReservMgt.ModifyActionMessage(ReservEntry."Entry No.",0,true); // Delete related action messages
+    END;
+
+    [External]
+    PROCEDURE ModifyExpectedReceiptDate@79(VAR ReservEntry@1000 : Record "Reservation Entry";NewExpectedReceiptDate@1001 : Date);
+    VAR
+      ReservEntry2@1002 : Record "Reservation Entry";
+    BEGIN
+      ReservEntry2 := ReservEntry;
+      ReservEntry2."Expected Receipt Date" := NewExpectedReceiptDate;
+      ReservEntry2."Changed By" := USERID;
+      ReservEntry2.MODIFY;
+
+      ModifyActionMessageDating(ReservEntry2);
+
+      if ReservEntry2.GET(ReservEntry2."Entry No.",not ReservEntry2.Positive) then begin // Get related entry
+        ReservEntry2."Expected Receipt Date" := NewExpectedReceiptDate;
+        ReservEntry2."Changed By" := USERID;
+        ReservEntry2.MODIFY;
+      end;
+    END;
+
+    [External]
+    PROCEDURE InitFilterAndSortingFor@19(VAR FilterReservEntry@1000 : Record "Reservation Entry";SetFilters@1001 : Boolean);
+    BEGIN
+      FilterReservEntry.RESET;
+      FilterReservEntry.SETCURRENTKEY(
+        "Source ID","Source Ref. No.","Source Type","Source Subtype",
+        "Source Batch Name","Source Prod. Order Line","Reservation Status");
+      if SetFilters then
+        FilterReservEntry.SETRANGE("Reservation Status",FilterReservEntry."Reservation Status"::Reservation);
+    END;
+
+    [External]
+    PROCEDURE InitFilterAndSortingLookupFor@64(VAR FilterReservEntry@1000 : Record "Reservation Entry";SetFilters@1001 : Boolean);
+    BEGIN
+      FilterReservEntry.RESET;
+      FilterReservEntry.SETCURRENTKEY(
+        "Source ID","Source Ref. No.","Source Type","Source Subtype",
+        "Source Batch Name","Source Prod. Order Line","Reservation Status",
+        "Shipment Date","Expected Receipt Date");
+      if SetFilters then
+        FilterReservEntry.SETRANGE("Reservation Status",FilterReservEntry."Reservation Status"::Reservation);
+    END;
+
+    [External]
+    PROCEDURE ModifyUnitOfMeasure@2(VAR ReservEntry@1000 : Record "Reservation Entry";NewQtyPerUnitOfMeasure@1001 : Decimal);
+    VAR
+      ReservEntry2@1002 : Record "Reservation Entry";
+    BEGIN
+      ReservEntry.TESTFIELD("Source Type");
+      ReservEntry2.RESET;
+      ReservEntry2.SETCURRENTKEY(
+        "Source ID","Source Ref. No.","Source Type","Source Subtype",
+        "Source Batch Name","Source Prod. Order Line","Reservation Status",
+        "Shipment Date","Expected Receipt Date");
+
+      ReservEntry2.SETRANGE("Source ID",ReservEntry."Source ID");
+      ReservEntry2.SETRANGE("Source Ref. No.",ReservEntry."Source Ref. No.");
+      ReservEntry2.SETRANGE("Source Type",ReservEntry."Source Type");
+      ReservEntry2.SETRANGE("Source Subtype",ReservEntry."Source Subtype");
+      ReservEntry2.SETRANGE("Source Batch Name",ReservEntry."Source Batch Name");
+      ReservEntry2.SETRANGE("Source Prod. Order Line",ReservEntry."Source Prod. Order Line");
+
+      if ReservEntry2.FINDSET then
+        if NewQtyPerUnitOfMeasure <> ReservEntry2."Qty. per Unit of Measure" then
+          repeat
+            ReservEntry2.VALIDATE("Qty. per Unit of Measure",NewQtyPerUnitOfMeasure);
+            ReservEntry2.MODIFY;
+          until ReservEntry2.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE ModifyActionMessageDating@3(VAR ReservEntry@1000 : Record "Reservation Entry");
+    VAR
+      ReservEntry2@1001 : Record "Reservation Entry";
+      ActionMessageEntry@1002 : Record "Action Message Entry";
+      ManufacturingSetup@1003 : Record "Manufacturing Setup";
+      FirstDate@1004 : Date;
+      NextEntryNo@1005 : Integer;
+      DateFormula@1006 : DateFormula;
+    BEGIN
+      if not (ReservEntry."Source Type" in [DATABASE::"Prod. Order Line",
+                                            DATABASE::"Purchase Line"])
+      then
+        exit;
+
+      if not ReservEntry.Positive then
+        exit;
+
+      GetItem(ReservEntry."Item No.");
+      if Item."Order Tracking Policy" <> Item."Order Tracking Policy"::"Tracking & Action Msg." then
+        exit;
+
+      ActionMessageEntry.SETCURRENTKEY(
+        "Source Type","Source Subtype","Source ID","Source Batch Name","Source Prod. Order Line","Source Ref. No.");
+      ActionMessageEntry.SETRANGE("Source Type",ReservEntry."Source Type");
+      ActionMessageEntry.SETRANGE("Source Subtype",ReservEntry."Source Subtype");
+      ActionMessageEntry.SETRANGE("Source ID",ReservEntry."Source ID");
+      ActionMessageEntry.SETRANGE("Source Batch Name",ReservEntry."Source Batch Name");
+      ActionMessageEntry.SETRANGE("Source Prod. Order Line",ReservEntry."Source Prod. Order Line");
+      ActionMessageEntry.SETRANGE("Source Ref. No.",ReservEntry."Source Ref. No.");
+      ActionMessageEntry.SETRANGE(Quantity,0);
+
+      ReservEntry2.COPY(ReservEntry);
+      ReservEntry2.SetPointerFilter;
+      ReservEntry2.SETRANGE(
+        "Reservation Status",ReservEntry2."Reservation Status"::Reservation,ReservEntry2."Reservation Status"::Tracking);
+      FirstDate := ReservMgt.FindDate(ReservEntry2,0,true);
+
+      ManufacturingSetup.GET;
+      if (FORMAT(ManufacturingSetup."Default Dampener Period") = '') or
+         ((ReservEntry.Binding = ReservEntry.Binding::"Order-to-Order") and
+          (ReservEntry."Reservation Status" = ReservEntry."Reservation Status"::Reservation))
+      then
+        EVALUATE(ManufacturingSetup."Default Dampener Period",'<0D>');
+
+      ActionMessageEntry.DELETEALL;
+
+      if FirstDate = 0D then
+        exit;
+
+      EVALUATE(DateFormula,STRSUBSTNO('%1%2','-',FORMAT(ManufacturingSetup."Default Dampener Period")));
+      if CALCDATE(DateFormula,FirstDate) <= ReservEntry."Expected Receipt Date" then
+        exit;
+
+      if ReservEntry."Planning Flexibility" = ReservEntry."Planning Flexibility"::None then
+        exit;
+
+      ActionMessageEntry.RESET;
+      if not ActionMessageEntry.FINDLAST then
+        NextEntryNo := 1
+      else
+        NextEntryNo := ActionMessageEntry."Entry No." + 1;
+      ActionMessageEntry.INIT;
+      ActionMessageEntry.TransferFromReservEntry(ReservEntry);
+      ActionMessageEntry."Entry No." := NextEntryNo;
+      ActionMessageEntry.Type := ActionMessageEntry.Type::Reschedule;
+      ActionMessageEntry."New Date" := FirstDate;
+      ActionMessageEntry."Reservation Entry" := ReservEntry2."Entry No.";
+      while not ActionMessageEntry.INSERT do
+        ActionMessageEntry."Entry No." += 1;
+    END;
+
+    [External]
+    PROCEDURE AddItemTrackingToTempRecSet@4(VAR TempReservEntry@1007 : TEMPORARY Record "Reservation Entry";VAR TrackingSpecification@1001 : Record "Tracking Specification";QtyToAdd@1002 : Decimal;VAR QtyToAddAsBlank@1005 : Decimal;SNSpecific@1004 : Boolean;LotSpecific@1003 : Boolean) : Decimal;
+    VAR
+      ReservStatus@1000 : Integer;
+    BEGIN
+      with TempReservEntry do begin
+        LostReservationQty := 0; // Late Binding
+        ReservationsModified := false;
+        SETCURRENTKEY(
+          "Source ID","Source Ref. No.","Source Type","Source Subtype",
+          "Source Batch Name","Source Prod. Order Line","Reservation Status");
+
+        // Process entry in descending order against field Reservation Status
+        for ReservStatus := "Reservation Status"::Prospect downto "Reservation Status"::Reservation do
+          ModifyItemTrkgByReservStatus(
+            TempReservEntry,TrackingSpecification,ReservStatus,
+            QtyToAdd,QtyToAddAsBlank,SNSpecific,LotSpecific);
+
+        exit(QtyToAdd);
+      end;
+    END;
+
+    LOCAL PROCEDURE ModifyItemTrkgByReservStatus@32(VAR TempReservEntry@1000 : TEMPORARY Record "Reservation Entry";VAR TrackingSpecification@1006 : Record "Tracking Specification";ReservStatus@1007 : 'Reservation,Tracking,Surplus,Prospect';VAR QtyToAdd@1005 : Decimal;VAR QtyToAddAsBlank@1004 : Decimal;SNSpecific@1003 : Boolean;LotSpecific@1002 : Boolean);
+    BEGIN
+      if QtyToAdd = 0 then
+        exit;
+
+      TempReservEntry.SETRANGE("Reservation Status",ReservStatus);
+      if TempReservEntry.FINDSET then
+        repeat
+          QtyToAdd :=
+            ModifyItemTrackingOnTempRec(
+              TempReservEntry,TrackingSpecification,QtyToAdd,
+              QtyToAddAsBlank,0,SNSpecific,LotSpecific,false,false);
+        until (TempReservEntry.NEXT = 0) or (QtyToAdd = 0);
+    END;
+
+    LOCAL PROCEDURE ModifyItemTrackingOnTempRec@8(VAR TempReservEntry@1007 : TEMPORARY Record "Reservation Entry";VAR TrackingSpecification@1001 : Record "Tracking Specification";QtyToAdd@1002 : Decimal;VAR QtyToAddAsBlank@1017 : Decimal;LastEntryNo@1000 : Integer;SNSpecific@1012 : Boolean;LotSpecific@1011 : Boolean;EntryMismatch@1016 : Boolean;CalledRecursively@1005 : Boolean) : Decimal;
+    VAR
+      TempReservEntryCopy@1018 : TEMPORARY Record "Reservation Entry";
+      ReservEntry1@1004 : Record "Reservation Entry";
+      ReservEntry2@1003 : Record "Reservation Entry";
+      TempReservEntry2@1008 : TEMPORARY Record "Reservation Entry";
+      TrackingSpecification2@1013 : Record "Tracking Specification";
+      ItemTrackingMgt@1006 : Codeunit "Item Tracking Management";
+      QtyToAdd2@1010 : Decimal;
+      ModifyPartnerRec@1009 : Boolean;
+      FromSourceID@1102601001 : Text[100];
+      ToSourceID@1102601002 : Text[100];
+    BEGIN
+      if not CalledRecursively then begin
+        TempReservEntryCopy := TempReservEntry;
+
+        if TempReservEntry."Reservation Status" in
+           [TempReservEntry."Reservation Status"::Reservation,
+            TempReservEntry."Reservation Status"::Tracking]
+        then begin
+          ModifyPartnerRec := true;
+          ReservEntry1 := TempReservEntry;
+          ReservEntry1.GET(ReservEntry1."Entry No.",not ReservEntry1.Positive);
+          TempReservEntry2 := ReservEntry1;
+          TrackingSpecification2 := TrackingSpecification;
+
+          SetItemTracking2(TempReservEntry2,TrackingSpecification2);
+
+          EntryMismatch :=
+            CheckTrackingNoMismatch(TempReservEntry,TrackingSpecification,TrackingSpecification2,SNSpecific,LotSpecific);
+          QtyToAdd2 := -QtyToAdd;
+        end;
+      end;
+
+      ReservEntry1 := TempReservEntry;
+      ReservEntry1.GET(TempReservEntry."Entry No.",TempReservEntry.Positive);
+      if ABS(TempReservEntry."Quantity (Base)") > ABS(QtyToAdd) then begin // Split entry
+        ReservEntry2 := TempReservEntry;
+        ReservEntry2.VALIDATE("Quantity (Base)",QtyToAdd);
+        ReservEntry2."Lot No." := TrackingSpecification."Lot No.";
+        ReservEntry2."Serial No." := TrackingSpecification."Serial No.";
+        ReservEntry2."Warranty Date" := TrackingSpecification."Warranty Date";
+        ReservEntry2."Expiration Date" := TrackingSpecification."Expiration Date";
+        ReservEntry2."Entry No." := LastEntryNo;
+        ReservEntry2.UpdateItemTracking;
+        if EntryMismatch then begin
+          if not CalledRecursively then
+            SaveLostReservQty(ReservEntry2); // Late Binding
+          ReservEntry2."Reservation Status" := ReservEntry2."Reservation Status"::Surplus;
+          if ReservEntry2."Source Type" = DATABASE::"Item Ledger Entry" then begin
+            GetItem(ReservEntry2."Item No.");
+            if Item."Order Tracking Policy" = Item."Order Tracking Policy"::None then
+              ReservEntry2."Quantity (Base)" := 0;
+          end;
+        end else
+          if not CalledRecursively then
+            ReservationsModified := ReservEntry2."Reservation Status" = ReservEntry2."Reservation Status"::Reservation;
+        if not CalledRecursively then
+          VerifySurplusRecord(ReservEntry2,QtyToAddAsBlank);
+        if ReservEntry2."Quantity (Base)" <> 0 then begin
+          ReservEntry2.INSERT;
+          LastEntryNo := ReservEntry2."Entry No.";
+        end;
+
+        if EntryMismatch then
+          LastEntryNo := 0;
+
+        ReservEntry1.VALIDATE("Quantity (Base)",ReservEntry1."Quantity (Base)" - QtyToAdd);
+        ReservEntry1.MODIFY;
+        TempReservEntry := ReservEntry1;
+        if not CalledRecursively then begin
+          TempReservEntry := ReservEntry2;
+          if TempReservEntry."Quantity (Base)" <> 0 then
+            TempReservEntry.INSERT;
+          TempReservEntry := ReservEntry1;
+          TempReservEntry.MODIFY;
+        end else
+          TempReservEntry := ReservEntry1;
+        QtyToAdd := 0;
+        UpdateTempSurplusEntry(ReservEntry1);
+        UpdateTempSurplusEntry(ReservEntry2);
+      end else begin // Modify entry directly
+        ReservEntry1."Qty. to Handle (Base)" := ReservEntry1."Quantity (Base)";
+        ReservEntry1."Qty. to Invoice (Base)" := ReservEntry1."Quantity (Base)";
+        ReservEntry1."Lot No." := TrackingSpecification."Lot No.";
+        ReservEntry1."Serial No." := TrackingSpecification."Serial No.";
+        ReservEntry1."Warranty Date" := TrackingSpecification."Warranty Date";
+        ReservEntry1."Expiration Date" := TrackingSpecification."Expiration Date";
+        if ReservEntry1.Positive then
+          ReservEntry1."Appl.-from Item Entry" := TrackingSpecification."Appl.-from Item Entry"
+        else
+          ReservEntry1."Appl.-to Item Entry" := TrackingSpecification."Appl.-to Item Entry";
+
+        ReservEntry1.UpdateItemTracking;
+        if EntryMismatch then begin
+          if not CalledRecursively then
+            SaveLostReservQty(ReservEntry1); // Late Binding
+          GetItem(ReservEntry1."Item No.");
+          if (ReservEntry1."Source Type" = DATABASE::"Item Ledger Entry") and
+             (Item."Order Tracking Policy" = Item."Order Tracking Policy"::None)
+          then begin
+            ReservEntry1.DELETE;
+          end else begin
+            ReservEntry1."Reservation Status" := ReservEntry1."Reservation Status"::Surplus;
+            if CalledRecursively then begin
+              ReservEntry1.DELETE;
+              ReservEntry1."Entry No." := LastEntryNo;
+              ReservEntry1.INSERT;
+              LastEntryNo := ReservEntry1."Entry No.";
+            end else
+              ReservEntry1.MODIFY;
+          end;
+        end else begin
+          if not CalledRecursively then
+            ReservationsModified := ReservEntry2."Reservation Status" = ReservEntry2."Reservation Status"::Reservation;
+          ReservEntry1.MODIFY;
+        end;
+        QtyToAdd -= ReservEntry1."Quantity (Base)";
+        if not CalledRecursively then begin
+          if VerifySurplusRecord(ReservEntry1,QtyToAddAsBlank) then
+            ReservEntry1.MODIFY;
+          if ReservEntry1."Quantity (Base)" = 0 then begin
+            TempReservEntry := ReservEntry1;
+            TempReservEntry.DELETE;
+            ReservEntry1.DELETE;
+            ReservMgt.ModifyActionMessage(ReservEntry1."Entry No.",0,true); // Delete related Action Msg.
+          end else begin
+            TempReservEntry := ReservEntry1;
+            TempReservEntry.MODIFY;
+          end;
+        end;
+        UpdateTempSurplusEntry(ReservEntry1);
+      end;
+
+      if ModifyPartnerRec then
+        ModifyItemTrackingOnTempRec(TempReservEntry2,TrackingSpecification2,
+          QtyToAdd2,QtyToAddAsBlank,LastEntryNo,SNSpecific,LotSpecific,EntryMismatch,true);
+      if (TempReservEntry."Reservation Status" = TempReservEntry."Reservation Status"::Reservation) and
+         (TempReservEntry."Source Type" = DATABASE::"Transfer Line") and
+         (TempReservEntry."Source Subtype" = 0) and
+         (TempReservEntry.Binding = TempReservEntry.Binding::"Order-to-Order") and
+         not ModifyPartnerRec
+      then begin
+        FromSourceID := ItemTrackingMgt.ComposeRowID(TempReservEntry."Source Type",
+            TempReservEntry."Source Subtype",TempReservEntry."Source ID",TempReservEntry."Source Batch Name",
+            TempReservEntry."Source Prod. Order Line",TempReservEntry."Source Ref. No.");
+        ToSourceID := ItemTrackingMgt.ComposeRowID(TempReservEntry."Source Type",
+            1,TempReservEntry."Source ID",TempReservEntry."Source Batch Name",
+            TempReservEntry."Source Prod. Order Line",TempReservEntry."Source Ref. No.");
+        ItemTrackingMgt.SynchronizeItemTracking(FromSourceID,ToSourceID,'');
+      end;
+
+      TempSurplusEntry.RESET;
+      if TempSurplusEntry.FINDSET then begin
+        GetItem(TempSurplusEntry."Item No.");
+        if Item."Order Tracking Policy" = Item."Order Tracking Policy"::"Tracking & Action Msg." then
+          repeat
+            UpdateActionMessages(TempSurplusEntry);
+          until TempSurplusEntry.NEXT = 0;
+      end;
+
+      if not CalledRecursively then
+        TempReservEntry := TempReservEntryCopy;
+
+      exit(QtyToAdd);
+    END;
+
+    LOCAL PROCEDURE VerifySurplusRecord@7(VAR ReservEntry@1000 : Record "Reservation Entry";VAR QtyToAddAsBlank@1001 : Decimal) Modified@1002 : Boolean;
+    BEGIN
+      if ReservEntry.TrackingExists then
+        exit;
+      if ReservEntry."Reservation Status" = ReservEntry."Reservation Status"::Prospect then begin
+        ReservEntry.VALIDATE("Quantity (Base)",0);
+        exit(true);
+      end;
+      if ReservEntry."Reservation Status" <> ReservEntry."Reservation Status"::Surplus then
+        exit;
+      if QtyToAddAsBlank * ReservEntry."Quantity (Base)" < 0 then
+        ERROR(Text006);
+      if ABS(QtyToAddAsBlank) < ABS(ReservEntry."Quantity (Base)") then begin
+        ReservEntry.VALIDATE("Quantity (Base)",QtyToAddAsBlank);
+        Modified := true;
+      end;
+      QtyToAddAsBlank -= ReservEntry."Quantity (Base)";
+      exit(Modified);
+    END;
+
+    LOCAL PROCEDURE UpdateTempSurplusEntry@6(VAR ReservEntry@1000 : Record "Reservation Entry");
+    BEGIN
+      if ReservEntry."Reservation Status" <> ReservEntry."Reservation Status"::Surplus then
+        exit;
+      if ReservEntry."Quantity (Base)" = 0 then
+        exit;
+      TempSurplusEntry := ReservEntry;
+      if not TempSurplusEntry.INSERT then
+        TempSurplusEntry.MODIFY;
+    END;
+
+    [External]
+    PROCEDURE CollectAffectedSurplusEntries@16(VAR TempReservEntry@1002 : TEMPORARY Record "Reservation Entry") : Boolean;
+    BEGIN
+      TempSurplusEntry.RESET;
+      TempReservEntry.RESET;
+
+      if not TempSurplusEntry.FINDSET then
+        exit(false);
+
+      repeat
+        TempReservEntry := TempSurplusEntry;
+        TempReservEntry.INSERT;
+      until TempSurplusEntry.NEXT = 0;
+
+      TempSurplusEntry.DELETEALL;
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE UpdateOrderTracking@26(VAR TempReservEntry@1000 : TEMPORARY Record "Reservation Entry");
+    VAR
+      ReservEntry@1004 : Record "Reservation Entry";
+      SurplusEntry@1002 : Record "Reservation Entry";
+      ReservationMgt@1001 : Codeunit "Reservation Management";
+      AvailabilityDate@1003 : Date;
+      FirstLoop@1005 : Boolean;
+    BEGIN
+      FirstLoop := true;
+
+      while TempReservEntry.FINDSET do begin
+        if FirstLoop then begin
+          GetItem(TempReservEntry."Item No.");
+          if Item."Order Tracking Policy" = Item."Order Tracking Policy"::None then begin
+            repeat
+              if (TempReservEntry."Source Type" = DATABASE::"Item Ledger Entry") or not TempReservEntry.TrackingExists then begin
+                ReservEntry := TempReservEntry;
+                ReservEntry.DELETE;
+              end;
+            until TempReservEntry.NEXT = 0;
+            exit;
+          end;
+          FirstLoop := false;
+        end;
+        CLEAR(SurplusEntry);
+        SurplusEntry.TESTFIELD("Entry No.",0);
+        TempReservEntry.TESTFIELD("Item No.",Item."No.");
+        if ReservEntry.GET(TempReservEntry."Entry No.",TempReservEntry.Positive) then
+          if ReservEntry."Reservation Status" = ReservEntry."Reservation Status"::Surplus then
+            ReservEntry."Quantity (Base)" := ReservationMgt.MatchSurplus(ReservEntry,SurplusEntry,
+                ReservEntry."Quantity (Base)",not ReservEntry.Positive,AvailabilityDate,Item."Order Tracking Policy");
+        TempReservEntry.DELETE;
+        if SurplusEntry."Entry No." <> 0 then begin
+          if ReservEntry."Quantity (Base)" = 0 then
+            ReservEntry.DELETE(true)
+          else begin
+            ReservEntry.VALIDATE("Quantity (Base)");
+            ReservEntry.MODIFY;
+          end;
+          TempReservEntry := SurplusEntry;
+          if not TempReservEntry.INSERT then
+            TempReservEntry.MODIFY;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdateActionMessages@10(SurplusEntry@1000 : Record "Reservation Entry");
+    VAR
+      DummyReservEntry@1002 : Record "Reservation Entry";
+      ActionMessageEntry@1001 : Record "Action Message Entry";
+    BEGIN
+      ActionMessageEntry.RESET;
+      ActionMessageEntry.SETCURRENTKEY("Reservation Entry");
+      ActionMessageEntry.SETRANGE("Reservation Entry",SurplusEntry."Entry No.");
+      if not ActionMessageEntry.ISEMPTY then
+        ActionMessageEntry.DELETEALL;
+      if not (SurplusEntry."Reservation Status" = SurplusEntry."Reservation Status"::Surplus) then
+        exit;
+      ReservMgt.IssueActionMessage(SurplusEntry,false,DummyReservEntry);
+    END;
+
+    LOCAL PROCEDURE GetItem@11(ItemNo@1000 : Code[20]);
+    BEGIN
+      if Item."No." <> ItemNo then
+        Item.GET(ItemNo);
+    END;
+
+    LOCAL PROCEDURE ItemTrackingMismatch@25(ReservEntry@1000 : Record "Reservation Entry";NewSerialNo@1003 : Code[20];NewLotNo@1002 : Code[20]) : Boolean;
+    VAR
+      ReservEntry2@1001 : Record "Reservation Entry";
+    BEGIN
+      if (NewLotNo = '') and (NewSerialNo = '') then
+        exit(false);
+
+      if ReservEntry."Reservation Status" > ReservEntry."Reservation Status"::Tracking then
+        exit(false);
+
+      ReservEntry2.GET(ReservEntry."Entry No.",not ReservEntry.Positive);
+
+      if ReservEntry2."Item Tracking" = ReservEntry2."Item Tracking"::None then
+        exit(false);
+
+      if (ReservEntry2."Lot No." <> '') and (NewLotNo <> '') then
+        if ReservEntry2."Lot No." <> NewLotNo then
+          exit(true);
+
+      if (ReservEntry2."Serial No." <> '') and (NewSerialNo <> '') then
+        if ReservEntry2."Serial No." <> NewSerialNo then
+          exit(true);
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE InitRecordSet@24(VAR ReservEntry@1000 : Record "Reservation Entry") : Boolean;
+    BEGIN
+      exit(InitRecordSet2(ReservEntry,'',''));
+    END;
+
+    [External]
+    PROCEDURE InitRecordSet2@14(VAR ReservEntry@1000 : Record "Reservation Entry";CurrSerialNo@1003 : Code[20];CurrLotNo@1004 : Code[20]) : Boolean;
+    VAR
+      IsDemand@1002 : Boolean;
+      CarriesItemTracking@1001 : Boolean;
+    BEGIN
+      // Used for combining sorting of reservation entries with priorities
+      if not ReservEntry.FINDSET then
+        exit(false);
+
+      IsDemand := ReservEntry."Quantity (Base)" < 0;
+
+      TempSortRec1.RESET;
+      TempSortRec2.RESET;
+      TempSortRec3.RESET;
+      TempSortRec4.RESET;
+
+      TempSortRec1.DELETEALL;
+      TempSortRec2.DELETEALL;
+      TempSortRec3.DELETEALL;
+      TempSortRec4.DELETEALL;
+
+      repeat
+        if not ItemTrackingMismatch(ReservEntry,CurrSerialNo,CurrLotNo) then begin
+          TempSortRec1 := ReservEntry;
+          TempSortRec1.INSERT;
+          CarriesItemTracking := TempSortRec1.TrackingExists;
+          if CarriesItemTracking then begin
+            TempSortRec2 := TempSortRec1;
+            TempSortRec2.INSERT;
+          end;
+
+          if TempSortRec1."Reservation Status" = TempSortRec1."Reservation Status"::Reservation then
+            if TempSortRec1."Expected Receipt Date" = 0D then // Inventory
+              if IsDemand then
+                if CarriesItemTracking then begin
+                  TempSortRec4 := TempSortRec1;
+                  TempSortRec4.INSERT;
+                  TempSortRec2.DELETE;
+                end else begin
+                  TempSortRec3 := TempSortRec1;
+                  TempSortRec3.INSERT;
+                end;
+        end;
+      until ReservEntry.NEXT = 0;
+
+      SetKeyAndFilters(TempSortRec1);
+      SetKeyAndFilters(TempSortRec2);
+      SetKeyAndFilters(TempSortRec3);
+      SetKeyAndFilters(TempSortRec4);
+
+      exit(NEXTRecord(ReservEntry) <> 0);
+    END;
+
+    [External]
+    PROCEDURE NEXTRecord@13(VAR ReservEntry@1000 : Record "Reservation Entry") : Integer;
+    VAR
+      Found@1001 : Boolean;
+    BEGIN
+      // Used for combining sorting of reservation entries with priorities
+      if not TempSortRec1.FINDFIRST then
+        exit(0);
+
+      if TempSortRec1."Reservation Status" = TempSortRec1."Reservation Status"::Reservation then
+        if not TempSortRec4.ISEMPTY then begin // Reservations with item tracking against inventory
+          TempSortRec4.FINDFIRST;
+          TempSortRec1 := TempSortRec4;
+          TempSortRec4.DELETE;
+          Found := true;
+        end else
+          if not TempSortRec3.ISEMPTY then begin // Reservations with no item tracking against inventory
+            TempSortRec3.FINDFIRST;
+            TempSortRec1 := TempSortRec3;
+            TempSortRec3.DELETE;
+            Found := true;
+          end;
+
+      if not Found then begin
+        TempSortRec2.SETRANGE("Reservation Status",TempSortRec1."Reservation Status");
+        if not TempSortRec2.ISEMPTY then begin // Records carrying item tracking
+          TempSortRec2.FINDFIRST;
+          TempSortRec1 := TempSortRec2;
+          TempSortRec2.DELETE;
+        end else begin
+          TempSortRec2.SETRANGE("Reservation Status");
+          if not TempSortRec2.ISEMPTY then begin // Records carrying item tracking
+            TempSortRec2.FINDFIRST;
+            TempSortRec1 := TempSortRec2;
+            TempSortRec2.DELETE;
+          end;
+        end;
+      end;
+
+      ReservEntry := TempSortRec1;
+      TempSortRec1.DELETE;
+      exit(1);
+    END;
+
+    LOCAL PROCEDURE SetKeyAndFilters@12(VAR ReservEntry@1001 : Record "Reservation Entry");
+    BEGIN
+      if ReservEntry.ISEMPTY then
+        exit;
+
+      ReservEntry.SETCURRENTKEY(
+        "Source ID","Source Ref. No.","Source Type","Source Subtype",
+        "Source Batch Name","Source Prod. Order Line","Reservation Status",
+        "Shipment Date","Expected Receipt Date");
+
+      if ReservEntry.FINDFIRST then
+        ReservEntry.SetPointerFilter;
+    END;
+
+    [External]
+    PROCEDURE RenamePointer@15(TableID@1005 : Integer;OldSubtype@1004 : Integer;OldID@1003 : Code[20];OldBatchName@1002 : Code[10];OldProdOrderLine@1001 : Integer;OldRefNo@1000 : Integer;NewSubtype@1010 : Integer;NewID@1009 : Code[20];NewBatchName@1008 : Code[10];NewProdOrderLine@1007 : Integer;NewRefNo@1006 : Integer);
+    VAR
+      ReservEntry@1011 : Record "Reservation Entry";
+      NewReservEntry@1013 : Record "Reservation Entry";
+      W@1014 : Dialog;
+      PointerFieldIsActive@1012 : ARRAY [6] OF Boolean;
+    BEGIN
+      GetActivePointerFields(TableID,PointerFieldIsActive);
+      if not PointerFieldIsActive[1] then
+        exit;
+
+      ReservEntry.SETCURRENTKEY(
+        "Source ID","Source Ref. No.","Source Type","Source Subtype",
+        "Source Batch Name","Source Prod. Order Line","Reservation Status");
+
+      if PointerFieldIsActive[3] then
+        ReservEntry.SETRANGE("Source ID",OldID)
+      else
+        ReservEntry.SETRANGE("Source ID",'');
+
+      if PointerFieldIsActive[6] then
+        ReservEntry.SETRANGE("Source Ref. No.",OldRefNo)
+      else
+        ReservEntry.SETRANGE("Source Ref. No.",0);
+
+      ReservEntry.SETRANGE("Source Type",TableID);
+
+      if PointerFieldIsActive[2] then
+        ReservEntry.SETRANGE("Source Subtype",OldSubtype)
+      else
+        ReservEntry.SETRANGE("Source Subtype",0);
+
+      if PointerFieldIsActive[4] then
+        ReservEntry.SETRANGE("Source Batch Name",OldBatchName)
+      else
+        ReservEntry.SETRANGE("Source Batch Name",'');
+
+      if PointerFieldIsActive[5] then
+        ReservEntry.SETRANGE("Source Prod. Order Line",OldProdOrderLine)
+      else
+        ReservEntry.SETRANGE("Source Prod. Order Line",0);
+
+      ReservEntry.Lock;
+
+      if ReservEntry.FINDSET then begin
+        W.OPEN(Text007);
+        repeat
+          NewReservEntry := ReservEntry;
+          if OldSubtype <> NewSubtype then
+            NewReservEntry."Source Subtype" := NewSubtype;
+          if OldID <> NewID then
+            NewReservEntry."Source ID" := NewID;
+          if OldBatchName <> NewBatchName then
+            NewReservEntry."Source Batch Name" := NewBatchName;
+          if OldProdOrderLine <> NewProdOrderLine then
+            NewReservEntry."Source Prod. Order Line" := NewProdOrderLine;
+          if OldRefNo <> NewRefNo then
+            NewReservEntry."Source Ref. No." := NewRefNo;
+          ReservEntry.DELETE;
+          NewReservEntry.INSERT;
+        until ReservEntry.NEXT = 0;
+        W.CLOSE;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetActivePointerFields@17(TableID@1000 : Integer;VAR PointerFieldIsActive@1001 : ARRAY [6] OF Boolean);
+    BEGIN
+      CLEAR(PointerFieldIsActive);
+      PointerFieldIsActive[1] := true;  // Type
+
+      case TableID of
+        DATABASE::"Sales Line",
+        DATABASE::"Purchase Line",
+        DATABASE::"Service Line",
+        DATABASE::"Job Planning Line",
+        DATABASE::"Assembly Line":
+          begin
+            PointerFieldIsActive[2] := true;  // SubType
+            PointerFieldIsActive[3] := true;  // ID
+            PointerFieldIsActive[6] := true;  // RefNo
+          end;
+        DATABASE::"Requisition Line":
+          begin
+            PointerFieldIsActive[3] := true;  // ID
+            PointerFieldIsActive[4] := true;  // BatchName
+            PointerFieldIsActive[6] := true;  // RefNo
+          end;
+        DATABASE::"Item Journal Line":
+          begin
+            PointerFieldIsActive[2] := true;  // SubType
+            PointerFieldIsActive[3] := true;  // ID
+            PointerFieldIsActive[4] := true;  // BatchName
+            PointerFieldIsActive[6] := true;  // RefNo
+          end;
+        DATABASE::"Job Journal Line":
+          begin
+            PointerFieldIsActive[2] := true;  // SubType
+            PointerFieldIsActive[3] := true;  // ID
+            PointerFieldIsActive[4] := true;  // BatchName
+            PointerFieldIsActive[6] := true;  // RefNo
+          end;
+        DATABASE::"Item Ledger Entry":
+          PointerFieldIsActive[6] := true;  // RefNo
+        DATABASE::"Prod. Order Line":
+          begin
+            PointerFieldIsActive[2] := true;  // SubType
+            PointerFieldIsActive[3] := true;  // ID
+            PointerFieldIsActive[5] := true;  // ProdOrderLine
+          end;
+        DATABASE::"Prod. Order Component",  DATABASE::"Transfer Line":
+          begin
+            PointerFieldIsActive[2] := true;  // SubType
+            PointerFieldIsActive[3] := true;  // ID
+            PointerFieldIsActive[5] := true;  // ProdOrderLine
+            PointerFieldIsActive[6] := true;  // RefNo
+          end;
+        DATABASE::"Planning Component":
+          begin
+            PointerFieldIsActive[3] := true;  // ID
+            PointerFieldIsActive[4] := true;  // BatchName
+            PointerFieldIsActive[5] := true;  // ProdOrderLine
+            PointerFieldIsActive[6] := true;  // RefNo
+          end;
+        DATABASE::"Assembly Header":
+          begin
+            PointerFieldIsActive[2] := true;  // SubType
+            PointerFieldIsActive[3] := true;  // ID
+          end;
+        else
+          PointerFieldIsActive[1] := false;  // Type is not used
+      end;
+    END;
+
+    [External]
+    PROCEDURE SplitTrackingConnection@18(ReservEntry2@1002 : Record "Reservation Entry";NewDate@1000 : Date);
+    VAR
+      ActionMessageEntry@1001 : Record "Action Message Entry";
+      ReservEntry3@1003 : Record "Reservation Entry";
+      DummyReservEntry@1005 : Record "Reservation Entry";
+    BEGIN
+      ActionMessageEntry.SETCURRENTKEY("Reservation Entry");
+      ActionMessageEntry.SETRANGE("Reservation Entry",ReservEntry2."Entry No.");
+      if not ActionMessageEntry.ISEMPTY then
+        ActionMessageEntry.DELETEALL;
+
+      if ReservEntry2.Positive then begin
+        ReservEntry2."Expected Receipt Date" := NewDate;
+        ReservEntry2."Shipment Date" := 0D;
+      end else begin
+        ReservEntry2."Shipment Date" := NewDate;
+        ReservEntry2."Expected Receipt Date" := 0D;
+      end;
+      ReservEntry2."Changed By" := USERID;
+      ReservEntry2."Reservation Status" := ReservEntry2."Reservation Status"::Surplus;
+      ReservEntry2.MODIFY;
+
+      if ReservEntry3.GET(ReservEntry2."Entry No.",not ReservEntry2.Positive) then begin // Get related entry
+        ReservEntry3.DELETE;
+        ReservEntry3."Entry No." := 0;
+        ReservEntry3."Reservation Status" := ReservEntry3."Reservation Status"::Surplus;
+        if ReservEntry3.Positive then
+          ReservEntry3."Shipment Date" := 0D
+        else
+          ReservEntry3."Expected Receipt Date" := 0D;
+        ReservEntry3.INSERT;
+      end else
+        CLEAR(ReservEntry3);
+
+      if ReservEntry2."Quantity (Base)" <> 0 then
+        ReservMgt.IssueActionMessage(ReservEntry2,false,DummyReservEntry);
+
+      if ReservEntry3."Quantity (Base)" <> 0 then
+        ReservMgt.IssueActionMessage(ReservEntry3,false,DummyReservEntry);
+    END;
+
+    LOCAL PROCEDURE SaveLostReservQty@22(ReservEntry@1000 : Record "Reservation Entry");
+    BEGIN
+      if ReservEntry."Reservation Status" = ReservEntry."Reservation Status"::Reservation then begin
+        LostReservationQty += ReservEntry."Quantity (Base)";
+        ReservationsModified := true;
+      end;
+    END;
+
+    [External]
+    PROCEDURE RetrieveLostReservQty@21(VAR LostQuantity@1000 : Decimal) ReservEntriesHaveBeenModified : Boolean;
+    BEGIN
+      LostQuantity := LostReservationQty;
+      LostReservationQty := 0;
+      ReservEntriesHaveBeenModified := ReservationsModified;
+      ReservationsModified := false;
+    END;
+
+    LOCAL PROCEDURE SetItemTracking2@23(TempReservEntry2@1000 : Record "Reservation Entry";VAR TrackingSpecification2@1001 : Record "Tracking Specification");
+    BEGIN
+      if TempReservEntry2.Binding = TempReservEntry2.Binding::"Order-to-Order" then begin
+        // only supply can change IT and demand must respect it
+        if TempReservEntry2.Positive and
+           ((TempReservEntry2."Serial No." <> TrackingSpecification2."Serial No.") or
+            (TempReservEntry2."Lot No." <> TrackingSpecification2."Lot No."))
+        then
+          ERROR(Text008,
+            TempReservEntry2.FIELDCAPTION("Serial No."),
+            TempReservEntry2.FIELDCAPTION("Lot No."),
+            TempReservEntry2.FIELDCAPTION(Binding),
+            TempReservEntry2.Binding);
+      end else begin
+        // each record brings/holds own IT
+        TrackingSpecification2."Serial No." := TempReservEntry2."Serial No.";
+        TrackingSpecification2."Lot No." := TempReservEntry2."Lot No.";
+      end;
+    END;
+
+    [External]
+    PROCEDURE ResvExistsForSalesHeader@27(VAR SalesHeader@1000 : Record "Sales Header") : Boolean;
+    VAR
+      ReservEntry@1001 : Record "Reservation Entry";
+    BEGIN
+      InitFilterAndSortingFor(ReservEntry,true);
+
+      with SalesHeader do begin
+        ReservEntry.SETRANGE("Source Type",DATABASE::"Sales Line");
+        ReservEntry.SETRANGE("Source Subtype","Document Type");
+        ReservEntry.SETRANGE("Source ID","No.");
+      end;
+
+      exit(ResvExistsForHeader(ReservEntry));
+    END;
+
+    [External]
+    PROCEDURE ResvExistsForPurchHeader@28(VAR PurchHeader@1000 : Record "Purchase Header") : Boolean;
+    VAR
+      ReservEntry@1001 : Record "Reservation Entry";
+    BEGIN
+      InitFilterAndSortingFor(ReservEntry,true);
+
+      with PurchHeader do begin
+        ReservEntry.SETRANGE("Source Type",DATABASE::"Purchase Line");
+        ReservEntry.SETRANGE("Source Subtype","Document Type");
+        ReservEntry.SETRANGE("Source ID","No.");
+      end;
+
+      exit(ResvExistsForHeader(ReservEntry));
+    END;
+
+    [External]
+    PROCEDURE ResvExistsForTransHeader@29(VAR TransHeader@1000 : Record "Transfer Header") : Boolean;
+    VAR
+      ReservEntry@1001 : Record "Reservation Entry";
+    BEGIN
+      InitFilterAndSortingFor(ReservEntry,true);
+
+      with TransHeader do begin
+        ReservEntry.SETRANGE("Source Type",DATABASE::"Transfer Line");
+        ReservEntry.SETRANGE("Source ID","No.");
+      end;
+
+      exit(ResvExistsForHeader(ReservEntry));
+    END;
+
+    LOCAL PROCEDURE ResvExistsForHeader@30(VAR ReservEntry@1000 : Record "Reservation Entry") : Boolean;
+    BEGIN
+      ReservEntry.SETRANGE("Source Batch Name",'');
+      ReservEntry.SETRANGE("Source Prod. Order Line",0);
+      ReservEntry.SETFILTER("Source Ref. No.",'>0');
+      ReservEntry.SETFILTER("Expected Receipt Date",'<>%1',0D);
+
+      exit(not ReservEntry.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE TransferLineWithItemTracking@5(ReservEntry@1000 : Record "Reservation Entry") : Boolean;
+    BEGIN
+      exit((ReservEntry."Source Type" = DATABASE::"Transfer Line") and ReservEntry.TrackingExists);
+    END;
+
+    LOCAL PROCEDURE CheckTrackingNoMismatch@34(ReservEntry@1000 : Record "Reservation Entry";TrackingSpecification@1001 : Record "Tracking Specification";TrackingSpecification2@1002 : Record "Tracking Specification";SNSpecific@1005 : Boolean;LotSpecific@1006 : Boolean) : Boolean;
+    VAR
+      SNMismatch@1003 : Boolean;
+      LotMismatch@1004 : Boolean;
+    BEGIN
+      if ReservEntry.Positive then begin
+        if TrackingSpecification2."Serial No." <> '' then
+          SNMismatch := SNSpecific and
+            (TrackingSpecification."Serial No." <> TrackingSpecification2."Serial No.");
+        if TrackingSpecification2."Lot No." <> '' then
+          LotMismatch := LotSpecific and
+            (TrackingSpecification."Lot No." <> TrackingSpecification2."Lot No.");
+      end else begin
+        if TrackingSpecification."Serial No." <> '' then
+          SNMismatch := SNSpecific and
+            (TrackingSpecification."Serial No." <> TrackingSpecification2."Serial No.");
+        if TrackingSpecification."Lot No." <> '' then
+          LotMismatch := LotSpecific and
+            (TrackingSpecification."Lot No." <> TrackingSpecification2."Lot No.");
+      end;
+      exit(LotMismatch or SNMismatch);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

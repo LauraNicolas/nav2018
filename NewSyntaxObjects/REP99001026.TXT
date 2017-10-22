@@ -1,0 +1,387 @@
+OBJECT Report 99001026 Replan Production Order
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Replan Production Order;
+    ProcessingOnly=true;
+    OnInitReport=BEGIN
+                   Direction := Direction::Backward;
+                 END;
+
+    OnPreReport=BEGIN
+                  MfgSetup.GET;
+                END;
+
+  }
+  DATASET
+  {
+    { 4824;    ;DataItem;Production Order    ;
+               DataItemTable="Production Order";
+               DataItemTableView=SORTING(Status,"No.") WHERE(Status=FILTER(..Released));
+               OnPreDataItem=BEGIN
+                               First := true;
+                               MfgSetup.GET;
+
+                               Window.OPEN(
+                                 Text000 +
+                                 Text001 +
+                                 Text002);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  if (CalcMethod = CalcMethod::"One level") and not First then
+                                    CurrReport.BREAK;
+
+                                  Window.UPDATE(1,Status);
+                                  Window.UPDATE(2,"No.");
+
+                                  if "Replan Ref. No." = '' then begin
+                                    "Replan Ref. No." := "No.";
+                                    "Replan Ref. Status" := Status;
+                                    MODIFY;
+                                  end;
+                                  if First then begin
+                                    RESET;
+                                    SETRANGE("Replan Ref. No.","Replan Ref. No.");
+                                    SETRANGE("Replan Ref. Status","Replan Ref. Status");
+                                    First := false;
+                                    if CalcMethod <> CalcMethod::"No Levels" then
+                                      DeleteProdOrders("Production Order","Low-Level Code",CalcMethod = CalcMethod::"All levels");
+                                  end;
+
+                                  DeleteUnreservedLowLevelProdOrderLines("Production Order");
+
+                                  CreateProdOrderLines.CheckStructure(
+                                    Status,"No.",Direction,true,true);
+                                END;
+                                 }
+
+    { 3581;1   ;DataItem;Prod. Order Line    ;
+               DataItemTable="Prod. Order Line";
+               DataItemTableView=SORTING(Status,"Prod. Order No.","Planning Level Code");
+               OnAfterGetRecord=VAR
+                                  ProdOrderRouteMgt@1000 : Codeunit "Prod. Order Route Management";
+                                BEGIN
+                                  BlockDynamicTracking(true);
+                                  if "Routing No." = '' then begin
+                                    CalcProdOrder.BlockDynamicTracking(true);
+                                    CalcProdOrder.Recalculate("Prod. Order Line",Direction,true);
+
+                                    MODIFY;
+                                  end else
+                                    ProdOrderRouteMgt.Calculate("Prod. Order Line");
+                                END;
+
+               DataItemLink=Status=FIELD(Status),"Prod. Order No."=FIELD("No.") }
+
+    { 4877;2   ;DataItem;Prod. Order Routing Line;
+               DataItemTable="Prod. Order Routing Line";
+               DataItemTableView=SORTING(Status,"Prod. Order No.","Routing Reference No.","Routing No.","Operation No.");
+               OnPreDataItem=BEGIN
+                               if Direction = Direction::Forward then
+                                 SETCURRENTKEY(Status,"Prod. Order No.","Routing Reference No.","Routing No.","Sequence No. (Forward)")
+                               else
+                                 SETCURRENTKEY(Status,"Prod. Order No.","Routing Reference No.","Routing No.","Sequence No. (Backward)");
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  ProdOrderLine@1000 : Record "Prod. Order Line";
+                                  CalcProdOrderRtngLine@1001 : Codeunit "Calculate Routing Line";
+                                  PlanLevel@1002 : Integer;
+                                BEGIN
+                                  if "Routing Status" = "Routing Status"::Finished then
+                                    CurrReport.SKIP;
+
+                                  PlanLevel := "Prod. Order Line"."Planning Level Code";
+
+                                  ProdOrderLine.SETCURRENTKEY(Status,"Prod. Order No.","Routing No.");
+                                  ProdOrderLine.SETRANGE(Status,Status);
+                                  ProdOrderLine.SETRANGE("Prod. Order No.","Prod. Order No.");
+                                  ProdOrderLine.SETRANGE("Routing No.","Routing No.");
+                                  if ProdOrderLine.FIND('-') then
+                                    repeat
+                                      if PlanLevel < ProdOrderLine."Planning Level Code" then
+                                        PlanLevel := ProdOrderLine."Planning Level Code";
+                                    until (ProdOrderLine.NEXT = 0) or (PlanLevel > "Prod. Order Line"."Planning Level Code");
+
+                                  ProdOrderLine.RESET;
+
+                                  if PlanLevel = "Prod. Order Line"."Planning Level Code" then begin
+                                    if Direction = Direction::Forward then begin
+                                      "Starting Date" := "Prod. Order Line"."Starting Date";
+                                      "Starting Time" := "Prod. Order Line"."Starting Time";
+                                      MODIFY;
+                                    end else begin
+                                      "Ending Date" := "Prod. Order Line"."Ending Date";
+                                      "Ending Time" := "Prod. Order Line"."Ending Time";
+                                      MODIFY;
+                                    end;
+                                    CalcProdOrderRtngLine.CalculateRoutingLine("Prod. Order Routing Line",Direction,true);
+                                  end;
+                                  MODIFY;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                CalcProdOrder.CalculateProdOrderDates("Prod. Order Line",true);
+                              END;
+
+               DataItemLink=Status=FIELD(Status),"Prod. Order No."=FIELD("Prod. Order No."),"Routing No."=FIELD("Routing No.") }
+
+    { 7771;2   ;DataItem;Prod. Order Component;
+               DataItemTable="Prod. Order Component";
+               DataItemTableView=SORTING(Status,"Prod. Order No.","Prod. Order Line No.","Line No.");
+               OnPreDataItem=BEGIN
+                               SETFILTER("Item No.",'<>%1','');
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  SKU@1001 : TEMPORARY Record "Stockkeeping Unit";
+                                  StockkeepingUnit@1009 : Record "Stockkeeping Unit";
+                                  CompItem@1000 : Record Item;
+                                  MainProdOrder@1002 : Record "Production Order";
+                                  ProdOrder@1003 : Record "Production Order";
+                                  ProdOrderLine@1004 : Record "Prod. Order Line";
+                                  AvailabilityMgt@1005 : Codeunit "Available Management";
+                                  CreateProdOrderLines@1006 : Codeunit "Create Prod. Order Lines";
+                                  GetPlanningParameters@1011 : Codeunit "Planning-Get Parameters";
+                                  InvtProfileOffsetting@1010 : Codeunit "Inventory Profile Offsetting";
+                                  ReqQty@1007 : Decimal;
+                                  WithInventory@1008 : Boolean;
+                                BEGIN
+                                  BlockDynamicTracking(true);
+                                  VALIDATE("Routing Link Code");
+                                  MODIFY;
+
+                                  CALCFIELDS("Reserved Qty. (Base)");
+                                  if "Reserved Qty. (Base)" = "Remaining Qty. (Base)" then
+                                    exit;
+
+                                  CompItem.GET("Item No.");
+
+                                  if CalcMethod = CalcMethod::"No Levels" then
+                                    CurrReport.BREAK;
+
+                                  CompItem.SETRANGE("Variant Filter","Variant Code");
+                                  CompItem.SETRANGE("Location Filter","Location Code");
+                                  CompItem.SETRANGE("Date Filter",0D,"Due Date");
+
+                                  if StockkeepingUnit.GET("Location Code","Item No.","Variant Code") then
+                                    WithInventory := StockkeepingUnit."Include Inventory"
+                                  else
+                                    WithInventory := CompItem."Include Inventory";
+
+                                  if WithInventory then
+                                    CompItem.CALCFIELDS(Inventory);
+
+                                  AvailabilityMgt.ExpectedQtyOnHand(CompItem,true,0,ReqQty,"Due Date");
+
+                                  if ReqQty >= 0 then
+                                    CurrReport.SKIP;
+
+                                  ReqQty := ABS(ReqQty);
+                                  if ReqQty > "Remaining Qty. (Base)" then
+                                    ReqQty := "Remaining Qty. (Base)";
+
+                                  GetPlanningParameters.AtSKU(SKU,"Item No.","Variant Code","Location Code");
+                                  ReqQty += InvtProfileOffsetting.AdjustReorderQty(ReqQty,SKU,0,0);
+
+                                  if ReqQty = 0 then
+                                    CurrReport.SKIP;
+
+                                  MainProdOrder.GET("Production Order".Status,"Prod. Order No.");
+
+                                  if CompItem."Replenishment System" = CompItem."Replenishment System"::"Prod. Order" then begin
+                                    ProdOrder.Status := MainProdOrder.Status;
+                                    ProdOrder."Replan Ref. No." := MainProdOrder."Replan Ref. No.";
+                                    ProdOrder."Replan Ref. Status" := MainProdOrder."Replan Ref. Status";
+                                    ProdOrder.INSERT(true);
+
+                                    ProdOrder."Starting Date" := WORKDATE;
+                                    ProdOrder."Creation Date" := WORKDATE;
+                                    ProdOrder."Starting Time" := MfgSetup."Normal Starting Time";
+                                    ProdOrder."Ending Time" := MfgSetup."Normal Ending Time";
+                                    ProdOrder."Due Date" := "Due Date";
+                                    ProdOrder."Ending Date" := "Due Date";
+                                    ProdOrder."Low-Level Code" := MainProdOrder."Low-Level Code" + 1;
+                                    ProdOrder."Source Type" := ProdOrder."Source Type"::Item;
+                                    ProdOrder.VALIDATE("Source No.","Item No.");
+                                    ProdOrder.VALIDATE(Quantity,ReqQty);
+                                    ProdOrder."Location Code" := "Location Code";
+                                    ProdOrder.MODIFY;
+                                    CreateProdOrderLines.Copy(ProdOrder,1,"Variant Code",true);
+                                    ProdOrderLine.SETRANGE(Status,ProdOrder.Status);
+                                    ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrder."No.");
+                                    ProdOrderLine.FIND('-');
+
+                                    MODIFY;
+                                    ProdOrderLine.MODIFY;
+
+                                    ProdOrderLine.SETRANGE(Status,Status);
+                                    ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrder."No.");
+
+                                    if ProdOrderLine.FIND('-') then
+                                      repeat
+                                        CalcProdOrder.BlockDynamicTracking(true);
+                                        CalcProdOrder.Recalculate(ProdOrderLine,1,true);
+                                      until ProdOrderLine.NEXT = 0;
+
+                                    MODIFY;
+                                  end;
+                                  ReservMgt.SetProdOrderComponent("Prod. Order Component");
+                                  ReservMgt.AutoTrack("Remaining Qty. (Base)");
+                                END;
+
+               DataItemLink=Status=FIELD(Status),"Prod. Order No."=FIELD("Prod. Order No."),"Prod. Order Line No."=FIELD("Line No.") }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  Name=Container1900000001;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  Name=Options;
+                  CaptionML=ENU=Options }
+
+      { 6   ;2   ;Field     ;
+                  Name=Scheduling Direction;
+                  CaptionML=ENU=Scheduling Direction;
+                  ToolTipML=ENU=Specifies if you want the scheduling to be replanned forward or backward.;
+                  OptionCaptionML=ENU=Forward,Back;
+                  ApplicationArea=#Manufacturing;
+                  SourceExpr=Direction }
+
+      { 1   ;2   ;Field     ;
+                  Name=Plan;
+                  CaptionML=ENU=Plan;
+                  ToolTipML=ENU=Specifies whether the planning is to take place over one or all levels of the production BOM.;
+                  OptionCaptionML=ENU=No Levels,One Level,All Levels;
+                  ApplicationArea=#Manufacturing;
+                  SourceExpr=CalcMethod }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Replanning Production Orders...\\';
+      Text001@1001 : TextConst 'ENU=Status         #1##########\';
+      Text002@1002 : TextConst 'ENU=No.            #2##########';
+      MfgSetup@1003 : Record "Manufacturing Setup";
+      CalcProdOrder@1005 : Codeunit "Calculate Prod. Order";
+      CreateProdOrderLines@1006 : Codeunit "Create Prod. Order Lines";
+      ReservMgt@1007 : Codeunit "Reservation Management";
+      UOMMgt@1004 : Codeunit "Unit of Measure Management";
+      Window@1010 : Dialog;
+      Direction@1011 : 'Forward,Backward';
+      CalcMethod@1012 : '"No Levels","One level","All levels"';
+      First@1013 : Boolean;
+
+    [External]
+    PROCEDURE InitializeRequest@1(NewDirection@1000 : Option;NewCalcMethod@1001 : Option);
+    BEGIN
+      Direction := NewDirection;
+      CalcMethod := NewCalcMethod;
+    END;
+
+    LOCAL PROCEDURE DeleteProdOrders@2(ProdOrder@1000 : Record "Production Order";LowLevelCode@1001 : Integer;AllLevels@1002 : Boolean);
+    VAR
+      ProdOrderComponent@1003 : Record "Prod. Order Component";
+    BEGIN
+      if LowLevelCode > 99 then
+        exit;
+
+      ProdOrder.SETCURRENTKEY("Low-Level Code");
+      ProdOrder.SETRANGE("Replan Ref. No.",ProdOrder."Replan Ref. No.");
+      ProdOrder.SETRANGE("Replan Ref. Status",ProdOrder."Replan Ref. Status");
+      ProdOrder.SETRANGE("Low-Level Code",LowLevelCode + 1);
+
+      ProdOrderComponent.SETRANGE(Status,ProdOrder.Status);
+      ProdOrderComponent.SETRANGE("Prod. Order No.",ProdOrder."No.");
+      if ProdOrderComponent.FINDSET then
+        repeat
+          ProdOrder.SETRANGE("Source No.",ProdOrderComponent."Item No.");
+          if ProdOrder.FINDFIRST then begin
+            if AllLevels then
+              DeleteProdOrders(ProdOrder,LowLevelCode + 1,AllLevels);
+            ProdOrder.DELETE(true);
+          end;
+        until ProdOrderComponent.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DeleteUnreservedLowLevelProdOrderLines@3(ProdOrder@1002 : Record "Production Order");
+    VAR
+      ProdOrderLine@1001 : Record "Prod. Order Line";
+      ExtReservedQtyBase@1000 : Decimal;
+    BEGIN
+      with ProdOrderLine do begin
+        SetCalledFromComponent(true);
+        LOCKTABLE;
+        SETRANGE(Status,ProdOrder.Status);
+        SETRANGE("Prod. Order No.",ProdOrder."No.");
+        if FIND('-') then
+          repeat
+            if "Planning Level Code" > 0 then begin
+              CALCFIELDS("Reserved Qty. (Base)");
+              if "Reserved Qty. (Base)" = 0 then
+                DELETE(true)
+              else begin
+                ExtReservedQtyBase := CalcQtyReservedFromExternalDemand(ProdOrderLine,DATABASE::"Prod. Order Component");
+                VALIDATE(Quantity,UOMMgt.CalcQtyFromBase(ExtReservedQtyBase,"Qty. per Unit of Measure"));
+                if Quantity > 0 then
+                  MODIFY(true)
+                else
+                  DELETE(true);
+              end;
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcQtyReservedFromExternalDemand@13(ProdOrderLine@1008 : Record "Prod. Order Line";SourceType@1006 : Integer) ReservedQtyBase : Decimal;
+    VAR
+      ReservEntry@1007 : Record "Reservation Entry";
+      ReservEntryFrom@1001 : Record "Reservation Entry";
+      ProdOrderLineReserve@1000 : Codeunit "Prod. Order Line-Reserve";
+    BEGIN
+      ReservedQtyBase := 0;
+
+      with ReservEntry do begin
+        SETCURRENTKEY("Source ID","Source Ref. No.","Source Type","Source Subtype","Source Batch Name");
+        SETRANGE("Reservation Status","Reservation Status"::Reservation);
+        ProdOrderLineReserve.FilterReservFor(ReservEntry,ProdOrderLine);
+
+        if FINDSET then
+          repeat
+            ReservEntryFrom.GET("Entry No.",not Positive);
+            if (ReservEntryFrom."Source Type" <> SourceType) or (ReservEntryFrom."Source ID" <> ProdOrderLine."Prod. Order No.") or
+               (ReservEntryFrom."Source Subtype" <> ProdOrderLine.Status)
+            then
+              ReservedQtyBase += "Quantity (Base)";
+          until NEXT = 0;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

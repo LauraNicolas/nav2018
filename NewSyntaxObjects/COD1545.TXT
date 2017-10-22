@@ -1,0 +1,200 @@
+OBJECT Codeunit 1545 Workflow Webhook Notification
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    EventSubscriberInstance=Manual;
+    Permissions=TableData "Workflow Webhook Notification"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      RetryCounter@1000 : Integer;
+      WaitTime@1001 : Integer;
+      IsInitialized@1002 : Boolean;
+      NotInitializedErr@1003 : TextConst 'ENU=The code unit is not initialized.';
+      ArgumentNullErr@1004 : TextConst '@@@="%1=Argument";ENU=%1 cannot be null.';
+      ArgumentEmptyErr@1005 : TextConst '@@@="%1=Argument";ENU=%1 cannot be empty.';
+      DataIDTxt@1006 : TextConst 'ENU=DataID';
+      WorkflowStepInstanceIDTxt@1007 : TextConst 'ENU=WorkflowStepInstanceID';
+      NotificationUrlTxt@1008 : TextConst 'ENU=NotificationUrl';
+
+    PROCEDURE Initialize@39(RetryCount@1000 : Integer;WaitTimeInMs@1001 : Integer);
+    BEGIN
+      RetryCounter := RetryCount;
+      WaitTime := WaitTimeInMs;
+      IsInitialized := true;
+    END;
+
+    PROCEDURE SendNotification@1(DataID@1000 : GUID;WorkflowStepInstanceID@1006 : GUID;NotificationUrl@1001 : Text;RequestedByUserEmail@1002 : Text);
+    VAR
+      WorkflowWebhookNotificationTable@1007 : Record "Workflow Webhook Notification";
+    BEGIN
+      if IsInitialized = false then
+        ERROR(NotInitializedErr);
+
+      if ISNULLGUID(DataID) then
+        ERROR(ArgumentNullErr,DataIDTxt);
+
+      if ISNULLGUID(WorkflowStepInstanceID) then
+        ERROR(ArgumentNullErr,WorkflowStepInstanceIDTxt);
+
+      if NotificationUrl = '' then
+        ERROR(ArgumentEmptyErr,NotificationUrlTxt);
+
+      GetNotificationRecord(WorkflowWebhookNotificationTable,WorkflowStepInstanceID);
+      Notify(DataID,WorkflowStepInstanceID,NotificationUrl,RequestedByUserEmail,WorkflowWebhookNotificationTable);
+    END;
+
+    PROCEDURE StartNotification@11(WorkflowStepInstanceID@1000 : GUID);
+    VAR
+      WorkflowWebhookNotificationTable@1001 : Record "Workflow Webhook Notification";
+    BEGIN
+      GetNotificationRecord(WorkflowWebhookNotificationTable,WorkflowStepInstanceID);
+      WorkflowWebhookNotificationTable.Status := WorkflowWebhookNotificationTable.Status::Pending;
+      WorkflowWebhookNotificationTable.MODIFY(true);
+    END;
+
+    LOCAL PROCEDURE Notify@13(DataID@1002 : GUID;WorkflowStepInstanceID@1001 : GUID;NotificationUrl@1000 : Text;RequestedByUserEmail@1011 : Text;VAR WorkflowWebhookNotification@1007 : Record "Workflow Webhook Notification");
+    VAR
+      DotNetExceptionHandler@1005 : Codeunit "DotNet Exception Handler";
+      Exception@1006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Exception";
+      HttpWebResponse@1004 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      WebException@1003 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebException";
+      Retry@1008 : Boolean;
+      ErrorMessage@1009 : Text;
+      ErrorDetails@1010 : Text;
+    BEGIN
+      RetryCounter := RetryCounter - 1;
+      if OnPostNotificationRequest(DataID,WorkflowStepInstanceID,NotificationUrl,RequestedByUserEmail) then begin
+        WorkflowWebhookNotification.Status := WorkflowWebhookNotification.Status::Sent;
+        WorkflowWebhookNotification.SetErrorMessage('');
+        WorkflowWebhookNotification.SetErrorDetails('');
+        WorkflowWebhookNotification.MODIFY(true);
+        COMMIT;
+      end else begin
+        Exception := GETLASTERROROBJECT;
+
+        ErrorMessage := Exception.Message;
+        ErrorDetails := Exception.StackTrace;
+
+        if RetryCounter > 0 then begin
+          Retry := true;
+          DotNetExceptionHandler.Collect;
+          if DotNetExceptionHandler.CastToType(WebException,GETDOTNETTYPE(WebException)) then begin
+            HttpWebResponse := WebException.Response;
+            if not ISNULL(HttpWebResponse) then
+              if not ISNULL(HttpWebResponse.StatusCode) then begin
+                ErrorDetails := STRSUBSTNO('%1 - StatusCode: %2 - StatusDescription: %3',ErrorDetails,
+                    FORMAT(HttpWebResponse.StatusCode),HttpWebResponse.StatusDescription);
+                Retry := ShouldRetry(HttpWebResponse.StatusCode,HttpWebResponse.StatusDescription);
+              end;
+          end;
+        end;
+
+        if Retry then begin
+          SLEEP(WaitTime);
+          Notify(DataID,WorkflowStepInstanceID,NotificationUrl,RequestedByUserEmail,WorkflowWebhookNotification);
+        end else begin
+          WorkflowWebhookNotification.SetErrorMessage(ErrorMessage);
+          WorkflowWebhookNotification.SetErrorDetails(ErrorDetails);
+          WorkflowWebhookNotification.Status := WorkflowWebhookNotification.Status::Failed;
+          WorkflowWebhookNotification.MODIFY(true);
+          COMMIT;
+        end;
+      end;
+    END;
+
+    [TryFunction]
+    [Integration(TRUE,TRUE)]
+    PROCEDURE OnPostNotificationRequest@23(DataID@1002 : GUID;WorkflowStepInstanceID@1001 : GUID;NotificationUrl@1000 : Text;RequestedByUserEmail@1003 : Text);
+    BEGIN
+    END;
+
+    [EventSubscriber(Codeunit,1545,OnPostNotificationRequest)]
+    [TryFunction]
+    LOCAL PROCEDURE PostNotificationRequest@2(VAR Sender@1000 : Codeunit "Workflow Webhook Notification";DataID@1001 : GUID;WorkflowStepInstanceID@1002 : GUID;NotificationUrl@1003 : Text;RequestedByUserEmail@1004 : Text);
+    BEGIN
+      PostHttpRequest(DataID,WorkflowStepInstanceID,NotificationUrl,RequestedByUserEmail);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE PostHttpRequest@16(DataID@1002 : GUID;WorkflowStepInstanceID@1001 : GUID;NotificationUrl@1000 : Text;RequestedByUserEmail@1009 : Text);
+    VAR
+      TypeHelper@1003 : Codeunit "Type Helper";
+      HttpWebRequest@1007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";
+      HttpWebResponse@1006 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      RequestStr@1005 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      StreamWriter@1004 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+      Encoding@1008 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+    BEGIN
+      HttpWebRequest := HttpWebRequest.Create(NotificationUrl);
+      HttpWebRequest.Method := 'POST';
+      HttpWebRequest.ContentType('application/json');
+
+      RequestStr := HttpWebRequest.GetRequestStream;
+      StreamWriter := StreamWriter.StreamWriter(RequestStr,Encoding.ASCII);
+      StreamWriter.Write('{"Row Id":"' + TypeHelper.GetGuidAsString(DataID) +
+        '","Workflow Step Id":"' + TypeHelper.GetGuidAsString(WorkflowStepInstanceID) +
+        '","Requested By User Email":"' + RequestedByUserEmail + '"}');
+      StreamWriter.Flush;
+      StreamWriter.Close;
+      StreamWriter.Dispose;
+
+      HttpWebResponse := HttpWebRequest.GetResponse;
+      HttpWebResponse.Close; // close connection
+      HttpWebResponse.Dispose; // cleanup of IDisposable
+    END;
+
+    LOCAL PROCEDURE FindNotificationRecord@3(VAR WorkflowWebhookNotificationTable@1002 : Record "Workflow Webhook Notification";WorkflowStepInstanceID@1000 : GUID) : Boolean;
+    BEGIN
+      // Fetch current notification record
+      WorkflowWebhookNotificationTable.SETRANGE("Workflow Step Instance ID",WorkflowStepInstanceID);
+      exit(WorkflowWebhookNotificationTable.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE GetNotificationRecord@4(VAR WorkflowWebhookNotificationTable@1000 : Record "Workflow Webhook Notification";WorkflowStepInstanceID@1001 : GUID);
+    BEGIN
+      if not FindNotificationRecord(WorkflowWebhookNotificationTable,WorkflowStepInstanceID) then begin
+        // Create Notification Record
+        WorkflowWebhookNotificationTable.INIT;
+        WorkflowWebhookNotificationTable."Workflow Step Instance ID" := WorkflowStepInstanceID;
+        WorkflowWebhookNotificationTable.Status := WorkflowWebhookNotificationTable.Status::Pending;
+        WorkflowWebhookNotificationTable.INSERT(true);
+        FindNotificationRecord(WorkflowWebhookNotificationTable,WorkflowStepInstanceID);
+      end;
+    END;
+
+    PROCEDURE GetCurrentRetryCounter@30() : Integer;
+    BEGIN
+      exit(RetryCounter);
+    END;
+
+    PROCEDURE ShouldRetry@55(StatusCode@1000 : Integer;StatusDescription@1001 : Text) : Boolean;
+    BEGIN
+      if StatusCode = 404 then
+        if (StatusDescription = 'WorkflowNotFound') or (StatusDescription = 'WorkflowTriggerVersionNotFound') then
+          exit(false);
+
+      if (StatusCode = 400) and (StatusDescription = 'WorkflowTriggerIsNotEnabled') then
+        exit(false);
+
+      exit(true);
+    END;
+
+    BEGIN
+    {
+      // Intended to be called from a Task (background session)
+    }
+    END.
+  }
+}
+

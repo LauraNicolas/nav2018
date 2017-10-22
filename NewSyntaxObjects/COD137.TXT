@@ -1,0 +1,118 @@
+OBJECT Codeunit 137 OCR Inc. Doc. via Job Queue
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Job Queue Entry";
+    Permissions=TableData "Job Queue Entry"=rimd;
+    OnRun=VAR
+            IncomingDocument@1000 : Record "Incoming Document";
+            SendIncomingDocumentToOCR@1003 : Codeunit "Send Incoming Document to OCR";
+            RecRef@1001 : RecordRef;
+          BEGIN
+            TESTFIELD("Record ID to Process");
+            RecRef.GET("Record ID to Process");
+            RecRef.SETTABLE(IncomingDocument);
+            IncomingDocument.FIND;
+            SetJobQueueStatus(IncomingDocument,IncomingDocument."Job Queue Status"::Processing);
+
+            case IncomingDocument."OCR Status" of
+              IncomingDocument."OCR Status"::Ready:
+                if not SendIncomingDocumentToOCR.TrySendToOCR(IncomingDocument) then begin
+                  SetJobQueueStatus(IncomingDocument,IncomingDocument."Job Queue Status"::Error);
+                  ERROR(GETLASTERRORTEXT);
+                end;
+              IncomingDocument."OCR Status"::Sent,IncomingDocument."OCR Status"::"Awaiting Verification":
+                if not (SendIncomingDocumentToOCR.TryRetrieveFromOCR(IncomingDocument) and
+                        (IncomingDocument."OCR Status" = IncomingDocument."OCR Status"::Success))
+                then begin
+                  SetJobQueueStatus(IncomingDocument,IncomingDocument."Job Queue Status"::Processing);
+                  ERROR(GETLASTERRORTEXT);
+                end;
+            end;
+
+            SetJobQueueStatus(IncomingDocument,IncomingDocument."Job Queue Status"::" ");
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OCRSendReceiveDescriptionTxt@1000 : TextConst '@@@="%1 = document type, %2 = document number. Example: Post Purchase Order 1234.";ENU=OCR Incoming Document No. %1.';
+      IncomingDocumentScheduledMsg@1001 : TextConst '@@@="%1=document type, %2=number, e.g. Order 123  or Invoice 234.";ENU=Incoming Document No. %1 has been scheduled for OCR.';
+      WrongJobQueueStatusErr@1003 : TextConst '@@@="%1 = document type, %2 = document number. Example: Purchase Order 1234 or Invoice 1234.";ENU=Incoming Document No. %1 cannot be processed because it has already been scheduled for OCR. Choose the Remove from Job Queue action to reset the job queue status and then OCR again.';
+
+    LOCAL PROCEDURE SetJobQueueStatus@5(VAR IncomingDocument@1001 : Record "Incoming Document";NewStatus@1000 : Option);
+    BEGIN
+      IncomingDocument.LOCKTABLE;
+      if IncomingDocument.FIND then begin
+        IncomingDocument."Job Queue Status" := NewStatus;
+        IncomingDocument.MODIFY;
+        COMMIT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE EnqueueIncomingDoc@1(VAR IncomingDocument@1000 : Record "Incoming Document");
+    BEGIN
+      with IncomingDocument do begin
+        if not ("Job Queue Status" in ["Job Queue Status"::" ","Job Queue Status"::Error]) then
+          ERROR(WrongJobQueueStatusErr,"Entry No.");
+        if Status = Status::New then
+          CODEUNIT.RUN(CODEUNIT::"Release Incoming Document",IncomingDocument);
+
+        "Job Queue Status" := "Job Queue Status"::Scheduled;
+        "Job Queue Entry ID" := EnqueueJobEntry(IncomingDocument);
+        MODIFY;
+        MESSAGE(IncomingDocumentScheduledMsg,"Entry No.");
+      end;
+    END;
+
+    LOCAL PROCEDURE EnqueueJobEntry@3(IncomingDocument@1001 : Record "Incoming Document") : GUID;
+    VAR
+      JobQueueEntry@1000 : Record "Job Queue Entry";
+    BEGIN
+      with JobQueueEntry do begin
+        "Object Type to Run" := "Object Type to Run"::Codeunit;
+        "Object ID to Run" := CODEUNIT::"OCR Inc. Doc. via Job Queue";
+        "Record ID to Process" := IncomingDocument.RECORDID;
+        // Set Timeout to prevent the Job Queue from hanging (eg. as a result of a printer dialog).
+        "Maximum No. of Attempts to Run" := 10;
+        "Rerun Delay (sec.)" := 5;
+        Priority := 1000;
+        Description :=
+          COPYSTR(STRSUBSTNO(OCRSendReceiveDescriptionTxt,IncomingDocument."Entry No."),1,MAXSTRLEN(Description));
+        "Notify On Success" := true;
+        CODEUNIT.RUN(CODEUNIT::"Job Queue - Enqueue",JobQueueEntry);
+        exit(ID);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CancelQueueEntry@2(VAR IncomingDocument@1000 : Record "Incoming Document");
+    VAR
+      JobQueueEntry@1002 : Record "Job Queue Entry";
+    BEGIN
+      with IncomingDocument do begin
+        if "Job Queue Status" = "Job Queue Status"::" " then
+          exit;
+        if not ISNULLGUID("Job Queue Entry ID") then
+          JobQueueEntry.SETRANGE(ID,"Job Queue Entry ID");
+        JobQueueEntry.SETRANGE("Record ID to Process",RECORDID);
+        if not JobQueueEntry.ISEMPTY then
+          JobQueueEntry.DELETEALL(true);
+        "Job Queue Status" := "Job Queue Status"::" ";
+        MODIFY;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

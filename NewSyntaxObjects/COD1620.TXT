@@ -1,0 +1,274 @@
+OBJECT Codeunit 1620 PEPPOL Validation
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Sales Header";
+    OnRun=BEGIN
+            CheckSalesDocument(Rec);
+            CheckSalesDocumentLines(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      WrongLengthErr@1006 : TextConst 'ENU=should be %1 characters long';
+      EmptyUnitOfMeasureErr@1004 : TextConst '@@@=Parameter 1 - document type (Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order), 2 - document number;ENU=You must specify a valid International Standard Code for the Unit of Measure for %1.';
+      MissingDescriptionErr@1003 : TextConst '@@@=Parameter 1 - document type (), 2 - document number;ENU=Description field is empty. \Field must be filled if you want to send the posted document as an electronic document.';
+      MissingCustGLNOrVATRegNoErr@1000 : TextConst 'ENU=You must specify either GLN or VAT Registration No. for Customer %1.';
+      MissingCompInfGLNOrVATRegNoErr@1001 : TextConst '@@@="%1=Company Information";ENU=You must specify either GLN or VAT Registration No. in %1.';
+      PEPPOLManagement@1002 : Codeunit "PEPPOL Management";
+
+    LOCAL PROCEDURE CheckSalesDocument@38(SalesHeader@1000 : Record "Sales Header");
+    VAR
+      CompanyInfo@1001 : Record "Company Information";
+      GLSetup@1002 : Record "General Ledger Setup";
+      ResponsibilityCenter@1004 : Record "Responsibility Center";
+      Customer@1003 : Record Customer;
+    BEGIN
+      with SalesHeader do begin
+        CompanyInfo.GET;
+        GLSetup.GET;
+
+        CheckCurrencyCode("Currency Code");
+
+        if "Responsibility Center" <> '' then begin
+          ResponsibilityCenter.GET("Responsibility Center");
+          ResponsibilityCenter.TESTFIELD(Name);
+          ResponsibilityCenter.TESTFIELD(Address);
+          ResponsibilityCenter.TESTFIELD(City);
+          ResponsibilityCenter.TESTFIELD("Post Code");
+          ResponsibilityCenter.TESTFIELD("Country/Region Code");
+        end else begin
+          CompanyInfo.TESTFIELD(Name);
+          CompanyInfo.TESTFIELD(Address);
+          CompanyInfo.TESTFIELD(City);
+          CompanyInfo.TESTFIELD("Post Code");
+        end;
+
+        CompanyInfo.TESTFIELD("Country/Region Code");
+        CheckCountryRegionCode(CompanyInfo."Country/Region Code");
+
+        if CompanyInfo.GLN + CompanyInfo."VAT Registration No." = '' then
+          ERROR(MissingCompInfGLNOrVATRegNoErr,CompanyInfo.TABLECAPTION);
+        TESTFIELD("Bill-to Name");
+        TESTFIELD("Bill-to Address");
+        TESTFIELD("Bill-to City");
+        TESTFIELD("Bill-to Post Code");
+        TESTFIELD("Bill-to Country/Region Code");
+        CheckCountryRegionCode("Bill-to Country/Region Code");
+
+        if ("Document Type" in ["Document Type"::Invoice,"Document Type"::Order,"Document Type"::"Credit Memo"]) and
+           Customer.GET("Bill-to Customer No.")
+        then
+          if (Customer.GLN + Customer."VAT Registration No.") = '' then
+            ERROR(MissingCustGLNOrVATRegNoErr,Customer."No.");
+
+        if "Document Type" = "Document Type"::"Credit Memo" then
+          if "Applies-to Doc. Type" = "Applies-to Doc. Type"::Invoice then
+            TESTFIELD("Applies-to Doc. No.");
+
+        if "Document Type" in ["Document Type"::Invoice,"Document Type"::Order] then
+          TESTFIELD("Shipment Date");
+        TESTFIELD("Ship-to Address");
+        TESTFIELD("Ship-to City");
+        TESTFIELD("Ship-to Post Code");
+        TESTFIELD("Ship-to Country/Region Code");
+        CheckCountryRegionCode("Ship-to Country/Region Code");
+        TESTFIELD("Due Date");
+
+        if CompanyInfo.IBAN = '' then
+          CompanyInfo.TESTFIELD("Bank Account No.");
+        CompanyInfo.TESTFIELD("Bank Branch No.");
+        CompanyInfo.TESTFIELD("SWIFT Code");
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckSalesDocumentLines@1500(SalesHeader@1000 : Record "Sales Header");
+    VAR
+      SalesLine@1100 : Record "Sales Line";
+    BEGIN
+      with SalesLine do begin
+        SETRANGE("Document Type",SalesHeader."Document Type");
+        SETRANGE("Document No.",SalesHeader."No.");
+        if FINDSET then
+          repeat
+            CheckSalesDocumentLine(SalesLine)
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckSalesDocumentLine@2(SalesLine@1000 : Record "Sales Line");
+    VAR
+      GeneralLedgerSetup@1005 : Record "General Ledger Setup";
+      VATPostingSetup@1004 : Record "VAT Posting Setup";
+      PEPPOLMgt@1001 : Codeunit "PEPPOL Management";
+      unitCode@1002 : Text;
+      unitCodeListID@1003 : Text;
+    BEGIN
+      PEPPOLMgt.GetLineUnitCodeInfo(SalesLine,unitCode,unitCodeListID);
+      with SalesLine do begin
+        if (Type <> Type::" ") and ("No." <> '') and (unitCode = '') then
+          ERROR(EmptyUnitOfMeasureErr,"Unit of Measure Code");
+        if Description = '' then
+          ERROR(MissingDescriptionErr);
+
+        if (Type <> Type::" ") and ("No." <> '') then begin // Not a description line
+          if GeneralLedgerSetup.UseVat then
+            TESTFIELD("VAT Prod. Posting Group");
+          VATPostingSetup.GET("VAT Bus. Posting Group","VAT Prod. Posting Group");
+          VATPostingSetup.TESTFIELD("Tax Category");
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckSalesInvoice@1(SalesInvoiceHeader@1000 : Record "Sales Invoice Header");
+    VAR
+      SalesInvoiceLine@1003 : Record "Sales Invoice Line";
+      SalesHeader@1001 : Record "Sales Header";
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      SalesHeader.TRANSFERFIELDS(SalesInvoiceHeader);
+      SalesHeader."Document Type" := SalesHeader."Document Type"::Invoice;
+      CheckSalesDocument(SalesHeader);
+      SalesInvoiceLine.SETRANGE("Document No.",SalesInvoiceHeader."No.");
+      if SalesInvoiceLine.FINDSET then
+        repeat
+          SalesLine.TRANSFERFIELDS(SalesInvoiceLine);
+          SalesLine."Document Type" := SalesLine."Document Type"::Invoice;
+          CheckSalesDocumentLine(SalesLine);
+        until SalesInvoiceLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE CheckSalesCreditMemo@3(SalesCrMemoHeader@1000 : Record "Sales Cr.Memo Header");
+    VAR
+      SalesCrMemoLine@1003 : Record "Sales Cr.Memo Line";
+      SalesHeader@1001 : Record "Sales Header";
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      SalesHeader.TRANSFERFIELDS(SalesCrMemoHeader);
+      SalesHeader."Document Type" := SalesHeader."Document Type"::"Credit Memo";
+      CheckSalesDocument(SalesHeader);
+      SalesCrMemoLine.SETRANGE("Document No.",SalesCrMemoHeader."No.");
+      if SalesCrMemoLine.FINDSET then
+        repeat
+          SalesLine.TRANSFERFIELDS(SalesCrMemoLine);
+          SalesLine."Document Type" := SalesLine."Document Type"::"Credit Memo";
+          CheckSalesDocumentLine(SalesLine);
+        until SalesCrMemoLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE CheckServiceHeader@7(ServiceHeader@1000 : Record "Service Header");
+    VAR
+      ServiceLine@1003 : Record "Service Line";
+      SalesHeader@1001 : Record "Sales Header";
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      PEPPOLManagement.TransferHeaderToSalesHeader(ServiceHeader,SalesHeader);
+      SalesHeader."Shipment Date" := SalesHeader."Posting Date";
+      CheckSalesDocument(SalesHeader);
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      if ServiceLine.FINDSET then
+        repeat
+          PEPPOLManagement.TransferLineToSalesLine(ServiceLine,SalesLine);
+          CheckSalesDocumentLine(SalesLine);
+        until ServiceLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE CheckServiceInvoice@5(ServiceInvoiceHeader@1000 : Record "Service Invoice Header");
+    VAR
+      ServiceInvoiceLine@1003 : Record "Service Invoice Line";
+      SalesHeader@1001 : Record "Sales Header";
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      PEPPOLManagement.TransferHeaderToSalesHeader(ServiceInvoiceHeader,SalesHeader);
+      SalesHeader."Document Type" := SalesHeader."Document Type"::Invoice;
+      SalesHeader."Shipment Date" := SalesHeader."Posting Date";
+      CheckSalesDocument(SalesHeader);
+      ServiceInvoiceLine.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      if ServiceInvoiceLine.FINDSET then
+        repeat
+          PEPPOLManagement.TransferLineToSalesLine(ServiceInvoiceLine,SalesLine);
+          SalesLine."Document Type" := SalesLine."Document Type"::Invoice;
+          CheckSalesDocumentLine(SalesLine);
+        until ServiceInvoiceLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE CheckServiceCreditMemo@4(ServiceCrMemoHeader@1000 : Record "Service Cr.Memo Header");
+    VAR
+      ServiceCrMemoLine@1003 : Record "Service Cr.Memo Line";
+      SalesHeader@1001 : Record "Sales Header";
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      PEPPOLManagement.TransferHeaderToSalesHeader(ServiceCrMemoHeader,SalesHeader);
+      SalesHeader."Document Type" := SalesHeader."Document Type"::"Credit Memo";
+      SalesHeader."Shipment Date" := SalesHeader."Posting Date";
+      CheckSalesDocument(SalesHeader);
+      ServiceCrMemoLine.SETRANGE("Document No.",ServiceCrMemoHeader."No.");
+      if ServiceCrMemoLine.FINDSET then
+        repeat
+          PEPPOLManagement.TransferLineToSalesLine(ServiceCrMemoLine,SalesLine);
+          SalesLine."Document Type" := SalesLine."Document Type"::"Credit Memo";
+          CheckSalesDocumentLine(SalesLine);
+        until ServiceCrMemoLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckCurrencyCode@41(CurrencyCode@1000 : Code[10]);
+    VAR
+      GLSetup@1001 : Record "General Ledger Setup";
+      Currency@1002 : Record Currency;
+      MaxCurrencyCodeLength@1003 : Integer;
+    BEGIN
+      MaxCurrencyCodeLength := 3;
+
+      if CurrencyCode = '' then begin
+        GLSetup.GET;
+        GLSetup.TESTFIELD("LCY Code");
+        CurrencyCode := GLSetup."LCY Code";
+      end;
+
+      if not Currency.GET(CurrencyCode) then begin
+        if STRLEN(CurrencyCode) <> MaxCurrencyCodeLength then
+          GLSetup.FIELDERROR("LCY Code",STRSUBSTNO(WrongLengthErr,MaxCurrencyCodeLength));
+        exit; // Valid
+      end;
+
+      if STRLEN(Currency.Code) <> MaxCurrencyCodeLength then
+        Currency.FIELDERROR(Code,STRSUBSTNO(WrongLengthErr,MaxCurrencyCodeLength));
+    END;
+
+    LOCAL PROCEDURE CheckCountryRegionCode@44(CountryRegionCode@1000 : Code[10]);
+    VAR
+      CountryRegion@1001 : Record "Country/Region";
+      CompanyInfo@1002 : Record "Company Information";
+      MaxCountryCodeLength@1003 : Integer;
+    BEGIN
+      MaxCountryCodeLength := 2;
+
+      if CountryRegionCode = '' then begin
+        CompanyInfo.GET;
+        CompanyInfo.TESTFIELD("Country/Region Code");
+        CountryRegionCode := CompanyInfo."Country/Region Code";
+      end;
+
+      CountryRegion.GET(CountryRegionCode);
+      if STRLEN(CountryRegion.Code) <> MaxCountryCodeLength then
+        CountryRegion.FIELDERROR(Code,STRSUBSTNO(WrongLengthErr,MaxCountryCodeLength));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -2,9 +2,9 @@ OBJECT Table 39 Purchase Line
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -237,8 +237,9 @@ OBJECT Table 39 Purchase Line
                                                                                                                                         ELSE IF (Type=CONST(Item)) Item;
                                                    OnValidate=VAR
                                                                 TempPurchLine@1003 : TEMPORARY Record 39;
+                                                                FindRecordMgt@1000 : Codeunit 703;
                                                               BEGIN
-                                                                "No." := FindNoFromTypedValue("No.");
+                                                                "No." := FindRecordMgt.FindNoFromTypedValue(Type,"No.",NOT "System-Created Entry");
 
                                                                 TestStatusOpen;
                                                                 TESTFIELD("Qty. Rcd. Not Invoiced",0);
@@ -355,7 +356,10 @@ OBJECT Table 39 Purchase Line
                                                                 IF JobTaskIsSet THEN BEGIN
                                                                   CreateTempJobJnlLine(TRUE);
                                                                   UpdateJobPrices;
-                                                                END
+                                                                END;
+
+                                                                PostingSetupMgt.CheckGenPostingSetupPurchAccount("Gen. Bus. Posting Group","Gen. Prod. Posting Group");
+                                                                PostingSetupMgt.CheckVATPostingSetupPurchAccount("VAT Bus. Posting Group","VAT Prod. Posting Group");
                                                               END;
 
                                                    ValidateTableRelation=No;
@@ -397,6 +401,7 @@ OBJECT Table 39 Purchase Line
                                                                   ReservePurchLine.VerifyChange(Rec,xRec);
                                                                   WhseValidateSourceLine.PurchaseLineVerifyChange(Rec,xRec);
                                                                   UpdateWithWarehouseReceive;
+                                                                  PostingSetupMgt.CheckInvtPostingSetupInventoryAccount("Location Code","Posting Group");
                                                                 END;
                                                                 "Bin Code" := '';
 
@@ -429,8 +434,6 @@ OBJECT Table 39 Purchase Line
                                                                 IF NOT TrackingBlocked THEN
                                                                   CheckDateConflict.PurchLineCheck(Rec,CurrFieldNo <> 0);
 
-                                                                CheckReservationDateConflict(FIELDNO("Expected Receipt Date"));
-
                                                                 IF "Expected Receipt Date" <> 0D THEN
                                                                   VALIDATE(
                                                                     "Planned Receipt Date",
@@ -443,16 +446,15 @@ OBJECT Table 39 Purchase Line
 
                                                    AccessByPermission=TableData 120=R;
                                                    CaptionML=ENU=Expected Receipt Date }
-    { 11  ;   ;Description         ;Text50        ;TableRelation=IF (Type=CONST(" ")) "Standard Text".Description
-                                                                 ELSE IF (Type=CONST(G/L Account),
-                                                                          System-Created Entry=CONST(No)) "G/L Account".Name WHERE (Direct Posting=CONST(Yes),
-                                                                                                                                    Account Type=CONST(Posting),
-                                                                                                                                    Blocked=CONST(No))
-                                                                                                                                    ELSE IF (Type=CONST(G/L Account),
-                                                                                                                                             System-Created Entry=CONST(Yes)) "G/L Account".Name
-                                                                                                                                             ELSE IF (Type=CONST(Fixed Asset)) "Fixed Asset".Description
-                                                                                                                                             ELSE IF (Type=CONST("Charge (Item)")) "Item Charge".Description
-                                                                                                                                             ELSE IF (Type=CONST(Item)) Item.Description;
+    { 11  ;   ;Description         ;Text50        ;TableRelation=IF (Type=CONST(G/L Account),
+                                                                     System-Created Entry=CONST(No)) "G/L Account" WHERE (Direct Posting=CONST(Yes),
+                                                                                                                          Account Type=CONST(Posting),
+                                                                                                                          Blocked=CONST(No))
+                                                                                                                          ELSE IF (Type=CONST(G/L Account),
+                                                                                                                                   System-Created Entry=CONST(Yes)) "G/L Account"
+                                                                                                                                   ELSE IF (Type=CONST(Item)) Item
+                                                                                                                                   ELSE IF (Type=CONST(Fixed Asset)) "Fixed Asset"
+                                                                                                                                   ELSE IF (Type=CONST("Charge (Item)")) "Item Charge";
                                                    OnValidate=VAR
                                                                 Item@1000 : Record 27;
                                                                 ApplicationAreaSetup@1003 : Record 9178;
@@ -488,10 +490,11 @@ OBJECT Table 39 Purchase Line
                                                                       END;
                                                                   END;
                                                                 END ELSE
-                                                                  IF FindRecordMgt.FindRecordByDescription(ReturnValue,Type,Description) = 1 THEN BEGIN
-                                                                    CurrFieldNo := FIELDNO("No.");
-                                                                    VALIDATE("No.",COPYSTR(ReturnValue,1,MAXSTRLEN("No.")));
-                                                                  END;
+                                                                  IF "No." = '' THEN
+                                                                    IF FindRecordMgt.FindRecordByDescription(ReturnValue,Type,Description) = 1 THEN BEGIN
+                                                                      CurrFieldNo := FIELDNO("No.");
+                                                                      VALIDATE("No.",COPYSTR(ReturnValue,1,MAXSTRLEN("No.")));
+                                                                    END;
 
                                                                 IF ("No." = '') AND GUIALLOWED AND ApplicationAreaSetup.IsFoundationEnabled THEN
                                                                   IF "Document Type" IN ["Document Type"::Order] THEN
@@ -672,7 +675,9 @@ OBJECT Table 39 Purchase Line
                                                    AutoFormatType=2;
                                                    AutoFormatExpr="Currency Code";
                                                    CaptionClass=GetCaptionClass(FIELDNO("Direct Unit Cost")) }
-    { 23  ;   ;Unit Cost (LCY)     ;Decimal       ;OnValidate=BEGIN
+    { 23  ;   ;Unit Cost (LCY)     ;Decimal       ;OnValidate=VAR
+                                                                IndirectCostPercent@1000 : Decimal;
+                                                              BEGIN
                                                                 TestStatusOpen;
                                                                 TESTFIELD("No.");
                                                                 TESTFIELD(Quantity);
@@ -706,12 +711,16 @@ OBJECT Table 39 Purchase Line
 
                                                                 IF ("Direct Unit Cost" <> 0) AND
                                                                    ("Direct Unit Cost" <> ("Line Discount Amount" / Quantity))
-                                                                THEN
-                                                                  "Indirect Cost %" :=
+                                                                THEN BEGIN
+                                                                  IndirectCostPercent :=
                                                                     ROUND(
                                                                       (UnitCostCurrency - "Direct Unit Cost" + "Line Discount Amount" / Quantity) /
-                                                                      ("Direct Unit Cost" - "Line Discount Amount" / Quantity) * 100,0.00001)
-                                                                ELSE
+                                                                      ("Direct Unit Cost" - "Line Discount Amount" / Quantity) * 100,0.00001);
+                                                                  IF IndirectCostPercentCheck(IndirectCostPercent) THEN
+                                                                    "Indirect Cost %" := IndirectCostPercent
+                                                                  ELSE
+                                                                    ERROR(CannotBeNegativeErr,FIELDCAPTION("Indirect Cost %"));
+                                                                END ELSE
                                                                   "Indirect Cost %" := 0;
 
                                                                 UpdateSalesCost;
@@ -904,14 +913,16 @@ OBJECT Table 39 Purchase Line
 
                                                    AccessByPermission=TableData 27=R;
                                                    CaptionML=ENU=Appl.-to Item Entry }
-    { 40  ;   ;Shortcut Dimension 1 Code;Code20   ;TableRelation="Dimension Value".Code WHERE (Global Dimension No.=CONST(1));
+    { 40  ;   ;Shortcut Dimension 1 Code;Code20   ;TableRelation="Dimension Value".Code WHERE (Global Dimension No.=CONST(1),
+                                                                                               Blocked=CONST(No));
                                                    OnValidate=BEGIN
                                                                 ValidateShortcutDimCode(1,"Shortcut Dimension 1 Code");
                                                               END;
 
                                                    CaptionML=ENU=Shortcut Dimension 1 Code;
                                                    CaptionClass='1,2,1' }
-    { 41  ;   ;Shortcut Dimension 2 Code;Code20   ;TableRelation="Dimension Value".Code WHERE (Global Dimension No.=CONST(2));
+    { 41  ;   ;Shortcut Dimension 2 Code;Code20   ;TableRelation="Dimension Value".Code WHERE (Global Dimension No.=CONST(2),
+                                                                                               Blocked=CONST(No));
                                                    OnValidate=BEGIN
                                                                 ValidateShortcutDimCode(2,"Shortcut Dimension 2 Code");
                                                               END;
@@ -1503,6 +1514,10 @@ OBJECT Table 39 Purchase Line
     { 141 ;   ;A. Rcd. Not Inv. Ex. VAT (LCY);Decimal;
                                                    CaptionML=ENU=A. Rcd. Not Inv. Ex. VAT (LCY) }
     { 480 ;   ;Dimension Set ID    ;Integer       ;TableRelation="Dimension Set Entry";
+                                                   OnValidate=BEGIN
+                                                                DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+                                                              END;
+
                                                    OnLookup=BEGIN
                                                               ShowDimensions;
                                                             END;
@@ -2251,7 +2266,6 @@ OBJECT Table 39 Purchase Line
 
                                                                 IF NOT TrackingBlocked THEN
                                                                   CheckDateConflict.PurchLineCheck(Rec,CurrFieldNo <> 0);
-                                                                CheckReservationDateConflict(FIELDNO("Planned Receipt Date"));
                                                               END;
 
                                                    AccessByPermission=TableData 99000880=R;
@@ -2283,7 +2297,6 @@ OBJECT Table 39 Purchase Line
 
                                                                 IF NOT TrackingBlocked THEN
                                                                   CheckDateConflict.PurchLineCheck(Rec,CurrFieldNo <> 0);
-                                                                CheckReservationDateConflict(FIELDNO("Order Date"));
                                                               END;
 
                                                    AccessByPermission=TableData 120=R;
@@ -2499,8 +2512,7 @@ OBJECT Table 39 Purchase Line
                                                    Clustered=Yes }
     { No ;Document No.,Line No.,Document Type      }
     {    ;Document Type,Type,No.,Variant Code,Drop Shipment,Location Code,Expected Receipt Date;
-                                                   SumIndexFields=Outstanding Qty. (Base);
-                                                   MaintainSIFTIndex=No }
+                                                   SumIndexFields=Outstanding Qty. (Base) }
     {    ;Document Type,Pay-to Vendor No.,Currency Code;
                                                    SumIndexFields=Outstanding Amount,Amt. Rcd. Not Invoiced,Outstanding Amount (LCY),Amt. Rcd. Not Invoiced (LCY);
                                                    MaintainSIFTIndex=No }
@@ -2594,6 +2606,7 @@ OBJECT Table 39 Purchase Line
       CalendarMgmt@1032 : Codeunit 7600;
       CheckDateConflict@1013 : Codeunit 99000815;
       DeferralUtilities@1081 : Codeunit 1720;
+      PostingSetupMgt@1031 : Codeunit 48;
       TrackingBlocked@1070 : Boolean;
       StatusCheckSuspended@1073 : Boolean;
       GLSetupRead@1075 : Boolean;
@@ -2614,10 +2627,10 @@ OBJECT Table 39 Purchase Line
       Text054@1055 : TextConst 'ENU=The quantity that you are trying to invoice is greater than the quantity in return shipment %1.';
       AnotherItemWithSameDescrQst@1033 : TextConst '@@@="%1=Item no., %2=item description";ENU=Item No. %1 also has the description "%2".\Do you want to change the current item no. to %1?';
       AnotherChargeItemWithSameDescQst@1029 : TextConst '@@@="%1=Item charge no., %2=item charge description";ENU=Item charge No. %1 also has the description "%2".\Do you want to change the current item charge no. to %1?';
-      DataConflictQst@1094 : TextConst 'ENU=The change creates a date conflict with existing reservations. Do you want to continue?';
       PurchSetupRead@1096 : Boolean;
       CannotFindDescErr@1035 : TextConst '@@@="%1 = Type caption %2 = Description";ENU=Cannot find %1 with Description %2.\\Make sure to use the correct type.';
       CommentLbl@1024 : TextConst 'ENU=Comment';
+      CannotBeNegativeErr@1036 : TextConst '@@@=%1 - Field Caption;ENU=The %1 field cannot be negative on the purchase line.';
 
     [External]
     PROCEDURE InitOutstanding@16();
@@ -2863,6 +2876,8 @@ OBJECT Table 39 Purchase Line
       "Product Group Code" := Item."Product Group Code";
       "Allow Item Charge Assignment" := TRUE;
       PrepaymentMgt.SetPurchPrepaymentPct(Rec,PurchHeader."Posting Date");
+      IF Item.Type = Item.Type::Inventory THEN
+        PostingSetupMgt.CheckInvtPostingSetupInventoryAccount("Location Code","Posting Group");
 
       IF Item."Price Includes VAT" THEN BEGIN
         IF NOT VATPostingSetup.GET(Item."VAT Bus. Posting Gr. (Price)",Item."VAT Prod. Posting Group") THEN
@@ -3064,8 +3079,8 @@ OBJECT Table 39 Purchase Line
       VATBaseAmount@1003 : Decimal;
       LineAmountChanged@1002 : Boolean;
     BEGIN
-      IF CurrFieldNo <> FIELDNO("Allow Invoice Disc.") THEN
-        TESTFIELD(Type);
+      IF Type = Type::" " THEN
+        EXIT;
       GetPurchHeader;
 
       VATBaseAmount := "VAT Base Amount";
@@ -3497,9 +3512,9 @@ OBJECT Table 39 Purchase Line
       "Shortcut Dimension 2 Code" := '';
       GetPurchHeader;
       "Dimension Set ID" :=
-        DimMgt.GetDefaultDimID(
-          TableID,No,SourceCodeSetup.Purchases,"Shortcut Dimension 1 Code","Shortcut Dimension 2 Code",
-          PurchHeader."Dimension Set ID",DATABASE::Vendor);
+        DimMgt.GetRecDefaultDimID(
+          Rec,CurrFieldNo,TableID,No,SourceCodeSetup.Purchases,
+          "Shortcut Dimension 1 Code","Shortcut Dimension 2 Code",PurchHeader."Dimension Set ID",DATABASE::Vendor);
       DimMgt.UpdateGlobalDimFromDimSetID("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
     END;
 
@@ -4449,7 +4464,9 @@ OBJECT Table 39 Purchase Line
 
       GetPurchHeader;
       LineAmount := ROUND(QtyToHandle * "Direct Unit Cost",Currency."Amount Rounding Precision");
-      LineDiscAmount := ROUND("Line Discount Amount" * QtyToHandle / Quantity,Currency."Amount Rounding Precision");
+      LineDiscAmount :=
+        ROUND(
+          LineAmount * "Line Discount %" / 100,Currency."Amount Rounding Precision");
       EXIT(LineAmount - LineDiscAmount);
     END;
 
@@ -4840,20 +4857,6 @@ OBJECT Table 39 Purchase Line
       EXIT(Item.Type = Item.Type::Service);
     END;
 
-    LOCAL PROCEDURE CheckReservationDateConflict@1502(DateFieldNo@1000 : Integer);
-    VAR
-      ReservEntry@1002 : Record 337;
-      PurchLineReserve@1001 : Codeunit 99000834;
-    BEGIN
-      IF CurrFieldNo = DateFieldNo THEN
-        IF PurchLineReserve.FindReservEntry(Rec,ReservEntry) THEN BEGIN
-          ReservEntry.SETFILTER("Shipment Date",'<%1',"Expected Receipt Date");
-          IF NOT ReservEntry.ISEMPTY THEN
-            IF NOT CONFIRM(DataConflictQst) THEN
-              ERROR('');
-        END;
-    END;
-
     LOCAL PROCEDURE ReservEntryExist@78() : Boolean;
     VAR
       NewReservEntry@1000 : Record 337;
@@ -5086,18 +5089,6 @@ OBJECT Table 39 Purchase Line
       TESTFIELD("Return Shipment No.",'');
     END;
 
-    LOCAL PROCEDURE FindNoFromTypedValue@87(Value@1000 : Code[20]) : Code[20];
-    BEGIN
-      CASE Type OF
-        Type::Item:
-          EXIT(Item.GetItemNo(Value));
-        Type::"Charge (Item)":
-          EXIT(ItemCharge.GetItemChargeNo(Value));
-        ELSE
-          EXIT("No.");
-      END;
-    END;
-
     [External]
     PROCEDURE CanEditUnitOfMeasureCode@115() : Boolean;
     VAR
@@ -5238,6 +5229,17 @@ OBJECT Table 39 Purchase Line
     PROCEDURE AssignedItemCharge@119() : Boolean;
     BEGIN
       EXIT((Type = Type::"Charge (Item)") AND ("No." <> '') AND ("Qty. to Assign" < Quantity));
+    END;
+
+    LOCAL PROCEDURE IndirectCostPercentCheck@87(IndirectCostPercent@1000 : Decimal) : Boolean;
+    BEGIN
+      EXIT(
+        (IndirectCostPercent >= 0) AND
+        ("Document Type" IN
+         ["Document Type"::Quote,"Document Type"::Order,"Document Type"::Invoice,"Document Type"::"Blanket Order"]) OR
+        (IndirectCostPercent <= 0) AND
+        ("Document Type" IN ["Document Type"::"Credit Memo","Document Type"::"Return Order"])
+        );
     END;
 
     BEGIN

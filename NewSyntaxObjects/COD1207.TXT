@@ -1,0 +1,245 @@
+OBJECT Codeunit 1207 Pmt Export Mgt Vend Ledg Entry
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Vendor Ledger Entry"=rm;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ExportAgainQst@1002 : TextConst 'ENU=One or more of the selected lines has already been exported. Do you want to export it again?';
+      ProgressMsg@1001 : TextConst 'ENU=Processing line no. #1######.';
+      PaymentExportMgt@1003 : Codeunit "Payment Export Mgt";
+
+    [Internal]
+    PROCEDURE ExportVendorPaymentFileYN@23(VAR VendorLedgerEntry@1000 : Record "Vendor Ledger Entry");
+    BEGIN
+      if IsVendorLedgerEntryExported(VendorLedgerEntry) or IsAppliedToVendorPaymentExported(VendorLedgerEntry) then
+        if not CONFIRM(ExportAgainQst) then
+          exit;
+      ExportVendorPaymentFile(VendorLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE IsVendorLedgerEntryExported@26(VAR VendorLedgerEntry@1000 : Record "Vendor Ledger Entry") : Boolean;
+    VAR
+      VendorLedgerEntry2@1001 : Record "Vendor Ledger Entry";
+    BEGIN
+      // In case of selecting more than one line on the page.
+      if VendorLedgerEntry.MARKEDONLY then
+        with VendorLedgerEntry2 do begin
+          MARKEDONLY(true);
+          SETRANGE("Exported to Payment File",true);
+          exit(not ISEMPTY);
+        end;
+
+      // In case of selecting one line on the page or passing a variable directly.
+      if VendorLedgerEntry.HASFILTER then
+        with VendorLedgerEntry2 do begin
+          COPYFILTERS(VendorLedgerEntry);
+          SETRANGE("Exported to Payment File",true);
+          exit(not ISEMPTY);
+        end;
+
+      // The case of a record not being passed via the user interface is not supported.
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE IsAppliedToVendorPaymentExported@32(VAR VendorLedgerEntry@1000 : Record "Vendor Ledger Entry") : Boolean;
+    VAR
+      AppliedToVendLedgerEntry@1002 : Record "Vendor Ledger Entry";
+      ExportVendLedgerEntry@1001 : Record "Vendor Ledger Entry";
+    BEGIN
+      case true of
+        VendorLedgerEntry.MARKEDONLY:
+          ExportVendLedgerEntry.MARKEDONLY(true);
+        VendorLedgerEntry.HASFILTER:
+          begin
+            ExportVendLedgerEntry.COPYFILTERS(VendorLedgerEntry);
+            ExportVendLedgerEntry.FINDSET;
+          end;
+        else
+          ExportVendLedgerEntry.COPY(VendorLedgerEntry);
+      end;
+
+      AppliedToVendLedgerEntry.SETRANGE("Exported to Payment File",true);
+      repeat
+        AppliedToVendLedgerEntry.SETRANGE("Closed by Entry No.",ExportVendLedgerEntry."Entry No.");
+        if not AppliedToVendLedgerEntry.ISEMPTY then
+          exit(true);
+      until ExportVendLedgerEntry.NEXT = 0;
+
+      exit(false);
+    END;
+
+    [Internal]
+    PROCEDURE ExportVendorPaymentFile@115(VAR VendorLedgerEntry@1000 : Record "Vendor Ledger Entry");
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"Pmt. Export Vend. Ledger Check",VendorLedgerEntry);
+      ExportVendLedgerEntry(VendorLedgerEntry);
+      SetExportFlagOnVendorLedgerEntries(VendorLedgerEntry);
+    END;
+
+    [Internal]
+    PROCEDURE ExportVendLedgerEntry@17(VAR VendorLedgerEntry@1000 : Record "Vendor Ledger Entry");
+    VAR
+      VendorLedgerEntry2@1004 : Record "Vendor Ledger Entry";
+      DataExch@1001 : Record "Data Exch.";
+      Window@1003 : Dialog;
+      LineNo@1002 : Integer;
+      LineAmount@1219 : Decimal;
+      TransferDate@1218 : Date;
+      TotalAmount@1217 : Decimal;
+      HandledGenJnlDataExchLine@1213 : Boolean;
+      HandledPaymentExportVendLedgerEntry@1214 : Boolean;
+    BEGIN
+      VendorLedgerEntry2.COPY(VendorLedgerEntry);
+      PaymentExportMgt.CreateDataExch(DataExch,VendorLedgerEntry2."Bal. Account No.");
+      Window.OPEN(ProgressMsg);
+      repeat
+        LineNo += 1;
+        Window.UPDATE(1,LineNo);
+        OnBeforeCreateVendLedgerDataExchLine(DataExch,VendorLedgerEntry2,LineNo,LineAmount,
+          TotalAmount,TransferDate,HandledGenJnlDataExchLine);
+        if not HandledGenJnlDataExchLine then
+          CreateVendLedgerDataExchLine(DataExch."Entry No.",VendorLedgerEntry2,LineNo);
+      until VendorLedgerEntry2.NEXT = 0;
+      Window.CLOSE;
+
+      OnBeforePaymentExportVendorLedgerEntry(VendorLedgerEntry."Bal. Account No.",DataExch."Entry No.",
+        LineNo,TotalAmount,TransferDate,HandledPaymentExportVendLedgerEntry);
+      if not HandledPaymentExportVendLedgerEntry then
+        PaymentExportMgt.ExportToFile(DataExch."Entry No.")
+    END;
+
+    LOCAL PROCEDURE CreateVendLedgerDataExchLine@18(DataExchEntryNo@1000 : Integer;VendorLedgerEntry@1001 : Record "Vendor Ledger Entry";LineNo@1002 : Integer);
+    VAR
+      PaymentExportData@1003 : Record "Payment Export Data";
+    BEGIN
+      with VendorLedgerEntry do begin
+        PreparePaymentExportDataVLE(PaymentExportData,VendorLedgerEntry,DataExchEntryNo,LineNo);
+        PaymentExportMgt.CreatePaymentLines(PaymentExportData);
+      end;
+    END;
+
+    [External]
+    PROCEDURE PreparePaymentExportDataVLE@13(VAR TempPaymentExportData@1000 : TEMPORARY Record "Payment Export Data";VendorLedgerEntry@1001 : Record "Vendor Ledger Entry";DataExchEntryNo@1003 : Integer;LineNo@1007 : Integer);
+    VAR
+      GeneralLedgerSetup@1002 : Record "General Ledger Setup";
+      Vendor@1006 : Record Vendor;
+      VendorBankAccount@1008 : Record "Vendor Bank Account";
+      PaymentMethod@1009 : Record "Payment Method";
+      BankAccount@1010 : Record "Bank Account";
+      BankExportImportSetup@1004 : Record "Bank Export/Import Setup";
+    BEGIN
+      GeneralLedgerSetup.GET;
+      Vendor.GET(VendorLedgerEntry."Vendor No.");
+
+      with TempPaymentExportData do begin
+        BankAccount.GET(VendorLedgerEntry."Bal. Account No.");
+        BankAccount.GetBankExportImportSetup(BankExportImportSetup);
+        SetPreserveNonLatinCharacters(BankExportImportSetup."Preserve Non-Latin Characters");
+
+        INIT;
+        "Data Exch Entry No." := DataExchEntryNo;
+        "Sender Bank Account Code" := VendorLedgerEntry."Bal. Account No.";
+
+        if VendorBankAccount.GET(VendorLedgerEntry."Vendor No.",VendorLedgerEntry."Recipient Bank Account") then begin
+          if BankAccount."Country/Region Code" = VendorBankAccount."Country/Region Code" then begin
+            VendorLedgerEntry.CALCFIELDS("Amount (LCY)");
+            Amount := VendorLedgerEntry."Amount (LCY)";
+            "Currency Code" := GeneralLedgerSetup."LCY Code";
+          end else begin
+            VendorLedgerEntry.CALCFIELDS(Amount);
+            Amount := VendorLedgerEntry.Amount;
+            "Currency Code" := GeneralLedgerSetup.GetCurrencyCode(VendorLedgerEntry."Currency Code");
+          end;
+
+          "Recipient Bank Acc. No." :=
+            COPYSTR(VendorBankAccount.GetBankAccountNo,1,MAXSTRLEN("Recipient Bank Acc. No."));
+          "Recipient Reg. No." := VendorBankAccount."Bank Branch No.";
+          "Recipient Acc. No." := VendorBankAccount."Bank Account No.";
+          "Recipient Bank Country/Region" := VendorBankAccount."Country/Region Code";
+          "Recipient Bank Name" := COPYSTR(VendorBankAccount.Name,1,35);
+          "Recipient Bank Address" := COPYSTR(VendorBankAccount.Address,1,35);
+          "Recipient Bank City" := COPYSTR(VendorBankAccount."Post Code" + VendorBankAccount.City,1,35);
+          "Recipient Bank BIC" := VendorBankAccount."SWIFT Code";
+        end else
+          if VendorLedgerEntry."Creditor No." <> '' then begin
+            VendorLedgerEntry.CALCFIELDS("Amount (LCY)");
+            Amount := VendorLedgerEntry."Amount (LCY)";
+            "Currency Code" := GeneralLedgerSetup."LCY Code";
+          end;
+
+        "Recipient Name" := COPYSTR(Vendor.Name,1,35);
+        "Recipient Address" := COPYSTR(Vendor.Address,1,35);
+        "Recipient City" := COPYSTR(Vendor."Post Code" + ' ' + Vendor.City,1,35);
+        "Transfer Date" := VendorLedgerEntry."Posting Date";
+        "Message to Recipient 1" := COPYSTR(VendorLedgerEntry."Message to Recipient",1,35);
+        "Message to Recipient 2" := COPYSTR(VendorLedgerEntry."Message to Recipient",36,70);
+        "Document No." := VendorLedgerEntry."Document No.";
+        "Applies-to Ext. Doc. No." := VendorLedgerEntry."Applies-to Ext. Doc. No.";
+        "Short Advice" := VendorLedgerEntry."Applies-to Ext. Doc. No.";
+        "Line No." := LineNo;
+        "Payment Reference" := VendorLedgerEntry."Payment Reference";
+        if PaymentMethod.GET(VendorLedgerEntry."Payment Method Code") then
+          "Data Exch. Line Def Code" := PaymentMethod."Pmt. Export Line Definition";
+        "Recipient Creditor No." := VendorLedgerEntry."Creditor No.";
+        OnBeforeInsertPmtExportDataJnlFromVendorLedgerEntry(TempPaymentExportData,VendorLedgerEntry,GeneralLedgerSetup);
+        INSERT(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE EnableExportToServerTempFile@27(SilentServerMode@1000 : Boolean;ServerFileExtension@1001 : Text[3]);
+    BEGIN
+      PaymentExportMgt.EnableExportToServerTempFile(SilentServerMode,ServerFileExtension);
+    END;
+
+    [External]
+    PROCEDURE GetServerTempFileName@29() : Text[1024];
+    BEGIN
+      exit(PaymentExportMgt.GetServerTempFileName);
+    END;
+
+    LOCAL PROCEDURE SetExportFlagOnVendorLedgerEntries@41(VAR VendorLedgerEntry@1000 : Record "Vendor Ledger Entry");
+    VAR
+      VendorLedgerEntry2@1001 : Record "Vendor Ledger Entry";
+    BEGIN
+      with VendorLedgerEntry2 do begin
+        COPY(VendorLedgerEntry);
+        repeat
+          VALIDATE("Exported to Payment File",true);
+          CODEUNIT.RUN(CODEUNIT::"Vend. Entry-Edit",VendorLedgerEntry2);
+        until NEXT = 0;
+      end;
+    END;
+
+    [Integration]
+    PROCEDURE OnBeforeInsertPmtExportDataJnlFromVendorLedgerEntry@67(VAR PaymentExportData@1000 : Record "Payment Export Data";VendorLedgerEntry@1001 : Record "Vendor Ledger Entry";GeneralLedgerSetup@1002 : Record "General Ledger Setup");
+    BEGIN
+    END;
+
+    [Integration]
+    PROCEDURE OnBeforePaymentExportVendorLedgerEntry@1214(BalAccountNo@1213 : Code[20];DataExchEntryNo@1214 : Integer;LineCount@1215 : Integer;TotalAmount@1216 : Decimal;TransferDate@1217 : Date;VAR Handled@1218 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    PROCEDURE OnBeforeCreateVendLedgerDataExchLine@1213(DataExch@1219 : Record "Data Exch.";VendorLedgerEntry@1218 : Record "Vendor Ledger Entry";LineNo@1217 : Integer;VAR LineAmount@1216 : Decimal;VAR TotalAmount@1215 : Decimal;VAR TransferDate@1214 : Date;VAR Handled@1213 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

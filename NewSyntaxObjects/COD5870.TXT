@@ -1,0 +1,947 @@
+OBJECT Codeunit 5870 Calculate BOM Tree
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempItemAvailByDate@1002 : TEMPORARY Record "Item Availability by Date";
+      TempMemoizedResult@1004 : TEMPORARY Record "Memoized Result";
+      ItemFilter@1008 : Record Item;
+      TempItem@1016 : TEMPORARY Record Item;
+      AvailableToPromise@1000 : Codeunit "Available to Promise";
+      Window@1012 : Dialog;
+      WindowUpdateDateTime@1013 : DateTime;
+      LocationSpecific@1009 : Boolean;
+      EntryNo@1003 : Integer;
+      ZeroDF@1001 : DateFormula;
+      AvailToUse@1005 : 'UpdatedQtyOnItemAvail,QtyOnItemAvail,QtyAvail';
+      MarkBottleneck@1006 : Boolean;
+      Text000@1011 : TextConst 'ENU=Generating Tree @1@@@@@@@';
+      ShowTotalAvailability@1014 : Boolean;
+      TreeType@1010 : '" ",Availability,Cost';
+
+    LOCAL PROCEDURE OpenWindow@19();
+    BEGIN
+      Window.OPEN(Text000);
+      WindowUpdateDateTime := CURRENTDATETIME;
+    END;
+
+    LOCAL PROCEDURE UpdateWindow@28(ProgressValue@1000 : Integer);
+    BEGIN
+      if CURRENTDATETIME - WindowUpdateDateTime >= 300 then begin
+        WindowUpdateDateTime := CURRENTDATETIME;
+        Window.UPDATE(1,ProgressValue);
+      end;
+    END;
+
+    LOCAL PROCEDURE InitVars@5();
+    BEGIN
+      TempItemAvailByDate.RESET;
+      TempItemAvailByDate.DELETEALL;
+      TempMemoizedResult.RESET;
+      TempMemoizedResult.DELETEALL;
+      TempItem.RESET;
+      TempItem.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE InitBOMBuffer@6(VAR BOMBuffer@1000 : Record "BOM Buffer");
+    BEGIN
+      BOMBuffer.RESET;
+      BOMBuffer.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE InitTreeType@32(NewTreeType@1001 : Option);
+    BEGIN
+      TreeType := NewTreeType;
+    END;
+
+    [External]
+    PROCEDURE GenerateTreeForItems@1(VAR ParentItem@1000 : Record Item;VAR BOMBuffer@1001 : Record "BOM Buffer";TreeType@1002 : '" ",Availability,Cost');
+    VAR
+      i@1005 : Integer;
+      NoOfRecords@1006 : Integer;
+      DemandDate@1007 : Date;
+    BEGIN
+      OpenWindow;
+
+      InitBOMBuffer(BOMBuffer);
+      InitTreeType(TreeType);
+      ItemFilter.COPY(ParentItem);
+
+      with ParentItem do begin
+        if TreeType = TreeType::Availability then
+          if GETRANGEMAX("Date Filter") <> 0D then
+            DemandDate := GETRANGEMAX("Date Filter")
+          else
+            DemandDate := 99981231D;
+        NoOfRecords := COUNT;
+        if FINDSET then
+          repeat
+            i += 1;
+            UpdateWindow(ROUND(i / NoOfRecords * 10000,1));
+            GenerateTreeForItemLocal(ParentItem,BOMBuffer,DemandDate,TreeType);
+          until NEXT = 0;
+      end;
+
+      ParentItem.COPY(ItemFilter);
+
+      Window.CLOSE;
+    END;
+
+    [External]
+    PROCEDURE GenerateTreeForItem@33(VAR ParentItem@1000 : Record Item;VAR BOMBuffer@1001 : Record "BOM Buffer";DemandDate@1005 : Date;TreeType@1004 : Option);
+    BEGIN
+      with ParentItem do begin
+        ItemFilter.COPY(ParentItem);
+
+        GET("No.");
+        InitBOMBuffer(BOMBuffer);
+        InitTreeType(TreeType);
+        GenerateTreeForItemLocal(ParentItem,BOMBuffer,DemandDate,TreeType);
+        COPY(ItemFilter);
+      end;
+    END;
+
+    LOCAL PROCEDURE GenerateTreeForItemLocal@8(VAR ParentItem@1000 : Record Item;VAR BOMBuffer@1001 : Record "BOM Buffer";DemandDate@1005 : Date;TreeType@1004 : Option);
+    VAR
+      BOMComp@1003 : Record "BOM Component";
+      ProdBOMLine@1002 : Record "Production BOM Line";
+    BEGIN
+      with ParentItem do begin
+        InitVars;
+
+        BOMComp.SETRANGE(Type,BOMComp.Type::Item);
+        BOMComp.SETRANGE("No.","No.");
+
+        ProdBOMLine.SETRANGE(Type,ProdBOMLine.Type::Item);
+        ProdBOMLine.SETRANGE("No.","No.");
+
+        if HasBOM or ("Routing No." <> '') then begin
+          BOMBuffer.SetLocationVariantFiltersFrom(ItemFilter);
+          BOMBuffer.TransferFromItem(EntryNo,ParentItem,DemandDate);
+          GenerateItemSubTree("No.",BOMBuffer);
+          CalculateTreeType(BOMBuffer,ShowTotalAvailability,TreeType);
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE GenerateTreeForAsm@3(AsmHeader@1000 : Record "Assembly Header";VAR BOMBuffer@1001 : Record "BOM Buffer";TreeType@1002 : Option);
+    BEGIN
+      InitBOMBuffer(BOMBuffer);
+      InitTreeType(TreeType);
+      InitVars;
+
+      LocationSpecific := true;
+
+      BOMBuffer.SetLocationVariantFiltersFrom(ItemFilter);
+      BOMBuffer.TransferFromAsmHeader(EntryNo,AsmHeader);
+
+      if not GenerateAsmHeaderSubTree(AsmHeader,BOMBuffer) then
+        GenerateItemSubTree(AsmHeader."Item No.",BOMBuffer);
+
+      CalculateTreeType(BOMBuffer,ShowTotalAvailability,TreeType);
+    END;
+
+    [External]
+    PROCEDURE GenerateTreeForProdLine@20(ProdOrderLine@1000 : Record "Prod. Order Line";VAR BOMBuffer@1001 : Record "BOM Buffer";TreeType@1002 : Option);
+    BEGIN
+      InitBOMBuffer(BOMBuffer);
+      InitTreeType(TreeType);
+      InitVars;
+
+      LocationSpecific := true;
+      BOMBuffer.SetLocationVariantFiltersFrom(ItemFilter);
+      BOMBuffer.TransferFromProdOrderLine(EntryNo,ProdOrderLine);
+      if not GenerateProdOrderLineSubTree(ProdOrderLine,BOMBuffer) then
+        GenerateItemSubTree(ProdOrderLine."Item No.",BOMBuffer);
+
+      CalculateTreeType(BOMBuffer,ShowTotalAvailability,TreeType);
+    END;
+
+    LOCAL PROCEDURE CalculateTreeType@29(VAR BOMBuffer@1000 : Record "BOM Buffer";ShowTotalAvailability@1001 : Boolean;TreeType@1002 : '" ",Availability,Cost');
+    BEGIN
+      case TreeType of
+        TreeType::Availability:
+          UpdateAvailability(BOMBuffer,ShowTotalAvailability);
+        TreeType::Cost:
+          UpdateCost(BOMBuffer);
+      end;
+    END;
+
+    LOCAL PROCEDURE GenerateItemSubTree@11(ItemNo@1000 : Code[20];VAR BOMBuffer@1002 : Record "BOM Buffer") : Boolean;
+    VAR
+      ParentItem@1003 : Record Item;
+    BEGIN
+      with BOMBuffer do begin
+        ParentItem.GET(ItemNo);
+        if TempItem.GET(ItemNo) then begin
+          "Is Leaf" := false;
+          MODIFY(true);
+          exit(false);
+        end;
+        TempItem := ParentItem;
+        TempItem.INSERT;
+
+        if ParentItem."Replenishment System" = ParentItem."Replenishment System"::"Prod. Order" then begin
+          "Is Leaf" := not GenerateProdCompSubTree(ParentItem,BOMBuffer);
+          if "Is Leaf" then
+            "Is Leaf" := not GenerateBOMCompSubTree(ParentItem,BOMBuffer);
+        end else begin
+          "Is Leaf" := not GenerateBOMCompSubTree(ParentItem,BOMBuffer);
+          if "Is Leaf" then
+            "Is Leaf" := not GenerateProdCompSubTree(ParentItem,BOMBuffer);
+        end;
+        MODIFY(true);
+
+        TempItem.GET(ItemNo);
+        TempItem.DELETE;
+        exit(not "Is Leaf");
+      end;
+    END;
+
+    LOCAL PROCEDURE GenerateBOMCompSubTree@2(ParentItem@1000 : Record Item;VAR BOMBuffer@1005 : Record "BOM Buffer") : Boolean;
+    VAR
+      BOMComp@1001 : Record "BOM Component";
+      ParentBOMBuffer@1007 : Record "BOM Buffer";
+      UOMMgt@1002 : Codeunit "Unit of Measure Management";
+    BEGIN
+      ParentBOMBuffer := BOMBuffer;
+      with BOMComp do begin
+        SETRANGE("Parent Item No.",ParentItem."No.");
+        if FINDSET then begin
+          if ParentItem."Replenishment System" <> ParentItem."Replenishment System"::Assembly then
+            exit(true);
+          repeat
+            if ("No." <> '') and ((Type = Type::Item) or (TreeType in [TreeType::" ",TreeType::Cost])) then begin
+              BOMBuffer.SetLocationVariantFiltersFrom(ItemFilter);
+              BOMBuffer.TransferFromBOMComp(
+                EntryNo,BOMComp,ParentBOMBuffer.Indentation + 1,
+                ROUND(
+                  ParentBOMBuffer."Qty. per Top Item" *
+                  UOMMgt.GetQtyPerUnitOfMeasure(ParentItem,ParentBOMBuffer."Unit of Measure Code"),0.00001),
+                ROUND(
+                  ParentBOMBuffer."Scrap Qty. per Top Item" *
+                  UOMMgt.GetQtyPerUnitOfMeasure(ParentItem,ParentBOMBuffer."Unit of Measure Code"),0.00001),
+                CalcCompDueDate(ParentBOMBuffer."Needed by Date",ParentItem,"Lead-Time Offset"),
+                ParentBOMBuffer."Location Code");
+              if Type = Type::Item then
+                GenerateItemSubTree("No.",BOMBuffer);
+            end;
+          until NEXT = 0;
+          BOMBuffer := ParentBOMBuffer;
+
+          exit(true);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE GenerateProdCompSubTree@9(ParentItem@1000 : Record Item;VAR BOMBuffer@1005 : Record "BOM Buffer") FoundSubTree : Boolean;
+    VAR
+      CopyOfParentItem@1004 : Record Item;
+      ProdBOMLine@1006 : Record "Production BOM Line";
+      RoutingLine@1002 : Record "Routing Line";
+      ParentBOMBuffer@1007 : Record "BOM Buffer";
+      UOMMgt@1003 : Codeunit "Unit of Measure Management";
+      VersionMgt@1008 : Codeunit VersionManagement;
+      CostCalculationMgt@1010 : Codeunit "Cost Calculation Management";
+      LotSize@1001 : Decimal;
+      BomQtyPerUom@1009 : Decimal;
+    BEGIN
+      ParentBOMBuffer := BOMBuffer;
+      if not ProdBOMLine.READPERMISSION then
+        exit;
+      with ProdBOMLine do begin
+        SETRANGE("Production BOM No.",ParentItem."Production BOM No.");
+        SETRANGE("Version Code",VersionMgt.GetBOMVersion(ParentItem."Production BOM No.",WORKDATE,true));
+        SETFILTER("Ending Date",'%1|%2..',0D,ParentBOMBuffer."Needed by Date");
+        if FINDSET then begin
+          if ParentItem."Replenishment System" <> ParentItem."Replenishment System"::"Prod. Order" then
+            exit(true);
+          repeat
+            if "No." <> '' then
+              case Type of
+                Type::Item:
+                  begin
+                    BOMBuffer.SetLocationVariantFiltersFrom(ItemFilter);
+                    BomQtyPerUom :=
+                      GetQtyPerBOMHeaderUnitOfMeasure(
+                        ParentItem,ParentBOMBuffer."Production BOM No.",
+                        VersionMgt.GetBOMVersion(ParentBOMBuffer."Production BOM No.",WORKDATE,true));
+                    BOMBuffer.TransferFromProdComp(
+                      EntryNo,ProdBOMLine,ParentBOMBuffer.Indentation + 1,
+                      ROUND(
+                        ParentBOMBuffer."Qty. per Top Item" *
+                        UOMMgt.GetQtyPerUnitOfMeasure(ParentItem,ParentBOMBuffer."Unit of Measure Code"),0.00001),
+                      ROUND(
+                        ParentBOMBuffer."Scrap Qty. per Top Item" *
+                        UOMMgt.GetQtyPerUnitOfMeasure(ParentItem,ParentBOMBuffer."Unit of Measure Code"),0.00001),
+                      ParentBOMBuffer."Scrap %",
+                      CalcCompDueDate(ParentBOMBuffer."Needed by Date",ParentItem,"Lead-Time Offset"),
+                      ParentBOMBuffer."Location Code",
+                      ParentItem,BomQtyPerUom);
+
+                    if ParentItem."Production BOM No." <> ParentBOMBuffer."Production BOM No." then begin
+                      BOMBuffer."Qty. per Parent" := BOMBuffer."Qty. per Parent" * ParentBOMBuffer."Qty. per Parent";
+                      BOMBuffer."Scrap Qty. per Parent" := BOMBuffer."Scrap Qty. per Parent" * ParentBOMBuffer."Qty. per Parent";
+
+                      BOMBuffer."Qty. per BOM Line" := BOMBuffer."Qty. per BOM Line" * ParentBOMBuffer."Qty. per Parent";
+                    end;
+                    GenerateItemSubTree("No.",BOMBuffer);
+                  end;
+                Type::"Production BOM":
+                  begin
+                    CopyOfParentItem := ParentItem;
+                    ParentItem."Routing No." := '';
+                    ParentItem."Production BOM No." := "No.";
+                    BOMBuffer := ParentBOMBuffer;
+                    BOMBuffer."Qty. per Top Item" := ROUND(BOMBuffer."Qty. per Top Item" * "Quantity per",0.00001);
+                    BOMBuffer."Qty. per Parent" := BOMBuffer."Qty. per Parent" * "Quantity per";
+                    BOMBuffer."Scrap %" := CombineScrapFactors(BOMBuffer."Scrap %","Scrap %");
+                    if CostCalculationMgt.FindRountingLine(RoutingLine,ProdBOMLine,WORKDATE,CopyOfParentItem."Routing No.") then
+                      BOMBuffer."Scrap %" := CombineScrapFactors(BOMBuffer."Scrap %",RoutingLine."Scrap Factor % (Accumulated)" * 100);
+
+                    BOMBuffer."Scrap %" := ROUND(BOMBuffer."Scrap %",0.00001);
+
+                    GenerateProdCompSubTree(ParentItem,BOMBuffer);
+                    ParentItem := CopyOfParentItem;
+                  end;
+              end;
+          until NEXT = 0;
+          FoundSubTree := true;
+        end;
+      end;
+
+      if RoutingLine.READPERMISSION then
+        with RoutingLine do
+          if (TreeType in [TreeType::" ",TreeType::Cost]) and
+             CertifiedRoutingVersionExists(ParentItem."Routing No.",WORKDATE)
+          then begin
+            repeat
+              if "No." <> '' then begin
+                BOMBuffer.SetLocationVariantFiltersFrom(ItemFilter);
+                BOMBuffer.TransferFromProdRouting(
+                  EntryNo,RoutingLine,ParentBOMBuffer.Indentation + 1,
+                  ParentBOMBuffer."Qty. per Top Item" *
+                  UOMMgt.GetQtyPerUnitOfMeasure(ParentItem,ParentBOMBuffer."Unit of Measure Code"),
+                  ParentBOMBuffer."Needed by Date",
+                  ParentBOMBuffer."Location Code");
+                if TreeType = TreeType::Cost then begin
+                  LotSize := ParentBOMBuffer."Lot Size";
+                  if LotSize = 0 then
+                    LotSize := 1;
+                  CalcRoutingLineCosts(RoutingLine,LotSize,ParentBOMBuffer."Scrap %",BOMBuffer);
+                  BOMBuffer.RoundCosts(
+                    ParentBOMBuffer."Qty. per Top Item" *
+                    UOMMgt.GetQtyPerUnitOfMeasure(ParentItem,ParentBOMBuffer."Unit of Measure Code") / LotSize);
+                  BOMBuffer.MODIFY;
+                end;
+              end;
+            until NEXT = 0;
+            FoundSubTree := true;
+          end;
+
+      BOMBuffer := ParentBOMBuffer;
+    END;
+
+    LOCAL PROCEDURE GenerateAsmHeaderSubTree@10(AsmHeader@1000 : Record "Assembly Header";VAR BOMBuffer@1005 : Record "BOM Buffer") : Boolean;
+    VAR
+      AsmLine@1006 : Record "Assembly Line";
+      OldAsmHeader@1002 : Record "Assembly Header";
+      ParentBOMBuffer@1001 : Record "BOM Buffer";
+    BEGIN
+      ParentBOMBuffer := BOMBuffer;
+      with AsmLine do begin
+        SETRANGE("Document Type",AsmHeader."Document Type");
+        SETRANGE("Document No.",AsmHeader."No.");
+        if FINDSET then begin
+          repeat
+            if (Type = Type::Item) and ("No." <> '') then begin
+              OldAsmHeader.GET("Document Type","Document No.");
+              if AsmHeader."Due Date" <> OldAsmHeader."Due Date" then
+                "Due Date" := "Due Date" - (OldAsmHeader."Due Date" - AsmHeader."Due Date");
+
+              BOMBuffer.SetLocationVariantFiltersFrom(ItemFilter);
+              BOMBuffer.TransferFromAsmLine(EntryNo,AsmLine);
+              GenerateItemSubTree("No.",BOMBuffer);
+            end;
+          until NEXT = 0;
+          BOMBuffer := ParentBOMBuffer;
+
+          exit(true);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE GenerateProdOrderLineSubTree@23(ProdOrderLine@1000 : Record "Prod. Order Line";VAR BOMBuffer@1005 : Record "BOM Buffer") : Boolean;
+    VAR
+      OldProdOrderLine@1002 : Record "Prod. Order Line";
+      ProdOrderComp@1006 : Record "Prod. Order Component";
+      ParentBOMBuffer@1001 : Record "BOM Buffer";
+    BEGIN
+      ParentBOMBuffer := BOMBuffer;
+      with ProdOrderComp do begin
+        SETRANGE(Status,ProdOrderLine.Status);
+        SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+        SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+        if FINDSET then begin
+          repeat
+            if "Item No." <> '' then begin
+              OldProdOrderLine.GET(Status,"Prod. Order No.","Prod. Order Line No.");
+              if ProdOrderLine."Due Date" <> OldProdOrderLine."Due Date" then
+                "Due Date" := "Due Date" - (OldProdOrderLine."Due Date" - ProdOrderLine."Due Date");
+
+              BOMBuffer.SetLocationVariantFiltersFrom(ItemFilter);
+              BOMBuffer.TransferFromProdOrderComp(EntryNo,ProdOrderComp);
+              GenerateItemSubTree("Item No.",BOMBuffer);
+            end;
+          until NEXT = 0;
+          BOMBuffer := ParentBOMBuffer;
+
+          exit(true);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateMinAbleToMake@12(VAR BOMBuffer@1000 : Record "BOM Buffer";AvailToUse@1002 : 'UpdatedQtyOnItemAvail,QtyOnItemAvail,QtyAvail');
+    VAR
+      AvailQty@1003 : Decimal;
+    BEGIN
+      with TempItemAvailByDate do begin
+        SETRANGE("Item No.",BOMBuffer."No.");
+        SETRANGE("Variant Code",BOMBuffer."Variant Code");
+        if LocationSpecific then
+          SETRANGE("Location Code",BOMBuffer."Location Code");
+        SETRANGE(Date,BOMBuffer."Needed by Date");
+        FINDFIRST;
+
+        case AvailToUse of
+          AvailToUse::UpdatedQtyOnItemAvail:
+            AvailQty := "Updated Available Qty";
+          AvailToUse::QtyOnItemAvail:
+            AvailQty := "Available Qty";
+          AvailToUse::QtyAvail:
+            AvailQty := BOMBuffer."Available Quantity";
+        end;
+      end;
+
+      with BOMBuffer do begin
+        UpdateAbleToMake(AvailQty);
+        MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcMinAbleToMake@14(IsFirst@1002 : Boolean;OldMin@1000 : Decimal;NewMin@1001 : Decimal) : Decimal;
+    BEGIN
+      if NewMin <= 0 then
+        exit(0);
+      if IsFirst then
+        exit(NewMin);
+      if NewMin < OldMin then
+        exit(NewMin);
+      exit(OldMin);
+    END;
+
+    LOCAL PROCEDURE InitItemAvailDates@13(VAR BOMBuffer@1000 : Record "BOM Buffer");
+    VAR
+      BOMItem@1004 : Record Item;
+      ParentBOMBuffer@1003 : Record "BOM Buffer";
+    BEGIN
+      ParentBOMBuffer := BOMBuffer;
+      TempItemAvailByDate.RESET;
+      TempItemAvailByDate.DELETEALL;
+
+      with BOMBuffer do
+        repeat
+          if not AvailByDateExists(BOMBuffer) then begin
+            BOMItem.COPYFILTERS(ItemFilter);
+            BOMItem.GET("No.");
+            BOMItem.SETRANGE("Date Filter",0D,"Needed by Date");
+            if Indentation = 0 then begin
+              BOMItem.SETFILTER("Variant Filter",ItemFilter.GETFILTER("Variant Filter"));
+              BOMItem.SETFILTER("Location Filter",ItemFilter.GETFILTER("Location Filter"));
+            end else
+              BOMItem.SETRANGE("Variant Filter","Variant Code");
+
+            TempItemAvailByDate.INIT;
+            TempItemAvailByDate."Item No." := "No.";
+            TempItemAvailByDate.Date := "Needed by Date";
+            TempItemAvailByDate."Variant Code" := "Variant Code";
+            if LocationSpecific then
+              TempItemAvailByDate."Location Code" := "Location Code";
+
+            CLEAR(AvailableToPromise);
+            TempItemAvailByDate."Available Qty" :=
+              AvailableToPromise.QtyAvailabletoPromise(BOMItem,"Gross Requirement","Scheduled Receipts","Needed by Date",0,ZeroDF);
+            TempItemAvailByDate."Updated Available Qty" := TempItemAvailByDate."Available Qty";
+            TempItemAvailByDate.INSERT;
+
+            MODIFY;
+          end;
+        until (NEXT = 0) or (Indentation <= ParentBOMBuffer.Indentation);
+      BOMBuffer := ParentBOMBuffer;
+      BOMBuffer.FIND;
+    END;
+
+    LOCAL PROCEDURE UpdateAvailability@15(VAR BOMBuffer@1000 : Record "BOM Buffer";ShowTotalAvailability@1003 : Boolean);
+    VAR
+      CopyOfBOMBuffer@1004 : Record "BOM Buffer";
+      SubOptimalQty@1002 : Decimal;
+      OptimalQty@1001 : Decimal;
+    BEGIN
+      with BOMBuffer do begin
+        CopyOfBOMBuffer.COPY(BOMBuffer);
+        if FIND then
+          repeat
+            if Indentation = 0 then begin
+              InitItemAvailDates(BOMBuffer);
+              SubOptimalQty := TraverseTree(BOMBuffer,AvailToUse::QtyOnItemAvail);
+              TempMemoizedResult.DELETEALL;
+              OptimalQty := BinarySearchOptimal(BOMBuffer,0.00001,SubOptimalQty);
+              MarkBottlenecks(BOMBuffer,OptimalQty);
+              CalcAvailability(BOMBuffer,OptimalQty,false);
+              if ShowTotalAvailability then
+                DistributeRemainingAvail(BOMBuffer);
+              TraverseTree(BOMBuffer,AvailToUse::QtyAvail);
+            end;
+          until NEXT = 0;
+        COPY(CopyOfBOMBuffer);
+      end;
+    END;
+
+    LOCAL PROCEDURE TraverseTree@16(VAR BOMBuffer@1000 : Record "BOM Buffer";AvailToUse@1003 : 'UpdatedQtyOnItemAvail,QtyOnItemAvail,QtyAvail') : Decimal;
+    VAR
+      ParentBOMBuffer@1001 : Record "BOM Buffer";
+      IsFirst@1002 : Boolean;
+    BEGIN
+      ParentBOMBuffer := BOMBuffer;
+      IsFirst := true;
+      with BOMBuffer do begin
+        while (NEXT <> 0) and (ParentBOMBuffer.Indentation < Indentation) do
+          if ParentBOMBuffer.Indentation + 1 = Indentation then begin
+            if not "Is Leaf" then
+              TraverseTree(BOMBuffer,AvailToUse)
+            else
+              UpdateMinAbleToMake(BOMBuffer,AvailToUse);
+
+            ParentBOMBuffer."Able to Make Parent" :=
+              CalcMinAbleToMake(IsFirst,ParentBOMBuffer."Able to Make Parent","Able to Make Parent");
+            ParentBOMBuffer."Able to Make Top Item" :=
+              CalcMinAbleToMake(IsFirst,ParentBOMBuffer."Able to Make Top Item","Able to Make Top Item");
+
+            IsFirst := false;
+          end;
+
+        BOMBuffer := ParentBOMBuffer;
+        UpdateMinAbleToMake(BOMBuffer,AvailToUse);
+        exit("Able to Make Top Item");
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateCost@25(VAR BOMBuffer@1000 : Record "BOM Buffer");
+    VAR
+      CopyOfBOMBuffer@1001 : Record "BOM Buffer";
+    BEGIN
+      with BOMBuffer do begin
+        CopyOfBOMBuffer.COPY(BOMBuffer);
+        if FIND then
+          repeat
+            if Indentation = 0 then
+              TraverseCostTree(BOMBuffer);
+          until NEXT = 0;
+        COPY(CopyOfBOMBuffer);
+      end;
+    END;
+
+    LOCAL PROCEDURE TraverseCostTree@26(VAR BOMBuffer@1000 : Record "BOM Buffer") : Decimal;
+    VAR
+      ParentBOMBuffer@1001 : Record "BOM Buffer";
+    BEGIN
+      ParentBOMBuffer := BOMBuffer;
+      with BOMBuffer do begin
+        while (NEXT <> 0) and (ParentBOMBuffer.Indentation < Indentation) do
+          if (ParentBOMBuffer.Indentation + 1 = Indentation) and
+             (("Qty. per Top Item" <> 0) or (Type in [Type::"Machine Center",Type::"Work Center"]))
+          then begin
+            if not "Is Leaf" then
+              TraverseCostTree(BOMBuffer)
+            else
+              if (Type = Type::Resource) and ("Resource Usage Type" = "Resource Usage Type"::Fixed) then
+                UpdateNodeCosts(BOMBuffer,ParentBOMBuffer."Lot Size" / ParentBOMBuffer."Qty. per Top Item")
+              else
+                UpdateNodeCosts(BOMBuffer,1);
+
+            if "Is Leaf" then begin
+              ParentBOMBuffer.AddMaterialCost("Single-Level Material Cost","Rolled-up Material Cost");
+              ParentBOMBuffer.AddCapacityCost("Single-Level Capacity Cost","Rolled-up Capacity Cost");
+              ParentBOMBuffer.AddSubcontrdCost("Single-Level Subcontrd. Cost","Rolled-up Subcontracted Cost");
+              ParentBOMBuffer.AddCapOvhdCost("Single-Level Cap. Ovhd Cost","Rolled-up Capacity Ovhd. Cost");
+              ParentBOMBuffer.AddMfgOvhdCost("Single-Level Mfg. Ovhd Cost","Rolled-up Mfg. Ovhd Cost");
+              ParentBOMBuffer.AddScrapCost("Single-Level Scrap Cost","Rolled-up Scrap Cost");
+            end else begin
+              ParentBOMBuffer.AddMaterialCost(
+                "Single-Level Material Cost" +
+                "Single-Level Capacity Cost" +
+                "Single-Level Subcontrd. Cost" +
+                "Single-Level Cap. Ovhd Cost" +
+                "Single-Level Mfg. Ovhd Cost",
+                "Rolled-up Material Cost");
+              ParentBOMBuffer.AddCapacityCost(0,"Rolled-up Capacity Cost");
+              ParentBOMBuffer.AddSubcontrdCost(0,"Rolled-up Subcontracted Cost");
+              ParentBOMBuffer.AddCapOvhdCost(0,"Rolled-up Capacity Ovhd. Cost");
+              ParentBOMBuffer.AddMfgOvhdCost(0,"Rolled-up Mfg. Ovhd Cost");
+              ParentBOMBuffer.AddScrapCost(0,"Rolled-up Scrap Cost");
+            end;
+          end;
+
+        BOMBuffer := ParentBOMBuffer;
+        UpdateNodeCosts(BOMBuffer,ParentBOMBuffer."Lot Size");
+        exit("Able to Make Top Item");
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateNodeCosts@27(VAR BOMBuffer@1000 : Record "BOM Buffer";LotSize@1007 : Decimal);
+    BEGIN
+      with BOMBuffer do begin
+        if LotSize = 0 then
+          LotSize := 1;
+        RoundCosts(LotSize);
+
+        if "Is Leaf" then begin
+          case Type of
+            Type::Item:
+              GetItemCosts;
+            Type::Resource:
+              GetResCosts;
+          end;
+        end else
+          if HasBomStructure("No.") then
+            CalcOvhdCost
+          else
+            if Type = Type::Item then begin
+              GetItemCosts;
+              LotSize := 1;
+            end;
+        RoundCosts(1 / LotSize);
+
+        CalcUnitCost;
+        MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE BinarySearchOptimal@17(VAR BOMBuffer@1002 : Record "BOM Buffer";InputLow@1000 : Decimal;InputHigh@1001 : Decimal) : Decimal;
+    VAR
+      InputMid@1003 : Decimal;
+    BEGIN
+      if InputHigh <= 0 then
+        exit(0);
+      if CalcAvailability(BOMBuffer,InputHigh,true) then begin
+        TempMemoizedResult.DELETEALL;
+        exit(InputHigh);
+      end;
+      if InputHigh - InputLow = 0.00001 then begin
+        TempMemoizedResult.DELETEALL;
+        exit(InputLow);
+      end;
+      InputMid := ROUND((InputLow + InputHigh) / 2,0.00001);
+      if not CalcAvailability(BOMBuffer,InputMid,true) then
+        exit(BinarySearchOptimal(BOMBuffer,InputLow,InputMid));
+      exit(BinarySearchOptimal(BOMBuffer,InputMid,InputHigh));
+    END;
+
+    LOCAL PROCEDURE CalcAvailability@18(VAR BOMBuffer@1000 : Record "BOM Buffer";Input@1001 : Decimal;IsTest@1005 : Boolean) : Boolean;
+    VAR
+      ParentBOMBuffer@1003 : Record "BOM Buffer";
+      ExpectedQty@1002 : Decimal;
+      AvailQty@1004 : Decimal;
+      MaxTime@1006 : Integer;
+    BEGIN
+      if BOMBuffer.Indentation = 0 then begin
+        if IsTest then
+          if TempMemoizedResult.GET(Input) then
+            exit(TempMemoizedResult.Output);
+
+        ResetUpdatedAvailability;
+      end;
+
+      ParentBOMBuffer := BOMBuffer;
+      with BOMBuffer do begin
+        while (NEXT <> 0) and (ParentBOMBuffer.Indentation < Indentation) do
+          if ParentBOMBuffer.Indentation + 1 = Indentation then begin
+            TempItemAvailByDate.SETRANGE("Item No.","No.");
+            TempItemAvailByDate.SETRANGE(Date,"Needed by Date");
+            TempItemAvailByDate.SETRANGE("Variant Code","Variant Code");
+            if LocationSpecific then
+              TempItemAvailByDate.SETRANGE("Location Code","Location Code");
+            TempItemAvailByDate.FINDFIRST;
+            ExpectedQty := ROUND("Qty. per Parent" * Input,0.00001);
+            AvailQty := TempItemAvailByDate."Updated Available Qty";
+            if AvailQty < ExpectedQty then begin
+              if "Is Leaf" then begin
+                if MarkBottleneck then begin
+                  Bottleneck := true;
+                  MODIFY(true);
+                end;
+                BOMBuffer := ParentBOMBuffer;
+                if (Indentation = 0) and IsTest then
+                  AddMemoizedResult(Input,false);
+                exit(false);
+              end;
+              if AvailQty <> 0 then
+                ReduceAvailability("No.","Variant Code","Location Code","Needed by Date",AvailQty);
+              if not IsTest then begin
+                "Available Quantity" := AvailQty;
+                MODIFY;
+              end;
+              if not CalcAvailability(BOMBuffer,ExpectedQty - AvailQty,IsTest) then begin
+                if MarkBottleneck then begin
+                  Bottleneck := true;
+                  MODIFY(true);
+                end;
+                BOMBuffer := ParentBOMBuffer;
+                if (Indentation = 0) and IsTest then
+                  AddMemoizedResult(Input,false);
+                exit(false);
+              end;
+              if not IsTest then
+                if MaxTime < (ParentBOMBuffer."Needed by Date" - "Needed by Date") + "Rolled-up Lead-Time Offset" then
+                  MaxTime := (ParentBOMBuffer."Needed by Date" - "Needed by Date") + "Rolled-up Lead-Time Offset";
+            end else begin
+              if not IsTest then begin
+                "Available Quantity" := ExpectedQty;
+                MODIFY;
+                if MaxTime < (ParentBOMBuffer."Needed by Date" - "Needed by Date") + "Rolled-up Lead-Time Offset" then
+                  MaxTime := (ParentBOMBuffer."Needed by Date" - "Needed by Date") + "Rolled-up Lead-Time Offset";
+              end;
+              ReduceAvailability("No.","Variant Code","Location Code","Needed by Date",ExpectedQty);
+            end;
+          end;
+        BOMBuffer := ParentBOMBuffer;
+        "Rolled-up Lead-Time Offset" := MaxTime;
+        MODIFY(true);
+        if (Indentation = 0) and IsTest then
+          AddMemoizedResult(Input,true);
+        exit(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE AddMemoizedResult@40(NewInput@1000 : Decimal;NewOutput@1001 : Boolean);
+    BEGIN
+      with TempMemoizedResult do begin
+        Input := NewInput;
+        Output := NewOutput;
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE ResetUpdatedAvailability@24();
+    BEGIN
+      with TempItemAvailByDate do begin
+        RESET;
+        if FIND('-') then
+          repeat
+            if "Updated Available Qty" <> "Available Qty" then begin
+              "Updated Available Qty" := "Available Qty";
+              MODIFY;
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE ReduceAvailability@31(ItemNo@1000 : Code[20];VariantCode@1002 : Code[10];LocationCode@1003 : Code[10];ToDate@1004 : Date;Qty@1001 : Decimal);
+    BEGIN
+      with TempItemAvailByDate do begin
+        RESET;
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Variant Code",VariantCode);
+        if LocationSpecific then
+          SETRANGE("Location Code",LocationCode);
+        SETRANGE(Date,0D,ToDate);
+        if FINDSET then
+          repeat
+            if "Updated Available Qty" <> 0 then begin
+              if "Updated Available Qty" > Qty then
+                "Updated Available Qty" := "Updated Available Qty" - Qty
+              else
+                "Updated Available Qty" := 0;
+              MODIFY;
+            end;
+          until NEXT = 0;
+        SETRANGE("Item No.");
+        SETRANGE("Variant Code");
+        SETRANGE("Location Code");
+        SETRANGE(Date);
+      end;
+    END;
+
+    LOCAL PROCEDURE DistributeRemainingAvail@21(VAR BOMBuffer@1000 : Record "BOM Buffer");
+    VAR
+      CurrItemAvailByDate@1005 : Record "Item Availability by Date";
+      CopyOfBOMBuffer@1001 : Record "BOM Buffer";
+    BEGIN
+      with BOMBuffer do begin
+        CopyOfBOMBuffer.COPY(BOMBuffer);
+        RESET;
+        SETCURRENTKEY(Type,"No.",Indentation);
+        SETFILTER("Entry No.",'>=%1',"Entry No.");
+        TempItemAvailByDate.RESET;
+        if TempItemAvailByDate.FINDSET then
+          repeat
+            if TempItemAvailByDate."Updated Available Qty" <> 0 then begin
+              CurrItemAvailByDate := TempItemAvailByDate;
+
+              SETRANGE(Type,Type);
+              SETRANGE("No.",TempItemAvailByDate."Item No.");
+              SETRANGE("Variant Code",TempItemAvailByDate."Variant Code");
+              if LocationSpecific then
+                SETRANGE("Location Code",TempItemAvailByDate."Location Code");
+              SETRANGE("Needed by Date",TempItemAvailByDate.Date);
+              FINDFIRST;
+              "Available Quantity" += TempItemAvailByDate."Updated Available Qty";
+              "Unused Quantity" += TempItemAvailByDate."Updated Available Qty";
+              MODIFY;
+
+              ReduceAvailability("No.","Variant Code","Location Code",
+                "Needed by Date",
+                TempItemAvailByDate."Updated Available Qty");
+              TempItemAvailByDate := CurrItemAvailByDate;
+            end;
+          until TempItemAvailByDate.NEXT = 0;
+        COPY(CopyOfBOMBuffer);
+        FIND;
+      end;
+    END;
+
+    LOCAL PROCEDURE MarkBottlenecks@22(VAR BOMBuffer@1005 : Record "BOM Buffer";Input@1003 : Decimal);
+    BEGIN
+      MarkBottleneck := true;
+      CalcAvailability(BOMBuffer,Input + 0.00001,true);
+      MarkBottleneck := false;
+    END;
+
+    LOCAL PROCEDURE CalcCompDueDate@57(DemandDate@1000 : Date;ParentItem@1003 : Record Item;LeadTimeOffset@1005 : DateFormula) DueDate : Date;
+    VAR
+      MfgSetup@1002 : Record "Manufacturing Setup";
+      EndDate@1001 : Date;
+      StartDate@1004 : Date;
+    BEGIN
+      if DemandDate = 0D then
+        exit;
+
+      EndDate := DemandDate;
+      if FORMAT(ParentItem."Safety Lead Time") <> '' then
+        EndDate := DemandDate - (CALCDATE(ParentItem."Safety Lead Time",DemandDate) - DemandDate)
+      else
+        if MfgSetup.GET and (FORMAT(MfgSetup."Default Safety Lead Time") <> '') then
+          EndDate := DemandDate - (CALCDATE(MfgSetup."Default Safety Lead Time",DemandDate) - DemandDate);
+
+      if FORMAT(ParentItem."Lead Time Calculation") = '' then
+        StartDate := EndDate
+      else
+        StartDate := EndDate - (CALCDATE(ParentItem."Lead Time Calculation",EndDate) - EndDate);
+
+      if FORMAT(LeadTimeOffset) = '' then
+        DueDate := StartDate
+      else
+        DueDate := StartDate - (CALCDATE(LeadTimeOffset,StartDate) - StartDate);
+    END;
+
+    LOCAL PROCEDURE AvailByDateExists@4(BOMBuffer@1000 : Record "BOM Buffer") : Boolean;
+    BEGIN
+      if LocationSpecific then
+        exit(TempItemAvailByDate.GET(BOMBuffer."No.",BOMBuffer."Variant Code",BOMBuffer."Location Code",BOMBuffer."Needed by Date"));
+      exit(TempItemAvailByDate.GET(BOMBuffer."No.",BOMBuffer."Variant Code",'',BOMBuffer."Needed by Date"));
+    END;
+
+    [External]
+    PROCEDURE SetShowTotalAvailability@30(NewShowTotalAvailability@1000 : Boolean);
+    BEGIN
+      ShowTotalAvailability := NewShowTotalAvailability;
+    END;
+
+    LOCAL PROCEDURE CalcRoutingLineCosts@7(RoutingLine@1002 : Record "Routing Line";LotSize@1003 : Decimal;ScrapPct@1004 : Decimal;VAR BOMBuffer@1005 : Record "BOM Buffer");
+    VAR
+      CalcStdCost@1001 : Codeunit "Calculate Standard Cost";
+      CostCalculationMgt@1000 : Codeunit "Cost Calculation Management";
+      CapCost@1006 : Decimal;
+      SubcontractedCapCost@1007 : Decimal;
+      CapOverhead@1008 : Decimal;
+    BEGIN
+      CalcStdCost.SetProperties(WORKDATE,false,false,false,'',false);
+      CalcStdCost.CalcRtngLineCost(
+        RoutingLine,CostCalculationMgt.CalcQtyAdjdForBOMScrap(LotSize,ScrapPct),CapCost,SubcontractedCapCost,CapOverhead);
+
+      BOMBuffer.AddCapacityCost(CapCost,CapCost);
+      BOMBuffer.AddSubcontrdCost(SubcontractedCapCost,SubcontractedCapCost);
+      BOMBuffer.AddCapOvhdCost(CapOverhead,CapOverhead);
+    END;
+
+    LOCAL PROCEDURE HasBomStructure@37(ItemNo@1000 : Code[20]) : Boolean;
+    VAR
+      Item@1001 : Record Item;
+    BEGIN
+      Item.GET(ItemNo);
+      case Item."Replenishment System" of
+        Item."Replenishment System"::Assembly:
+          begin
+            Item.CALCFIELDS("Assembly BOM");
+            if Item."Assembly BOM" then
+              exit(true);
+          end;
+        Item."Replenishment System"::"Prod. Order":
+          if Item."Production BOM No." <> '' then
+            exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetItemFilter@34(VAR Item@1000 : Record Item);
+    BEGIN
+      ItemFilter.COPYFILTERS(Item);
+    END;
+
+    LOCAL PROCEDURE GetBOMUnitOfMeasure@36(ProdBOMNo@1000 : Code[20];ProdBOMVersionNo@1002 : Code[20]) : Code[10];
+    VAR
+      ProdBOMHeader@1001 : Record "Production BOM Header";
+      ProdBOMVersion@1003 : Record "Production BOM Version";
+    BEGIN
+      if ProdBOMVersionNo <> '' then begin
+        ProdBOMVersion.GET(ProdBOMNo,ProdBOMVersionNo);
+        exit(ProdBOMVersion."Unit of Measure Code");
+      end;
+
+      ProdBOMHeader.GET(ProdBOMNo);
+      exit(ProdBOMHeader."Unit of Measure Code");
+    END;
+
+    LOCAL PROCEDURE GetQtyPerBOMHeaderUnitOfMeasure@35(Item@1002 : Record Item;ProdBOMNo@1001 : Code[20];ProdBOMVersionNo@1000 : Code[20]) : Decimal;
+    VAR
+      UOMMgt@1003 : Codeunit "Unit of Measure Management";
+    BEGIN
+      if ProdBOMNo = '' then
+        exit(1);
+
+      exit(UOMMgt.GetQtyPerUnitOfMeasure(Item,GetBOMUnitOfMeasure(ProdBOMNo,ProdBOMVersionNo)));
+    END;
+
+    LOCAL PROCEDURE CombineScrapFactors@38(LowLevelScrapPct@1000 : Decimal;HighLevelScrapPct@1001 : Decimal) : Decimal;
+    BEGIN
+      exit(LowLevelScrapPct + HighLevelScrapPct + LowLevelScrapPct * HighLevelScrapPct / 100);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

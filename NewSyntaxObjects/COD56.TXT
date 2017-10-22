@@ -1,0 +1,210 @@
+OBJECT Codeunit 56 Sales - Calc Discount By Type
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Sales Line";
+    OnRun=VAR
+            SalesLine@1000 : Record "Sales Line";
+            SalesHeader@1001 : Record "Sales Header";
+          BEGIN
+            SalesLine.COPY(Rec);
+
+            if SalesHeader.GET("Document Type","Document No.") then begin
+              ApplyDefaultInvoiceDiscount(SalesHeader."Invoice Discount Value",SalesHeader);
+              // on new order might be no line
+              if GET(SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.") then;
+            end;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      InvDiscBaseAmountIsZeroErr@1000 : TextConst 'ENU=There is no amount that you can apply an invoice discount to.';
+      AmountInvDiscErr@1002 : TextConst '@@@=%1 will be "Invoice Discount Amount";ENU=Manual %1 is not allowed.';
+
+    [External]
+    PROCEDURE ApplyDefaultInvoiceDiscount@70(InvoiceDiscountAmount@1000 : Decimal;VAR SalesHeader@1001 : Record "Sales Header");
+    BEGIN
+      if not ShouldRedistributeInvoiceDiscountAmount(SalesHeader) then
+        exit;
+
+      if SalesHeader."Invoice Discount Calculation" = SalesHeader."Invoice Discount Calculation"::Amount then
+        ApplyInvDiscBasedOnAmt(InvoiceDiscountAmount,SalesHeader)
+      else
+        ApplyInvDiscBasedOnPct(SalesHeader);
+
+      ResetRecalculateInvoiceDisc(SalesHeader);
+    END;
+
+    [External]
+    PROCEDURE ApplyInvDiscBasedOnAmt@60(InvoiceDiscountAmount@1000 : Decimal;VAR SalesHeader@1005 : Record "Sales Header");
+    VAR
+      TempVATAmountLine@1001 : TEMPORARY Record "VAT Amount Line";
+      SalesLine@1002 : Record "Sales Line";
+      InvDiscBaseAmount@1003 : Decimal;
+    BEGIN
+      with SalesHeader do begin
+        if not InvoiceDiscIsAllowed("Invoice Disc. Code") then
+          ERROR(STRSUBSTNO(AmountInvDiscErr,FIELDCAPTION("Invoice Discount Amount")));
+
+        SalesLine.SETRANGE("Document No.","No.");
+        SalesLine.SETRANGE("Document Type","Document Type");
+
+        SalesLine.CalcVATAmountLines(0,SalesHeader,SalesLine,TempVATAmountLine);
+
+        InvDiscBaseAmount := TempVATAmountLine.GetTotalInvDiscBaseAmount(false,"Currency Code");
+
+        if (InvDiscBaseAmount = 0) and (InvoiceDiscountAmount > 0) then
+          ERROR(InvDiscBaseAmountIsZeroErr);
+
+        TempVATAmountLine.SetInvoiceDiscountAmount(InvoiceDiscountAmount,"Currency Code",
+          "Prices Including VAT","VAT Base Discount %");
+
+        SalesLine.UpdateVATOnLines(0,SalesHeader,SalesLine,TempVATAmountLine);
+
+        "Invoice Discount Calculation" := "Invoice Discount Calculation"::Amount;
+        "Invoice Discount Value" := InvoiceDiscountAmount;
+
+        ResetRecalculateInvoiceDisc(SalesHeader);
+
+        MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE ApplyInvDiscBasedOnPct@73(VAR SalesHeader@1001 : Record "Sales Header");
+    VAR
+      SalesLine@1000 : Record "Sales Line";
+    BEGIN
+      with SalesHeader do begin
+        SalesLine.SETRANGE("Document No.","No.");
+        SalesLine.SETRANGE("Document Type","Document Type");
+        if SalesLine.FINDFIRST then begin
+          CODEUNIT.RUN(CODEUNIT::"Sales-Calc. Discount",SalesLine);
+          GET("Document Type","No.");
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetCustInvoiceDiscountPct@64(SalesLine@1001 : Record "Sales Line") : Decimal;
+    VAR
+      SalesHeader@1000 : Record "Sales Header";
+      InvoiceDiscountValue@1002 : Decimal;
+    BEGIN
+      with SalesHeader do begin
+        if not GET(SalesLine."Document Type",SalesLine."Document No.") then
+          exit(0);
+
+        CALCFIELDS("Invoice Discount Amount");
+        if "Invoice Discount Amount" = 0 then
+          exit(0);
+
+        case "Invoice Discount Calculation" of
+          "Invoice Discount Calculation"::"%":
+            begin
+              // Only if CustInvDisc table is empty header is not updated
+              if not CustInvDiscRecExists("Invoice Disc. Code") then
+                exit(0);
+
+              exit("Invoice Discount Value");
+            end;
+          "Invoice Discount Calculation"::None,
+          "Invoice Discount Calculation"::Amount:
+            begin
+              if "Invoice Discount Calculation" = "Invoice Discount Calculation"::None then
+                InvoiceDiscountValue := "Invoice Discount Amount"
+              else
+                InvoiceDiscountValue := "Invoice Discount Value";
+
+              CALCFIELDS("Amount Including VAT",Amount);
+              if Amount + InvoiceDiscountValue = 0 then
+                exit(0);
+
+              if "Prices Including VAT" then
+                exit(ROUND(InvoiceDiscountValue / ("Amount Including VAT" + InvoiceDiscountValue) * 100,0.01));
+
+              exit(ROUND(InvoiceDiscountValue / (Amount + InvoiceDiscountValue) * 100,0.01));
+            end;
+        end;
+      end;
+
+      exit(0);
+    END;
+
+    [External]
+    PROCEDURE ShouldRedistributeInvoiceDiscountAmount@101(VAR SalesHeader@1001 : Record "Sales Header") : Boolean;
+    VAR
+      DummyApplicationAreaSetup@1002 : Record "Application Area Setup";
+    BEGIN
+      SalesHeader.CALCFIELDS("Recalculate Invoice Disc.");
+
+      if not SalesHeader."Recalculate Invoice Disc." then
+        exit(false);
+
+      case SalesHeader."Invoice Discount Calculation" of
+        SalesHeader."Invoice Discount Calculation"::Amount:
+          exit(SalesHeader."Invoice Discount Value" <> 0);
+        SalesHeader."Invoice Discount Calculation"::"%":
+          exit(true);
+        SalesHeader."Invoice Discount Calculation"::None:
+          begin
+            if DummyApplicationAreaSetup.IsFoundationEnabled then
+              exit(true);
+
+            exit(not InvoiceDiscIsAllowed(SalesHeader."Invoice Disc. Code"));
+          end;
+        else
+          exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE ResetRecalculateInvoiceDisc@1(SalesHeader@1000 : Record "Sales Header");
+    VAR
+      SalesLine@1001 : Record "Sales Line";
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE("Recalculate Invoice Disc.",true);
+      SalesLine.MODIFYALL("Recalculate Invoice Disc.",false);
+
+      OnAfterResetRecalculateInvoiceDisc(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CustInvDiscRecExists@4(InvDiscCode@1000 : Code[20]) : Boolean;
+    VAR
+      CustInvDisc@1001 : Record "Cust. Invoice Disc.";
+    BEGIN
+      CustInvDisc.SETRANGE(Code,InvDiscCode);
+      exit(not CustInvDisc.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE InvoiceDiscIsAllowed@2(InvDiscCode@1001 : Code[20]) : Boolean;
+    VAR
+      SalesReceivablesSetup@1000 : Record "Sales & Receivables Setup";
+    BEGIN
+      SalesReceivablesSetup.GET;
+      if not SalesReceivablesSetup."Calc. Inv. Discount" then
+        exit(true);
+
+      exit(not CustInvDiscRecExists(InvDiscCode));
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterResetRecalculateInvoiceDisc@3(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

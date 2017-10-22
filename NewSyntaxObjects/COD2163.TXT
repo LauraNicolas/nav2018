@@ -1,0 +1,226 @@
+OBJECT Codeunit 2163 O365 Sales Quote Events
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Calendar Event";
+    Permissions=TableData "Calendar Event"=rimd;
+    OnRun=BEGIN
+            if not IsInvoicing then begin
+              Result := NotInvoicingErr;
+              State := State::Failed;
+              exit;
+            end;
+
+            ParseEvent(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      EstimateSentMsg@1000 : TextConst '@@@="%1=The estimate number";ENU=Estimate %1 was sent.';
+      EstimateAcceptedMsg@1002 : TextConst '@@@="%1=The estimate number";ENU=Estimate %1 was accepted.';
+      EstimateExpiringMsg@1003 : TextConst 'ENU=There are expiring estimates.';
+      UnsupportedTypeErr@1001 : TextConst 'ENU=This event type is not supported.';
+      NotInvoicingErr@1006 : TextConst 'ENU=This event is only handled for Invoicing.';
+
+    LOCAL PROCEDURE ParseEvent@1(CalendarEvent@1000 : Record "Calendar Event");
+    VAR
+      O365SalesEvent@1001 : Record "O365 Sales Event";
+      O365SalesWebService@1002 : Codeunit "O365 Sales Web Service";
+    BEGIN
+      O365SalesEvent.LOCKTABLE;
+      O365SalesEvent.GET(CalendarEvent."Record ID to Process");
+
+      case O365SalesEvent.Type of
+        O365SalesEvent.Type::"Estimate Accepted":
+          O365SalesWebService.SendEstimateAcceptedEvent(O365SalesEvent."Document No.");
+        O365SalesEvent.Type::"Estimate Expiring":
+          O365SalesWebService.SendEstimateExpiryEvent;
+        O365SalesEvent.Type::"Estimate Sent":
+          O365SalesWebService.SendEstimateSentEvent(O365SalesEvent."Document No.");
+        else
+          ERROR(UnsupportedTypeErr);
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateExpiringEvent@4();
+    VAR
+      O365C2GraphEventSettings@1000 : Record "O365 C2Graph Event Settings";
+      CalendarEvent@1001 : Record "Calendar Event";
+      SalesHeader@1003 : Record "Sales Header";
+      O365SalesEvent@1005 : Record "O365 Sales Event";
+      CalendarEventMangement@1004 : Codeunit "Calendar Event Mangement";
+      NewDate@1002 : Date;
+      EventNo@1006 : Integer;
+    BEGIN
+      if not O365C2GraphEventSettings.GET then
+        O365C2GraphEventSettings.INSERT(true);
+
+      // If there are any unaccepted estimates that are expiring next week
+      // Create/update the event
+      NewDate := CALCDATE(STRSUBSTNO('<WD%1>',O365C2GraphEventSettings."Est. Expiring Week Start (WD)"),TODAY); // Next start of the week
+
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Quote);
+      SalesHeader.SETRANGE("Quote Accepted",false);
+      SalesHeader.SETRANGE("Quote Valid Until Date",NewDate,CALCDATE('<1W>',NewDate)); // ends some time during next week
+
+      if CalendarEvent.GET(O365C2GraphEventSettings."Est. Expiring Event") and (not CalendarEvent.Archived) then begin
+        if SalesHeader.ISEMPTY or (not O365C2GraphEventSettings."Est. Expiring Enabled") then
+          CalendarEvent.DELETE(true)
+        else begin
+          CalendarEvent.VALIDATE("Scheduled Date",NewDate);
+          CalendarEvent.MODIFY(true);
+        end;
+
+        exit;
+      end;
+
+      if SalesHeader.ISEMPTY or (not O365C2GraphEventSettings."Est. Expiring Enabled") then
+        exit;
+
+      CreateEvent(O365SalesEvent,O365SalesEvent.Type::"Estimate Expiring",'');
+      EventNo :=
+        CalendarEventMangement.CreateCalendarEvent(
+          NewDate,EstimateExpiringMsg,CODEUNIT::"O365 Sales Quote Events",O365SalesEvent.RECORDID);
+
+      O365C2GraphEventSettings."Est. Expiring Event" := EventNo;
+      O365C2GraphEventSettings.MODIFY(true);
+    END;
+
+    LOCAL PROCEDURE CreateSendEvent@13(DocNo@1000 : Code[20]);
+    VAR
+      O365SalesEvent@1001 : Record "O365 Sales Event";
+      CalendarEventMangement@1002 : Codeunit "Calendar Event Mangement";
+    BEGIN
+      if not O365SalesEvent.IsEventTypeEnabled(O365SalesEvent.Type::"Estimate Sent") then
+        exit;
+
+      CreateEvent(O365SalesEvent,O365SalesEvent.Type::"Estimate Sent",DocNo);
+      CalendarEventMangement.CreateCalendarEvent(
+        TODAY,STRSUBSTNO(EstimateSentMsg,DocNo),CODEUNIT::"O365 Sales Quote Events",O365SalesEvent.RECORDID);
+    END;
+
+    LOCAL PROCEDURE CreateAcceptedEvent@15(DocNo@1000 : Code[20]);
+    VAR
+      O365SalesEvent@1002 : Record "O365 Sales Event";
+      CalendarEventMangement@1001 : Codeunit "Calendar Event Mangement";
+    BEGIN
+      if not O365SalesEvent.IsEventTypeEnabled(O365SalesEvent.Type::"Estimate Accepted") then
+        exit;
+
+      CreateEvent(O365SalesEvent,O365SalesEvent.Type::"Estimate Accepted",DocNo);
+      CalendarEventMangement.CreateCalendarEvent(
+        TODAY,STRSUBSTNO(EstimateAcceptedMsg,DocNo),CODEUNIT::"O365 Sales Quote Events",
+        O365SalesEvent.RECORDID);
+    END;
+
+    LOCAL PROCEDURE CreateEvent@5(VAR O365SalesEvent@1002 : Record "O365 Sales Event";Type@1000 : Integer;DocNo@1001 : Code[20]);
+    BEGIN
+      O365SalesEvent.INIT;
+      O365SalesEvent.Type := Type;
+      O365SalesEvent."Document No." := DocNo;
+      O365SalesEvent.INSERT;
+    END;
+
+    LOCAL PROCEDURE IsQuote@6(VAR SalesHeader@1003 : Record "Sales Header") : Boolean;
+    BEGIN
+      if SalesHeader.ISTEMPORARY then
+        exit(false);
+
+      exit(SalesHeader."Document Type" = SalesHeader."Document Type"::Quote);
+    END;
+
+    LOCAL PROCEDURE IsInvoicing@8() : Boolean;
+    VAR
+      O365SalesInitialSetup@1000 : Record "O365 Sales Initial Setup";
+      O365C2GraphEventSettings@1002 : Record "O365 C2Graph Event Settings";
+      O365SalesEvent@1001 : Record "O365 Sales Event";
+    BEGIN
+      if not O365SalesInitialSetup.READPERMISSION then
+        exit(false);
+
+      if not (O365C2GraphEventSettings.READPERMISSION and O365C2GraphEventSettings.WRITEPERMISSION) then
+        exit(false);
+
+      if not (O365SalesEvent.READPERMISSION and O365SalesEvent.WRITEPERMISSION) then
+        exit(false);
+
+      if not O365SalesInitialSetup.GET then
+        exit(false);
+
+      exit(O365SalesInitialSetup."Is initialized");
+    END;
+
+    [EventSubscriber(Table,36,OnAfterInsertEvent)]
+    PROCEDURE OnAfterSalesHeaderInsert@7(VAR Rec@1000 : Record "Sales Header";RunTrigger@1001 : Boolean);
+    BEGIN
+      if not IsQuote(Rec) then
+        exit;
+
+      if not IsInvoicing then
+        exit;
+
+      UpdateExpiringEvent;
+    END;
+
+    [EventSubscriber(Table,36,OnAfterDeleteEvent)]
+    PROCEDURE OnAfterSalesHeaderDelete@10(VAR Rec@1000 : Record "Sales Header";RunTrigger@1001 : Boolean);
+    BEGIN
+      if not (IsInvoicing and IsQuote(Rec)) then
+        exit;
+
+      UpdateExpiringEvent;
+    END;
+
+    [EventSubscriber(Table,36,OnAfterModifyEvent)]
+    LOCAL PROCEDURE OnAfterSalesHeaderModify@2(VAR Rec@1000 : Record "Sales Header";VAR xRec@1001 : Record "Sales Header";RunTrigger@1002 : Boolean);
+    BEGIN
+      if not IsQuote(Rec) then
+        exit;
+
+      if not IsInvoicing then
+        exit;
+
+      UpdateExpiringEvent;
+    END;
+
+    [EventSubscriber(Table,36,OnAfterSalesQuoteAccepted)]
+    LOCAL PROCEDURE OnAfterSalesQuoteAccepted@3(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+      if not IsQuote(SalesHeader) then
+        exit;
+
+      if not IsInvoicing then
+        exit;
+
+      CreateAcceptedEvent(SalesHeader."No.");
+      UpdateExpiringEvent;
+    END;
+
+    [EventSubscriber(Table,36,OnAfterSendSalesHeader)]
+    LOCAL PROCEDURE OnAfterSendSalesHeader@9(VAR SalesHeader@1000 : Record "Sales Header";ShowDialog@1001 : Boolean);
+    BEGIN
+      if not IsQuote(SalesHeader) then
+        exit;
+
+      if not IsInvoicing then
+        exit;
+
+      if ShowDialog then
+        exit;
+
+      CreateSendEvent(SalesHeader."No.");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,424 @@
+OBJECT Codeunit 5642 FA Reclass. Transfer Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=is a %1 and %2 is not a %1.';
+      Text001@1001 : TextConst 'ENU=is not different than %1.';
+      Text002@1002 : TextConst 'ENU=%1 is disposed.';
+      Text003@1003 : TextConst 'ENU="%2 = 0 for %1."';
+      Text004@1004 : TextConst 'ENU=%2 is greater than %3 for %1.';
+      FAJnlSetup@1005 : Record "FA Journal Setup";
+      OldFA@1006 : Record "Fixed Asset";
+      NewFA@1007 : Record "Fixed Asset";
+      FADeprBook@1008 : Record "FA Depreciation Book";
+      FADeprBook2@1009 : Record "FA Depreciation Book";
+      GenJnlLine@1010 : Record "Gen. Journal Line";
+      FAJnlLine@1011 : Record "FA Journal Line";
+      DepreciationCalc@1012 : Codeunit "Depreciation Calculation";
+      FAGetJnl@1013 : Codeunit "FA Get Journal";
+      FAPostingType@1014 : 'Acquisition,Depr,WriteDown,Appr,Custom1,Custom2,Disposal,Maintenance,"Salvage Value"';
+      TransferToGenJnl@1015 : Boolean;
+      TemplateName@1016 : Code[10];
+      BatchName@1017 : Code[10];
+      FANo@1018 : Code[20];
+      TransferType@1019 : ARRAY [9] OF Boolean;
+      Amounts@1020 : ARRAY [9] OF Decimal;
+      FAJnlNextLineNo@1021 : Integer;
+      GenJnlNextLineNo@1022 : Integer;
+      i@1023 : Integer;
+      j@1024 : Integer;
+      OldNewFA@1025 : Integer;
+      Sign@1026 : Integer;
+      GenJnlUsedOnce@1027 : Boolean;
+      FAJnlUsedOnce@1028 : Boolean;
+      FAJnlDocumentNo@1029 : Code[20];
+      GenJnlDocumentNo@1030 : Code[20];
+      Text005@1032 : TextConst 'ENU=It was not possible to find a %1 in %2.';
+      Text006@1031 : TextConst 'ENU=%1 must be %2 or %3 for %4.';
+      Text007@1033 : TextConst 'ENU=%1 must be %2 for %3.';
+      Text008@1034 : TextConst 'ENU=must not be used together with %1 in %2 %3.';
+      Text009@1035 : TextConst 'ENU=%1 cannot be calculated for %2.';
+
+    [External]
+    PROCEDURE FAReclassLine@3(VAR FAReclassJnlLine@1000 : Record "FA Reclass. Journal Line";VAR Done@1001 : Boolean);
+    BEGIN
+      with FAReclassJnlLine do begin
+        if ("FA No." = '') and ("New FA No." = '') then
+          exit;
+        OldFA.GET("FA No.");
+        NewFA.GET("New FA No.");
+        FADeprBook.GET("FA No.","Depreciation Book Code");
+        FADeprBook2.GET("New FA No.","Depreciation Book Code");
+        OldFA.TESTFIELD(Blocked,false);
+        NewFA.TESTFIELD(Blocked,false);
+        OldFA.TESTFIELD(Inactive,false);
+        NewFA.TESTFIELD(Inactive,false);
+
+        if OldFA."Budgeted Asset" and not NewFA."Budgeted Asset" then
+          FIELDERROR(
+            "FA No.",STRSUBSTNO(Text000,
+              OldFA.FIELDCAPTION("Budgeted Asset"),FIELDCAPTION("New FA No.")));
+
+        if NewFA."Budgeted Asset" and not OldFA."Budgeted Asset" then
+          FIELDERROR(
+            "New FA No.",STRSUBSTNO(Text000,
+              NewFA.FIELDCAPTION("Budgeted Asset"),FIELDCAPTION("FA No.")));
+
+        if "FA No." = "New FA No." then
+          FIELDERROR(
+            "FA No.",STRSUBSTNO(Text001,FIELDCAPTION("New FA No.")));
+
+        if FADeprBook."Disposal Date" > 0D then
+          ERROR(Text002,FAName(OldFA,"Depreciation Book Code"));
+
+        if FADeprBook2."Disposal Date" > 0D then
+          ERROR(Text002,FAName(NewFA,"Depreciation Book Code"));
+
+        SetFAReclassType(FAReclassJnlLine);
+        CalcAmounts(FAReclassJnlLine);
+        CalcDB1DeprAmount(FAReclassJnlLine);
+
+        for OldNewFA := 0 to 1 do begin
+          j := 0;
+          while j < 9 do begin
+            j := j + 1;
+            if j = 7 then
+              j := 9;
+            Convert(OldNewFA,j,FAPostingType,Sign,FANo);
+            i := FAPostingType + 1;
+            TemplateName := '';
+            BatchName := '';
+            if TransferType[i] and (Amounts[i] <> 0) then begin
+              FAGetJnl.JnlName(
+                "Depreciation Book Code",OldFA."Budgeted Asset",FAPostingType,
+                TransferToGenJnl,TemplateName,BatchName);
+              SetJnlRange;
+              if TransferToGenJnl then
+                InsertGenJnlLine(FAReclassJnlLine,FANo,Sign * Amounts[i],"Insert Bal. Account")
+              else
+                InsertFAJnlLine(FAReclassJnlLine,FANo,Sign * Amounts[i]);
+              Done := true;
+            end;
+          end;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcAmounts@1(VAR FAReclassJnlLine@1000 : Record "FA Reclass. Journal Line");
+    BEGIN
+      with FADeprBook do begin
+        CALCFIELDS("Acquisition Cost");
+        if TransferType[2] then
+          CALCFIELDS(Depreciation);
+        if TransferType[3] then
+          CALCFIELDS("Write-Down");
+        if TransferType[4] then
+          CALCFIELDS(Appreciation);
+        if TransferType[5] then
+          CALCFIELDS("Custom 1");
+        if TransferType[6] then
+          CALCFIELDS("Custom 2");
+        if TransferType[9] then
+          CALCFIELDS("Salvage Value");
+        Amounts[1] := "Acquisition Cost";
+        Amounts[2] := Depreciation;
+        Amounts[3] := "Write-Down";
+        Amounts[4] := Appreciation;
+        Amounts[5] := "Custom 1";
+        Amounts[6] := "Custom 2";
+        Amounts[9] := "Salvage Value";
+        if Amounts[1] = 0 then
+          ERROR(Text003,
+            FAName(OldFA,"Depreciation Book Code"),FIELDCAPTION("Acquisition Cost"));
+      end;
+
+      with FAReclassJnlLine do begin
+        if "Reclassify Acq. Cost Amount" <> 0 then begin
+          if "Reclassify Acq. Cost Amount" > Amounts[1] then
+            ERROR(Text004,
+              FAName(OldFA,"Depreciation Book Code"),
+              FIELDCAPTION("Reclassify Acq. Cost Amount"),
+              FADeprBook.FIELDCAPTION("Acquisition Cost"));
+          "Reclassify Acq. Cost %" := "Reclassify Acq. Cost Amount" / Amounts[1] * 100;
+        end;
+        if "Reclassify Acq. Cost Amount" <> 0 then
+          Amounts[1] := "Reclassify Acq. Cost Amount"
+        else
+          Amounts[1] := ROUND(Amounts[1] * "Reclassify Acq. Cost %" / 100);
+        for i := 2 to 9 do
+          Amounts[i] := ROUND(Amounts[i] * "Reclassify Acq. Cost %" / 100);
+      end;
+    END;
+
+    LOCAL PROCEDURE SetFAReclassType@8(VAR FAReclassJnlLine@1000 : Record "FA Reclass. Journal Line");
+    BEGIN
+      with FAReclassJnlLine do begin
+        TransferType[1] := "Reclassify Acquisition Cost";
+        TransferType[2] := "Reclassify Depreciation";
+        TransferType[3] := "Reclassify Write-Down";
+        TransferType[4] := "Reclassify Appreciation";
+        TransferType[5] := "Reclassify Custom 1";
+        TransferType[6] := "Reclassify Custom 2";
+        TransferType[9] := "Reclassify Salvage Value";
+      end;
+    END;
+
+    LOCAL PROCEDURE SetJnlRange@2();
+    BEGIN
+      if (FAJnlNextLineNo = 0) and not TransferToGenJnl then begin
+        FAJnlLine.LOCKTABLE;
+        FAGetJnl.SetFAJnlRange(FAJnlLine,TemplateName,BatchName);
+        FAJnlNextLineNo := FAJnlLine."Line No.";
+      end;
+      if (GenJnlNextLineNo = 0) and TransferToGenJnl then begin
+        GenJnlLine.LOCKTABLE;
+        FAGetJnl.SetGenJnlRange(GenJnlLine,TemplateName,BatchName);
+        GenJnlNextLineNo := GenJnlLine."Line No.";
+      end;
+    END;
+
+    LOCAL PROCEDURE Convert@5(OldNewFA@1000 : 'OldFA,NewFA';J@1001 : Integer;VAR FAPostingType@1002 : 'Acquisition,Depr,WriteDown,Appr,Custom1,Custom2,Disposal,Maintenance,"Salvage Value"';VAR Sign@1003 : Integer;VAR FANo@1004 : Code[20]);
+    BEGIN
+      if OldNewFA = OldNewFA::OldFA then begin
+        Sign := -1;
+        FANo := OldFA."No.";
+      end else begin
+        Sign := 1;
+        FANo := NewFA."No.";
+      end;
+      if OldNewFA = OldNewFA::OldFA then
+        case J of
+          1:
+            FAPostingType := FAPostingType::"Salvage Value";
+          2:
+            FAPostingType := FAPostingType::Depr;
+          3:
+            FAPostingType := FAPostingType::WriteDown;
+          4:
+            FAPostingType := FAPostingType::Custom1;
+          5:
+            FAPostingType := FAPostingType::Custom2;
+          6:
+            FAPostingType := FAPostingType::Appr;
+          9:
+            FAPostingType := FAPostingType::Acquisition;
+        end;
+      if OldNewFA = OldNewFA::NewFA then
+        case J of
+          1:
+            FAPostingType := FAPostingType::Acquisition;
+          2:
+            FAPostingType := FAPostingType::"Salvage Value";
+          3:
+            FAPostingType := FAPostingType::Appr;
+          4:
+            FAPostingType := FAPostingType::WriteDown;
+          5:
+            FAPostingType := FAPostingType::Custom1;
+          6:
+            FAPostingType := FAPostingType::Custom2;
+          9:
+            FAPostingType := FAPostingType::Depr;
+        end;
+    END;
+
+    LOCAL PROCEDURE InsertFAJnlLine@13(VAR FAReclassJnlLine@1000 : Record "FA Reclass. Journal Line";FANo@1001 : Code[20];EntryAmount@1002 : Decimal);
+    BEGIN
+      if not FAJnlUsedOnce then begin;
+        FAJnlUsedOnce := true;
+        FAJnlDocumentNo :=
+          FAJnlSetup.GetFAJnlDocumentNo(FAJnlLine,FAReclassJnlLine."FA Posting Date",false);
+      end;
+
+      with FAJnlLine do begin
+        INIT;
+        "Line No." := 0;
+        FAJnlSetup.SetFAJnlTrailCodes(FAJnlLine);
+        "FA Posting Type" := FAPostingType;
+        VALIDATE("FA No.",FANo);
+        "FA Posting Date" := FAReclassJnlLine."FA Posting Date";
+        "Posting Date" := FAReclassJnlLine."Posting Date";
+        if "Posting Date" = "FA Posting Date" then
+          "Posting Date" := 0D;
+
+        "Document No." := FAReclassJnlLine."Document No.";
+        if "Document No." = '' then
+          "Document No." := FAJnlDocumentNo;
+        if "Document No." = '' then
+          FAReclassJnlLine.TESTFIELD("Document No.");
+
+        "Posting No. Series" := FAJnlSetup.GetFANoSeries(FAJnlLine);
+        VALIDATE("Depreciation Book Code",FAReclassJnlLine."Depreciation Book Code");
+        VALIDATE(Amount,EntryAmount);
+        Description := FAReclassJnlLine.Description;
+        "FA Reclassification Entry" := true;
+        FAJnlNextLineNo := FAJnlNextLineNo + 10000;
+        "Line No." := FAJnlNextLineNo;
+        INSERT(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertGenJnlLine@14(VAR FAReclassJnlLine@1000 : Record "FA Reclass. Journal Line";FANo@1001 : Code[20];EntryAmount@1002 : Decimal;BalAccount@1003 : Boolean);
+    VAR
+      FAInsertGLAcc@1004 : Codeunit "FA Insert G/L Account";
+    BEGIN
+      if not GenJnlUsedOnce then begin;
+        GenJnlUsedOnce := true;
+        GenJnlDocumentNo :=
+          FAJnlSetup.GetGenJnlDocumentNo(GenJnlLine,FAReclassJnlLine."FA Posting Date",false);
+      end;
+
+      with GenJnlLine do begin
+        INIT;
+        "Line No." := 0;
+        FAJnlSetup.SetGenJnlTrailCodes(GenJnlLine);
+        "Account Type" := "Account Type"::"Fixed Asset";
+        "FA Posting Type" := FAPostingType + 1;
+        VALIDATE("Account No.",FANo);
+        VALIDATE("Depreciation Book Code",FAReclassJnlLine."Depreciation Book Code");
+        "FA Posting Date" := FAReclassJnlLine."FA Posting Date";
+        "Posting Date" := FAReclassJnlLine."Posting Date";
+        if "Posting Date" = 0D then
+          "Posting Date" := FAReclassJnlLine."FA Posting Date";
+        if "Posting Date" = "FA Posting Date" then
+          "FA Posting Date" := 0D;
+
+        "Document No." := FAReclassJnlLine."Document No.";
+        if "Document No." = '' then
+          "Document No." := GenJnlDocumentNo;
+        if "Document No." = '' then
+          FAReclassJnlLine.TESTFIELD("Document No.");
+
+        "Posting No. Series" := FAJnlSetup.GetGenNoSeries(GenJnlLine);
+        VALIDATE(Amount,EntryAmount);
+        Description := FAReclassJnlLine.Description;
+        "FA Reclassification Entry" := true;
+        GenJnlNextLineNo := GenJnlNextLineNo + 10000;
+        "Line No." := GenJnlNextLineNo;
+        INSERT(true);
+        if BalAccount then begin
+          FAInsertGLAcc.GetBalAcc(GenJnlLine);
+          if FIND('+') then ;
+          GenJnlNextLineNo := "Line No.";
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE FAName@7(VAR FA@1000 : Record "Fixed Asset";DeprBookCode@1001 : Code[10]) : Text[200];
+    BEGIN
+      exit(DepreciationCalc.FAName(FA,DeprBookCode));
+    END;
+
+    LOCAL PROCEDURE CalcDB1DeprAmount@4(FAReclassJnlLine@1000 : Record "FA Reclass. Journal Line");
+    VAR
+      AccountingPeriod@1008 : Record "Accounting Period";
+      DeprBook@1010 : Record "Depreciation Book";
+      CalculateDepr@1001 : Codeunit "Calculate Depreciation";
+      DeprAmount@1002 : Decimal;
+      DeprAmount2@1012 : Decimal;
+      Custom1Amount@1003 : Decimal;
+      NumberOfDays@1004 : Integer;
+      NumberOfDays2@1013 : Integer;
+      Custom1NumberOfDays@1005 : Integer;
+      DeprUntilDate@1006 : Date;
+      DummyEntryAmounts@1007 : ARRAY [4] OF Decimal;
+      FixedAmount@1009 : Decimal;
+      FixedAmount2@1014 : Decimal;
+      DaysInFiscalYear@1011 : Integer;
+    BEGIN
+      if not FAReclassJnlLine."Calc. DB1 Depr. Amount" then
+        exit;
+      DeprBook.GET(FAReclassJnlLine."Depreciation Book Code");
+      DeprBook.TESTFIELD("Use Custom 1 Depreciation",false); // better
+      if (FADeprBook."Depreciation Method" <> FADeprBook."Depreciation Method"::"DB1/SL") and
+         (FADeprBook."Depreciation Method" <> FADeprBook."Depreciation Method"::"Declining-Balance 1")
+      then begin
+        FADeprBook."Depreciation Method" := FADeprBook."Depreciation Method"::"Declining-Balance 1";
+        FADeprBook2."Depreciation Method" := FADeprBook."Depreciation Method"::"DB1/SL";
+        ERROR(Text006,
+          FADeprBook.FIELDCAPTION("Depreciation Method"),
+          FADeprBook."Depreciation Method",
+          FADeprBook2."Depreciation Method",
+          FAName(OldFA,FAReclassJnlLine."Depreciation Book Code"));
+      end;
+      if FADeprBook."Depreciation Method" <> FADeprBook2."Depreciation Method" then
+        ERROR(Text007,
+          FADeprBook.FIELDCAPTION("Depreciation Method"),
+          FADeprBook."Depreciation Method",
+          FAName(NewFA,FAReclassJnlLine."Depreciation Book Code"));
+
+      if DeprBook."Use Custom 1 Depreciation" then
+        FAReclassJnlLine.FIELDERROR("Calc. DB1 Depr. Amount",
+          STRSUBSTNO(
+            Text008,
+            DeprBook.FIELDCAPTION("Use Custom 1 Depreciation"),
+            DeprBook.TABLECAPTION,
+            DeprBook.Code));
+
+      FADeprBook.TESTFIELD("Temp. Ending Date",0D);
+      FADeprBook2.TESTFIELD("Temp. Ending Date",0D);
+
+      with AccountingPeriod do begin
+        SETRANGE("New Fiscal Year",true);
+        SETRANGE("Starting Date",FAReclassJnlLine."FA Posting Date",DMY2DATE(31,12,9999));
+        if FINDFIRST then begin
+          if "Starting Date" <= 00000101D then
+            ERROR(Text005,FIELDCAPTION("Starting Date"),TABLECAPTION);
+          DeprUntilDate := "Starting Date" - 1
+        end else
+          ERROR(Text005,FIELDCAPTION("Starting Date"),TABLECAPTION);
+      end;
+
+      CalculateDepr.Calculate(
+        DeprAmount,Custom1Amount,NumberOfDays,Custom1NumberOfDays,
+        FAReclassJnlLine."FA No.",FAReclassJnlLine."Depreciation Book Code",
+        DeprUntilDate,DummyEntryAmounts,0D,0);
+      if (DeprAmount >= 0) or (NumberOfDays <= 0) then
+        ERROR(Text009,
+          FADeprBook.FIELDCAPTION("Temp. Fixed Depr. Amount"),
+          FAName(OldFA,FAReclassJnlLine."Depreciation Book Code"));
+      CalculateDepr.Calculate(
+        DeprAmount2,Custom1Amount,NumberOfDays2,Custom1NumberOfDays,
+        FAReclassJnlLine."New FA No.",FAReclassJnlLine."Depreciation Book Code",
+        DeprUntilDate,DummyEntryAmounts,0D,0);
+
+      DaysInFiscalYear := DeprBook."No. of Days in Fiscal Year";
+      if DaysInFiscalYear = 0 then
+        DaysInFiscalYear := 360;
+
+      if DeprBook."Fiscal Year 365 Days" then
+        DaysInFiscalYear := 365;
+
+      FixedAmount := ROUND(-DeprAmount / NumberOfDays * DaysInFiscalYear);
+      if NumberOfDays2 > 0 then
+        FixedAmount2 := ROUND(-DeprAmount2 / NumberOfDays2 * DaysInFiscalYear);
+
+      FADeprBook."Temp. Fixed Depr. Amount" :=
+        ROUND(FixedAmount * (100 - FAReclassJnlLine."Reclassify Acq. Cost %") / 100);
+      FADeprBook."Temp. Ending Date" := DeprUntilDate;
+      FADeprBook.MODIFY;
+
+      FADeprBook2."Temp. Fixed Depr. Amount" :=
+        ROUND(FixedAmount2 + FixedAmount - FADeprBook."Temp. Fixed Depr. Amount");
+      FADeprBook2."Temp. Ending Date" := FADeprBook."Temp. Ending Date";
+      FADeprBook2.MODIFY;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

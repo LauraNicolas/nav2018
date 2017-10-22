@@ -1,0 +1,218 @@
+OBJECT Codeunit 76 Purch.-Get Drop Shpt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Purchase Header";
+    Permissions=TableData "Sales Header"=m,
+                TableData "Sales Line"=m;
+    OnRun=BEGIN
+            PurchHeader.COPY(Rec);
+            Code;
+            Rec := PurchHeader;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=There were no lines to be retrieved from sales order %1.';
+      PurchHeader@1001 : Record "Purchase Header";
+      PurchLine@1002 : Record "Purchase Line";
+      SalesHeader@1003 : Record "Sales Header";
+      SalesLine@1004 : Record "Sales Line";
+      CopyDocMgt@1006 : Codeunit "Copy Document Mgt.";
+      ItemTrackingMgt@1007 : Codeunit "Item Tracking Management";
+      TransferExtendedText@1008 : Codeunit "Transfer Extended Text";
+      NextLineNo@1005 : Integer;
+      Text001@1009 : TextConst 'ENU=The %1 for %2 %3 has changed from %4 to %5 since the Sales Order was created. Adjust the %6 on the Sales Order or the %1.';
+      SelltoCustomerBlankErr@1010 : TextConst 'ENU=The Sell-to Customer No. field must have a value.';
+
+    LOCAL PROCEDURE Code@1();
+    VAR
+      PurchLine2@1000 : Record "Purchase Line";
+      ItemUnitofMeasure@1001 : Record "Item Unit of Measure";
+    BEGIN
+      with PurchHeader do begin
+        TESTFIELD("Document Type","Document Type"::Order);
+
+        if "Sell-to Customer No." = '' then
+          ERROR(SelltoCustomerBlankErr);
+
+        SalesHeader.SETCURRENTKEY("Document Type","Sell-to Customer No.");
+        SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Order);
+        SalesHeader.SETRANGE("Sell-to Customer No.","Sell-to Customer No.");
+        if (PAGE.RUNMODAL(PAGE::"Sales List",SalesHeader) <> ACTION::LookupOK) or
+           (SalesHeader."No." = '')
+        then
+          exit;
+        LOCKTABLE;
+        SalesHeader.TESTFIELD("Document Type",SalesHeader."Document Type"::Order);
+        TESTFIELD("Sell-to Customer No.",SalesHeader."Sell-to Customer No.");
+        TESTFIELD("Ship-to Code",SalesHeader."Ship-to Code");
+        if DropShptOrderExists(SalesHeader) then
+          AddShipToAddress(SalesHeader,true);
+
+        PurchLine.LOCKTABLE;
+        SalesLine.LOCKTABLE;
+
+        PurchLine.SETRANGE("Document Type",PurchLine."Document Type"::Order);
+        PurchLine.SETRANGE("Document No.","No.");
+        if PurchLine.FINDLAST then
+          NextLineNo := PurchLine."Line No." + 10000
+        else
+          NextLineNo := 10000;
+
+        SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+        SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+        SalesLine.SETRANGE("Drop Shipment",true);
+        SalesLine.SETFILTER("Outstanding Quantity",'<>0');
+        SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+        SalesLine.SETFILTER("No.",'<>%1','');
+        SalesLine.SETRANGE("Purch. Order Line No.",0);
+
+        if SalesLine.FIND('-') then
+          repeat
+            if (SalesLine.Type = SalesLine.Type::Item) and ItemUnitofMeasure.GET(SalesLine."No.",SalesLine."Unit of Measure Code") then
+              if SalesLine."Qty. per Unit of Measure" <> ItemUnitofMeasure."Qty. per Unit of Measure" then
+                ERROR(Text001,
+                  SalesLine.FIELDCAPTION("Qty. per Unit of Measure"),
+                  SalesLine.FIELDCAPTION("Unit of Measure Code"),
+                  SalesLine."Unit of Measure Code",
+                  SalesLine."Qty. per Unit of Measure",
+                  ItemUnitofMeasure."Qty. per Unit of Measure",
+                  SalesLine.FIELDCAPTION(Quantity));
+
+            PurchLine.INIT;
+            PurchLine."Document Type" := PurchLine."Document Type"::Order;
+            PurchLine."Document No." := "No.";
+            PurchLine."Line No." := NextLineNo;
+            CopyDocMgt.TransfldsFromSalesToPurchLine(SalesLine,PurchLine);
+            GetDescription(PurchLine,SalesLine);
+            PurchLine."Sales Order No." := SalesLine."Document No.";
+            PurchLine."Sales Order Line No." := SalesLine."Line No.";
+            PurchLine."Drop Shipment" := true;
+            PurchLine."Purchasing Code" := SalesLine."Purchasing Code";
+            EVALUATE(PurchLine."Inbound Whse. Handling Time",'<0D>');
+            PurchLine.VALIDATE("Inbound Whse. Handling Time");
+            PurchLine.INSERT;
+            NextLineNo := NextLineNo + 10000;
+
+            SalesLine."Unit Cost (LCY)" := PurchLine."Unit Cost (LCY)";
+            SalesLine.VALIDATE("Unit Cost (LCY)");
+            SalesLine."Purchase Order No." := PurchLine."Document No.";
+            SalesLine."Purch. Order Line No." := PurchLine."Line No.";
+            SalesLine.MODIFY;
+            ItemTrackingMgt.CopyItemTracking(SalesLine.RowID1,PurchLine.RowID1,true);
+
+            if TransferExtendedText.PurchCheckIfAnyExtText(PurchLine,true) then begin
+              TransferExtendedText.InsertPurchExtText(PurchLine);
+              PurchLine2.SETRANGE("Document Type","Document Type");
+              PurchLine2.SETRANGE("Document No.","No.");
+              if PurchLine2.FINDLAST then
+                NextLineNo := PurchLine2."Line No.";
+              NextLineNo := NextLineNo + 10000;
+            end;
+
+          until SalesLine.NEXT = 0
+        else
+          ERROR(
+            Text000,
+            SalesHeader."No.");
+
+        MODIFY; // Only version check
+        SalesHeader.MODIFY; // Only version check
+      end;
+    END;
+
+    LOCAL PROCEDURE GetDescription@2(VAR PurchaseLine@1007 : Record "Purchase Line";SalesLine@1006 : Record "Sales Line");
+    VAR
+      Item@1000 : Record Item;
+    BEGIN
+      if (SalesLine.Type <> SalesLine.Type::Item) or (SalesLine."No." = '') then
+        exit;
+      Item.GET(SalesLine."No.");
+
+      if GetDescriptionFromItemCrossReference(PurchaseLine,SalesLine,Item) then
+        exit;
+      if GetDescriptionFromItemTranslation(PurchaseLine,SalesLine) then
+        exit;
+      if GetDescriptionFromSalesLine(PurchaseLine,SalesLine) then
+        exit;
+      if GetDescriptionFromItemVariant(PurchaseLine,SalesLine,Item) then
+        exit;
+      GetDescriptionFromItem(PurchaseLine,Item);
+    END;
+
+    LOCAL PROCEDURE GetDescriptionFromItemCrossReference@7(VAR PurchaseLine@1001 : Record "Purchase Line";SalesLine@1000 : Record "Sales Line";Item@1004 : Record Item) : Boolean;
+    VAR
+      ItemCrossRef@1002 : Record "Item Cross Reference";
+    BEGIN
+      if PurchHeader."Buy-from Vendor No." <> '' then
+        if ItemCrossRef.GetItemDescription(
+             PurchaseLine.Description,Item."No.",SalesLine."Variant Code",SalesLine."Unit of Measure Code",
+             ItemCrossRef."Cross-Reference Type"::Vendor,PurchHeader."Buy-from Vendor No.")
+        then begin
+          PurchaseLine."Description 2" := '';
+          exit(true);
+        end;
+
+      exit(false)
+    END;
+
+    LOCAL PROCEDURE GetDescriptionFromItemTranslation@8(VAR PurchaseLine@1001 : Record "Purchase Line";SalesLine@1000 : Record "Sales Line") : Boolean;
+    VAR
+      Vend@1003 : Record Vendor;
+      ItemTranslation@1002 : Record "Item Translation";
+    BEGIN
+      if PurchHeader."Buy-from Vendor No." <> '' then begin
+        Vend.GET(PurchHeader."Buy-from Vendor No.");
+        if Vend."Language Code" <> '' then
+          if ItemTranslation.GET(SalesLine."No.",SalesLine."Variant Code",Vend."Language Code") then begin
+            PurchaseLine.Description := ItemTranslation.Description;
+            PurchaseLine."Description 2" := ItemTranslation."Description 2";
+            exit(true);
+          end;
+      end;
+      exit(false)
+    END;
+
+    LOCAL PROCEDURE GetDescriptionFromItemVariant@9(VAR PurchaseLine@1001 : Record "Purchase Line";SalesLine@1000 : Record "Sales Line";Item@1002 : Record Item) : Boolean;
+    VAR
+      ItemVariant@1003 : Record "Item Variant";
+    BEGIN
+      if SalesLine."Variant Code" <> '' then begin
+        ItemVariant.GET(Item."No.",SalesLine."Variant Code");
+        PurchaseLine.Description := ItemVariant.Description;
+        PurchaseLine."Description 2" := ItemVariant."Description 2";
+        exit(true);
+      end;
+      exit(false)
+    END;
+
+    LOCAL PROCEDURE GetDescriptionFromItem@11(VAR PurchaseLine@1001 : Record "Purchase Line";Item@1002 : Record Item);
+    BEGIN
+      PurchaseLine.Description := Item.Description;
+      PurchaseLine."Description 2" := Item."Description 2";
+    END;
+
+    LOCAL PROCEDURE GetDescriptionFromSalesLine@3(VAR PurchaseLine@1001 : Record "Purchase Line";SalesLine@1000 : Record "Sales Line") : Boolean;
+    BEGIN
+      if (SalesLine.Description <> '') or (SalesLine."Description 2" <> '') then begin
+        PurchaseLine.Description := SalesLine.Description;
+        PurchaseLine."Description 2" := SalesLine."Description 2";
+        exit(true);
+      end;
+      exit(false);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

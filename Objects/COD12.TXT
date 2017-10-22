@@ -2,9 +2,9 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -20,6 +20,8 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
                 TableData 379=imd,
                 TableData 380=imd,
                 TableData 1053=rim,
+                TableData 5222=imd,
+                TableData 5223=imd,
                 TableData 5601=rimd,
                 TableData 5617=imd,
                 TableData 5625=rimd;
@@ -77,6 +79,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       NextEntryNo@1022 : Integer;
       NextVATEntryNo@1064 : Integer;
       FirstNewVATEntryNo@1065 : Integer;
+      FirstTransactionNo@1024 : Integer;
       NextTransactionNo@1066 : Integer;
       NextConnectionNo@1067 : Integer;
       NextCheckEntryNo@1028 : Integer;
@@ -129,6 +132,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
     LOCAL PROCEDURE Code@9(VAR GenJnlLine@1003 : Record 81;CheckLine@1000 : Boolean);
     VAR
       Balancing@1002 : Boolean;
+      IsTransactionConsistent@1001 : Boolean;
     BEGIN
       GetGLSourceCode;
 
@@ -187,19 +191,12 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
 
         CheckPostUnrealizedVAT(GenJnlLine,TRUE);
 
-        IF "Account No." <> '' THEN
-          IF "Account Type" IN
-             ["Account Type"::"G/L Account","Account Type"::Customer,"Account Type"::Vendor,"Account Type"::"Bank Account"]
-          THEN
-            IF ("Deferral Code" <> '') AND ("Source Code" = GLSourceCode) THEN BEGIN
-              // Once posting has completed, move the deferral schedule over to Posted Deferral Schedule
-              IF NOT Balancing THEN
-                CODEUNIT.RUN(CODEUNIT::"Exchange Acc. G/L Journal Line",GenJnlLine);
-              DeferralUtilities.CreateScheduleFromGL(GenJnlLine,FirstEntryNo);
-            END;
+        CreateDeferralScheduleFromGL(GenJnlLine,Balancing);
 
-        FinishPosting;
+        IsTransactionConsistent := FinishPosting;
       END;
+
+      OnAfterGLFinishPosting(GlobalGLEntry,IsTransactionConsistent,FirstTransactionNo);
     END;
 
     LOCAL PROCEDURE PostGenJnlLine@47(VAR GenJnlLine@1000 : Record 81;Balancing@1001 : Boolean);
@@ -212,6 +209,8 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
             PostCust(GenJnlLine,Balancing);
           "Account Type"::Vendor:
             PostVend(GenJnlLine,Balancing);
+          "Account Type"::Employee:
+            PostEmployee(GenJnlLine);
           "Account Type"::"Bank Account":
             PostBankAcc(GenJnlLine,Balancing);
           "Account Type"::"Fixed Asset":
@@ -892,6 +891,60 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       END;
     END;
 
+    LOCAL PROCEDURE PostEmployee@86(GenJnlLine@1007 : Record 81);
+    VAR
+      Employee@1005 : Record 5200;
+      EmployeePostingGr@1006 : Record 5221;
+      EmployeeLedgerEntry@1000 : Record 5222;
+      CVLedgEntryBuf@1008 : Record 382;
+      TempDtldCVLedgEntryBuf@1004 : TEMPORARY Record 383;
+      DtldEmplLedgEntry@1001 : Record 5223;
+      DtldLedgEntryInserted@1010 : Boolean;
+    BEGIN
+      WITH GenJnlLine DO BEGIN
+        Employee.GET("Account No.");
+
+        IF "Posting Group" = '' THEN BEGIN
+          Employee.TESTFIELD("Employee Posting Group");
+          "Posting Group" := Employee."Employee Posting Group";
+        END;
+        EmployeePostingGr.GET("Posting Group");
+
+        DtldEmplLedgEntry.LOCKTABLE;
+        EmployeeLedgerEntry.LOCKTABLE;
+
+        InitEmployeeLedgerEntry(GenJnlLine,EmployeeLedgerEntry);
+
+        TempDtldCVLedgEntryBuf.DELETEALL;
+        TempDtldCVLedgEntryBuf.INIT;
+        TempDtldCVLedgEntryBuf.CopyFromGenJnlLine(GenJnlLine);
+        TempDtldCVLedgEntryBuf."CV Ledger Entry No." := EmployeeLedgerEntry."Entry No.";
+        CVLedgEntryBuf.CopyFromEmplLedgEntry(EmployeeLedgerEntry);
+        TempDtldCVLedgEntryBuf.InsertDtldCVLedgEntry(TempDtldCVLedgEntryBuf,CVLedgEntryBuf,TRUE);
+        CVLedgEntryBuf.Open := CVLedgEntryBuf."Remaining Amount" <> 0;
+        CVLedgEntryBuf.Positive := CVLedgEntryBuf."Remaining Amount" > 0;
+
+        // Post application
+        ApplyEmplLedgEntry(CVLedgEntryBuf,TempDtldCVLedgEntryBuf,GenJnlLine,Employee);
+
+        // Post vendor entry
+        EmployeeLedgerEntry.CopyFromCVLedgEntryBuffer(CVLedgEntryBuf);
+        EmployeeLedgerEntry."Amount to Apply" := 0;
+        EmployeeLedgerEntry."Applies-to Doc. No." := '';
+        EmployeeLedgerEntry.INSERT(TRUE);
+
+        // Post detailed employee entries
+        DtldLedgEntryInserted := PostDtldEmplLedgEntries(GenJnlLine,TempDtldCVLedgEntryBuf,EmployeePostingGr,TRUE);
+
+        // Posting GL Entry
+        IF DtldLedgEntryInserted THEN
+          IF IsTempGLEntryBufEmpty THEN
+            DtldEmplLedgEntry.SetZeroTransNo(NextTransactionNo);
+
+        OnMoveGenJournalLine(EmployeeLedgerEntry.RECORDID);
+      END;
+    END;
+
     LOCAL PROCEDURE PostBankAcc@14(GenJnlLine@1005 : Record 81;Balancing@1006 : Boolean);
     VAR
       BankAcc@1000 : Record 270;
@@ -1128,6 +1181,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
           NextEntryNo := 1;
           NextTransactionNo := 1;
         END;
+        FirstTransactionNo := NextTransactionNo;
 
         InitLastDocDate(GenJnlLine);
         CurrentBalance := 0;
@@ -1195,11 +1249,10 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
     END;
 
     [Internal]
-    PROCEDURE FinishPosting@25();
+    PROCEDURE FinishPosting@25() IsTransactionConsistent : Boolean;
     VAR
       CostAccSetup@1003 : Record 1108;
       TransferGlEntriesToCA@1004 : Codeunit 1105;
-      IsTransactionConsistent@1000 : Boolean;
     BEGIN
       IsTransactionConsistent :=
         (BalanceCheckAmount = 0) AND (BalanceCheckAmount2 = 0) AND
@@ -1300,7 +1353,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       SummarizeVAT(GLSetup."Summarize G/L Entries",GLEntry);
     END;
 
-    LOCAL PROCEDURE InitGLEntryVATCopy@116(GenJnlLine@1001 : Record 81;AccNo@1003 : Code[20];BalAccNo@1007 : Code[20];Amount@1004 : Decimal;AmountAddCurr@1005 : Decimal;VATEntry@1008 : Record 254);
+    LOCAL PROCEDURE InitGLEntryVATCopy@116(GenJnlLine@1001 : Record 81;AccNo@1003 : Code[20];BalAccNo@1007 : Code[20];Amount@1004 : Decimal;AmountAddCurr@1005 : Decimal;VATEntry@1008 : Record 254) : Integer;
     VAR
       GLEntry@1000 : Record 17;
     BEGIN
@@ -1309,6 +1362,8 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       GLEntry."Bal. Account No." := BalAccNo;
       GLEntry.CopyPostingGroupsFromVATEntry(VATEntry);
       SummarizeVAT(GLSetup."Summarize G/L Entries",GLEntry);
+
+      EXIT(GLEntry."Entry No.");
     END;
 
     [External]
@@ -1408,6 +1463,19 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       GLEntry."Additional-Currency Amount" := AmountAddCurr;
       GLEntry.CopyPostingGroupsFromVATEntry(VATEntry);
       InsertGLEntry(GenJnlLine,GLEntry,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateDeferralScheduleFromGL@386(VAR GenJournalLine@1000 : Record 81;IsBalancing@1001 : Boolean);
+    BEGIN
+      WITH GenJournalLine DO
+        IF ("Account No." <> '') AND ("Deferral Code" <> '') THEN
+          IF (("Account Type" IN ["Account Type"::Customer,"Account Type"::Vendor]) AND ("Source Code" = GLSourceCode)) OR
+             ("Account Type" IN ["Account Type"::"G/L Account","Account Type"::"Bank Account"])
+          THEN BEGIN
+            IF NOT IsBalancing THEN
+              CODEUNIT.RUN(CODEUNIT::"Exchange Acc. G/L Journal Line",GenJournalLine);
+            DeferralUtilities.CreateScheduleFromGL(GenJournalLine,FirstEntryNo);
+          END;
     END;
 
     LOCAL PROCEDURE UpdateCheckAmounts@98(PostingDate@1000 : Date;Amount@1005 : Decimal;AddCurrAmount@1006 : Decimal;VAR BalanceCheckAmount@1001 : Decimal;VAR BalanceCheckAmount2@1002 : Decimal;VAR BalanceCheckAddCurrAmount@1003 : Decimal;VAR BalanceCheckAddCurrAmount2@1004 : Decimal);
@@ -1643,12 +1711,12 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
               DtldCVLedgEntryBuf2."Amount (LCY)" := -VATBase;
               DtldCVLedgEntryBuf2."Entry Type" := EntryType;
               CASE EntryType OF
-                DtldCVLedgEntryBuf."Entry Type"::"Payment Discount (VAT Excl.)":
-                  VATEntryModifier := 0;
                 DtldCVLedgEntryBuf."Entry Type"::"Payment Discount Tolerance (VAT Excl.)":
                   VATEntryModifier := 1000000;
                 DtldCVLedgEntryBuf."Entry Type"::"Payment Tolerance (VAT Excl.)":
                   VATEntryModifier := 2000000;
+                DtldCVLedgEntryBuf."Entry Type"::"Payment Discount (VAT Excl.)":
+                  VATEntryModifier := 3000000;
               END;
               DtldCVLedgEntryBuf2.CopyFromCVLedgEntryBuf(NewCVLedgEntryBuf);
               // The total payment discount in currency is posted on the entry made in
@@ -2196,6 +2264,14 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       VendLedgEntry."Transaction No." := NextTransactionNo;
     END;
 
+    LOCAL PROCEDURE InitEmployeeLedgerEntry@134(GenJnlLine@1001 : Record 81;VAR EmployeeLedgerEntry@1000 : Record 5222);
+    BEGIN
+      EmployeeLedgerEntry.INIT;
+      EmployeeLedgerEntry.CopyFromGenJnlLine(GenJnlLine);
+      EmployeeLedgerEntry."Entry No." := NextEntryNo;
+      EmployeeLedgerEntry."Transaction No." := NextTransactionNo;
+    END;
+
     LOCAL PROCEDURE InsertDtldCustLedgEntry@102(GenJnlLine@1003 : Record 81;DtldCVLedgEntryBuf@1002 : Record 383;VAR DtldCustLedgEntry@1001 : Record 379;Offset@1000 : Integer);
     BEGIN
       WITH DtldCustLedgEntry DO BEGIN
@@ -2214,6 +2290,21 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
     LOCAL PROCEDURE InsertDtldVendLedgEntry@103(GenJnlLine@1000 : Record 81;DtldCVLedgEntryBuf@1001 : Record 383;VAR DtldVendLedgEntry@1004 : Record 380;Offset@1002 : Integer);
     BEGIN
       WITH DtldVendLedgEntry DO BEGIN
+        INIT;
+        TRANSFERFIELDS(DtldCVLedgEntryBuf);
+        "Entry No." := Offset + DtldCVLedgEntryBuf."Entry No.";
+        "Journal Batch Name" := GenJnlLine."Journal Batch Name";
+        "Reason Code" := GenJnlLine."Reason Code";
+        "Source Code" := GenJnlLine."Source Code";
+        "Transaction No." := NextTransactionNo;
+        UpdateDebitCredit(GenJnlLine.Correction);
+        INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertDtldEmplLedgEntry@143(GenJnlLine@1000 : Record 81;DtldCVLedgEntryBuf@1001 : Record 383;VAR DtldEmplLedgEntry@1004 : Record 5223;Offset@1002 : Integer);
+    BEGIN
+      WITH DtldEmplLedgEntry DO BEGIN
         INIT;
         TRANSFERFIELDS(DtldCVLedgEntryBuf);
         "Entry No." := Offset + DtldCVLedgEntryBuf."Entry No.";
@@ -2352,7 +2443,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
         END;
     END;
 
-    [Internal]
+    [External]
     PROCEDURE CustPostApplyCustLedgEntry@74(VAR GenJnlLinePostApply@1000 : Record 81;VAR CustLedgEntryPostApply@1001 : Record 21);
     VAR
       Cust@1002 : Record 18;
@@ -2654,6 +2745,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       SalesVATAccount@1009 : Code[20];
       SalesVATUnrealAccount@1010 : Code[20];
       LastConnectionNo@1011 : Integer;
+      GLEntryNo@1016 : Integer;
     BEGIN
       PaidAmount := CustLedgEntry2."Amount (LCY)" - CustLedgEntry2."Remaining Amt. (LCY)";
       VATEntry2.RESET;
@@ -2725,10 +2817,10 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
 
             InitGLEntryVAT(
               GenJnlLine,SalesVATUnrealAccount,SalesVATAccount,-VATAmount,-VATAmountAddCurr,FALSE);
-            InitGLEntryVATCopy(
-              GenJnlLine,SalesVATAccount,SalesVATUnrealAccount,VATAmount,VATAmountAddCurr,VATEntry2);
+            GLEntryNo :=
+              InitGLEntryVATCopy(GenJnlLine,SalesVATAccount,SalesVATUnrealAccount,VATAmount,VATAmountAddCurr,VATEntry2);
 
-            PostUnrealVATEntry(GenJnlLine,VATEntry2,VATAmount,VATBase,VATAmountAddCurr,VATBaseAddCurr);
+            PostUnrealVATEntry(GenJnlLine,VATEntry2,VATAmount,VATBase,VATAmountAddCurr,VATBaseAddCurr,GLEntryNo);
           END;
         UNTIL VATEntry2.NEXT = 0;
 
@@ -2855,6 +2947,91 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
         END;
     END;
 
+    LOCAL PROCEDURE ApplyEmplLedgEntry@141(VAR NewCVLedgEntryBuf@1000 : Record 382;VAR DtldCVLedgEntryBuf@1001 : Record 383;GenJnlLine@1002 : Record 81;Employee@1015 : Record 5200);
+    VAR
+      OldEmplLedgEntry@1005 : Record 5222;
+      OldCVLedgEntryBuf@1006 : Record 382;
+      NewCVLedgEntryBuf2@1019 : Record 382;
+      TempOldEmplLedgEntry@1003 : TEMPORARY Record 5222;
+      Completed@1009 : Boolean;
+      AppliedAmount@1010 : Decimal;
+      ApplyingDate@1017 : Date;
+      PmtTolAmtToBeApplied@1004 : Decimal;
+      AllApplied@1024 : Boolean;
+    BEGIN
+      IF NewCVLedgEntryBuf."Amount to Apply" = 0 THEN
+        EXIT;
+
+      AllApplied := TRUE;
+      IF (GenJnlLine."Applies-to Doc. No." = '') AND (GenJnlLine."Applies-to ID" = '') AND
+         NOT
+         ((Employee."Application Method" = Employee."Application Method"::"Apply to Oldest") AND
+          GenJnlLine."Allow Application")
+      THEN
+        EXIT;
+
+      PmtTolAmtToBeApplied := 0;
+      NewCVLedgEntryBuf2 := NewCVLedgEntryBuf;
+
+      ApplyingDate := GenJnlLine."Posting Date";
+
+      IF NOT PrepareTempEmplLedgEntry(GenJnlLine,NewCVLedgEntryBuf,TempOldEmplLedgEntry,Employee,ApplyingDate) THEN
+        EXIT;
+
+      GenJnlLine."Posting Date" := ApplyingDate;
+
+      // Apply the new entry (Payment) to the old entries one at a time
+      REPEAT
+        TempOldEmplLedgEntry.CALCFIELDS(
+          Amount,"Amount (LCY)","Remaining Amount","Remaining Amt. (LCY)",
+          "Original Amount","Original Amt. (LCY)");
+        OldCVLedgEntryBuf.CopyFromEmplLedgEntry(TempOldEmplLedgEntry);
+        TempOldEmplLedgEntry.COPYFILTER(Positive,OldCVLedgEntryBuf.Positive);
+
+        PostApply(
+          GenJnlLine,DtldCVLedgEntryBuf,OldCVLedgEntryBuf,NewCVLedgEntryBuf,NewCVLedgEntryBuf2,
+          TRUE,AllApplied,AppliedAmount,PmtTolAmtToBeApplied);
+
+        // Update the Old Entry
+        TempOldEmplLedgEntry.CopyFromCVLedgEntryBuffer(OldCVLedgEntryBuf);
+        OldEmplLedgEntry := TempOldEmplLedgEntry;
+        OldEmplLedgEntry."Applies-to ID" := '';
+        OldEmplLedgEntry."Amount to Apply" := 0;
+        OldEmplLedgEntry.MODIFY;
+
+        TempOldEmplLedgEntry.DELETE;
+
+        // Find the next old entry to apply to the new entry
+        IF GenJnlLine."Applies-to Doc. No." <> '' THEN
+          Completed := TRUE
+        ELSE
+          IF TempOldEmplLedgEntry.GETFILTER(Positive) <> '' THEN
+            IF TempOldEmplLedgEntry.NEXT = 1 THEN
+              Completed := FALSE
+            ELSE BEGIN
+              TempOldEmplLedgEntry.SETRANGE(Positive);
+              TempOldEmplLedgEntry.FIND('-');
+              TempOldEmplLedgEntry.CALCFIELDS("Remaining Amount");
+              Completed := TempOldEmplLedgEntry."Remaining Amount" * NewCVLedgEntryBuf."Remaining Amount" >= 0;
+            END
+          ELSE
+            IF NewCVLedgEntryBuf.Open THEN
+              Completed := TempOldEmplLedgEntry.NEXT = 0
+            ELSE
+              Completed := TRUE;
+      UNTIL Completed;
+
+      DtldCVLedgEntryBuf.SETCURRENTKEY("CV Ledger Entry No.","Entry Type");
+      DtldCVLedgEntryBuf.SETRANGE("CV Ledger Entry No.",NewCVLedgEntryBuf."Entry No.");
+      DtldCVLedgEntryBuf.SETRANGE(
+        "Entry Type",
+        DtldCVLedgEntryBuf."Entry Type"::Application);
+      DtldCVLedgEntryBuf.CALCSUMS("Amount (LCY)",Amount);
+
+      NewCVLedgEntryBuf."Applies-to ID" := '';
+      NewCVLedgEntryBuf."Amount to Apply" := 0;
+    END;
+
     [Internal]
     PROCEDURE VendPostApplyVendLedgEntry@66(VAR GenJnlLinePostApply@1000 : Record 81;VAR VendLedgEntryPostApply@1001 : Record 25);
     VAR
@@ -2911,6 +3088,66 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
         IF DtldLedgEntryInserted THEN
           IF IsTempGLEntryBufEmpty THEN
             DtldVendLedgEntry.SetZeroTransNo(NextTransactionNo);
+
+        FinishPosting;
+      END;
+    END;
+
+    [Internal]
+    PROCEDURE EmplPostApplyEmplLedgEntry@138(VAR GenJnlLinePostApply@1000 : Record 81;VAR EmplLedgEntryPostApply@1001 : Record 5222);
+    VAR
+      Empl@1002 : Record 5200;
+      EmplPostingGr@1007 : Record 5221;
+      EmplLedgEntry@1006 : Record 5222;
+      DtldEmplLedgEntry@1003 : Record 5223;
+      TempDtldCVLedgEntryBuf@1004 : TEMPORARY Record 383;
+      CVLedgEntryBuf@1005 : Record 382;
+      GenJnlLine@1008 : Record 81;
+      DtldLedgEntryInserted@1009 : Boolean;
+    BEGIN
+      GenJnlLine := GenJnlLinePostApply;
+      EmplLedgEntry.TRANSFERFIELDS(EmplLedgEntryPostApply);
+      WITH GenJnlLine DO BEGIN
+        "Source Currency Code" := EmplLedgEntryPostApply."Currency Code";
+        "Applies-to ID" := EmplLedgEntryPostApply."Applies-to ID";
+
+        GenJnlCheckLine.RunCheck(GenJnlLine);
+
+        IF NextEntryNo = 0 THEN
+          StartPosting(GenJnlLine)
+        ELSE
+          ContinuePosting(GenJnlLine);
+
+        Empl.GET(EmplLedgEntry."Employee No.");
+
+        IF "Posting Group" = '' THEN BEGIN
+          Empl.TESTFIELD("Employee Posting Group");
+          "Posting Group" := Empl."Employee Posting Group";
+        END;
+        EmplPostingGr.GET("Posting Group");
+        EmplPostingGr.GetPayablesAccount;
+
+        DtldEmplLedgEntry.LOCKTABLE;
+        EmplLedgEntry.LOCKTABLE;
+
+        // Post the application
+        EmplLedgEntry.CALCFIELDS(
+          Amount,"Amount (LCY)","Remaining Amount","Remaining Amt. (LCY)",
+          "Original Amount","Original Amt. (LCY)");
+        CVLedgEntryBuf.CopyFromEmplLedgEntry(EmplLedgEntry);
+        ApplyEmplLedgEntry(
+          CVLedgEntryBuf,TempDtldCVLedgEntryBuf,GenJnlLine,Empl);
+        EmplLedgEntry.CopyFromCVLedgEntryBuffer(CVLedgEntryBuf);
+        EmplLedgEntry.MODIFY(TRUE);
+
+        // Post Dtld vendor entry
+        DtldLedgEntryInserted := PostDtldEmplLedgEntries(GenJnlLine,TempDtldCVLedgEntryBuf,EmplPostingGr,FALSE);
+
+        CheckPostUnrealizedVAT(GenJnlLine,TRUE);
+
+        IF DtldLedgEntryInserted THEN
+          IF IsTempGLEntryBufEmpty THEN
+            DtldEmplLedgEntry.SetZeroTransNo(NextTransactionNo);
 
         FinishPosting;
       END;
@@ -2988,6 +3225,67 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
         END ELSE
           TempOldVendLedgEntry.SETRANGE(Positive);
         EXIT(TempOldVendLedgEntry.FIND('-'));
+      END;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE PrepareTempEmplLedgEntry@145(GenJnlLine@1004 : Record 81;VAR NewCVLedgEntryBuf@1003 : Record 382;VAR TempOldEmplLedgEntry@1002 : TEMPORARY Record 5222;Employee@1001 : Record 5200;VAR ApplyingDate@1000 : Date) : Boolean;
+    VAR
+      OldEmplLedgEntry@1018 : Record 5222;
+      RemainingAmount@1009 : Decimal;
+    BEGIN
+      IF GenJnlLine."Applies-to Doc. No." <> '' THEN BEGIN
+        // Find the entry to be applied to
+        OldEmplLedgEntry.RESET;
+        OldEmplLedgEntry.SETCURRENTKEY("Document No.");
+        OldEmplLedgEntry.SETRANGE("Document Type",GenJnlLine."Applies-to Doc. Type");
+        OldEmplLedgEntry.SETRANGE("Document No.",GenJnlLine."Applies-to Doc. No.");
+        OldEmplLedgEntry.SETRANGE("Employee No.",NewCVLedgEntryBuf."CV No.");
+        OldEmplLedgEntry.SETRANGE(Open,TRUE);
+        OldEmplLedgEntry.FINDFIRST;
+        OldEmplLedgEntry.TESTFIELD(Positive,NOT NewCVLedgEntryBuf.Positive);
+        IF OldEmplLedgEntry."Posting Date" > ApplyingDate THEN
+          ApplyingDate := OldEmplLedgEntry."Posting Date";
+        TempOldEmplLedgEntry := OldEmplLedgEntry;
+        TempOldEmplLedgEntry.INSERT;
+      END ELSE BEGIN
+        // Find the first old entry which the new entry (Payment) should apply to
+        OldEmplLedgEntry.RESET;
+        OldEmplLedgEntry.SETCURRENTKEY("Employee No.","Applies-to ID",Open,Positive);
+        TempOldEmplLedgEntry.SETCURRENTKEY("Employee No.","Applies-to ID",Open,Positive);
+        OldEmplLedgEntry.SETRANGE("Employee No.",NewCVLedgEntryBuf."CV No.");
+        OldEmplLedgEntry.SETRANGE("Applies-to ID",GenJnlLine."Applies-to ID");
+        OldEmplLedgEntry.SETRANGE(Open,TRUE);
+        OldEmplLedgEntry.SETFILTER("Entry No.",'<>%1',NewCVLedgEntryBuf."Entry No.");
+        IF NOT (Employee."Application Method" = Employee."Application Method"::"Apply to Oldest") THEN
+          OldEmplLedgEntry.SETFILTER("Amount to Apply",'<>%1',0);
+
+        IF Employee."Application Method" = Employee."Application Method"::"Apply to Oldest" THEN
+          OldEmplLedgEntry.SETFILTER("Posting Date",'..%1',GenJnlLine."Posting Date");
+
+        OldEmplLedgEntry.SETRANGE("Currency Code",NewCVLedgEntryBuf."Currency Code");
+        IF OldEmplLedgEntry.FINDSET(FALSE,FALSE) THEN
+          REPEAT
+            IF (OldEmplLedgEntry."Posting Date" > ApplyingDate) AND (OldEmplLedgEntry."Applies-to ID" <> '') THEN
+              ApplyingDate := OldEmplLedgEntry."Posting Date";
+            TempOldEmplLedgEntry := OldEmplLedgEntry;
+            TempOldEmplLedgEntry.INSERT;
+          UNTIL OldEmplLedgEntry.NEXT = 0;
+
+        TempOldEmplLedgEntry.SETRANGE(Positive,NewCVLedgEntryBuf."Remaining Amount" > 0);
+
+        IF TempOldEmplLedgEntry.FIND('-') THEN BEGIN
+          RemainingAmount := NewCVLedgEntryBuf."Remaining Amount";
+          TempOldEmplLedgEntry.SETRANGE(Positive);
+          TempOldEmplLedgEntry.FIND('-');
+          REPEAT
+            TempOldEmplLedgEntry.CALCFIELDS("Remaining Amount");
+            RemainingAmount += TempOldEmplLedgEntry."Remaining Amount";
+          UNTIL TempOldEmplLedgEntry.NEXT = 0;
+          TempOldEmplLedgEntry.SETRANGE(Positive,RemainingAmount < 0);
+        END ELSE
+          TempOldEmplLedgEntry.SETRANGE(Positive);
+        EXIT(TempOldEmplLedgEntry.FIND('-'));
       END;
       EXIT(TRUE);
     END;
@@ -3139,6 +3437,44 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       END;
     END;
 
+    LOCAL PROCEDURE PostDtldEmplLedgEntries@148(GenJnlLine@1000 : Record 81;VAR DtldCVLedgEntryBuf@1001 : Record 383;EmplPostingGr@1002 : Record 5221;LedgEntryInserted@1011 : Boolean) DtldLedgEntryInserted : Boolean;
+    VAR
+      TempInvPostBuf@1007 : TEMPORARY Record 49;
+      DtldEmplLedgEntry@1004 : Record 5223;
+      DummyAdjAmount@1012 : ARRAY [4] OF Decimal;
+      DtldEmplLedgEntryNoOffset@1005 : Integer;
+      SaveEntryNo@1013 : Integer;
+    BEGIN
+      IF GenJnlLine."Account Type" <> GenJnlLine."Account Type"::Employee THEN
+        EXIT;
+
+      IF DtldEmplLedgEntry.FINDLAST THEN
+        DtldEmplLedgEntryNoOffset := DtldEmplLedgEntry."Entry No."
+      ELSE
+        DtldEmplLedgEntryNoOffset := 0;
+
+      DtldCVLedgEntryBuf.RESET;
+      IF DtldCVLedgEntryBuf.FINDSET THEN BEGIN
+        IF LedgEntryInserted THEN BEGIN
+          SaveEntryNo := NextEntryNo;
+          NextEntryNo := NextEntryNo + 1;
+        END;
+        REPEAT
+          InsertDtldEmplLedgEntry(GenJnlLine,DtldCVLedgEntryBuf,DtldEmplLedgEntry,DtldEmplLedgEntryNoOffset);
+
+          UpdateTotalAmounts(
+            TempInvPostBuf,GenJnlLine."Dimension Set ID",
+            DtldCVLedgEntryBuf."Amount (LCY)",DtldCVLedgEntryBuf."Additional-Currency Amount");
+        UNTIL DtldCVLedgEntryBuf.NEXT = 0;
+      END;
+
+      CreateGLEntriesForTotalAmounts(
+        GenJnlLine,TempInvPostBuf,DummyAdjAmount,SaveEntryNo,EmplPostingGr.GetPayablesAccount,LedgEntryInserted);
+
+      DtldLedgEntryInserted := NOT DtldCVLedgEntryBuf.ISEMPTY;
+      DtldCVLedgEntryBuf.DELETEALL;
+    END;
+
     LOCAL PROCEDURE PostDtldCVLedgEntry@15(GenJnlLine@1000 : Record 81;DtldCVLedgEntryBuf@1001 : Record 383;AccNo@1002 : Code[20];VAR AdjAmount@1004 : ARRAY [4] OF Decimal;Unapply@1005 : Boolean);
     BEGIN
       WITH DtldCVLedgEntryBuf DO
@@ -3287,6 +3623,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       PurchReverseAccount@1011 : Code[20];
       PurchReverseUnrealAccount@1012 : Code[20];
       LastConnectionNo@1013 : Integer;
+      GLEntryNo@1018 : Integer;
     BEGIN
       VATEntry2.RESET;
       VATEntry2.SETCURRENTKEY("Transaction No.");
@@ -3370,8 +3707,8 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
 
             InitGLEntryVAT(
               GenJnlLine,PurchVATUnrealAccount,PurchVATAccount,-VATAmount,-VATAmountAddCurr,FALSE);
-            InitGLEntryVATCopy(
-              GenJnlLine,PurchVATAccount,PurchVATUnrealAccount,VATAmount,VATAmountAddCurr,VATEntry2);
+            GLEntryNo :=
+              InitGLEntryVATCopy(GenJnlLine,PurchVATAccount,PurchVATUnrealAccount,VATAmount,VATAmountAddCurr,VATEntry2);
 
             IF (VATEntry2."VAT Calculation Type" =
                 VATEntry2."VAT Calculation Type"::"Reverse Charge VAT") OR
@@ -3381,11 +3718,11 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
             THEN BEGIN
               InitGLEntryVAT(
                 GenJnlLine,PurchReverseUnrealAccount,PurchReverseAccount,VATAmount,VATAmountAddCurr,FALSE);
-              InitGLEntryVATCopy(
-                GenJnlLine,PurchReverseAccount,PurchReverseUnrealAccount,-VATAmount,-VATAmountAddCurr,VATEntry2);
+              GLEntryNo :=
+                InitGLEntryVATCopy(GenJnlLine,PurchReverseAccount,PurchReverseUnrealAccount,-VATAmount,-VATAmountAddCurr,VATEntry2);
             END;
 
-            PostUnrealVATEntry(GenJnlLine,VATEntry2,VATAmount,VATBase,VATAmountAddCurr,VATBaseAddCurr);
+            PostUnrealVATEntry(GenJnlLine,VATEntry2,VATAmount,VATBase,VATAmountAddCurr,VATBaseAddCurr,GLEntryNo);
           END;
         UNTIL VATEntry2.NEXT = 0;
 
@@ -3393,7 +3730,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       END;
     END;
 
-    LOCAL PROCEDURE PostUnrealVATEntry@5(GenJnlLine@1002 : Record 81;VAR VATEntry2@1000 : Record 254;VATAmount@1003 : Decimal;VATBase@1004 : Decimal;VATAmountAddCurr@1006 : Decimal;VATBaseAddCurr@1005 : Decimal);
+    LOCAL PROCEDURE PostUnrealVATEntry@5(GenJnlLine@1002 : Record 81;VAR VATEntry2@1000 : Record 254;VATAmount@1003 : Decimal;VATBase@1004 : Decimal;VATAmountAddCurr@1006 : Decimal;VATBaseAddCurr@1005 : Decimal;GLEntryNo@1001 : Integer);
     BEGIN
       VATEntry.LOCKTABLE;
       VATEntry := VATEntry2;
@@ -3416,6 +3753,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       VATEntry."Sales Tax Connection No." := NextConnectionNo;
       VATEntry."Unrealized VAT Entry No." := VATEntry2."Entry No.";
       VATEntry.INSERT(TRUE);
+      GLEntryVATEntryLink.InsertLink(GLEntryNo + 1,NextVATEntryNo);
       NextVATEntryNo := NextVATEntryNo + 1;
 
       VATEntry2."Remaining Unrealized Amount" :=
@@ -3490,7 +3828,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       CalcAmtLCYAdjustment(OldCVLedgEntryBuf,DtldCVLedgEntryBuf,GenJnlLine);
     END;
 
-    [Internal]
+    [External]
     PROCEDURE UnapplyCustLedgEntry@109(GenJnlLine2@1004 : Record 81;DtldCustLedgEntry@1003 : Record 379);
     VAR
       Cust@1006 : Record 18;
@@ -3611,7 +3949,7 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       FinishPosting;
     END;
 
-    [Internal]
+    [External]
     PROCEDURE UnapplyVendLedgEntry@108(GenJnlLine2@1003 : Record 81;DtldVendLedgEntry@1002 : Record 380);
     VAR
       Vend@1005 : Record 23;
@@ -3732,6 +4070,83 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       FinishPosting;
     END;
 
+    [Internal]
+    PROCEDURE UnapplyEmplLedgEntry@89(GenJnlLine2@1003 : Record 81;DtldEmplLedgEntry@1002 : Record 5223);
+    VAR
+      Employee@1005 : Record 5200;
+      EmployeePostingGroup@1019 : Record 5221;
+      GenJnlLine@1021 : Record 81;
+      DtldEmplLedgEntry2@1012 : Record 5223;
+      NewDtldEmplLedgEntry@1011 : Record 5223;
+      EmplLedgEntry@1010 : Record 5222;
+      DtldCVLedgEntryBuf@1009 : Record 383;
+      CurrencyLCY@1024 : Record 4;
+      TempInvPostBuf@1001 : TEMPORARY Record 49;
+      NextDtldLedgEntryNo@1000 : Integer;
+    BEGIN
+      GenJnlLine.TRANSFERFIELDS(GenJnlLine2);
+      IF GenJnlLine."Document Date" = 0D THEN
+        GenJnlLine."Document Date" := GenJnlLine."Posting Date";
+
+      IF NextEntryNo = 0 THEN
+        StartPosting(GenJnlLine)
+      ELSE
+        ContinuePosting(GenJnlLine);
+
+      ReadGLSetup(GLSetup);
+
+      Employee.GET(DtldEmplLedgEntry."Employee No.");
+      EmployeePostingGroup.GET(GenJnlLine."Posting Group");
+      EmployeePostingGroup.GetPayablesAccount;
+
+      DtldEmplLedgEntry.LOCKTABLE;
+      EmplLedgEntry.LOCKTABLE;
+
+      DtldEmplLedgEntry.TESTFIELD("Entry Type",DtldEmplLedgEntry."Entry Type"::Application);
+
+      DtldEmplLedgEntry2.RESET;
+      DtldEmplLedgEntry2.FINDLAST;
+      NextDtldLedgEntryNo := DtldEmplLedgEntry2."Entry No." + 1;
+      IF DtldEmplLedgEntry."Transaction No." = 0 THEN BEGIN
+        DtldEmplLedgEntry2.SETCURRENTKEY("Application No.","Employee No.","Entry Type");
+        DtldEmplLedgEntry2.SETRANGE("Application No.",DtldEmplLedgEntry."Application No.");
+      END ELSE BEGIN
+        DtldEmplLedgEntry2.SETCURRENTKEY("Transaction No.","Employee No.","Entry Type");
+        DtldEmplLedgEntry2.SETRANGE("Transaction No.",DtldEmplLedgEntry."Transaction No.");
+      END;
+      DtldEmplLedgEntry2.SETRANGE("Employee No.",DtldEmplLedgEntry."Employee No.");
+      DtldEmplLedgEntry2.SETFILTER("Entry Type",'>%1',DtldEmplLedgEntry."Entry Type"::"Initial Entry");
+
+      // Look one more time
+      DtldEmplLedgEntry2.FINDSET;
+      TempInvPostBuf.DELETEALL;
+      REPEAT
+        DtldEmplLedgEntry2.TESTFIELD(Unapplied,FALSE);
+        InsertDtldEmplLedgEntryUnapply(GenJnlLine,NewDtldEmplLedgEntry,DtldEmplLedgEntry2,NextDtldLedgEntryNo);
+
+        DtldCVLedgEntryBuf.INIT;
+        DtldCVLedgEntryBuf.TRANSFERFIELDS(NewDtldEmplLedgEntry);
+        SetAddCurrForUnapplication(DtldCVLedgEntryBuf);
+        CurrencyLCY.InitRoundingPrecision;
+
+        UpdateTotalAmounts(
+          TempInvPostBuf,GenJnlLine."Dimension Set ID",DtldCVLedgEntryBuf."Amount (LCY)",
+          DtldCVLedgEntryBuf."Additional-Currency Amount");
+
+        DtldEmplLedgEntry2.Unapplied := TRUE;
+        DtldEmplLedgEntry2."Unapplied by Entry No." := NewDtldEmplLedgEntry."Entry No.";
+        DtldEmplLedgEntry2.MODIFY;
+
+        UpdateEmplLedgEntry(DtldEmplLedgEntry2);
+      UNTIL DtldEmplLedgEntry2.NEXT = 0;
+
+      CreateGLEntriesForTotalAmountsUnapply(GenJnlLine,TempInvPostBuf,EmployeePostingGroup.GetPayablesAccount);
+
+      IF IsTempGLEntryBufEmpty THEN
+        DtldEmplLedgEntry.SetZeroTransNo(NextTransactionNo);
+      FinishPosting;
+    END;
+
     LOCAL PROCEDURE UnapplyExcludedVAT@85(VAR TempVATEntry@1000 : TEMPORARY Record 254;TransactionNo@1004 : Integer;VATBusPostingGroup@1001 : Code[20];VATProdPostingGroup@1002 : Code[20];GenProdPostingGroup@1003 : Code[20]);
     BEGIN
       TempVATEntry.SETRANGE("VAT Bus. Posting Group",VATBusPostingGroup);
@@ -3809,13 +4224,13 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       VATEntry.SETRANGE(Type,VATEntryType);
       VATEntry.SETRANGE("Bill-to/Pay-to No.",BilltoPaytoNo);
       VATEntry.SETRANGE("Transaction No.",TransactionNo);
-      IF VATEntry.FINDSET THEN BEGIN
-        VATPostingSetup.GET(VATEntry."VAT Bus. Posting Group",VATEntry."VAT Prod. Posting Group");
-        IF VATPostingSetup."Adjust for Payment Discount" AND NOT IsNotPayment(VATEntry."Document Type") AND
-           (VATPostingSetup."VAT Calculation Type" = VATPostingSetup."VAT Calculation Type"::"Reverse Charge VAT")
-        THEN
-          UnapplyVATEntries := TRUE;
+      IF VATEntry.FINDSET THEN
         REPEAT
+          VATPostingSetup.GET(VATEntry."VAT Bus. Posting Group",VATEntry."VAT Prod. Posting Group");
+          IF VATPostingSetup."Adjust for Payment Discount" AND NOT IsNotPayment(VATEntry."Document Type") AND
+             (VATPostingSetup."VAT Calculation Type" = VATPostingSetup."VAT Calculation Type"::"Reverse Charge VAT")
+          THEN
+            UnapplyVATEntries := TRUE;
           IF UnapplyVATEntries OR (VATEntry."Unrealized VAT Entry No." <> 0) THEN BEGIN
             InsertTempVATEntry(GenJnlLine,VATEntry,TempVATEntryNo,TempVATEntry);
             IF VATEntry."Unrealized VAT Entry No." <> 0 THEN BEGIN
@@ -3860,7 +4275,6 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
             END;
           END;
         UNTIL VATEntry.NEXT = 0;
-      END;
     END;
 
     LOCAL PROCEDURE CalcAddCurrForUnapplication@100(Date@1001 : Date;Amt@1002 : Decimal) : Decimal;
@@ -3947,6 +4361,30 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       NextDtldLedgEntryNo := NextDtldLedgEntryNo + 1;
     END;
 
+    LOCAL PROCEDURE InsertDtldEmplLedgEntryUnapply@140(GenJnlLine@1003 : Record 81;VAR NewDtldEmplLedgEntry@1002 : Record 5223;OldDtldEmplLedgEntry@1001 : Record 5223;VAR NextDtldLedgEntryNo@1000 : Integer);
+    BEGIN
+      NewDtldEmplLedgEntry := OldDtldEmplLedgEntry;
+      WITH NewDtldEmplLedgEntry DO BEGIN
+        "Entry No." := NextDtldLedgEntryNo;
+        "Posting Date" := GenJnlLine."Posting Date";
+        "Transaction No." := NextTransactionNo;
+        "Application No." := 0;
+        Amount := -OldDtldEmplLedgEntry.Amount;
+        "Amount (LCY)" := -OldDtldEmplLedgEntry."Amount (LCY)";
+        "Debit Amount" := -OldDtldEmplLedgEntry."Debit Amount";
+        "Credit Amount" := -OldDtldEmplLedgEntry."Credit Amount";
+        "Debit Amount (LCY)" := -OldDtldEmplLedgEntry."Debit Amount (LCY)";
+        "Credit Amount (LCY)" := -OldDtldEmplLedgEntry."Credit Amount (LCY)";
+        Unapplied := TRUE;
+        "Unapplied by Entry No." := OldDtldEmplLedgEntry."Entry No.";
+        "Document No." := GenJnlLine."Document No.";
+        "Source Code" := GenJnlLine."Source Code";
+        "User ID" := USERID;
+        INSERT(TRUE);
+      END;
+      NextDtldLedgEntryNo := NextDtldLedgEntryNo + 1;
+    END;
+
     LOCAL PROCEDURE InsertTempVATEntry@88(GenJnlLine@1002 : Record 81;VATEntry@1000 : Record 254;VAR TempVATEntryNo@1001 : Integer;VAR TempVATEntry@1003 : TEMPORARY Record 254);
     BEGIN
       TempVATEntry := VATEntry;
@@ -4013,6 +4451,8 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
             REPEAT
               VATEntrySaved := TempVATEntry;
               CASE DtldCVLedgEntryBuf."Entry Type" OF
+                DtldCVLedgEntryBuf."Entry Type"::"Payment Discount (VAT Excl.)":
+                  TempVATEntry.RENAME(TempVATEntry."Entry No." + 3000000);
                 DtldCVLedgEntryBuf."Entry Type"::"Payment Tolerance (VAT Excl.)":
                   TempVATEntry.RENAME(TempVATEntry."Entry No." + 2000000);
                 DtldCVLedgEntryBuf."Entry Type"::"Payment Discount Tolerance (VAT Excl.)":
@@ -4087,6 +4527,24 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
         VendLedgEntry."Pmt. Tolerance (LCY)" := 0;
       END;
       VendLedgEntry.MODIFY;
+    END;
+
+    LOCAL PROCEDURE UpdateEmplLedgEntry@151(DtldEmplLedgEntry@1000 : Record 5223);
+    VAR
+      EmplLedgEntry@1001 : Record 5222;
+    BEGIN
+      IF DtldEmplLedgEntry."Entry Type" <> DtldEmplLedgEntry."Entry Type"::Application THEN
+        EXIT;
+
+      EmplLedgEntry.GET(DtldEmplLedgEntry."Employee Ledger Entry No.");
+      IF NOT EmplLedgEntry.Open THEN BEGIN
+        EmplLedgEntry.Open := TRUE;
+        EmplLedgEntry."Closed by Entry No." := 0;
+        EmplLedgEntry."Closed at Date" := 0D;
+        EmplLedgEntry."Closed by Amount" := 0;
+        EmplLedgEntry."Closed by Amount (LCY)" := 0;
+      END;
+      EmplLedgEntry.MODIFY;
     END;
 
     LOCAL PROCEDURE UpdateCalcInterest@28(VAR CVLedgEntryBuf@1000 : Record 382);
@@ -4274,11 +4732,6 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
       TempVATEntry.SETRANGE("VAT Bus. Posting Group",GLEntry."VAT Bus. Posting Group");
       TempVATEntry.SETRANGE("VAT Prod. Posting Group",GLEntry."VAT Prod. Posting Group");
       CASE DtldCVLedgEntryBuf."Entry Type" OF
-        DtldCVLedgEntryBuf."Entry Type"::"Payment Discount (VAT Excl.)":
-          BEGIN
-            FirstEntryNo := 0;
-            LastEntryNo := 999999;
-          END;
         DtldCVLedgEntryBuf."Entry Type"::"Payment Discount Tolerance (VAT Excl.)":
           BEGIN
             FirstEntryNo := 1000000;
@@ -4288,6 +4741,11 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
           BEGIN
             FirstEntryNo := 2000000;
             LastEntryNo := 2999999;
+          END;
+        DtldCVLedgEntryBuf."Entry Type"::"Payment Discount (VAT Excl.)":
+          BEGIN
+            FirstEntryNo := 3000000;
+            LastEntryNo := 3999999;
           END;
       END;
       TempVATEntry.SETRANGE("Entry No.",FirstEntryNo,LastEntryNo);
@@ -4299,13 +4757,8 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
           NextVATEntryNo := NextVATEntryNo + 1;
           IF VATEntry."Unrealized VAT Entry No." = 0 THEN
             GLEntryVATEntryLink.InsertLink(GLEntry."Entry No.",VATEntry."Entry No.");
-          IF VATEntry."VAT Calculation Type" = VATEntry."VAT Calculation Type"::"Full VAT" THEN BEGIN
-            LinkedAmount += VATEntry.Amount;
-            Complete := LinkedAmount = -DtldCVLedgEntryBuf."VAT Amount (LCY)";
-          END ELSE BEGIN
-            LinkedAmount += VATEntry.Base;
-            Complete := LinkedAmount = -DtldCVLedgEntryBuf."Amount (LCY)";
-          END;
+          LinkedAmount += VATEntry.Amount + VATEntry.Base;
+          Complete := LinkedAmount = -(DtldCVLedgEntryBuf."Amount (LCY)" + DtldCVLedgEntryBuf."VAT Amount (LCY)");
           LastEntryNo := TempVATEntry."Entry No.";
         UNTIL Complete OR (TempVATEntry.NEXT = 0);
 
@@ -4864,7 +5317,9 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
     BEGIN
       IF DeferralCode <> '' THEN
         // Sales and purchasing could have negative amounts, so check for them first...
-        IF SourceCode <> GLSourceCode THEN
+        IF (SourceCode <> GLSourceCode) AND
+           (GenJournalLine."Account Type" IN [GenJournalLine."Account Type"::Customer,GenJournalLine."Account Type"::Vendor])
+        THEN
           PostDeferralPostBuffer(GenJournalLine)
         ELSE
           // Pure GL trx, only post deferrals if it is not a balancing entry
@@ -4940,6 +5395,11 @@ OBJECT Codeunit 12 Gen. Jnl.-Post Line
     [Integration]
     [External]
     LOCAL PROCEDURE OnBeforeInsertGLEntryBuffer@146(VAR TempGLEntryBuf@1000 : TEMPORARY Record 17;VAR GenJournalLine@1001 : Record 81);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterGLFinishPosting@144(GLEntry@1000 : Record 17;IsTransactionConsistent@1001 : Boolean;FirstTransactionNo@1002 : Integer);
     BEGIN
     END;
 

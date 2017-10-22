@@ -1,0 +1,170 @@
+OBJECT Table 2020 Image Analysis Setup
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    DataPerCompany=false;
+    Permissions=TableData "Service Password"=rimd;
+    CaptionML=ENU=Image Analysis Setup;
+  }
+  FIELDS
+  {
+    { 1   ;   ;Primary Key         ;Code10        ;CaptionML=ENU=Primary Key }
+    { 2   ;   ;Period start date   ;DateTime      ;CaptionML=ENU=Period start date }
+    { 3   ;   ;Number of calls     ;Integer       ;CaptionML=ENU=Number of calls }
+    { 4   ;   ;Api Uri             ;Text250       ;OnValidate=BEGIN
+                                                                ValidateApiUri("Api Uri");
+                                                              END;
+
+                                                   CaptionML=ENU=Api Uri }
+    { 5   ;   ;Api Key Key         ;GUID          ;ExtendedDatatype=Masked;
+                                                   CaptionML=ENU=Api Key Key }
+    { 6   ;   ;Limit value         ;Integer       ;CaptionML=ENU=Limit value }
+    { 7   ;   ;Limit type          ;Option        ;CaptionML=ENU=Limit type;
+                                                   OptionCaptionML=ENU=Year,Month,Day,Hour;
+                                                   OptionString=Year,Month,Day,Hour }
+  }
+  KEYS
+  {
+    {    ;"Primary Key"                           ;Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      ImageAnalysisPeriodTypeErr@1001 : TextConst 'ENU=Sorry, something went wrong on our end. Please try again later.';
+      TestMode@1003 : Boolean;
+      TestTime@1004 : Time;
+      TestDate@1005 : Date;
+      TooManyCallsErr@1007 : TextConst '@@@=%1 is the number of calls per time unit allowed, %2 is the time unit duration (year, month, day, or hour);ENU=Sorry, you''ll have to wait until the start of the next %2. You can analyze %1 images per %2, and you''ve already hit the limit.';
+      InvalidApiUriErr@1000 : TextConst 'ENU=The Api Uri must be a valid Uri for Cognitive Services.';
+
+    LOCAL PROCEDURE ComputeCurrentPeriodStartDate@11(CurrentPeriodStartDate@1005 : Date;CurrentPeriodStartTime@1003 : Time;Type@1000 : 'Year,Month,Day,Hour') : DateTime;
+    BEGIN
+      case Type of
+        Type::Year:
+          exit(CREATEDATETIME(CALCDATE('<-CY>',CurrentPeriodStartDate),000000T));
+        Type::Month:
+          exit(CREATEDATETIME(CALCDATE('<-CM>',CurrentPeriodStartDate),000000T));
+        Type::Day:
+          exit(CREATEDATETIME(CALCDATE('<-CD>',CurrentPeriodStartDate),000000T));
+        Type::Hour:
+          exit(ROUNDDATETIME(CREATEDATETIME(CurrentPeriodStartDate,CurrentPeriodStartTime),1000 * 60 * 60,'<'));
+      end;
+
+      ERROR(ImageAnalysisPeriodTypeErr);
+    END;
+
+    PROCEDURE Increment@2(PeriodType@1000 : 'Year,Month,Day,Hour');
+    VAR
+      ImageAnalysisSetup@1001 : Record "Image Analysis Setup";
+    BEGIN
+      GetCurrentStatus(ImageAnalysisSetup,PeriodType);
+
+      ImageAnalysisSetup."Number of calls" += 1;
+      ImageAnalysisSetup.MODIFY;
+    END;
+
+    LOCAL PROCEDURE SetOrUpdateLineIfNeeded@3(VAR ImageAnalysisSetup@1001 : Record "Image Analysis Setup";PeriodStartDate@1000 : DateTime);
+    BEGIN
+      if not ImageAnalysisSetup.GET then begin
+        ImageAnalysisSetup.INIT;
+        ImageAnalysisSetup."Period start date" := PeriodStartDate;
+        ImageAnalysisSetup."Number of calls" := 0;
+        ImageAnalysisSetup.INSERT;
+      end else
+        if ImageAnalysisSetup."Period start date" <> PeriodStartDate then begin
+          ImageAnalysisSetup."Period start date" := PeriodStartDate;
+          ImageAnalysisSetup."Number of calls" := 0;
+          ImageAnalysisSetup.MODIFY;
+        end;
+    END;
+
+    [External]
+    PROCEDURE GetCurrentStatus@5(VAR ImageAnalysisSetup@1000 : Record "Image Analysis Setup";PeriodType@1001 : 'Year,Month,Day,Hour');
+    VAR
+      CurrentPeriodStartDate@1002 : DateTime;
+    BEGIN
+      if TestMode then
+        CurrentPeriodStartDate := ComputeCurrentPeriodStartDate(TestDate,TestTime,PeriodType)
+      else
+        CurrentPeriodStartDate := ComputeCurrentPeriodStartDate(TODAY,TIME,PeriodType);
+
+      SetOrUpdateLineIfNeeded(ImageAnalysisSetup,CurrentPeriodStartDate)
+    END;
+
+    PROCEDURE SetTestMode@4(InputTestDate@1000 : Date;InputTestTime@1001 : Time);
+    BEGIN
+      TestMode := true;
+      TestDate := InputTestDate;
+      TestTime := InputTestTime;
+    END;
+
+    PROCEDURE IsUsageLimitReached@7(VAR UsageLimitError@1003 : Text;MaxCallsPerPeriod@1004 : Integer;PeriodType@1005 : 'Year,Month,Day,Hour') : Boolean;
+    VAR
+      ImageAnalysisSetup@1000 : Record "Image Analysis Setup";
+    BEGIN
+      GetCurrentStatus(ImageAnalysisSetup,PeriodType);
+      if ImageAnalysisSetup."Number of calls" >= MaxCallsPerPeriod then begin
+        UsageLimitError := STRSUBSTNO(TooManyCallsErr,FORMAT(MaxCallsPerPeriod),LOWERCASE(FORMAT(PeriodType)));
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    PROCEDURE ValidateApiUri@1(ApiUri@1000 : Text);
+    VAR
+      RegEx@1001 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.RegularExpressions.Regex";
+    BEGIN
+      if ApiUri <> '' then
+        if not RegEx.IsMatch(ApiUri,'https://([a-z0-9]|\.)*\.api\.cognitive\.microsoft.com/.*') then
+          ERROR(InvalidApiUriErr);
+    END;
+
+    [External]
+    PROCEDURE SetApiKey@6(ApiKey@1000 : Text);
+    VAR
+      ServicePassword@1001 : Record "Service Password";
+    BEGIN
+      if ISNULLGUID("Api Key Key") or not ServicePassword.GET("Api Key Key") then begin
+        ServicePassword.SavePassword(ApiKey);
+        ServicePassword.INSERT(true);
+        "Api Key Key" := ServicePassword.Key;
+      end else begin
+        ServicePassword.SavePassword(ApiKey);
+        ServicePassword.MODIFY(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetApiKey@8() : Text;
+    VAR
+      ServicePassword@1000 : Record "Service Password";
+    BEGIN
+      if not ISNULLGUID("Api Key Key") then
+        if ServicePassword.GET("Api Key Key") then
+          exit(ServicePassword.GetPassword);
+    END;
+
+    [External]
+    PROCEDURE GetSingleInstance@9();
+    BEGIN
+      if not GET then begin
+        INIT;
+        INSERT;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

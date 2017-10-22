@@ -1,0 +1,1395 @@
+OBJECT Codeunit 7000 Sales Price Calc. Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GLSetup@1017 : Record "General Ledger Setup";
+      Item@1000 : Record Item;
+      ResPrice@1009 : Record "Resource Price";
+      Res@1026 : Record Resource;
+      Currency@1007 : Record Currency;
+      Text000@1023 : TextConst 'ENU=%1 is less than %2 in the %3.';
+      Text010@1006 : TextConst 'ENU=Prices including VAT cannot be calculated when %1 is %2.';
+      TempSalesPrice@1002 : TEMPORARY Record "Sales Price";
+      TempSalesLineDisc@1015 : TEMPORARY Record "Sales Line Discount";
+      LineDiscPerCent@1022 : Decimal;
+      Qty@1021 : Decimal;
+      AllowLineDisc@1019 : Boolean;
+      AllowInvDisc@1020 : Boolean;
+      VATPerCent@1012 : Decimal;
+      PricesInclVAT@1008 : Boolean;
+      VATCalcType@1004 : '"Normal VAT","Reverse Charge VAT","Full VAT","Sales Tax"';
+      VATBusPostingGr@1003 : Code[20];
+      QtyPerUOM@1016 : Decimal;
+      PricesInCurrency@1014 : Boolean;
+      CurrencyFactor@1013 : Decimal;
+      ExchRateDate@1011 : Date;
+      Text018@1018 : TextConst 'ENU=%1 %2 is greater than %3 and was adjusted to %4.';
+      FoundSalesPrice@1024 : Boolean;
+      Text001@1025 : TextConst 'ENU=The %1 in the %2 must be same as in the %3.';
+      HideResUnitPriceMessage@1005 : Boolean;
+      DateCaption@1001 : Text[30];
+
+    [External]
+    PROCEDURE FindSalesLinePrice@2(SalesHeader@1001 : Record "Sales Header";VAR SalesLine@1000 : Record "Sales Line";CalledByFieldNo@1002 : Integer);
+    BEGIN
+      with SalesLine do begin
+        SetCurrency(
+          SalesHeader."Currency Code",SalesHeader."Currency Factor",SalesHeaderExchDate(SalesHeader));
+        SetVAT(SalesHeader."Prices Including VAT","VAT %","VAT Calculation Type","VAT Bus. Posting Group");
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+        SetLineDisc("Line Discount %","Allow Line Disc.","Allow Invoice Disc.");
+
+        TESTFIELD("Qty. per Unit of Measure");
+        if PricesInCurrency then
+          SalesHeader.TESTFIELD("Currency Factor");
+
+        case Type of
+          Type::Item:
+            begin
+              Item.GET("No.");
+              SalesLinePriceExists(SalesHeader,SalesLine,false);
+              CalcBestUnitPrice(TempSalesPrice);
+
+              if FoundSalesPrice or
+                 not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                      (CalledByFieldNo = FIELDNO("Variant Code")))
+              then begin
+                "Allow Line Disc." := TempSalesPrice."Allow Line Disc.";
+                "Allow Invoice Disc." := TempSalesPrice."Allow Invoice Disc.";
+                "Unit Price" := TempSalesPrice."Unit Price";
+              end;
+              if not "Allow Line Disc." then
+                "Line Discount %" := 0;
+            end;
+          Type::Resource:
+            begin
+              SetResPrice("No.","Work Type Code","Currency Code");
+              CODEUNIT.RUN(CODEUNIT::"Resource-Find Price",ResPrice);
+
+              ConvertPriceToVAT(false,'','',ResPrice."Unit Price");
+              ConvertPriceLCYToFCY(ResPrice."Currency Code",ResPrice."Unit Price");
+              "Unit Price" := ResPrice."Unit Price" * "Qty. per Unit of Measure";
+            end;
+        end;
+        OnAfterFindSalesLinePrice(SalesLine,SalesHeader,TempSalesPrice,ResPrice,CalledByFieldNo);
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindItemJnlLinePrice@3(VAR ItemJnlLine@1000 : Record "Item Journal Line";CalledByFieldNo@1001 : Integer);
+    BEGIN
+      with ItemJnlLine do begin
+        SetCurrency('',0,0D);
+        SetVAT(false,0,0,'');
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+        TESTFIELD("Qty. per Unit of Measure");
+        Item.GET("Item No.");
+
+        FindSalesPrice(
+          TempSalesPrice,'','','','',"Item No.","Variant Code",
+          "Unit of Measure Code",'',"Posting Date",false);
+        CalcBestUnitPrice(TempSalesPrice);
+        if FoundSalesPrice or
+           not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                (CalledByFieldNo = FIELDNO("Variant Code")))
+        then
+          VALIDATE("Unit Amount",TempSalesPrice."Unit Price");
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindServLinePrice@10(ServHeader@1004 : Record "Service Header";VAR ServLine@1000 : Record "Service Line";CalledByFieldNo@1001 : Integer);
+    VAR
+      ServCost@1002 : Record "Service Cost";
+      Res@1003 : Record Resource;
+    BEGIN
+      with ServLine do begin
+        ServHeader.GET("Document Type","Document No.");
+        if Type <> Type::" " then begin
+          SetCurrency(
+            ServHeader."Currency Code",ServHeader."Currency Factor",ServHeaderExchDate(ServHeader));
+          SetVAT(ServHeader."Prices Including VAT","VAT %","VAT Calculation Type","VAT Bus. Posting Group");
+          SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+          SetLineDisc("Line Discount %","Allow Line Disc.",false);
+
+          TESTFIELD("Qty. per Unit of Measure");
+          if PricesInCurrency then
+            ServHeader.TESTFIELD("Currency Factor");
+        end;
+
+        case Type of
+          Type::Item:
+            begin
+              ServLinePriceExists(ServHeader,ServLine,false);
+              CalcBestUnitPrice(TempSalesPrice);
+              if FoundSalesPrice or
+                 not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                      (CalledByFieldNo = FIELDNO("Variant Code")))
+              then begin
+                if "Line Discount Type" = "Line Discount Type"::"Line Disc." then
+                  "Allow Line Disc." := TempSalesPrice."Allow Line Disc.";
+                "Unit Price" := TempSalesPrice."Unit Price";
+              end;
+              if not "Allow Line Disc." and ("Line Discount Type" = "Line Discount Type"::"Line Disc.") then
+                "Line Discount %" := 0;
+            end;
+          Type::Resource:
+            begin
+              SetResPrice("No.","Work Type Code","Currency Code");
+              CODEUNIT.RUN(CODEUNIT::"Resource-Find Price",ResPrice);
+
+              ConvertPriceToVAT(false,'','',ResPrice."Unit Price");
+              ResPrice."Unit Price" := ResPrice."Unit Price" * "Qty. per Unit of Measure";
+              ConvertPriceLCYToFCY(ResPrice."Currency Code",ResPrice."Unit Price");
+              if (ResPrice."Unit Price" > ServHeader."Max. Labor Unit Price") and
+                 (ServHeader."Max. Labor Unit Price" <> 0)
+              then begin
+                Res.GET("No.");
+                "Unit Price" := ServHeader."Max. Labor Unit Price";
+                if (HideResUnitPriceMessage = false) and
+                   (CalledByFieldNo <> FIELDNO(Quantity))
+                then
+                  MESSAGE(
+                    STRSUBSTNO(
+                      Text018,
+                      Res.TABLECAPTION,FIELDCAPTION("Unit Price"),
+                      ServHeader.FIELDCAPTION("Max. Labor Unit Price"),
+                      ServHeader."Max. Labor Unit Price"));
+                HideResUnitPriceMessage := true;
+              end else
+                "Unit Price" := ResPrice."Unit Price";
+            end;
+          Type::Cost:
+            begin
+              ServCost.GET("No.");
+
+              ConvertPriceToVAT(false,'','',ServCost."Default Unit Price");
+              ConvertPriceLCYToFCY('',ServCost."Default Unit Price");
+              "Unit Price" := ServCost."Default Unit Price";
+            end;
+        end;
+        OnAfterFindServLinePrice(ServLine,ServHeader,TempSalesPrice,ResPrice,ServCost,CalledByFieldNo);
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindSalesLineLineDisc@14(SalesHeader@1001 : Record "Sales Header";VAR SalesLine@1000 : Record "Sales Line");
+    BEGIN
+      with SalesLine do begin
+        SetCurrency(SalesHeader."Currency Code",0,0D);
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+        TESTFIELD("Qty. per Unit of Measure");
+
+        if Type = Type::Item then begin
+          SalesLineLineDiscExists(SalesHeader,SalesLine,false);
+          CalcBestLineDisc(TempSalesLineDisc);
+
+          "Line Discount %" := TempSalesLineDisc."Line Discount %";
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindServLineDisc@24(ServHeader@1001 : Record "Service Header";VAR ServInvLine@1000 : Record "Service Line");
+    BEGIN
+      with ServInvLine do begin
+        SetCurrency(ServHeader."Currency Code",0,0D);
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+        TESTFIELD("Qty. per Unit of Measure");
+
+        if Type = Type::Item then begin
+          Item.GET("No.");
+          FindSalesLineDisc(
+            TempSalesLineDisc,"Bill-to Customer No.",ServHeader."Contact No.",
+            "Customer Disc. Group",'',"No.",Item."Item Disc. Group","Variant Code",
+            "Unit of Measure Code",ServHeader."Currency Code",ServHeader."Order Date",false);
+          CalcBestLineDisc(TempSalesLineDisc);
+          "Line Discount %" := TempSalesLineDisc."Line Discount %";
+        end;
+        if Type in [Type::Resource,Type::Cost,Type::"G/L Account"] then begin
+          "Line Discount %" := 0;
+          "Line Discount Amount" :=
+            ROUND(
+              ROUND(CalcChargeableQty * "Unit Price",Currency."Amount Rounding Precision") *
+              "Line Discount %" / 100,Currency."Amount Rounding Precision");
+          "Inv. Discount Amount" := 0;
+          "Inv. Disc. Amount to Invoice" := 0;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindStdItemJnlLinePrice@36(VAR StdItemJnlLine@1000 : Record "Standard Item Journal Line";CalledByFieldNo@1001 : Integer);
+    BEGIN
+      with StdItemJnlLine do begin
+        SetCurrency('',0,0D);
+        SetVAT(false,0,0,'');
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+        TESTFIELD("Qty. per Unit of Measure");
+        Item.GET("Item No.");
+
+        FindSalesPrice(
+          TempSalesPrice,'','','','',"Item No.","Variant Code",
+          "Unit of Measure Code",'',WORKDATE,false);
+        CalcBestUnitPrice(TempSalesPrice);
+        if FoundSalesPrice or
+           not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                (CalledByFieldNo = FIELDNO("Variant Code")))
+        then
+          VALIDATE("Unit Amount",TempSalesPrice."Unit Price");
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindAnalysisReportPrice@30(ItemNo@1000 : Code[20];Date@1001 : Date) : Decimal;
+    BEGIN
+      SetCurrency('',0,0D);
+      SetVAT(false,0,0,'');
+      SetUoM(0,1);
+      Item.GET(ItemNo);
+
+      FindSalesPrice(TempSalesPrice,'','','','',ItemNo,'','','',Date,false);
+      CalcBestUnitPrice(TempSalesPrice);
+      if FoundSalesPrice then
+        exit(TempSalesPrice."Unit Price");
+      exit(Item."Unit Price");
+    END;
+
+    LOCAL PROCEDURE CalcBestUnitPrice@1(VAR SalesPrice@1000 : Record "Sales Price");
+    VAR
+      BestSalesPrice@1002 : Record "Sales Price";
+    BEGIN
+      with SalesPrice do begin
+        FoundSalesPrice := FINDSET;
+        if FoundSalesPrice then
+          repeat
+            if IsInMinQty("Unit of Measure Code","Minimum Quantity") then begin
+              ConvertPriceToVAT(
+                "Price Includes VAT",Item."VAT Prod. Posting Group",
+                "VAT Bus. Posting Gr. (Price)","Unit Price");
+              ConvertPriceToUoM("Unit of Measure Code","Unit Price");
+              ConvertPriceLCYToFCY("Currency Code","Unit Price");
+
+              case true of
+                ((BestSalesPrice."Currency Code" = '') and ("Currency Code" <> '')) or
+                ((BestSalesPrice."Variant Code" = '') and ("Variant Code" <> '')):
+                  BestSalesPrice := SalesPrice;
+                ((BestSalesPrice."Currency Code" = '') or ("Currency Code" <> '')) and
+                ((BestSalesPrice."Variant Code" = '') or ("Variant Code" <> '')):
+                  if (BestSalesPrice."Unit Price" = 0) or
+                     (CalcLineAmount(BestSalesPrice) > CalcLineAmount(SalesPrice))
+                  then
+                    BestSalesPrice := SalesPrice;
+              end;
+            end;
+          until NEXT = 0;
+      end;
+
+      // No price found in agreement
+      if BestSalesPrice."Unit Price" = 0 then begin
+        ConvertPriceToVAT(
+          Item."Price Includes VAT",Item."VAT Prod. Posting Group",
+          Item."VAT Bus. Posting Gr. (Price)",Item."Unit Price");
+        ConvertPriceToUoM('',Item."Unit Price");
+        ConvertPriceLCYToFCY('',Item."Unit Price");
+
+        CLEAR(BestSalesPrice);
+        BestSalesPrice."Unit Price" := Item."Unit Price";
+        BestSalesPrice."Allow Line Disc." := AllowLineDisc;
+        BestSalesPrice."Allow Invoice Disc." := AllowInvDisc;
+      end;
+
+      SalesPrice := BestSalesPrice;
+    END;
+
+    LOCAL PROCEDURE CalcBestLineDisc@11(VAR SalesLineDisc@1000 : Record "Sales Line Discount");
+    VAR
+      BestSalesLineDisc@1002 : Record "Sales Line Discount";
+    BEGIN
+      with SalesLineDisc do begin
+        if FINDSET then
+          repeat
+            if IsInMinQty("Unit of Measure Code","Minimum Quantity") then
+              case true of
+                ((BestSalesLineDisc."Currency Code" = '') and ("Currency Code" <> '')) or
+                ((BestSalesLineDisc."Variant Code" = '') and ("Variant Code" <> '')):
+                  BestSalesLineDisc := SalesLineDisc;
+                ((BestSalesLineDisc."Currency Code" = '') or ("Currency Code" <> '')) and
+                ((BestSalesLineDisc."Variant Code" = '') or ("Variant Code" <> '')):
+                  if BestSalesLineDisc."Line Discount %" < "Line Discount %" then
+                    BestSalesLineDisc := SalesLineDisc;
+              end;
+          until NEXT = 0;
+      end;
+
+      SalesLineDisc := BestSalesLineDisc;
+    END;
+
+    [External]
+    PROCEDURE FindSalesPrice@16(VAR ToSalesPrice@1003 : Record "Sales Price";CustNo@1000 : Code[20];ContNo@1006 : Code[20];CustPriceGrCode@1001 : Code[10];CampaignNo@1007 : Code[20];ItemNo@1012 : Code[20];VariantCode@1011 : Code[10];UOM@1010 : Code[10];CurrencyCode@1009 : Code[10];StartingDate@1008 : Date;ShowAll@1004 : Boolean);
+    VAR
+      FromSalesPrice@1002 : Record "Sales Price";
+      TempTargetCampaignGr@1005 : TEMPORARY Record "Campaign Target Group";
+    BEGIN
+      with FromSalesPrice do begin
+        SETRANGE("Item No.",ItemNo);
+        SETFILTER("Variant Code",'%1|%2',VariantCode,'');
+        SETFILTER("Ending Date",'%1|>=%2',0D,StartingDate);
+        if not ShowAll then begin
+          SETFILTER("Currency Code",'%1|%2',CurrencyCode,'');
+          if UOM <> '' then
+            SETFILTER("Unit of Measure Code",'%1|%2',UOM,'');
+          SETRANGE("Starting Date",0D,StartingDate);
+        end;
+
+        ToSalesPrice.RESET;
+        ToSalesPrice.DELETEALL;
+
+        SETRANGE("Sales Type","Sales Type"::"All Customers");
+        SETRANGE("Sales Code");
+        CopySalesPriceToSalesPrice(FromSalesPrice,ToSalesPrice);
+
+        if CustNo <> '' then begin
+          SETRANGE("Sales Type","Sales Type"::Customer);
+          SETRANGE("Sales Code",CustNo);
+          CopySalesPriceToSalesPrice(FromSalesPrice,ToSalesPrice);
+        end;
+
+        if CustPriceGrCode <> '' then begin
+          SETRANGE("Sales Type","Sales Type"::"Customer Price Group");
+          SETRANGE("Sales Code",CustPriceGrCode);
+          CopySalesPriceToSalesPrice(FromSalesPrice,ToSalesPrice);
+        end;
+
+        if not ((CustNo = '') and (ContNo = '') and (CampaignNo = '')) then begin
+          SETRANGE("Sales Type","Sales Type"::Campaign);
+          if ActivatedCampaignExists(TempTargetCampaignGr,CustNo,ContNo,CampaignNo) then
+            repeat
+              SETRANGE("Sales Code",TempTargetCampaignGr."Campaign No.");
+              CopySalesPriceToSalesPrice(FromSalesPrice,ToSalesPrice);
+            until TempTargetCampaignGr.NEXT = 0;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindSalesLineDisc@12(VAR ToSalesLineDisc@1006 : Record "Sales Line Discount";CustNo@1003 : Code[20];ContNo@1001 : Code[20];CustDiscGrCode@1002 : Code[20];CampaignNo@1010 : Code[20];ItemNo@1004 : Code[20];ItemDiscGrCode@1005 : Code[20];VariantCode@1014 : Code[10];UOM@1013 : Code[10];CurrencyCode@1012 : Code[10];StartingDate@1011 : Date;ShowAll@1000 : Boolean);
+    VAR
+      FromSalesLineDisc@1007 : Record "Sales Line Discount";
+      TempCampaignTargetGr@1009 : TEMPORARY Record "Campaign Target Group";
+      InclCampaigns@1008 : Boolean;
+    BEGIN
+      with FromSalesLineDisc do begin
+        SETFILTER("Ending Date",'%1|>=%2',0D,StartingDate);
+        SETFILTER("Variant Code",'%1|%2',VariantCode,'');
+        if not ShowAll then begin
+          SETRANGE("Starting Date",0D,StartingDate);
+          SETFILTER("Currency Code",'%1|%2',CurrencyCode,'');
+          if UOM <> '' then
+            SETFILTER("Unit of Measure Code",'%1|%2',UOM,'');
+        end;
+
+        ToSalesLineDisc.RESET;
+        ToSalesLineDisc.DELETEALL;
+        for "Sales Type" := "Sales Type"::Customer to "Sales Type"::Campaign do
+          if ("Sales Type" = "Sales Type"::"All Customers") or
+             (("Sales Type" = "Sales Type"::Customer) and (CustNo <> '')) or
+             (("Sales Type" = "Sales Type"::"Customer Disc. Group") and (CustDiscGrCode <> '')) or
+             (("Sales Type" = "Sales Type"::Campaign) and
+              not ((CustNo = '') and (ContNo = '') and (CampaignNo = '')))
+          then begin
+            InclCampaigns := false;
+
+            SETRANGE("Sales Type","Sales Type");
+            case "Sales Type" of
+              "Sales Type"::"All Customers":
+                SETRANGE("Sales Code");
+              "Sales Type"::Customer:
+                SETRANGE("Sales Code",CustNo);
+              "Sales Type"::"Customer Disc. Group":
+                SETRANGE("Sales Code",CustDiscGrCode);
+              "Sales Type"::Campaign:
+                begin
+                  InclCampaigns := ActivatedCampaignExists(TempCampaignTargetGr,CustNo,ContNo,CampaignNo);
+                  SETRANGE("Sales Code",TempCampaignTargetGr."Campaign No.");
+                end;
+            end;
+
+            repeat
+              SETRANGE(Type,Type::Item);
+              SETRANGE(Code,ItemNo);
+              CopySalesDiscToSalesDisc(FromSalesLineDisc,ToSalesLineDisc);
+
+              if ItemDiscGrCode <> '' then begin
+                SETRANGE(Type,Type::"Item Disc. Group");
+                SETRANGE(Code,ItemDiscGrCode);
+                CopySalesDiscToSalesDisc(FromSalesLineDisc,ToSalesLineDisc);
+              end;
+
+              if InclCampaigns then begin
+                InclCampaigns := TempCampaignTargetGr.NEXT <> 0;
+                SETRANGE("Sales Code",TempCampaignTargetGr."Campaign No.");
+              end;
+            until not InclCampaigns;
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CopySalesPrice@32(VAR SalesPrice@1000 : Record "Sales Price");
+    BEGIN
+      SalesPrice.DELETEALL;
+      CopySalesPriceToSalesPrice(TempSalesPrice,SalesPrice);
+    END;
+
+    LOCAL PROCEDURE CopySalesPriceToSalesPrice@13(VAR FromSalesPrice@1000 : Record "Sales Price";VAR ToSalesPrice@1001 : Record "Sales Price");
+    BEGIN
+      with ToSalesPrice do begin
+        if FromSalesPrice.FINDSET then
+          repeat
+            if FromSalesPrice."Unit Price" <> 0 then begin
+              ToSalesPrice := FromSalesPrice;
+              INSERT;
+            end;
+          until FromSalesPrice.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CopySalesDiscToSalesDisc@17(VAR FromSalesLineDisc@1000 : Record "Sales Line Discount";VAR ToSalesLineDisc@1001 : Record "Sales Line Discount");
+    BEGIN
+      with ToSalesLineDisc do begin
+        if FromSalesLineDisc.FINDSET then
+          repeat
+            ToSalesLineDisc := FromSalesLineDisc;
+            INSERT;
+          until FromSalesLineDisc.NEXT = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetResPrice@28(Code2@1006 : Code[20];WorkTypeCode@1005 : Code[10];CurrencyCode@1003 : Code[10]);
+    BEGIN
+      with ResPrice do begin
+        INIT;
+        Code := Code2;
+        "Work Type Code" := WorkTypeCode;
+        "Currency Code" := CurrencyCode;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetCurrency@18(CurrencyCode2@1003 : Code[10];CurrencyFactor2@1001 : Decimal;ExchRateDate2@1002 : Date);
+    BEGIN
+      PricesInCurrency := CurrencyCode2 <> '';
+      if PricesInCurrency then begin
+        Currency.GET(CurrencyCode2);
+        Currency.TESTFIELD("Unit-Amount Rounding Precision");
+        CurrencyFactor := CurrencyFactor2;
+        ExchRateDate := ExchRateDate2;
+      end else
+        GLSetup.GET;
+    END;
+
+    LOCAL PROCEDURE SetVAT@22(PriceInclVAT2@1003 : Boolean;VATPerCent2@1002 : Decimal;VATCalcType2@1001 : Option;VATBusPostingGr2@1000 : Code[20]);
+    BEGIN
+      PricesInclVAT := PriceInclVAT2;
+      VATPerCent := VATPerCent2;
+      VATCalcType := VATCalcType2;
+      VATBusPostingGr := VATBusPostingGr2;
+    END;
+
+    LOCAL PROCEDURE SetUoM@23(Qty2@1000 : Decimal;QtyPerUoM2@1001 : Decimal);
+    BEGIN
+      Qty := Qty2;
+      QtyPerUOM := QtyPerUoM2;
+    END;
+
+    LOCAL PROCEDURE SetLineDisc@29(LineDiscPerCent2@1000 : Decimal;AllowLineDisc2@1001 : Boolean;AllowInvDisc2@1002 : Boolean);
+    BEGIN
+      LineDiscPerCent := LineDiscPerCent2;
+      AllowLineDisc := AllowLineDisc2;
+      AllowInvDisc := AllowInvDisc2;
+    END;
+
+    LOCAL PROCEDURE IsInMinQty@7(UnitofMeasureCode@1003 : Code[10];MinQty@1000 : Decimal) : Boolean;
+    BEGIN
+      if UnitofMeasureCode = '' then
+        exit(MinQty <= QtyPerUOM * Qty);
+      exit(MinQty <= Qty);
+    END;
+
+    LOCAL PROCEDURE ConvertPriceToVAT@4(FromPricesInclVAT@1006 : Boolean;FromVATProdPostingGr@1000 : Code[20];FromVATBusPostingGr@1002 : Code[20];VAR UnitPrice@1004 : Decimal);
+    VAR
+      VATPostingSetup@1007 : Record "VAT Posting Setup";
+    BEGIN
+      if FromPricesInclVAT then begin
+        VATPostingSetup.GET(FromVATBusPostingGr,FromVATProdPostingGr);
+
+        case VATPostingSetup."VAT Calculation Type" of
+          VATPostingSetup."VAT Calculation Type"::"Reverse Charge VAT":
+            VATPostingSetup."VAT %" := 0;
+          VATPostingSetup."VAT Calculation Type"::"Sales Tax":
+            ERROR(
+              Text010,
+              VATPostingSetup.FIELDCAPTION("VAT Calculation Type"),
+              VATPostingSetup."VAT Calculation Type");
+        end;
+
+        case VATCalcType of
+          VATCalcType::"Normal VAT",
+          VATCalcType::"Full VAT",
+          VATCalcType::"Sales Tax":
+            begin
+              if PricesInclVAT then begin
+                if VATBusPostingGr <> FromVATBusPostingGr then
+                  UnitPrice := UnitPrice * (100 + VATPerCent) / (100 + VATPostingSetup."VAT %");
+              end else
+                UnitPrice := UnitPrice / (1 + VATPostingSetup."VAT %" / 100);
+            end;
+          VATCalcType::"Reverse Charge VAT":
+            UnitPrice := UnitPrice / (1 + VATPostingSetup."VAT %" / 100);
+        end;
+      end else
+        if PricesInclVAT then
+          UnitPrice := UnitPrice * (1 + VATPerCent / 100);
+    END;
+
+    LOCAL PROCEDURE ConvertPriceToUoM@5(UnitOfMeasureCode@1002 : Code[10];VAR UnitPrice@1001 : Decimal);
+    BEGIN
+      if UnitOfMeasureCode = '' then
+        UnitPrice := UnitPrice * QtyPerUOM;
+    END;
+
+    LOCAL PROCEDURE ConvertPriceLCYToFCY@6(CurrencyCode@1005 : Code[10];VAR UnitPrice@1001 : Decimal);
+    VAR
+      CurrExchRate@1000 : Record "Currency Exchange Rate";
+    BEGIN
+      if PricesInCurrency then begin
+        if CurrencyCode = '' then
+          UnitPrice :=
+            CurrExchRate.ExchangeAmtLCYToFCY(ExchRateDate,Currency.Code,UnitPrice,CurrencyFactor);
+        UnitPrice := ROUND(UnitPrice,Currency."Unit-Amount Rounding Precision");
+      end else
+        UnitPrice := ROUND(UnitPrice,GLSetup."Unit-Amount Rounding Precision");
+    END;
+
+    LOCAL PROCEDURE CalcLineAmount@15(SalesPrice@1000 : Record "Sales Price") : Decimal;
+    BEGIN
+      with SalesPrice do begin
+        if "Allow Line Disc." then
+          exit("Unit Price" * (1 - LineDiscPerCent / 100));
+        exit("Unit Price");
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetSalesLinePrice@19(SalesHeader@1000 : Record "Sales Header";VAR SalesLine@1001 : Record "Sales Line");
+    BEGIN
+      SalesLinePriceExists(SalesHeader,SalesLine,true);
+
+      with SalesLine do
+        if PAGE.RUNMODAL(PAGE::"Get Sales Price",TempSalesPrice) = ACTION::LookupOK then begin
+          SetVAT(
+            SalesHeader."Prices Including VAT","VAT %","VAT Calculation Type","VAT Bus. Posting Group");
+          SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+          SetCurrency(
+            SalesHeader."Currency Code",SalesHeader."Currency Factor",SalesHeaderExchDate(SalesHeader));
+
+          if not IsInMinQty(TempSalesPrice."Unit of Measure Code",TempSalesPrice."Minimum Quantity") then
+            ERROR(
+              Text000,
+              FIELDCAPTION(Quantity),
+              TempSalesPrice.FIELDCAPTION("Minimum Quantity"),
+              TempSalesPrice.TABLECAPTION);
+          if not (TempSalesPrice."Currency Code" in ["Currency Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Currency Code"),
+              TABLECAPTION,
+              TempSalesPrice.TABLECAPTION);
+          if not (TempSalesPrice."Unit of Measure Code" in ["Unit of Measure Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Unit of Measure Code"),
+              TABLECAPTION,
+              TempSalesPrice.TABLECAPTION);
+          if TempSalesPrice."Starting Date" > SalesHeaderStartDate(SalesHeader,DateCaption) then
+            ERROR(
+              Text000,
+              DateCaption,
+              TempSalesPrice.FIELDCAPTION("Starting Date"),
+              TempSalesPrice.TABLECAPTION);
+
+          ConvertPriceToVAT(
+            TempSalesPrice."Price Includes VAT",Item."VAT Prod. Posting Group",
+            TempSalesPrice."VAT Bus. Posting Gr. (Price)",TempSalesPrice."Unit Price");
+          ConvertPriceToUoM(TempSalesPrice."Unit of Measure Code",TempSalesPrice."Unit Price");
+          ConvertPriceLCYToFCY(TempSalesPrice."Currency Code",TempSalesPrice."Unit Price");
+
+          "Allow Invoice Disc." := TempSalesPrice."Allow Invoice Disc.";
+          "Allow Line Disc." := TempSalesPrice."Allow Line Disc.";
+          if not "Allow Line Disc." then
+            "Line Discount %" := 0;
+
+          VALIDATE("Unit Price",TempSalesPrice."Unit Price");
+        end;
+    END;
+
+    [External]
+    PROCEDURE GetSalesLineLineDisc@20(SalesHeader@1000 : Record "Sales Header";VAR SalesLine@1001 : Record "Sales Line");
+    BEGIN
+      SalesLineLineDiscExists(SalesHeader,SalesLine,true);
+
+      with SalesLine do
+        if PAGE.RUNMODAL(PAGE::"Get Sales Line Disc.",TempSalesLineDisc) = ACTION::LookupOK then
+          begin
+          SetCurrency(SalesHeader."Currency Code",0,0D);
+          SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+          if not IsInMinQty(TempSalesLineDisc."Unit of Measure Code",TempSalesLineDisc."Minimum Quantity")
+          then
+            ERROR(
+              Text000,FIELDCAPTION(Quantity),
+              TempSalesLineDisc.FIELDCAPTION("Minimum Quantity"),
+              TempSalesLineDisc.TABLECAPTION);
+          if not (TempSalesLineDisc."Currency Code" in ["Currency Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Currency Code"),
+              TABLECAPTION,
+              TempSalesLineDisc.TABLECAPTION);
+          if not (TempSalesLineDisc."Unit of Measure Code" in ["Unit of Measure Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Unit of Measure Code"),
+              TABLECAPTION,
+              TempSalesLineDisc.TABLECAPTION);
+          if TempSalesLineDisc."Starting Date" > SalesHeaderStartDate(SalesHeader,DateCaption) then
+            ERROR(
+              Text000,
+              DateCaption,
+              TempSalesLineDisc.FIELDCAPTION("Starting Date"),
+              TempSalesLineDisc.TABLECAPTION);
+
+          TESTFIELD("Allow Line Disc.");
+          VALIDATE("Line Discount %",TempSalesLineDisc."Line Discount %");
+        end;
+    END;
+
+    [External]
+    PROCEDURE SalesLinePriceExists@45(SalesHeader@1001 : Record "Sales Header";VAR SalesLine@1000 : Record "Sales Line";ShowAll@1002 : Boolean) : Boolean;
+    BEGIN
+      with SalesLine do
+        if (Type = Type::Item) and Item.GET("No.") then begin
+          FindSalesPrice(
+            TempSalesPrice,"Bill-to Customer No.",SalesHeader."Bill-to Contact No.",
+            "Customer Price Group",'',"No.","Variant Code","Unit of Measure Code",
+            SalesHeader."Currency Code",SalesHeaderStartDate(SalesHeader,DateCaption),ShowAll);
+          exit(TempSalesPrice.FINDFIRST);
+        end;
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE SalesLineLineDiscExists@44(SalesHeader@1001 : Record "Sales Header";VAR SalesLine@1000 : Record "Sales Line";ShowAll@1002 : Boolean) : Boolean;
+    BEGIN
+      with SalesLine do
+        if (Type = Type::Item) and Item.GET("No.") then begin
+          FindSalesLineDisc(
+            TempSalesLineDisc,"Bill-to Customer No.",SalesHeader."Bill-to Contact No.",
+            "Customer Disc. Group",'',"No.",Item."Item Disc. Group","Variant Code","Unit of Measure Code",
+            SalesHeader."Currency Code",SalesHeaderStartDate(SalesHeader,DateCaption),ShowAll);
+          exit(TempSalesLineDisc.FINDFIRST);
+        end;
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE GetServLinePrice@34(ServHeader@1000 : Record "Service Header";VAR ServLine@1001 : Record "Service Line");
+    BEGIN
+      ServLinePriceExists(ServHeader,ServLine,true);
+
+      with ServLine do
+        if PAGE.RUNMODAL(PAGE::"Get Sales Price",TempSalesPrice) = ACTION::LookupOK then begin
+          SetVAT(
+            ServHeader."Prices Including VAT","VAT %","VAT Calculation Type","VAT Bus. Posting Group");
+          SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+          SetCurrency(
+            ServHeader."Currency Code",ServHeader."Currency Factor",ServHeaderExchDate(ServHeader));
+
+          if not IsInMinQty(TempSalesPrice."Unit of Measure Code",TempSalesPrice."Minimum Quantity") then
+            ERROR(
+              Text000,
+              FIELDCAPTION(Quantity),
+              TempSalesPrice.FIELDCAPTION("Minimum Quantity"),
+              TempSalesPrice.TABLECAPTION);
+          if not (TempSalesPrice."Currency Code" in ["Currency Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Currency Code"),
+              TABLECAPTION,
+              TempSalesPrice.TABLECAPTION);
+          if not (TempSalesPrice."Unit of Measure Code" in ["Unit of Measure Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Unit of Measure Code"),
+              TABLECAPTION,
+              TempSalesPrice.TABLECAPTION);
+          if TempSalesPrice."Starting Date" > ServHeaderStartDate(ServHeader,DateCaption) then
+            ERROR(
+              Text000,
+              DateCaption,
+              TempSalesPrice.FIELDCAPTION("Starting Date"),
+              TempSalesPrice.TABLECAPTION);
+
+          ConvertPriceToVAT(
+            TempSalesPrice."Price Includes VAT",Item."VAT Prod. Posting Group",
+            TempSalesPrice."VAT Bus. Posting Gr. (Price)",TempSalesPrice."Unit Price");
+          ConvertPriceToUoM(TempSalesPrice."Unit of Measure Code",TempSalesPrice."Unit Price");
+          ConvertPriceLCYToFCY(TempSalesPrice."Currency Code",TempSalesPrice."Unit Price");
+
+          "Allow Invoice Disc." := TempSalesPrice."Allow Invoice Disc.";
+          "Allow Line Disc." := TempSalesPrice."Allow Line Disc.";
+          if not "Allow Line Disc." then
+            "Line Discount %" := 0;
+
+          VALIDATE("Unit Price",TempSalesPrice."Unit Price");
+          ConfirmAdjPriceLineChange;
+        end;
+    END;
+
+    [External]
+    PROCEDURE GetServLineLineDisc@33(ServHeader@1000 : Record "Service Header";VAR ServLine@1001 : Record "Service Line");
+    BEGIN
+      ServLineLineDiscExists(ServHeader,ServLine,true);
+
+      with ServLine do
+        if PAGE.RUNMODAL(PAGE::"Get Sales Line Disc.",TempSalesLineDisc) = ACTION::LookupOK then begin
+          SetCurrency(ServHeader."Currency Code",0,0D);
+          SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+          if not IsInMinQty(TempSalesLineDisc."Unit of Measure Code",TempSalesLineDisc."Minimum Quantity")
+          then
+            ERROR(
+              Text000,FIELDCAPTION(Quantity),
+              TempSalesLineDisc.FIELDCAPTION("Minimum Quantity"),
+              TempSalesLineDisc.TABLECAPTION);
+          if not (TempSalesLineDisc."Currency Code" in ["Currency Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Currency Code"),
+              TABLECAPTION,
+              TempSalesLineDisc.TABLECAPTION);
+          if not (TempSalesLineDisc."Unit of Measure Code" in ["Unit of Measure Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Unit of Measure Code"),
+              TABLECAPTION,
+              TempSalesLineDisc.TABLECAPTION);
+          if TempSalesLineDisc."Starting Date" > ServHeaderStartDate(ServHeader,DateCaption) then
+            ERROR(
+              Text000,
+              DateCaption,
+              TempSalesLineDisc.FIELDCAPTION("Starting Date"),
+              TempSalesLineDisc.TABLECAPTION);
+
+          TESTFIELD("Allow Line Disc.");
+          CheckLineDiscount(TempSalesLineDisc."Line Discount %");
+          VALIDATE("Line Discount %",TempSalesLineDisc."Line Discount %");
+          ConfirmAdjPriceLineChange;
+        end;
+    END;
+
+    LOCAL PROCEDURE ServLinePriceExists@37(ServHeader@1001 : Record "Service Header";VAR ServLine@1000 : Record "Service Line";ShowAll@1002 : Boolean) : Boolean;
+    BEGIN
+      with ServLine do
+        if (Type = Type::Item) and Item.GET("No.") then begin
+          FindSalesPrice(
+            TempSalesPrice,"Bill-to Customer No.",ServHeader."Bill-to Contact No.",
+            "Customer Price Group",'',"No.","Variant Code","Unit of Measure Code",
+            ServHeader."Currency Code",ServHeaderStartDate(ServHeader,DateCaption),ShowAll);
+          exit(TempSalesPrice.FIND('-'));
+        end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE ServLineLineDiscExists@35(ServHeader@1001 : Record "Service Header";VAR ServLine@1000 : Record "Service Line";ShowAll@1002 : Boolean) : Boolean;
+    BEGIN
+      with ServLine do
+        if (Type = Type::Item) and Item.GET("No.") then begin
+          FindSalesLineDisc(
+            TempSalesLineDisc,"Bill-to Customer No.",ServHeader."Bill-to Contact No.",
+            "Customer Disc. Group",'',"No.",Item."Item Disc. Group","Variant Code","Unit of Measure Code",
+            ServHeader."Currency Code",ServHeaderStartDate(ServHeader,DateCaption),ShowAll);
+          exit(TempSalesLineDisc.FIND('-'));
+        end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE ActivatedCampaignExists@21(VAR ToCampaignTargetGr@1001 : Record "Campaign Target Group";CustNo@1000 : Code[20];ContNo@1002 : Code[20];CampaignNo@1004 : Code[20]) : Boolean;
+    VAR
+      FromCampaignTargetGr@1003 : Record "Campaign Target Group";
+      Cont@1005 : Record Contact;
+    BEGIN
+      with FromCampaignTargetGr do begin
+        ToCampaignTargetGr.RESET;
+        ToCampaignTargetGr.DELETEALL;
+
+        if CampaignNo <> '' then begin
+          ToCampaignTargetGr."Campaign No." := CampaignNo;
+          ToCampaignTargetGr.INSERT;
+        end else begin
+          SETRANGE(Type,Type::Customer);
+          SETRANGE("No.",CustNo);
+          if FINDSET then
+            repeat
+              ToCampaignTargetGr := FromCampaignTargetGr;
+              ToCampaignTargetGr.INSERT;
+            until NEXT = 0
+          else begin
+            if Cont.GET(ContNo) then begin
+              SETRANGE(Type,Type::Contact);
+              SETRANGE("No.",Cont."Company No.");
+              if FINDSET then
+                repeat
+                  ToCampaignTargetGr := FromCampaignTargetGr;
+                  ToCampaignTargetGr.INSERT;
+                until NEXT = 0;
+            end;
+          end;
+        end;
+        exit(ToCampaignTargetGr.FINDFIRST);
+      end;
+    END;
+
+    LOCAL PROCEDURE SalesHeaderExchDate@25(SalesHeader@1000 : Record "Sales Header") : Date;
+    BEGIN
+      with SalesHeader do begin
+        if "Posting Date" <> 0D then
+          exit("Posting Date");
+        exit(WORKDATE);
+      end;
+    END;
+
+    LOCAL PROCEDURE SalesHeaderStartDate@31(SalesHeader@1000 : Record "Sales Header";VAR DateCaption@1001 : Text[30]) : Date;
+    BEGIN
+      with SalesHeader do
+        if "Document Type" in ["Document Type"::Invoice,"Document Type"::"Credit Memo"] then begin
+          DateCaption := FIELDCAPTION("Posting Date");
+          exit("Posting Date")
+        end else begin
+          DateCaption := FIELDCAPTION("Order Date");
+          exit("Order Date");
+        end;
+    END;
+
+    LOCAL PROCEDURE ServHeaderExchDate@65(ServHeader@1000 : Record "Service Header") : Date;
+    BEGIN
+      with ServHeader do begin
+        if ("Document Type" = "Document Type"::Quote) and
+           ("Posting Date" = 0D)
+        then
+          exit(WORKDATE);
+        exit("Posting Date");
+      end;
+    END;
+
+    LOCAL PROCEDURE ServHeaderStartDate@66(ServHeader@1000 : Record "Service Header";VAR DateCaption@1001 : Text[30]) : Date;
+    BEGIN
+      with ServHeader do
+        if "Document Type" in ["Document Type"::Invoice,"Document Type"::"Credit Memo"] then begin
+          DateCaption := FIELDCAPTION("Posting Date");
+          exit("Posting Date")
+        end else begin
+          DateCaption := FIELDCAPTION("Order Date");
+          exit("Order Date");
+        end;
+    END;
+
+    [External]
+    PROCEDURE NoOfSalesLinePrice@27(SalesHeader@1001 : Record "Sales Header";VAR SalesLine@1000 : Record "Sales Line";ShowAll@1002 : Boolean) : Integer;
+    BEGIN
+      if SalesLinePriceExists(SalesHeader,SalesLine,ShowAll) then
+        exit(TempSalesPrice.COUNT);
+    END;
+
+    [External]
+    PROCEDURE NoOfSalesLineLineDisc@26(SalesHeader@1001 : Record "Sales Header";VAR SalesLine@1000 : Record "Sales Line";ShowAll@1002 : Boolean) : Integer;
+    BEGIN
+      if SalesLineLineDiscExists(SalesHeader,SalesLine,ShowAll) then
+        exit(TempSalesLineDisc.COUNT);
+    END;
+
+    [External]
+    PROCEDURE NoOfServLinePrice@41(ServHeader@1001 : Record "Service Header";VAR ServLine@1000 : Record "Service Line";ShowAll@1002 : Boolean) : Integer;
+    BEGIN
+      if ServLinePriceExists(ServHeader,ServLine,ShowAll) then
+        exit(TempSalesPrice.COUNT);
+    END;
+
+    [External]
+    PROCEDURE NoOfServLineLineDisc@40(ServHeader@1001 : Record "Service Header";VAR ServLine@1000 : Record "Service Line";ShowAll@1002 : Boolean) : Integer;
+    BEGIN
+      if ServLineLineDiscExists(ServHeader,ServLine,ShowAll) then
+        exit(TempSalesLineDisc.COUNT);
+    END;
+
+    [External]
+    PROCEDURE FindJobPlanningLinePrice@61(VAR JobPlanningLine@1000 : Record "Job Planning Line";CalledByFieldNo@1001 : Integer);
+    VAR
+      Job@1002 : Record Job;
+    BEGIN
+      with JobPlanningLine do begin
+        SetCurrency("Currency Code","Currency Factor","Planning Date");
+        SetVAT(false,0,0,'');
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+        SetLineDisc(0,true,true);
+
+        case Type of
+          Type::Item:
+            begin
+              Job.GET("Job No.");
+              Item.GET("No.");
+              TESTFIELD("Qty. per Unit of Measure");
+              FindSalesPrice(
+                TempSalesPrice,Job."Bill-to Customer No.",Job."Bill-to Contact No.",
+                Job."Customer Price Group",'',"No.","Variant Code","Unit of Measure Code",
+                Job."Currency Code","Planning Date",false);
+              CalcBestUnitPrice(TempSalesPrice);
+              if FoundSalesPrice or
+                 not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                      (CalledByFieldNo = FIELDNO("Location Code")) or
+                      (CalledByFieldNo = FIELDNO("Variant Code")))
+              then begin
+                "Unit Price" := TempSalesPrice."Unit Price";
+                AllowLineDisc := TempSalesPrice."Allow Line Disc.";
+              end;
+            end;
+          Type::Resource:
+            begin
+              Job.GET("Job No.");
+              SetResPrice("No.","Work Type Code","Currency Code");
+              CODEUNIT.RUN(CODEUNIT::"Resource-Find Price",ResPrice);
+              ConvertPriceLCYToFCY(ResPrice."Currency Code",ResPrice."Unit Price");
+              "Unit Price" := ResPrice."Unit Price" * "Qty. per Unit of Measure";
+            end;
+        end;
+      end;
+      JobPlanningLineFindJTPrice(JobPlanningLine);
+    END;
+
+    [External]
+    PROCEDURE JobPlanningLineFindJTPrice@64(VAR JobPlanningLine@1000 : Record "Job Planning Line");
+    VAR
+      JobItemPrice@1001 : Record "Job Item Price";
+      JobResPrice@1002 : Record "Job Resource Price";
+      JobGLAccPrice@1003 : Record "Job G/L Account Price";
+    BEGIN
+      with JobPlanningLine do
+        case Type of
+          Type::Item:
+            begin
+              JobItemPrice.SETRANGE("Job No.","Job No.");
+              JobItemPrice.SETRANGE("Item No.","No.");
+              JobItemPrice.SETRANGE("Variant Code","Variant Code");
+              JobItemPrice.SETRANGE("Unit of Measure Code","Unit of Measure Code");
+              JobItemPrice.SETRANGE("Currency Code","Currency Code");
+              JobItemPrice.SETRANGE("Job Task No.","Job Task No.");
+              if JobItemPrice.FINDFIRST then
+                CopyJobItemPriceToJobPlanLine(JobPlanningLine,JobItemPrice)
+              else begin
+                JobItemPrice.SETRANGE("Job Task No.",' ');
+                if JobItemPrice.FINDFIRST then
+                  CopyJobItemPriceToJobPlanLine(JobPlanningLine,JobItemPrice);
+              end;
+
+              if JobItemPrice.ISEMPTY or (not JobItemPrice."Apply Job Discount") then
+                FindJobPlanningLineLineDisc(JobPlanningLine);
+            end;
+          Type::Resource:
+            begin
+              Res.GET("No.");
+              JobResPrice.SETRANGE("Job No.","Job No.");
+              JobResPrice.SETRANGE("Currency Code","Currency Code");
+              JobResPrice.SETRANGE("Job Task No.","Job Task No.");
+              case true of
+                JobPlanningLineFindJobResPrice(JobPlanningLine,JobResPrice,JobResPrice.Type::Resource):
+                  CopyJobResPriceToJobPlanLine(JobPlanningLine,JobResPrice);
+                JobPlanningLineFindJobResPrice(JobPlanningLine,JobResPrice,JobResPrice.Type::"Group(Resource)"):
+                  CopyJobResPriceToJobPlanLine(JobPlanningLine,JobResPrice);
+                JobPlanningLineFindJobResPrice(JobPlanningLine,JobResPrice,JobResPrice.Type::All):
+                  CopyJobResPriceToJobPlanLine(JobPlanningLine,JobResPrice);
+                else
+                  begin
+                  JobResPrice.SETRANGE("Job Task No.",'');
+                  case true of
+                    JobPlanningLineFindJobResPrice(JobPlanningLine,JobResPrice,JobResPrice.Type::Resource):
+                      CopyJobResPriceToJobPlanLine(JobPlanningLine,JobResPrice);
+                    JobPlanningLineFindJobResPrice(JobPlanningLine,JobResPrice,JobResPrice.Type::"Group(Resource)"):
+                      CopyJobResPriceToJobPlanLine(JobPlanningLine,JobResPrice);
+                    JobPlanningLineFindJobResPrice(JobPlanningLine,JobResPrice,JobResPrice.Type::All):
+                      CopyJobResPriceToJobPlanLine(JobPlanningLine,JobResPrice);
+                  end;
+                end;
+              end;
+            end;
+          Type::"G/L Account":
+            begin
+              JobGLAccPrice.SETRANGE("Job No.","Job No.");
+              JobGLAccPrice.SETRANGE("G/L Account No.","No.");
+              JobGLAccPrice.SETRANGE("Currency Code","Currency Code");
+              JobGLAccPrice.SETRANGE("Job Task No.","Job Task No.");
+              if JobGLAccPrice.FINDFIRST then
+                CopyJobGLAccPriceToJobPlanLine(JobPlanningLine,JobGLAccPrice)
+              else begin
+                JobGLAccPrice.SETRANGE("Job Task No.",'');
+                if JobGLAccPrice.FINDFIRST then;
+                CopyJobGLAccPriceToJobPlanLine(JobPlanningLine,JobGLAccPrice);
+              end;
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE CopyJobItemPriceToJobPlanLine@63(VAR JobPlanningLine@1000 : Record "Job Planning Line";JobItemPrice@1001 : Record "Job Item Price");
+    BEGIN
+      with JobPlanningLine do begin
+        if JobItemPrice."Apply Job Price" then begin
+          "Unit Price" := JobItemPrice."Unit Price";
+          "Cost Factor" := JobItemPrice."Unit Cost Factor";
+        end;
+        if JobItemPrice."Apply Job Discount" then
+          "Line Discount %" := JobItemPrice."Line Discount %";
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyJobResPriceToJobPlanLine@62(VAR JobPlanningLine@1000 : Record "Job Planning Line";JobResPrice@1001 : Record "Job Resource Price");
+    BEGIN
+      with JobPlanningLine do begin
+        if JobResPrice."Apply Job Price" then begin
+          "Unit Price" := JobResPrice."Unit Price" * "Qty. per Unit of Measure";
+          "Cost Factor" := JobResPrice."Unit Cost Factor";
+        end;
+        if JobResPrice."Apply Job Discount" then
+          "Line Discount %" := JobResPrice."Line Discount %";
+      end;
+    END;
+
+    LOCAL PROCEDURE JobPlanningLineFindJobResPrice@67(VAR JobPlanningLine@1002 : Record "Job Planning Line";VAR JobResPrice@1000 : Record "Job Resource Price";PriceType@1001 : 'Resource,"Group(Resource)",All') : Boolean;
+    BEGIN
+      case PriceType of
+        PriceType::Resource:
+          begin
+            JobResPrice.SETRANGE(Type,JobResPrice.Type::Resource);
+            JobResPrice.SETRANGE("Work Type Code",JobPlanningLine."Work Type Code");
+            JobResPrice.SETRANGE(Code,JobPlanningLine."No.");
+            exit(JobResPrice.FIND('-'));
+          end;
+        PriceType::"Group(Resource)":
+          begin
+            JobResPrice.SETRANGE(Type,JobResPrice.Type::"Group(Resource)");
+            JobResPrice.SETRANGE(Code,Res."Resource Group No.");
+            exit(FindJobResPrice(JobResPrice,JobPlanningLine."Work Type Code"));
+          end;
+        PriceType::All:
+          begin
+            JobResPrice.SETRANGE(Type,JobResPrice.Type::All);
+            JobResPrice.SETRANGE(Code);
+            exit(FindJobResPrice(JobResPrice,JobPlanningLine."Work Type Code"));
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyJobGLAccPriceToJobPlanLine@38(VAR JobPlanningLine@1001 : Record "Job Planning Line";JobGLAccPrice@1000 : Record "Job G/L Account Price");
+    BEGIN
+      with JobPlanningLine do begin
+        "Unit Cost" := JobGLAccPrice."Unit Cost";
+        "Unit Price" := JobGLAccPrice."Unit Price" * "Qty. per Unit of Measure";
+        "Cost Factor" := JobGLAccPrice."Unit Cost Factor";
+        "Line Discount %" := JobGLAccPrice."Line Discount %";
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindJobJnlLinePrice@60(VAR JobJnlLine@1000 : Record "Job Journal Line";CalledByFieldNo@1001 : Integer);
+    VAR
+      Job@1002 : Record Job;
+    BEGIN
+      with JobJnlLine do begin
+        SetCurrency("Currency Code","Currency Factor","Posting Date");
+        SetVAT(false,0,0,'');
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+        case Type of
+          Type::Item:
+            begin
+              Item.GET("No.");
+              TESTFIELD("Qty. per Unit of Measure");
+              Job.GET("Job No.");
+
+              FindSalesPrice(
+                TempSalesPrice,Job."Bill-to Customer No.",Job."Bill-to Contact No.",
+                "Customer Price Group",'',"No.","Variant Code","Unit of Measure Code",
+                "Currency Code","Posting Date",false);
+              CalcBestUnitPrice(TempSalesPrice);
+              if FoundSalesPrice or
+                 not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                      (CalledByFieldNo = FIELDNO("Variant Code")))
+              then
+                "Unit Price" := TempSalesPrice."Unit Price";
+            end;
+          Type::Resource:
+            begin
+              Job.GET("Job No.");
+              SetResPrice("No.","Work Type Code","Currency Code");
+              CODEUNIT.RUN(CODEUNIT::"Resource-Find Price",ResPrice);
+              ConvertPriceLCYToFCY(ResPrice."Currency Code",ResPrice."Unit Price");
+              "Unit Price" := ResPrice."Unit Price" * "Qty. per Unit of Measure";
+            end;
+        end;
+      end;
+      JobJnlLineFindJTPrice(JobJnlLine);
+    END;
+
+    LOCAL PROCEDURE JobJnlLineFindJobResPrice@46(VAR JobJnlLine@1008 : Record "Job Journal Line";VAR JobResPrice@1007 : Record "Job Resource Price";PriceType@1006 : 'Resource,"Group(Resource)",All') : Boolean;
+    BEGIN
+      case PriceType of
+        PriceType::Resource:
+          begin
+            JobResPrice.SETRANGE(Type,JobResPrice.Type::Resource);
+            JobResPrice.SETRANGE("Work Type Code",JobJnlLine."Work Type Code");
+            JobResPrice.SETRANGE(Code,JobJnlLine."No.");
+            exit(JobResPrice.FIND('-'));
+          end;
+        PriceType::"Group(Resource)":
+          begin
+            JobResPrice.SETRANGE(Type,JobResPrice.Type::"Group(Resource)");
+            JobResPrice.SETRANGE(Code,Res."Resource Group No.");
+            exit(FindJobResPrice(JobResPrice,JobJnlLine."Work Type Code"));
+          end;
+        PriceType::All:
+          begin
+            JobResPrice.SETRANGE(Type,JobResPrice.Type::All);
+            JobResPrice.SETRANGE(Code);
+            exit(FindJobResPrice(JobResPrice,JobJnlLine."Work Type Code"));
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyJobResPriceToJobJnlLine@47(VAR JobJnlLine@1000 : Record "Job Journal Line";JobResPrice@1001 : Record "Job Resource Price");
+    BEGIN
+      with JobJnlLine do begin
+        if JobResPrice."Apply Job Price" then begin
+          "Unit Price" := JobResPrice."Unit Price" * "Qty. per Unit of Measure";
+          "Cost Factor" := JobResPrice."Unit Cost Factor";
+        end;
+        if JobResPrice."Apply Job Discount" then
+          "Line Discount %" := JobResPrice."Line Discount %";
+      end;
+    END;
+
+    LOCAL PROCEDURE CopyJobGLAccPriceToJobJnlLine@48(VAR JobJnlLine@1001 : Record "Job Journal Line";JobGLAccPrice@1000 : Record "Job G/L Account Price");
+    BEGIN
+      with JobJnlLine do begin
+        "Unit Cost" := JobGLAccPrice."Unit Cost";
+        "Unit Price" := JobGLAccPrice."Unit Price" * "Qty. per Unit of Measure";
+        "Cost Factor" := JobGLAccPrice."Unit Cost Factor";
+        "Line Discount %" := JobGLAccPrice."Line Discount %";
+      end;
+    END;
+
+    LOCAL PROCEDURE JobJnlLineFindJTPrice@42(VAR JobJnlLine@1000 : Record "Job Journal Line");
+    VAR
+      JobItemPrice@1003 : Record "Job Item Price";
+      JobResPrice@1002 : Record "Job Resource Price";
+      JobGLAccPrice@1001 : Record "Job G/L Account Price";
+    BEGIN
+      with JobJnlLine do
+        case Type of
+          Type::Item:
+            begin
+              JobItemPrice.SETRANGE("Job No.","Job No.");
+              JobItemPrice.SETRANGE("Item No.","No.");
+              JobItemPrice.SETRANGE("Variant Code","Variant Code");
+              JobItemPrice.SETRANGE("Unit of Measure Code","Unit of Measure Code");
+              JobItemPrice.SETRANGE("Currency Code","Currency Code");
+              JobItemPrice.SETRANGE("Job Task No.","Job Task No.");
+              if JobItemPrice.FINDFIRST then
+                CopyJobItemPriceToJobJnlLine(JobJnlLine,JobItemPrice)
+              else begin
+                JobItemPrice.SETRANGE("Job Task No.",' ');
+                if JobItemPrice.FINDFIRST then
+                  CopyJobItemPriceToJobJnlLine(JobJnlLine,JobItemPrice);
+              end;
+
+              if JobItemPrice.ISEMPTY or (not JobItemPrice."Apply Job Discount") then
+                FindJobJnlLineLineDisc(JobJnlLine);
+            end;
+          Type::Resource:
+            begin
+              Res.GET("No.");
+              JobResPrice.SETRANGE("Job No.","Job No.");
+              JobResPrice.SETRANGE("Currency Code","Currency Code");
+              JobResPrice.SETRANGE("Job Task No.","Job Task No.");
+              case true of
+                JobJnlLineFindJobResPrice(JobJnlLine,JobResPrice,JobResPrice.Type::Resource):
+                  CopyJobResPriceToJobJnlLine(JobJnlLine,JobResPrice);
+                JobJnlLineFindJobResPrice(JobJnlLine,JobResPrice,JobResPrice.Type::"Group(Resource)"):
+                  CopyJobResPriceToJobJnlLine(JobJnlLine,JobResPrice);
+                JobJnlLineFindJobResPrice(JobJnlLine,JobResPrice,JobResPrice.Type::All):
+                  CopyJobResPriceToJobJnlLine(JobJnlLine,JobResPrice);
+                else
+                  begin
+                  JobResPrice.SETRANGE("Job Task No.",'');
+                  case true of
+                    JobJnlLineFindJobResPrice(JobJnlLine,JobResPrice,JobResPrice.Type::Resource):
+                      CopyJobResPriceToJobJnlLine(JobJnlLine,JobResPrice);
+                    JobJnlLineFindJobResPrice(JobJnlLine,JobResPrice,JobResPrice.Type::"Group(Resource)"):
+                      CopyJobResPriceToJobJnlLine(JobJnlLine,JobResPrice);
+                    JobJnlLineFindJobResPrice(JobJnlLine,JobResPrice,JobResPrice.Type::All):
+                      CopyJobResPriceToJobJnlLine(JobJnlLine,JobResPrice);
+                  end;
+                end;
+              end;
+            end;
+          Type::"G/L Account":
+            begin
+              JobGLAccPrice.SETRANGE("Job No.","Job No.");
+              JobGLAccPrice.SETRANGE("G/L Account No.","No.");
+              JobGLAccPrice.SETRANGE("Currency Code","Currency Code");
+              JobGLAccPrice.SETRANGE("Job Task No.","Job Task No.");
+              if JobGLAccPrice.FINDFIRST then
+                CopyJobGLAccPriceToJobJnlLine(JobJnlLine,JobGLAccPrice)
+              else begin
+                JobGLAccPrice.SETRANGE("Job Task No.",'');
+                if JobGLAccPrice.FINDFIRST then;
+                CopyJobGLAccPriceToJobJnlLine(JobJnlLine,JobGLAccPrice);
+              end;
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE CopyJobItemPriceToJobJnlLine@43(VAR JobJnlLine@1001 : Record "Job Journal Line";JobItemPrice@1000 : Record "Job Item Price");
+    BEGIN
+      with JobJnlLine do begin
+        if JobItemPrice."Apply Job Price" then begin
+          "Unit Price" := JobItemPrice."Unit Price";
+          "Cost Factor" := JobItemPrice."Unit Cost Factor";
+        end;
+        if JobItemPrice."Apply Job Discount" then
+          "Line Discount %" := JobItemPrice."Line Discount %";
+      end;
+    END;
+
+    LOCAL PROCEDURE FindJobPlanningLineLineDisc@39(VAR JobPlanningLine@1000 : Record "Job Planning Line");
+    BEGIN
+      with JobPlanningLine do begin
+        SetCurrency("Currency Code","Currency Factor","Planning Date");
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+        TESTFIELD("Qty. per Unit of Measure");
+        if Type = Type::Item then begin
+          JobPlanningLineLineDiscExists(JobPlanningLine,false);
+          CalcBestLineDisc(TempSalesLineDisc);
+          if AllowLineDisc then
+            "Line Discount %" := TempSalesLineDisc."Line Discount %"
+          else
+            "Line Discount %" := 0;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE JobPlanningLineLineDiscExists@49(VAR JobPlanningLine@1000 : Record "Job Planning Line";ShowAll@1002 : Boolean) : Boolean;
+    VAR
+      Job@1001 : Record Job;
+    BEGIN
+      with JobPlanningLine do
+        if (Type = Type::Item) and Item.GET("No.") then begin
+          Job.GET("Job No.");
+          FindSalesLineDisc(
+            TempSalesLineDisc,Job."Bill-to Customer No.",Job."Bill-to Contact No.",
+            Job."Customer Disc. Group",'',"No.",Item."Item Disc. Group","Variant Code","Unit of Measure Code",
+            "Currency Code",JobPlanningLineStartDate(JobPlanningLine,DateCaption),ShowAll);
+          exit(TempSalesLineDisc.FIND('-'));
+        end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE JobPlanningLineStartDate@51(JobPlanningLine@1000 : Record "Job Planning Line";VAR DateCaption@1001 : Text[30]) : Date;
+    BEGIN
+      DateCaption := JobPlanningLine.FIELDCAPTION("Planning Date");
+      exit(JobPlanningLine."Planning Date");
+    END;
+
+    LOCAL PROCEDURE FindJobJnlLineLineDisc@58(VAR JobJnlLine@1000 : Record "Job Journal Line");
+    BEGIN
+      with JobJnlLine do begin
+        SetCurrency("Currency Code","Currency Factor","Posting Date");
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+        TESTFIELD("Qty. per Unit of Measure");
+        if Type = Type::Item then begin
+          JobJnlLineLineDiscExists(JobJnlLine,false);
+          CalcBestLineDisc(TempSalesLineDisc);
+          "Line Discount %" := TempSalesLineDisc."Line Discount %";
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE JobJnlLineLineDiscExists@57(VAR JobJnlLine@1000 : Record "Job Journal Line";ShowAll@1002 : Boolean) : Boolean;
+    VAR
+      Job@1001 : Record Job;
+    BEGIN
+      with JobJnlLine do
+        if (Type = Type::Item) and Item.GET("No.") then begin
+          Job.GET("Job No.");
+          FindSalesLineDisc(
+            TempSalesLineDisc,Job."Bill-to Customer No.",Job."Bill-to Contact No.",
+            Job."Customer Disc. Group",'',"No.",Item."Item Disc. Group","Variant Code","Unit of Measure Code",
+            "Currency Code",JobJnlLineStartDate(JobJnlLine,DateCaption),ShowAll);
+          exit(TempSalesLineDisc.FIND('-'));
+        end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE JobJnlLineStartDate@55(JobJnlLine@1000 : Record "Job Journal Line";VAR DateCaption@1001 : Text[30]) : Date;
+    BEGIN
+      DateCaption := JobJnlLine.FIELDCAPTION("Posting Date");
+      exit(JobJnlLine."Posting Date");
+    END;
+
+    LOCAL PROCEDURE FindJobResPrice@70(VAR JobResPrice@1000 : Record "Job Resource Price";WorkTypeCode@1001 : Code[10]) : Boolean;
+    BEGIN
+      JobResPrice.SETRANGE("Work Type Code",WorkTypeCode);
+      if JobResPrice.FINDFIRST then
+        exit(true);
+      JobResPrice.SETRANGE("Work Type Code",'');
+      exit(JobResPrice.FINDFIRST);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterFindSalesLinePrice@8(VAR SalesLine@1001 : Record "Sales Line";SalesHeader@1002 : Record "Sales Header";SalesPrice@1003 : Record "Sales Price";ResourcePrice@1004 : Record "Resource Price";CalledByFieldNo@1000 : Integer);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterFindServLinePrice@50(VAR ServiceLine@1000 : Record "Service Line";ServiceHeader@1001 : Record "Service Header";SalesPrice@1002 : Record "Sales Price";ResourcePrice@1003 : Record "Resource Price";ServiceCost@1004 : Record "Service Cost";CalledByFieldNo@1005 : Integer);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,931 @@
+OBJECT Codeunit 5342 CRM Synch. Helper
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Sales Invoice Header"=m;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CRMBaseCurrencyNotFoundInNAVErr@1008 : TextConst '@@@="%1,%2,%3=the ISO code of a currency (example: DKK);";ENU=The currency with the ISO code ''%1'' cannot be found. Therefore, the exchange rate between ''%2'' and ''%3'' cannot be calculated.';
+      DynamicsCRMTransactionCurrencyRecordNotFoundErr@1004 : TextConst '@@@="%1=the currency code, %2 = CRM product name";ENU=Cannot find the currency with the value ''%1'' in %2.';
+      DynamicsCRMUoMNotFoundInGroupErr@1011 : TextConst '@@@="%1=Unit Group Name, %2 = CRM product name";ENU=Cannot find any unit of measure inside the unit group ''%1'' in %2.';
+      DynamicsCRMUoMFoundMultipleInGroupErr@1012 : TextConst '@@@="%1=Unit Group Name, %2 = CRM product name";ENU=Multiple units of measure were found in the unit group ''%1'' in %2.';
+      IncorrectCRMUoMNameErr@1013 : TextConst '@@@="%1=Unit Group name (ex: NAV PIECE), %2=Expected name (ex: PIECE), %3=Actual name (ex: BOX)";ENU=The unit of measure in the unit group ''%1'' has an incorrect name: expected name ''%2'', found name ''%3''.';
+      IncorrectCRMUoMQuantityErr@1015 : TextConst '@@@="%1=unit of measure name (ex: PIECE).";ENU=The quantity on the unit of measure ''%1'' should be 1.';
+      DynamicsCRMUomscheduleNotFoundErr@1000 : TextConst '@@@="%1 = unit group name, %2 = CRM product name";ENU=Cannot find the unit group ''%1'' in %2.';
+      IncorrectCRMUoMStatusErr@1014 : TextConst '@@@="%1=value of the unit of measure, %2=value of the unit group";ENU=The unit of measure ''%1'' is not the base unit of measure of the unit group ''%2''.';
+      InvalidDestinationRecordNoErr@1010 : TextConst 'ENU=Invalid destination record number.';
+      NavTxt@1005 : TextConst '@@@={Locked};ENU=NAV';
+      RecordMustBeCoupledErr@1007 : TextConst '@@@="%1 = table caption, %2 = primary key value, %3 = CRM Table caption";ENU=%1 %2 must be coupled to a %3 record.';
+      RecordNotFoundErr@1001 : TextConst '@@@="%1=value;%2=table name in which the value was searched";ENU=%1 could not be found in %2.';
+      CanOnlyUseSystemUserOwnerTypeErr@1002 : TextConst '@@@="Dynamics CRM entity owner property can be of type team or systemuser. Only the type systemuser is supported. %1 = CRM product name";ENU=Only %1 Owner of Type SystemUser can be mapped to Salespeople.';
+      DefaultNAVPriceListNameTxt@1016 : TextConst '@@@=%1 - product name;ENU=%1 Default Price List';
+      TempCRMPricelevel@1018 : TEMPORARY Record "CRM Pricelevel";
+      TempCRMTransactioncurrency@1017 : TEMPORARY Record "CRM Transactioncurrency";
+      TempCRMUom@1009 : TEMPORARY Record "CRM Uom";
+      TempCRMUomschedule@1003 : TEMPORARY Record "CRM Uomschedule";
+      BaseCurrencyIsNullErr@1006 : TextConst 'ENU=The base currency is not defined. Disable and enable CRM connection to initialize setup properly.';
+      CRMProductName@1019 : Codeunit "CRM Product Name";
+
+    [External]
+    PROCEDURE ClearCache@36();
+    BEGIN
+      TempCRMPricelevel.RESET;
+      TempCRMPricelevel.DELETEALL;
+      CLEAR(TempCRMPricelevel);
+
+      TempCRMTransactioncurrency.RESET;
+      TempCRMTransactioncurrency.DELETEALL;
+      CLEAR(TempCRMTransactioncurrency);
+
+      TempCRMUom.RESET;
+      TempCRMUom.DELETEALL;
+      CLEAR(TempCRMUom);
+
+      TempCRMUomschedule.RESET;
+      TempCRMUomschedule.DELETEALL;
+      CLEAR(TempCRMUomschedule);
+    END;
+
+    LOCAL PROCEDURE GetDefaultNAVPriceListName@28() : Text[50];
+    BEGIN
+      exit(STRSUBSTNO(DefaultNAVPriceListNameTxt,PRODUCTNAME.SHORT));
+    END;
+
+    LOCAL PROCEDURE CreateCRMDefaultPriceList@57(VAR CRMPricelevel@1000 : Record "CRM Pricelevel");
+    VAR
+      CRMTransactioncurrency@1001 : Record "CRM Transactioncurrency";
+    BEGIN
+      with CRMPricelevel do begin
+        RESET;
+        SETRANGE(Name,GetDefaultNAVPriceListName);
+        if not FINDFIRST then begin
+          INIT;
+          Name := GetDefaultNAVPriceListName;
+          FindNAVLocalCurrencyInCRM(CRMTransactioncurrency);
+          TransactionCurrencyId := CRMTransactioncurrency.TransactionCurrencyId;
+          TransactionCurrencyIdName := CRMTransactioncurrency.CurrencyName;
+          INSERT;
+
+          AddToCacheCRMPriceLevel(CRMPricelevel);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateCRMProductpricelevelForProduct@16(CRMProduct@1000 : Record "CRM Product");
+    VAR
+      CRMProductpricelevel@1001 : Record "CRM Productpricelevel";
+    BEGIN
+      with CRMProductpricelevel do begin
+        INIT;
+        PriceLevelId := CRMProduct.PriceLevelId;
+        UoMId := CRMProduct.DefaultUoMId;
+        UoMScheduleId := CRMProduct.DefaultUoMScheduleId;
+        ProductId := CRMProduct.ProductId;
+        Amount := CRMProduct.Price;
+        TransactionCurrencyId := CRMProduct.TransactionCurrencyId;
+        ProductNumber := CRMProduct.ProductNumber;
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateCRMTransactioncurrency@18(VAR CRMTransactioncurrency@1000 : Record "CRM Transactioncurrency";CurrencyCode@1001 : Code[10]);
+    BEGIN
+      with CRMTransactioncurrency do begin
+        INIT;
+        ISOCurrencyCode := COPYSTR(CurrencyCode,1,MAXSTRLEN(ISOCurrencyCode));
+        CurrencyName := ISOCurrencyCode;
+        CurrencySymbol := ISOCurrencyCode;
+        CurrencyPrecision := GetCRMCurrencyDefaultPrecision;
+        ExchangeRate := GetCRMLCYToFCYExchangeRate(ISOCurrencyCode);
+        INSERT;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE FindCRMDefaultPriceList@26(VAR CRMPricelevel@1000 : Record "CRM Pricelevel");
+    VAR
+      CRMConnectionSetup@1003 : Record "CRM Connection Setup";
+    BEGIN
+      with CRMConnectionSetup do begin
+        GET;
+        if not FindCRMPriceList(CRMPricelevel,"Default CRM Price List ID") then begin
+          CreateCRMDefaultPriceList(CRMPricelevel);
+          VALIDATE("Default CRM Price List ID",CRMPricelevel.PriceLevelId);
+          MODIFY;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE FindCRMPriceList@56(VAR CRMPricelevel@1000 : Record "CRM Pricelevel";PriceListId@1001 : GUID) : Boolean;
+    BEGIN
+      if not ISNULLGUID(PriceListId) then begin
+        CRMPricelevel.RESET;
+        CRMPricelevel.SETRANGE(PriceLevelId,PriceListId);
+        exit(FindCachedCRMPriceLevel(CRMPricelevel));
+      end;
+    END;
+
+    LOCAL PROCEDURE FindCustomersContactByAccountId@58(VAR Contact@1004 : Record Contact;AccountId@1000 : GUID) : Boolean;
+    VAR
+      ContactBusinessRelation@1007 : Record "Contact Business Relation";
+      CRMIntegrationRecord@1003 : Record "CRM Integration Record";
+      Customer@1002 : Record Customer;
+      CustomerRecordID@1001 : RecordID;
+    BEGIN
+      if ISNULLGUID(AccountId) then
+        exit(false);
+
+      if not CRMIntegrationRecord.FindRecordIDFromID(AccountId,DATABASE::Customer,CustomerRecordID) then
+        if SynchRecordIfMappingExists(DATABASE::"CRM Account",AccountId) then
+          if not CRMIntegrationRecord.FindRecordIDFromID(AccountId,DATABASE::Customer,CustomerRecordID) then
+            exit(false);
+
+      if Customer.GET(CustomerRecordID) then begin
+        ContactBusinessRelation.SETCURRENTKEY("Link to Table","No.");
+        ContactBusinessRelation.SETRANGE("Link to Table",ContactBusinessRelation."Link to Table"::Customer);
+        ContactBusinessRelation.SETRANGE("No.",Customer."No.");
+        if ContactBusinessRelation.FINDFIRST then
+          exit(Contact.GET(ContactBusinessRelation."Contact No."));
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE FindNAVLocalCurrencyInCRM@20(VAR CRMTransactioncurrency@1000 : Record "CRM Transactioncurrency") : GUID;
+    VAR
+      NAVLCYCode@1001 : Code[10];
+    BEGIN
+      NAVLCYCode := GetNavLCYCode;
+      CRMTransactioncurrency.SETRANGE(ISOCurrencyCode,NAVLCYCode);
+      if not FindCachedCRMTransactionCurrency(CRMTransactioncurrency) then begin
+        CreateCRMTransactioncurrency(CRMTransactioncurrency,NAVLCYCode);
+        AddToCacheCRMTransactionCurrency(CRMTransactioncurrency);
+      end;
+      exit(CRMTransactioncurrency.TransactionCurrencyId);
+    END;
+
+    PROCEDURE GetBaseCurrencyPrecision@32() DecimalPrecision : Decimal;
+    VAR
+      CRMConnectionSetup@1000 : Record "CRM Connection Setup";
+    BEGIN
+      DecimalPrecision := 1;
+      CRMConnectionSetup.GET;
+      if CRMConnectionSetup.BaseCurrencyPrecision > 0 then
+        DecimalPrecision := POWER(10,-CRMConnectionSetup.BaseCurrencyPrecision);
+    END;
+
+    [External]
+    PROCEDURE GetCRMCurrencyDefaultPrecision@24() : Integer;
+    VAR
+      CRMConnectionSetup@1000 : Record "CRM Connection Setup";
+    BEGIN
+      CRMConnectionSetup.GET;
+      exit(CRMConnectionSetup.CurrencyDecimalPrecision);
+    END;
+
+    LOCAL PROCEDURE GetCRMExchangeRateRoundingPrecision@23() : Decimal;
+    BEGIN
+      exit(0.0000000001);
+    END;
+
+    [Internal]
+    PROCEDURE GetCRMLCYToFCYExchangeRate@12(ToCurrencyISOCode@1002 : Text[10]) : Decimal;
+    VAR
+      CRMConnectionSetup@1000 : Record "CRM Connection Setup";
+      CRMTransactioncurrency@1001 : Record "CRM Transactioncurrency";
+    BEGIN
+      CRMConnectionSetup.GET;
+      if ISNULLGUID(CRMConnectionSetup.BaseCurrencyId) then
+        ERROR(BaseCurrencyIsNullErr);
+      if ToCurrencyISOCode = DELCHR(CRMConnectionSetup.BaseCurrencySymbol) then
+        exit(1.0);
+
+      CRMTransactioncurrency.SETRANGE(TransactionCurrencyId,CRMConnectionSetup.BaseCurrencyId);
+      if not FindCachedCRMTransactionCurrency(CRMTransactioncurrency) then
+        ERROR(DynamicsCRMTransactionCurrencyRecordNotFoundErr,CRMConnectionSetup.BaseCurrencySymbol,CRMProductName.SHORT);
+      exit(GetFCYtoFCYExchangeRate(CRMTransactioncurrency.ISOCurrencyCode,ToCurrencyISOCode));
+    END;
+
+    [Internal]
+    PROCEDURE GetFCYtoFCYExchangeRate@27(FromFCY@1002 : Code[10];ToFCY@1005 : Code[10]) : Decimal;
+    VAR
+      Currency@1003 : Record Currency;
+      CurrencyExchangeRate@1004 : Record "Currency Exchange Rate";
+      CalculatedExchangeRate@1000 : Decimal;
+      NavLCYCode@1001 : Code[10];
+    BEGIN
+      FromFCY := DELCHR(FromFCY);
+      ToFCY := DELCHR(ToFCY);
+      if (FromFCY = '') or (ToFCY = '') then
+        ERROR(CRMBaseCurrencyNotFoundInNAVErr,'',ToFCY,FromFCY);
+
+      if ToFCY = FromFCY then
+        exit(1.0);
+
+      NavLCYCode := GetNavLCYCode;
+      if ToFCY = NavLCYCode then
+        ToFCY := '';
+
+      if FromFCY = NavLCYCode then
+        exit(CurrencyExchangeRate.GetCurrentCurrencyFactor(ToFCY));
+
+      if not Currency.GET(FromFCY) then
+        ERROR(CRMBaseCurrencyNotFoundInNAVErr,FromFCY,ToFCY,FromFCY);
+
+      // In CRM exchange rate is inverted, so ExchangeAmtFCYToFCY takes (ToFCY,FromFCY) instead of (FromFCY,ToFCY)
+      CalculatedExchangeRate := CurrencyExchangeRate.ExchangeAmtFCYToFCY(WORKDATE,ToFCY,FromFCY,1);
+      CalculatedExchangeRate := ROUND(CalculatedExchangeRate,GetCRMExchangeRateRoundingPrecision,'=');
+      exit(CalculatedExchangeRate);
+    END;
+
+    LOCAL PROCEDURE GetNavLCYCode@29() : Code[10];
+    VAR
+      GeneralLedgerSetup@1000 : Record "General Ledger Setup";
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.TESTFIELD("LCY Code");
+      exit(GeneralLedgerSetup."LCY Code");
+    END;
+
+    [External]
+    PROCEDURE GetUnitGroupName@11(UnitOfMeasureCode@1000 : Text) : Text[200];
+    BEGIN
+      exit(STRSUBSTNO('%1 %2',NavTxt,UnitOfMeasureCode));
+    END;
+
+    [External]
+    PROCEDURE GetUnitOfMeasureName@37(UnitOfMeasureRecordRef@1002 : RecordRef) : Text[100];
+    VAR
+      UnitOfMeasure@1004 : Record "Unit of Measure";
+      UnitOfMeasureCodeFieldRef@1003 : FieldRef;
+    BEGIN
+      UnitOfMeasureCodeFieldRef := UnitOfMeasureRecordRef.FIELD(UnitOfMeasure.FIELDNO(Code));
+      exit(FORMAT(UnitOfMeasureCodeFieldRef.VALUE));
+    END;
+
+    [External]
+    PROCEDURE SetCRMDecimalsSupportedValue@7(VAR CRMProduct@1003 : Record "CRM Product");
+    VAR
+      CRMSetupDefaults@1002 : Codeunit "CRM Setup Defaults";
+    BEGIN
+      CRMProduct.QuantityDecimal := CRMSetupDefaults.GetProductQuantityPrecision;
+    END;
+
+    [Internal]
+    PROCEDURE SetCRMDefaultPriceListOnProduct@22(VAR CRMProduct@1000 : Record "CRM Product") AdditionalFieldsWereModified : Boolean;
+    VAR
+      CRMPricelevel@1001 : Record "CRM Pricelevel";
+    BEGIN
+      FindCRMDefaultPriceList(CRMPricelevel);
+
+      if CRMProduct.PriceLevelId <> CRMPricelevel.PriceLevelId then begin
+        CRMProduct.PriceLevelId := CRMPricelevel.PriceLevelId;
+        AdditionalFieldsWereModified := true;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetCRMProductStateToActive@13(VAR CRMProduct@1000 : Record "CRM Product");
+    BEGIN
+      CRMProduct.StateCode := CRMProduct.StateCode::Active;
+      CRMProduct.StatusCode := CRMProduct.StatusCode::Active;
+    END;
+
+    [External]
+    PROCEDURE SetCRMProductStateToRetired@48(VAR CRMProduct@1000 : Record "CRM Product");
+    BEGIN
+      CRMProduct.StateCode := CRMProduct.StateCode::Retired;
+      CRMProduct.StatusCode := CRMProduct.StatusCode::Retired;
+    END;
+
+    [Internal]
+    PROCEDURE SetContactParentCompany@2(AccountID@1003 : GUID;DestinationContactRecordRef@1007 : RecordRef) : Boolean;
+    VAR
+      CompanyContact@1000 : Record Contact;
+      DestinationFieldRef@1006 : FieldRef;
+    BEGIN
+      if DestinationContactRecordRef.NUMBER <> DATABASE::Contact then
+        ERROR(InvalidDestinationRecordNoErr);
+
+      if FindCustomersContactByAccountId(CompanyContact,AccountID) then begin
+        DestinationFieldRef := DestinationContactRecordRef.FIELD(CompanyContact.FIELDNO("Company No."));
+        DestinationFieldRef.VALUE := CompanyContact."No.";
+        DestinationFieldRef := DestinationContactRecordRef.FIELD(CompanyContact.FIELDNO("Company Name"));
+        DestinationFieldRef.VALUE := CompanyContact.Name;
+        exit(true);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE SynchRecordIfMappingExists@8(TableNo@1000 : Integer;PrimaryKey@1001 : Variant) : Boolean;
+    VAR
+      IntegrationTableMapping@1002 : Record "Integration Table Mapping";
+      IntegrationSynchJob@1005 : Record "Integration Synch. Job";
+      CRMIntegrationTableSynch@1003 : Codeunit "CRM Integration Table Synch.";
+      NewJobEntryId@1004 : GUID;
+    BEGIN
+      if IntegrationTableMapping.FindMapping(TableNo,PrimaryKey) then
+        NewJobEntryId := CRMIntegrationTableSynch.SynchRecord(IntegrationTableMapping,PrimaryKey,true,false);
+
+      if ISNULLGUID(NewJobEntryId) then
+        exit(false);
+      if IntegrationSynchJob.GET(NewJobEntryId) then
+        exit(
+          (IntegrationSynchJob.Inserted > 0) or
+          (IntegrationSynchJob.Modified > 0) or
+          (IntegrationSynchJob.Unchanged > 0));
+    END;
+
+    [Internal]
+    PROCEDURE UpdateCRMCurrencyIdIfChanged@9(CurrencyCode@1000 : Text;VAR DestinationCurrencyIDFieldRef@1001 : FieldRef) : Boolean;
+    BEGIN
+      // Given a source NAV currency code, find a currency with the same ISO code in CRM and update the target CRM currency value if needed
+      exit(UpdateFieldRefValueIfChanged(DestinationCurrencyIDFieldRef,GetCRMTransactioncurrency(CurrencyCode)));
+    END;
+
+    [External]
+    PROCEDURE UpdateCRMInvoiceStatus@17(VAR CRMInvoice@1001 : Record "CRM Invoice";SalesInvoiceHeader@1000 : Record "Sales Invoice Header");
+    VAR
+      CustLedgerEntry@1002 : Record "Cust. Ledger Entry";
+    BEGIN
+      CustLedgerEntry.SETRANGE("Document No.",SalesInvoiceHeader."No.");
+      CustLedgerEntry.SETRANGE("Document Type",CustLedgerEntry."Document Type"::Invoice);
+      if CustLedgerEntry.FINDFIRST then
+        UpdateCRMInvoiceStatusFromEntry(CRMInvoice,CustLedgerEntry);
+    END;
+
+    [External]
+    PROCEDURE UpdateCRMInvoiceStatusFromEntry@15(VAR CRMInvoice@1001 : Record "CRM Invoice";CustLedgerEntry@1000 : Record "Cust. Ledger Entry") : Integer;
+    VAR
+      NewCRMInvoice@1002 : Record "CRM Invoice";
+    BEGIN
+      with CRMInvoice do begin
+        CalculateActualStatusCode(CustLedgerEntry,NewCRMInvoice);
+        if (NewCRMInvoice.StateCode <> StateCode) or (NewCRMInvoice.StatusCode <> StatusCode) then begin
+          ActivateInvoiceForFurtherUpdate(CRMInvoice);
+          StateCode := NewCRMInvoice.StateCode;
+          StatusCode := NewCRMInvoice.StatusCode;
+          MODIFY;
+          exit(1);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalculateActualStatusCode@59(CustLedgerEntry@1001 : Record "Cust. Ledger Entry";VAR CRMInvoice@1000 : Record "CRM Invoice");
+    BEGIN
+      with CRMInvoice do begin
+        CustLedgerEntry.CALCFIELDS("Remaining Amount",Amount);
+        if CustLedgerEntry."Remaining Amount" = 0 then begin
+          StateCode := StateCode::Paid;
+          StatusCode := StatusCode::Complete;
+        end else
+          if CustLedgerEntry."Remaining Amount" <> CustLedgerEntry.Amount then begin
+            StateCode := StateCode::Paid;
+            StatusCode := StatusCode::Partial;
+          end else begin
+            StateCode := StateCode::Active;
+            StatusCode := StatusCode::Billed;
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE ActivateInvoiceForFurtherUpdate@60(VAR CRMInvoice@1000 : Record "CRM Invoice");
+    BEGIN
+      with CRMInvoice do
+        if StateCode <> StateCode::Active then begin
+          StateCode := StateCode::Active;
+          StatusCode := StatusCode::Billed;
+          MODIFY;
+        end;
+    END;
+
+    [Internal]
+    PROCEDURE UpdateCRMPriceListItem@1(VAR CRMProduct@1000 : Record "CRM Product") AdditionalFieldsWereModified : Boolean;
+    VAR
+      CRMProductpricelevel@1001 : Record "CRM Productpricelevel";
+    BEGIN
+      if ISNULLGUID(CRMProduct.ProductId) then
+        exit(false);
+
+      AdditionalFieldsWereModified := SetCRMDefaultPriceListOnProduct(CRMProduct);
+      CRMProductpricelevel.SETRANGE(ProductId,CRMProduct.ProductId);
+      if CRMProductpricelevel.FINDFIRST then
+        exit(UpdateCRMProductpricelevel(CRMProductpricelevel,CRMProduct) or AdditionalFieldsWereModified);
+
+      CreateCRMProductpricelevelForProduct(CRMProduct);
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE UpdateCRMProductPriceIfNegative@6(VAR CRMProduct@1001 : Record "CRM Product") : Boolean;
+    BEGIN
+      // CRM doesn't allow negative prices. Update the price to zero, if negative (this preserves the behavior of the old CRM Connector)
+      if CRMProduct.Price < 0 then begin
+        CRMProduct.Price := 0;
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE UpdateCRMProductQuantityOnHandIfNegative@10(VAR CRMProduct@1001 : Record "CRM Product") : Boolean;
+    BEGIN
+      // Update to zero, if negative (this preserves the behavior of the old CRM Connector)
+      if CRMProduct.QuantityOnHand < 0 then begin
+        CRMProduct.QuantityOnHand := 0;
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE UpdateCRMProductpricelevel@52(VAR CRMProductpricelevel@1000 : Record "CRM Productpricelevel";CRMProduct@1001 : Record "CRM Product") AdditionalFieldsWereModified : Boolean;
+    BEGIN
+      with CRMProductpricelevel do begin
+        if PriceLevelId <> CRMProduct.PriceLevelId then begin
+          PriceLevelId := CRMProduct.PriceLevelId;
+          AdditionalFieldsWereModified := true;
+        end;
+
+        if UoMId <> CRMProduct.DefaultUoMId then begin
+          UoMId := CRMProduct.DefaultUoMId;
+          AdditionalFieldsWereModified := true;
+        end;
+
+        if UoMScheduleId <> CRMProduct.DefaultUoMScheduleId then begin
+          UoMScheduleId := CRMProduct.DefaultUoMScheduleId;
+          AdditionalFieldsWereModified := true;
+        end;
+
+        if Amount <> CRMProduct.Price then begin
+          Amount := CRMProduct.Price;
+          AdditionalFieldsWereModified := true;
+        end;
+
+        if TransactionCurrencyId <> CRMProduct.TransactionCurrencyId then begin
+          TransactionCurrencyId := CRMProduct.TransactionCurrencyId;
+          AdditionalFieldsWereModified := true;
+        end;
+
+        if ProductNumber <> CRMProduct.ProductNumber then begin
+          ProductNumber := CRMProduct.ProductNumber;
+          AdditionalFieldsWereModified := true;
+        end;
+
+        if AdditionalFieldsWereModified then
+          MODIFY;
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdateCRMProductTypeCodeIfChanged@19(VAR CRMProduct@1000 : Record "CRM Product";NewProductTypeCode@1009 : Integer) : Boolean;
+    BEGIN
+      // We use ProductTypeCode::SalesInventory and ProductTypeCode::Services to trace back later,
+      // where this CRM product originated from: a NAV Item, or a NAV Resource
+      if CRMProduct.ProductTypeCode <> NewProductTypeCode then begin
+        CRMProduct.ProductTypeCode := NewProductTypeCode;
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE UpdateCRMProductStateCodeIfChanged@49(VAR CRMProduct@1000 : Record "CRM Product";NewBlocked@1009 : Boolean) : Boolean;
+    VAR
+      NewStateCode@1001 : Option;
+    BEGIN
+      if NewBlocked then
+        NewStateCode := CRMProduct.StateCode::Retired
+      else
+        NewStateCode := CRMProduct.StateCode::Active;
+
+      if NewStateCode <> CRMProduct.StateCode then begin
+        if NewBlocked then
+          SetCRMProductStateToRetired(CRMProduct)
+        else
+          SetCRMProductStateToActive(CRMProduct);
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE UpdateItemBlockedIfChanged@50(VAR Item@1000 : Record Item;NewBlocked@1009 : Boolean) : Boolean;
+    BEGIN
+      if Item.Blocked <> NewBlocked then begin
+        Item.Blocked := NewBlocked;
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdateResourceBlockedIfChanged@39(VAR Resource@1000 : Record Resource;NewBlocked@1009 : Boolean) : Boolean;
+    BEGIN
+      if Resource.Blocked <> NewBlocked then begin
+        Resource.Blocked := NewBlocked;
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdateCRMProductUoMFieldsIfChanged@5(VAR CRMProduct@1000 : Record "CRM Product";UnitOfMeasureCode@1009 : Code[10]) : Boolean;
+    VAR
+      CRMUom@1005 : Record "CRM Uom";
+      CRMUomschedule@1008 : Record "CRM Uomschedule";
+      AdditionalFieldsWereModified@1011 : Boolean;
+    BEGIN
+      // Get the unit of measure ID used in this product
+      // On that unit of measure ID, get the UoMName, UomscheduleID, UomscheduleName and update them in the product if needed
+
+      GetValidCRMUnitOfMeasureRecords(CRMUom,CRMUomschedule,UnitOfMeasureCode);
+
+      // Update UoM ID if changed
+      if CRMProduct.DefaultUoMId <> CRMUom.UoMId then begin
+        CRMProduct.DefaultUoMId := CRMUom.UoMId;
+        AdditionalFieldsWereModified := true;
+      end;
+
+      // Update the Uomschedule ID if changed
+      if CRMProduct.DefaultUoMScheduleId <> CRMUomschedule.UoMScheduleId then begin
+        CRMProduct.DefaultUoMScheduleId := CRMUomschedule.UoMScheduleId;
+        AdditionalFieldsWereModified := true;
+      end;
+
+      exit(AdditionalFieldsWereModified);
+    END;
+
+    [External]
+    PROCEDURE UpdateCRMProductVendorNameIfChanged@14(VAR CRMProduct@1001 : Record "CRM Product") : Boolean;
+    VAR
+      Vendor@1000 : Record Vendor;
+    BEGIN
+      if not Vendor.GET(CRMProduct.VendorPartNumber) then
+        exit(false);
+
+      if CRMProduct.VendorName <> Vendor.Name then begin
+        CRMProduct.VendorName := Vendor.Name;
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE UpdateOwnerIfChanged@3(SourceRecordRef@1000 : RecordRef;DestinationRecordRef@1001 : RecordRef;SourceSalespersonCodeFieldNo@1002 : Integer;DestinationOwnerFieldNo@1003 : Integer;DestinationOwnerTypeFieldNo@1006 : Integer;DestinationOwnerTypeValue@1012 : Option) : Boolean;
+    VAR
+      SalespersonPurchaser@1009 : Record "Salesperson/Purchaser";
+      CRMIntegrationRecord@1010 : Record "CRM Integration Record";
+      IntegrationTableMapping@1011 : Record "Integration Table Mapping";
+      SalespersonCodeFieldRef@1008 : FieldRef;
+      OwnerFieldRef@1007 : FieldRef;
+      OwnerTypeFieldRef@1013 : FieldRef;
+      OwnerGuid@1005 : GUID;
+      CurrentOwnerGuid@1004 : GUID;
+    BEGIN
+      IntegrationTableMapping.SETRANGE("Table ID",DATABASE::"Salesperson/Purchaser");
+      IntegrationTableMapping.SETRANGE("Integration Table ID",DATABASE::"CRM Systemuser");
+      if not IntegrationTableMapping.FINDFIRST then
+        exit(false); // There are no mapping for salepeople to SystemUsers
+
+      SalespersonCodeFieldRef := SourceRecordRef.FIELD(SourceSalespersonCodeFieldNo);
+
+      // Ignore empty salesperson code.
+      if FORMAT(SalespersonCodeFieldRef.VALUE) = '' then
+        exit(false);
+
+      SalespersonPurchaser.SETFILTER(Code,FORMAT(SalespersonCodeFieldRef.VALUE));
+      if not SalespersonPurchaser.FINDFIRST then
+        ERROR(RecordNotFoundErr,SalespersonCodeFieldRef.VALUE,SalespersonPurchaser.TABLECAPTION);
+
+      if not CRMIntegrationRecord.FindIDFromRecordID(SalespersonPurchaser.RECORDID,OwnerGuid) then
+        ERROR(
+          RecordMustBeCoupledErr,SalespersonPurchaser.TABLECAPTION,SalespersonCodeFieldRef.VALUE,
+          IntegrationTableMapping.GetExtendedIntegrationTableCaption);
+
+      OwnerFieldRef := DestinationRecordRef.FIELD(DestinationOwnerFieldNo);
+      CurrentOwnerGuid := OwnerFieldRef.VALUE;
+      if CurrentOwnerGuid <> OwnerGuid then begin
+        OwnerFieldRef.VALUE := OwnerGuid;
+        OwnerTypeFieldRef := DestinationRecordRef.FIELD(DestinationOwnerTypeFieldNo);
+        OwnerTypeFieldRef.VALUE := DestinationOwnerTypeValue;
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE UpdateContactOnModifyCustomer@35(RecRef@1000 : RecordRef);
+    VAR
+      Customer@1002 : Record Customer;
+      CustContUpdate@1001 : Codeunit "CustCont-Update";
+    BEGIN
+      if RecRef.NUMBER = DATABASE::Customer then begin
+        RecRef.SETTABLE(Customer);
+        CustContUpdate.OnModify(Customer);
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE UpdateSalesPersonCodeIfChanged@4(SourceRecordRef@1008 : RecordRef;VAR DestinationRecordRef@1009 : RecordRef;SourceOwnerIDFieldNo@1004 : Integer;SourceOwnerTypeFieldNo@1010 : Integer;AllowedOwnerTypeValue@1011 : Option;DestinationSalesPersonCodeFieldNo@1005 : Integer) : Boolean;
+    VAR
+      CRMIntegrationRecord@1003 : Record "CRM Integration Record";
+      SalespersonPurchaser@1000 : Record "Salesperson/Purchaser";
+      IntegrationTableMapping@1014 : Record "Integration Table Mapping";
+      OutlookSynchTypeConv@1013 : Codeunit "Outlook Synch. Type Conv";
+      SalesPersonRecordID@1002 : RecordID;
+      SourceFieldRef@1007 : FieldRef;
+      DestinationFieldRef@1006 : FieldRef;
+      CRMSystemUserID@1001 : GUID;
+      CurrentOptionValue@1012 : Integer;
+    BEGIN
+      IntegrationTableMapping.SETRANGE("Table ID",DATABASE::"Salesperson/Purchaser");
+      IntegrationTableMapping.SETRANGE("Integration Table ID",DATABASE::"CRM Systemuser");
+      if IntegrationTableMapping.ISEMPTY then
+        exit(false); // There are no mapping for salepeople to SystemUsers
+
+      SourceFieldRef := SourceRecordRef.FIELD(SourceOwnerTypeFieldNo);
+      CurrentOptionValue := OutlookSynchTypeConv.TextToOptionValue(FORMAT(SourceFieldRef.VALUE),SourceFieldRef.OPTIONSTRING);
+      // Allow 0 as it is the default value for CRM options.
+      if (CurrentOptionValue <> 0) and (CurrentOptionValue <> AllowedOwnerTypeValue) then
+        ERROR(STRSUBSTNO(CanOnlyUseSystemUserOwnerTypeErr,CRMProductName.SHORT));
+
+      SourceFieldRef := SourceRecordRef.FIELD(SourceOwnerIDFieldNo);
+      CRMSystemUserID := SourceFieldRef.VALUE;
+
+      if ISNULLGUID(CRMSystemUserID) then
+        exit(false);
+
+      DestinationFieldRef := DestinationRecordRef.FIELD(DestinationSalesPersonCodeFieldNo);
+
+      if not CRMIntegrationRecord.FindRecordIDFromID(CRMSystemUserID,DATABASE::"Salesperson/Purchaser",SalesPersonRecordID) then begin
+        if not SynchRecordIfMappingExists(DATABASE::"CRM Systemuser",CRMSystemUserID) then
+          exit(false);
+        if not CRMIntegrationRecord.FindRecordIDFromID(CRMSystemUserID,DATABASE::"Salesperson/Purchaser",SalesPersonRecordID) then
+          exit(false);
+      end;
+
+      if not SalespersonPurchaser.GET(SalesPersonRecordID) then
+        exit(false);
+
+      exit(UpdateFieldRefValueIfChanged(DestinationFieldRef,SalespersonPurchaser.Code));
+    END;
+
+    [External]
+    PROCEDURE UpdateFieldRefValueIfChanged@21(VAR DestinationFieldRef@1000 : FieldRef;NewFieldValue@1001 : Text) : Boolean;
+    BEGIN
+      // Compare and updates the fieldref value, if different
+      if FORMAT(DestinationFieldRef.VALUE) = NewFieldValue then
+        exit(false);
+
+      // Return TRUE if the value was changed
+      DestinationFieldRef.VALUE := NewFieldValue;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE GetValidCRMUnitOfMeasureRecords@46(VAR CRMUom@1007 : Record "CRM Uom";VAR CRMUomschedule@1001 : Record "CRM Uomschedule";UnitOfMeasureCode@1002 : Code[10]);
+    VAR
+      CRMUnitGroupName@1003 : Text;
+    BEGIN
+      // This function checks that the CRM Unit of Measure and its parent group exist in CRM, and that the user didn't change their properties from
+      // the expected ones
+
+      // Attempt to get the Uomschedule with the expected name = 'NAV ' + UnitOfMeasureCode
+      CRMUnitGroupName := GetUnitGroupName(UnitOfMeasureCode);
+      CRMUomschedule.SETRANGE(Name,CRMUnitGroupName);
+
+      // CRM Unit Group - Not found
+      if not FindCachedCRMUomschedule(CRMUomschedule) then
+        ERROR(DynamicsCRMUomscheduleNotFoundErr,CRMUnitGroupName,CRMProductName.SHORT);
+
+      // CRM Unit Group  - Multiple found
+      if CountCRMUomschedule(CRMUomschedule) > 1 then
+        ERROR(DynamicsCRMUoMFoundMultipleInGroupErr,CRMUnitGroupName,CRMProductName.SHORT);
+
+      // CRM Unit Group - One found - check its child unit of measure, should be just one
+      CRMUom.SETRANGE(UoMScheduleId,CRMUomschedule.UoMScheduleId);
+
+      // CRM Unit of Measure - not found
+      if not FindCachedCRMUom(CRMUom) then
+        ERROR(DynamicsCRMUoMNotFoundInGroupErr,CRMUomschedule.Name,CRMProductName.SHORT);
+
+      // CRM Unit of Measure - multiple found
+      if CountCRMUom(CRMUom) > 1 then
+        ERROR(DynamicsCRMUoMFoundMultipleInGroupErr,CRMUomschedule.Name);
+
+      // CRM Unit of Measure - one found, does it have the correct name?
+      if CRMUom.Name <> UnitOfMeasureCode then
+        ERROR(IncorrectCRMUoMNameErr,CRMUomschedule.Name,UnitOfMeasureCode,CRMUom.Name);
+
+      // CRM Unit of Measure should be the base
+      if not CRMUom.IsScheduleBaseUoM then
+        ERROR(IncorrectCRMUoMStatusErr,CRMUom.Name,CRMUomschedule.Name);
+
+      // CRM Unit of Measure should have the conversion rate of 1
+      if CRMUom.Quantity <> 1 then
+        ERROR(IncorrectCRMUoMQuantityErr,CRMUom.Name);
+
+      // All checks passed. We're good to go
+    END;
+
+    [External]
+    PROCEDURE GetNavCurrencyCode@25(TransactionCurrencyId@1000 : GUID) : Code[10];
+    VAR
+      CRMTransactioncurrency@1001 : Record "CRM Transactioncurrency";
+      Currency@1003 : Record Currency;
+      NAVLCYCode@1004 : Code[10];
+      CRMCurrencyCode@1002 : Code[10];
+    BEGIN
+      if ISNULLGUID(TransactionCurrencyId) then
+        exit('');
+      NAVLCYCode := GetNavLCYCode;
+      CRMTransactioncurrency.SETRANGE(TransactionCurrencyId,TransactionCurrencyId);
+      if not FindCachedCRMTransactionCurrency(CRMTransactioncurrency) then
+        ERROR(DynamicsCRMTransactionCurrencyRecordNotFoundErr,TransactionCurrencyId,CRMProductName.SHORT);
+      CRMCurrencyCode := DELCHR(CRMTransactioncurrency.ISOCurrencyCode);
+      if CRMCurrencyCode = NAVLCYCode then
+        exit('');
+
+      Currency.GET(CRMCurrencyCode);
+      exit(Currency.Code);
+    END;
+
+    [Internal]
+    PROCEDURE GetCRMTransactioncurrency@30(CurrencyCode@1001 : Text) : GUID;
+    VAR
+      CRMTransactioncurrency@1000 : Record "CRM Transactioncurrency";
+      NAVLCYCode@1002 : Code[10];
+    BEGIN
+      // In NAV, an empty currency means local currency (LCY)
+      NAVLCYCode := GetNavLCYCode;
+      if DELCHR(CurrencyCode) = '' then
+        CurrencyCode := NAVLCYCode;
+
+      if CurrencyCode = NAVLCYCode then
+        FindNAVLocalCurrencyInCRM(CRMTransactioncurrency)
+      else begin
+        CRMTransactioncurrency.SETRANGE(ISOCurrencyCode,CurrencyCode);
+        if not FindCachedCRMTransactionCurrency(CRMTransactioncurrency) then
+          ERROR(DynamicsCRMTransactionCurrencyRecordNotFoundErr,CurrencyCode,CRMProductName.SHORT);
+      end;
+      exit(CRMTransactioncurrency.TransactionCurrencyId)
+    END;
+
+    LOCAL PROCEDURE AddToCacheCRMPriceLevel@47(CRMPricelevel@1000 : Record "CRM Pricelevel");
+    BEGIN
+      TempCRMPricelevel := CRMPricelevel;
+      TempCRMPricelevel.INSERT;
+    END;
+
+    LOCAL PROCEDURE CacheCRMPriceLevel@42() : Boolean;
+    VAR
+      CRMPricelevel@1000 : Record "CRM Pricelevel";
+    BEGIN
+      TempCRMPricelevel.RESET;
+      if TempCRMPricelevel.ISEMPTY then
+        if CRMPricelevel.FINDSET then
+          repeat
+            AddToCacheCRMPriceLevel(CRMPricelevel)
+          until CRMPricelevel.NEXT = 0;
+      exit(not TempCRMPricelevel.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE FindCachedCRMPriceLevel@41(VAR CRMPricelevel@1001 : Record "CRM Pricelevel") : Boolean;
+    BEGIN
+      if not CacheCRMPriceLevel then
+        exit(false);
+      TempCRMPricelevel.COPY(CRMPricelevel);
+      if TempCRMPricelevel.FINDFIRST then begin
+        CRMPricelevel.COPY(TempCRMPricelevel);
+        exit(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE AddToCacheCRMTransactionCurrency@38(CRMTransactioncurrency@1000 : Record "CRM Transactioncurrency");
+    BEGIN
+      TempCRMTransactioncurrency := CRMTransactioncurrency;
+      TempCRMTransactioncurrency.INSERT;
+    END;
+
+    LOCAL PROCEDURE CacheCRMTransactionCurrency@31() : Boolean;
+    VAR
+      CRMTransactioncurrency@1001 : Record "CRM Transactioncurrency";
+    BEGIN
+      TempCRMTransactioncurrency.RESET;
+      if TempCRMTransactioncurrency.ISEMPTY then
+        if CRMTransactioncurrency.FINDSET then
+          repeat
+            AddToCacheCRMTransactionCurrency(CRMTransactioncurrency)
+          until CRMTransactioncurrency.NEXT = 0;
+      exit(not TempCRMTransactioncurrency.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE FindCachedCRMTransactionCurrency@33(VAR CRMTransactioncurrency@1000 : Record "CRM Transactioncurrency") : Boolean;
+    BEGIN
+      if not CacheCRMTransactionCurrency then
+        exit(false);
+      TempCRMTransactioncurrency.COPY(CRMTransactioncurrency);
+      if TempCRMTransactioncurrency.FINDFIRST then begin
+        CRMTransactioncurrency.COPY(TempCRMTransactioncurrency);
+        exit(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE AddToCacheCRMUom@45(CRMUom@1000 : Record "CRM Uom");
+    BEGIN
+      TempCRMUom := CRMUom;
+      TempCRMUom.INSERT;
+    END;
+
+    LOCAL PROCEDURE CacheCRMUom@44() : Boolean;
+    VAR
+      CRMUom@1001 : Record "CRM Uom";
+    BEGIN
+      TempCRMUom.RESET;
+      if TempCRMUom.ISEMPTY then
+        if CRMUom.FINDSET then
+          repeat
+            AddToCacheCRMUom(CRMUom)
+          until CRMUom.NEXT = 0;
+      exit(not TempCRMUom.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE CountCRMUom@40(VAR CRMUom@1000 : Record "CRM Uom") : Integer;
+    BEGIN
+      TempCRMUom.COPY(CRMUom);
+      exit(TempCRMUom.COUNT);
+    END;
+
+    LOCAL PROCEDURE FindCachedCRMUom@43(VAR CRMUom@1000 : Record "CRM Uom") : Boolean;
+    BEGIN
+      if not CacheCRMUom then
+        exit(false);
+      TempCRMUom.COPY(CRMUom);
+      if TempCRMUom.FINDFIRST then begin
+        CRMUom.COPY(TempCRMUom);
+        exit(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE AddToCacheCRMUomschedule@55(CRMUomschedule@1000 : Record "CRM Uomschedule");
+    BEGIN
+      TempCRMUomschedule := CRMUomschedule;
+      TempCRMUomschedule.INSERT;
+    END;
+
+    LOCAL PROCEDURE CacheCRMUomschedule@54() : Boolean;
+    VAR
+      CRMUomschedule@1001 : Record "CRM Uomschedule";
+    BEGIN
+      TempCRMUomschedule.RESET;
+      if TempCRMUomschedule.ISEMPTY then
+        if CRMUomschedule.FINDSET then
+          repeat
+            AddToCacheCRMUomschedule(CRMUomschedule)
+          until CRMUomschedule.NEXT = 0;
+      exit(not TempCRMUomschedule.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE CountCRMUomschedule@34(VAR CRMUomschedule@1000 : Record "CRM Uomschedule") : Integer;
+    BEGIN
+      TempCRMUomschedule.COPY(CRMUomschedule);
+      exit(TempCRMUomschedule.COUNT);
+    END;
+
+    LOCAL PROCEDURE FindCachedCRMUomschedule@53(VAR CRMUomschedule@1000 : Record "CRM Uomschedule") : Boolean;
+    BEGIN
+      if not CacheCRMUomschedule then
+        exit(false);
+      TempCRMUomschedule.COPY(CRMUomschedule);
+      if TempCRMUomschedule.FINDFIRST then begin
+        CRMUomschedule.COPY(TempCRMUomschedule);
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetSalesInvoiceHeaderCoupledToCRM@51(SalesInvoiceHeader@1000 : Record "Sales Invoice Header");
+    BEGIN
+      SalesInvoiceHeader."Coupled to CRM" := true;
+      SalesInvoiceHeader.MODIFY;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

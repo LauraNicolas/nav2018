@@ -1,0 +1,610 @@
+OBJECT Codeunit 5600 FA Insert Ledger Entry
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="FA Ledger Entry";
+    Permissions=TableData "FA Ledger Entry"=rim,
+                TableData "FA Depreciation Book"=rim,
+                TableData "FA Register"=rim,
+                TableData "Maintenance Ledger Entry"=rim;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU="%2 = %3 does not exist for %1."';
+      Text001@1001 : TextConst 'ENU="%2 = %3 does not match the journal line for %1."';
+      Text002@1002 : TextConst 'ENU=%1 is a %2. %3 must be %4 in %5.';
+      FASetup@1003 : Record "FA Setup";
+      FAPostingTypeSetup@1004 : Record "FA Posting Type Setup";
+      DeprBook@1005 : Record "Depreciation Book";
+      FADeprBook@1006 : Record "FA Depreciation Book";
+      FADeprBook2@1007 : Record "FA Depreciation Book";
+      FA@1008 : Record "Fixed Asset";
+      FA2@1009 : Record "Fixed Asset";
+      FALedgEntry@1010 : Record "FA Ledger Entry";
+      FALedgEntry2@1011 : Record "FA Ledger Entry";
+      TmpFALedgEntry@1027 : TEMPORARY Record "FA Ledger Entry";
+      MaintenanceLedgEntry@1012 : Record "Maintenance Ledger Entry";
+      TmpMaintenanceLedgEntry@1028 : TEMPORARY Record "Maintenance Ledger Entry";
+      FAReg@1013 : Record "FA Register";
+      FAJnlLine@1014 : Record "FA Journal Line";
+      FAInsertGLAcc@1017 : Codeunit "FA Insert G/L Account";
+      FAAutomaticEntry@1019 : Codeunit "FA Automatic Entry";
+      DeprBookCode@1020 : Code[10];
+      ErrorEntryNo@1021 : Integer;
+      NextEntryNo@1022 : Integer;
+      NextMaintenanceEntryNo@1023 : Integer;
+      Text003@1025 : TextConst 'ENU=%1 must not be %2 in %3 %4.';
+      Text004@1024 : TextConst 'ENU=Reversal found a %1 without a matching %2.';
+      RegisterInserted@1026 : Boolean;
+      Text005@1029 : TextConst 'ENU=You cannot reverse the transaction, because it has already been reversed.';
+      Text006@1030 : TextConst 'ENU=The combination of dimensions used in %1 %2 is blocked. %3';
+      LastEntryNo@1031 : Integer;
+      Text007@1032 : TextConst 'ENU="%1 = %2 already exists for %5 (%3 = %4)."';
+      GLRegisterNo@1015 : Integer;
+
+    [External]
+    PROCEDURE InsertFA@14(VAR FALedgEntry3@1000 : Record "FA Ledger Entry");
+    BEGIN
+      if NextEntryNo = 0 then begin
+        FALedgEntry.LOCKTABLE;
+        if FALedgEntry.FINDLAST then
+          NextEntryNo := FALedgEntry."Entry No.";
+        InitRegister(
+          0,FALedgEntry3."G/L Entry No.",FALedgEntry3."Source Code",
+          FALedgEntry3."Journal Batch Name");
+      end;
+      NextEntryNo := NextEntryNo + 1;
+
+      FALedgEntry := FALedgEntry3;
+      DeprBook.GET(FALedgEntry."Depreciation Book Code");
+      FA.GET(FALedgEntry."FA No.");
+      DeprBookCode := FALedgEntry."Depreciation Book Code";
+      CheckMainAsset;
+      ErrorEntryNo := FALedgEntry."Entry No.";
+      FALedgEntry."Entry No." := NextEntryNo;
+      SetFAPostingType(FALedgEntry);
+      if FALedgEntry."Automatic Entry" then
+        FAAutomaticEntry.AdjustFALedgEntry(FALedgEntry);
+      FALedgEntry."Amount (LCY)" :=
+        ROUND(FALedgEntry.Amount * GetExchangeRate(FALedgEntry."FA Exchange Rate"));
+      if not CalcGLIntegration(FALedgEntry) then
+        FALedgEntry."G/L Entry No." := 0
+      else
+        FAInsertGLAcc.RUN(FALedgEntry);
+      if not DeprBook."Allow Identical Document No." and
+         (FALedgEntry."Journal Batch Name" <> '') and
+         (FALedgEntry."FA Posting Category" = FALedgEntry."FA Posting Category"::" ") and
+         (ErrorEntryNo = 0) and
+         (LastEntryNo > 0)
+      then
+        CheckFADocNo(FALedgEntry);
+      FALedgEntry.INSERT(true);
+
+      if ErrorEntryNo > 0 then begin
+        if not FALedgEntry2.GET(ErrorEntryNo) then
+          ERROR(
+            Text000,
+            FAName(DeprBookCode),FALedgEntry2.FIELDCAPTION("Entry No."),ErrorEntryNo);
+        if (FALedgEntry2."Depreciation Book Code" <> FALedgEntry."Depreciation Book Code") or
+           (FALedgEntry2."FA No." <> FALedgEntry."FA No.") or
+           (FALedgEntry2."FA Posting Category" <> FALedgEntry."FA Posting Category") or
+           (FALedgEntry2."FA Posting Type" <> FALedgEntry."FA Posting Type") or
+           (FALedgEntry2.Amount <> -FALedgEntry.Amount) or
+           (FALedgEntry2."FA Posting Date" <> FALedgEntry."FA Posting Date")
+        then
+          ERROR(
+            Text001,
+            FAName(DeprBookCode),FAJnlLine.FIELDCAPTION("FA Error Entry No."),ErrorEntryNo);
+        FALedgEntry."Canceled from FA No." := FALedgEntry."FA No.";
+        FALedgEntry2."Canceled from FA No." := FALedgEntry2."FA No.";
+        FALedgEntry2."FA No." := '';
+        FALedgEntry."FA No." := '';
+        FALedgEntry2.MODIFY;
+        FALedgEntry.MODIFY;
+        FALedgEntry."FA No." := FALedgEntry3."FA No.";
+      end;
+
+      if FALedgEntry3."FA Posting Category" = FALedgEntry3."FA Posting Category"::" " then
+        if FALedgEntry3."FA Posting Type" <= FALedgEntry3."FA Posting Type"::"Salvage Value" then
+          CODEUNIT.RUN(CODEUNIT::"FA Check Consistency",FALedgEntry);
+
+      InsertRegister(0,NextEntryNo);
+    END;
+
+    [External]
+    PROCEDURE InsertMaintenance@1(VAR MaintenanceLedgEntry2@1000 : Record "Maintenance Ledger Entry");
+    BEGIN
+      if NextMaintenanceEntryNo = 0 then begin
+        MaintenanceLedgEntry.LOCKTABLE;
+        if MaintenanceLedgEntry.FINDLAST then
+          NextMaintenanceEntryNo := MaintenanceLedgEntry."Entry No.";
+        InitRegister(
+          1,MaintenanceLedgEntry2."G/L Entry No.",MaintenanceLedgEntry2."Source Code",
+          MaintenanceLedgEntry2."Journal Batch Name");
+      end;
+      NextMaintenanceEntryNo := NextMaintenanceEntryNo + 1;
+      MaintenanceLedgEntry := MaintenanceLedgEntry2;
+      with MaintenanceLedgEntry do begin
+        DeprBook.GET("Depreciation Book Code");
+        FA.GET("FA No.");
+        CheckMainAsset;
+        "Entry No." := NextMaintenanceEntryNo;
+        if "Automatic Entry" then
+          FAAutomaticEntry.AdjustMaintenanceLedgEntry(MaintenanceLedgEntry);
+        "Amount (LCY)" := ROUND(Amount * GetExchangeRate("FA Exchange Rate"));
+        if (Amount > 0) and not Correction or
+           (Amount < 0) and Correction
+        then begin
+          "Debit Amount" := Amount;
+          "Credit Amount" := 0
+        end else begin
+          "Debit Amount" := 0;
+          "Credit Amount" := -Amount;
+        end;
+        if "G/L Entry No." > 0 then
+          FAInsertGLAcc.InsertMaintenanceAccNo(MaintenanceLedgEntry);
+        INSERT(true);
+        SetMaintenanceLastDate(MaintenanceLedgEntry);
+      end;
+      InsertRegister(1,NextMaintenanceEntryNo);
+    END;
+
+    [External]
+    PROCEDURE SetMaintenanceLastDate@11(MaintenanceLedgEntry@1000 : Record "Maintenance Ledger Entry");
+    BEGIN
+      with MaintenanceLedgEntry do begin
+        SETCURRENTKEY("FA No.","Depreciation Book Code","FA Posting Date");
+        SETRANGE("FA No.","FA No.");
+        SETRANGE("Depreciation Book Code","Depreciation Book Code");
+        FADeprBook.GET("FA No.","Depreciation Book Code");
+        if FINDLAST then
+          FADeprBook."Last Maintenance Date" := "FA Posting Date"
+        else
+          FADeprBook."Last Maintenance Date" := 0D;
+        FADeprBook.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetFAPostingType@3(VAR FALedgEntry@1000 : Record "FA Ledger Entry");
+    BEGIN
+      with FALedgEntry do begin
+        if (Amount > 0) and not Correction or
+           (Amount < 0) and Correction
+        then begin
+          "Debit Amount" := Amount;
+          "Credit Amount" := 0
+        end else begin
+          "Debit Amount" := 0;
+          "Credit Amount" := -Amount;
+        end;
+        "Part of Book Value" := false;
+        "Part of Depreciable Basis" := false;
+        if "FA Posting Category" <> "FA Posting Category"::" " then
+          exit;
+        case "FA Posting Type" of
+          "FA Posting Type"::"Write-Down":
+            FAPostingTypeSetup.GET(
+              DeprBookCode,FAPostingTypeSetup."FA Posting Type"::"Write-Down");
+          "FA Posting Type"::Appreciation:
+            FAPostingTypeSetup.GET(
+              DeprBookCode,FAPostingTypeSetup."FA Posting Type"::Appreciation);
+          "FA Posting Type"::"Custom 1":
+            FAPostingTypeSetup.GET(
+              DeprBookCode,FAPostingTypeSetup."FA Posting Type"::"Custom 1");
+          "FA Posting Type"::"Custom 2":
+            FAPostingTypeSetup.GET(
+              DeprBookCode,FAPostingTypeSetup."FA Posting Type"::"Custom 2");
+        end;
+        case "FA Posting Type" of
+          "FA Posting Type"::"Acquisition Cost",
+          "FA Posting Type"::"Salvage Value":
+            "Part of Depreciable Basis" := true;
+          "FA Posting Type"::"Write-Down",
+          "FA Posting Type"::Appreciation,
+          "FA Posting Type"::"Custom 1",
+          "FA Posting Type"::"Custom 2":
+            "Part of Depreciable Basis" := FAPostingTypeSetup."Part of Depreciable Basis";
+        end;
+        case "FA Posting Type" of
+          "FA Posting Type"::"Acquisition Cost",
+          "FA Posting Type"::Depreciation:
+            "Part of Book Value" := true;
+          "FA Posting Type"::"Write-Down",
+          "FA Posting Type"::Appreciation,
+          "FA Posting Type"::"Custom 1",
+          "FA Posting Type"::"Custom 2":
+            "Part of Book Value" := FAPostingTypeSetup."Part of Book Value";
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetExchangeRate@12(ExchangeRate@1000 : Decimal) : Decimal;
+    BEGIN
+      if ExchangeRate <= 0 then
+        exit(1);
+      exit(ExchangeRate / 100);
+    END;
+
+    LOCAL PROCEDURE CalcGLIntegration@4(VAR FALedgEntry@1000 : Record "FA Ledger Entry") : Boolean;
+    BEGIN
+      with FALedgEntry do begin
+        if "G/L Entry No." = 0 then
+          exit(false);
+        case DeprBook."Disposal Calculation Method" of
+          DeprBook."Disposal Calculation Method"::Net:
+            if "FA Posting Type" = "FA Posting Type"::"Proceeds on Disposal" then
+              exit(false);
+          DeprBook."Disposal Calculation Method"::Gross:
+            if "FA Posting Type" = "FA Posting Type"::"Gain/Loss" then
+              exit(false);
+        end;
+        if "FA Posting Type" = "FA Posting Type"::"Salvage Value" then
+          exit(false);
+
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE InsertBalAcc@2(VAR FALedgEntry@1000 : Record "FA Ledger Entry");
+    BEGIN
+      FAInsertGLAcc.InsertBalAcc(FALedgEntry);
+    END;
+
+    [External]
+    PROCEDURE InsertBalDisposalAcc@13(FALedgEntry@1000 : Record "FA Ledger Entry");
+    BEGIN
+      FAInsertGLAcc.RUN(FALedgEntry);
+    END;
+
+    [External]
+    PROCEDURE FindFirstGLAcc@7(VAR FAGLPostBuf@1000 : Record "FA G/L Posting Buffer") : Boolean;
+    BEGIN
+      exit(FAInsertGLAcc.FindFirstGLAcc(FAGLPostBuf));
+    END;
+
+    [External]
+    PROCEDURE GetNextGLAcc@8(VAR FAGLPostBuf@1000 : Record "FA G/L Posting Buffer") : Integer;
+    BEGIN
+      exit(FAInsertGLAcc.GetNextGLAcc(FAGLPostBuf));
+    END;
+
+    [External]
+    PROCEDURE DeleteAllGLAcc@9();
+    BEGIN
+      FAInsertGLAcc.DeleteAllGLAcc;
+    END;
+
+    LOCAL PROCEDURE CheckMainAsset@6();
+    BEGIN
+      if FA."Main Asset/Component" = FA."Main Asset/Component"::Component then
+        FADeprBook2.GET(FA."Component of Main Asset",DeprBook.Code);
+
+      with FASetup do begin
+        GET;
+        if "Allow Posting to Main Assets" then
+          exit;
+        FA2."Main Asset/Component" := FA2."Main Asset/Component"::"Main Asset";
+        if FA."Main Asset/Component" = FA."Main Asset/Component"::"Main Asset" then
+          ERROR(
+            Text002,
+            FAName(''),FA2."Main Asset/Component",FIELDCAPTION("Allow Posting to Main Assets"),
+            true,TABLECAPTION);
+      end;
+    END;
+
+    LOCAL PROCEDURE InitRegister@10(CalledFrom@1000 : 'FA,Maintenance';GLEntryNo@1001 : Integer;SourceCode@1002 : Code[10];BatchName@1003 : Code[10]);
+    BEGIN
+      if (CalledFrom = CalledFrom::FA) and (NextMaintenanceEntryNo <> 0) then
+        exit;
+      if (CalledFrom = CalledFrom::Maintenance) and (NextEntryNo <> 0) then
+        exit;
+      with FAReg do begin
+        LOCKTABLE;
+        if FINDLAST then begin
+          if (GLRegisterNo <> 0) and (GLRegisterNo = "G/L Register No.") then
+            exit;
+          "No." += 1;
+        end else
+          "No." := 1;
+        INIT;
+        if GLEntryNo = 0 then
+          "Journal Type" := "Journal Type"::"Fixed Asset";
+        "Creation Date" := TODAY;
+        "Source Code" := SourceCode;
+        "Journal Batch Name" := BatchName;
+        "User ID" := USERID;
+        INSERT(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertRegister@15(CalledFrom@1000 : 'FA,Maintenance';NextEntryNo@1001 : Integer);
+    BEGIN
+      with FAReg do begin
+        if CalledFrom = CalledFrom::FA then begin
+          if "From Entry No." = 0 then
+            "From Entry No." := NextEntryNo;
+          "To Entry No." := NextEntryNo;
+        end;
+        if CalledFrom = CalledFrom::Maintenance then begin
+          if "From Maintenance Entry No." = 0 then
+            "From Maintenance Entry No." := NextEntryNo;
+          "To Maintenance Entry No." := NextEntryNo;
+        end;
+        MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE FAName@5(DeprBookCode@1000 : Code[10]) : Text[200];
+    VAR
+      DepreciationCalc@1001 : Codeunit "Depreciation Calculation";
+    BEGIN
+      exit(DepreciationCalc.FAName(FA,DeprBookCode));
+    END;
+
+    LOCAL PROCEDURE CheckFADocNo@25(FALedgEntry@1000 : Record "FA Ledger Entry");
+    VAR
+      OldFALedgEntry@1001 : Record "FA Ledger Entry";
+    BEGIN
+      OldFALedgEntry.SETCURRENTKEY(
+        "FA No.","Depreciation Book Code","FA Posting Category","FA Posting Type","Document No.");
+      OldFALedgEntry.SETRANGE("FA No.",FALedgEntry."FA No.");
+      OldFALedgEntry.SETRANGE("Depreciation Book Code",FALedgEntry."Depreciation Book Code");
+      OldFALedgEntry.SETRANGE("FA Posting Category",FALedgEntry."FA Posting Category");
+      OldFALedgEntry.SETRANGE("FA Posting Type",FALedgEntry."FA Posting Type");
+      OldFALedgEntry.SETRANGE("Document No.",FALedgEntry."Document No.");
+      OldFALedgEntry.SETRANGE("Entry No.",0,LastEntryNo);
+      if OldFALedgEntry.FINDFIRST then
+        ERROR(
+          Text007,
+          OldFALedgEntry.FIELDCAPTION("Document No."),
+          OldFALedgEntry."Document No.",
+          OldFALedgEntry.FIELDCAPTION("FA Posting Type"),
+          OldFALedgEntry."FA Posting Type",
+          FAName(DeprBookCode));
+    END;
+
+    [External]
+    PROCEDURE SetOrgGenJnlLine@16(OrgGenJnlLine2@1000 : Boolean);
+    BEGIN
+      FAInsertGLAcc.SetOrgGenJnlLine(OrgGenJnlLine2)
+    END;
+
+    [External]
+    PROCEDURE CorrectEntries@17();
+    BEGIN
+      FAInsertGLAcc.CorrectEntries;
+    END;
+
+    [External]
+    PROCEDURE InsertReverseEntry@19(NewGLEntryNo@1001 : Integer;FAEntryType@1004 : '" ","Fixed Asset",Maintenance';FAEntryNo@1005 : Integer;VAR NewFAEntryNo@1002 : Integer;TransactionNo@1007 : Integer);
+    VAR
+      SourceCodeSetup@1008 : Record "Source Code Setup";
+      FALedgEntry3@1003 : Record "FA Ledger Entry";
+      MaintenanceLedgEntry3@1006 : Record "Maintenance Ledger Entry";
+      DimMgt@1012 : Codeunit DimensionManagement;
+      TableID@1014 : ARRAY [10] OF Integer;
+      AccNo@1013 : ARRAY [10] OF Code[20];
+    BEGIN
+      if FAEntryType = FAEntryType::"Fixed Asset" then begin
+        FALedgEntry3.GET(FAEntryNo);
+        FALedgEntry3.TESTFIELD("Reversed by Entry No.",0);
+        FALedgEntry3.TESTFIELD("FA Posting Category",FALedgEntry3."FA Posting Category"::" ");
+        if FALedgEntry3."FA Posting Type" = FALedgEntry3."FA Posting Type"::"Proceeds on Disposal" then
+          ERROR(
+            Text003,
+            FALedgEntry3.FIELDCAPTION("FA Posting Type"),
+            FALedgEntry3."FA Posting Type",
+            FALedgEntry.TABLECAPTION,FALedgEntry3."Entry No.");
+        if FALedgEntry3."FA Posting Type" <> FALedgEntry3."FA Posting Type"::"Salvage Value" then begin
+          if not DimMgt.CheckDimIDComb(FALedgEntry3."Dimension Set ID") then
+            ERROR(Text006,FALedgEntry3.TABLECAPTION,FALedgEntry3."Entry No.",DimMgt.GetDimCombErr);
+          CLEAR(TableID);
+          CLEAR(AccNo);
+          TableID[1] := DATABASE::"Fixed Asset";
+          AccNo[1] := FALedgEntry3."FA No.";
+          if not DimMgt.CheckDimValuePosting(TableID,AccNo,FALedgEntry3."Dimension Set ID") then
+            ERROR(DimMgt.GetDimValuePostingErr);
+          if NextEntryNo = 0 then begin
+            FALedgEntry.LOCKTABLE;
+            if FALedgEntry.FINDLAST then
+              NextEntryNo := FALedgEntry."Entry No.";
+            SourceCodeSetup.GET;
+            InitRegister(0,1,SourceCodeSetup.Reversal,'');
+            RegisterInserted := true;
+          end;
+          NextEntryNo := NextEntryNo + 1;
+          NewFAEntryNo := NextEntryNo;
+          TmpFALedgEntry := FALedgEntry3;
+          TmpFALedgEntry.INSERT;
+          SetFAReversalMark(FALedgEntry3,NextEntryNo);
+          FALedgEntry3."Entry No." := NextEntryNo;
+          FALedgEntry3."G/L Entry No." := NewGLEntryNo;
+          FALedgEntry3.Amount := -FALedgEntry3.Amount;
+          FALedgEntry3."Debit Amount" := -FALedgEntry3."Debit Amount";
+          FALedgEntry3."Credit Amount" := -FALedgEntry3."Credit Amount";
+          FALedgEntry3.Quantity := 0;
+          FALedgEntry3."User ID" := USERID;
+          FALedgEntry3."Source Code" := SourceCodeSetup.Reversal;
+          FALedgEntry3."Transaction No." := TransactionNo;
+          FALedgEntry3."VAT Amount" := -FALedgEntry3."VAT Amount";
+          FALedgEntry3."Amount (LCY)" := -FALedgEntry3."Amount (LCY)";
+          FALedgEntry3.Correction := not FALedgEntry3.Correction;
+          FALedgEntry3."No. Series" := '';
+          FALedgEntry3."Journal Batch Name" := '';
+          FALedgEntry3."FA No./Budgeted FA No." := '';
+          FALedgEntry3.INSERT(true);
+          CODEUNIT.RUN(CODEUNIT::"FA Check Consistency",FALedgEntry3);
+          InsertRegister(0,NextEntryNo);
+        end;
+      end;
+      if FAEntryType = FAEntryType::Maintenance then begin
+        if NextMaintenanceEntryNo = 0 then begin
+          MaintenanceLedgEntry.LOCKTABLE;
+          if MaintenanceLedgEntry.FINDLAST then
+            NextMaintenanceEntryNo := MaintenanceLedgEntry."Entry No.";
+          SourceCodeSetup.GET;
+          InitRegister(1,1,SourceCodeSetup.Reversal,'');
+          RegisterInserted := true;
+        end;
+        NextMaintenanceEntryNo := NextMaintenanceEntryNo + 1;
+        NewFAEntryNo := NextMaintenanceEntryNo;
+        MaintenanceLedgEntry3.GET(FAEntryNo);
+
+        if not DimMgt.CheckDimIDComb(MaintenanceLedgEntry3."Dimension Set ID") then
+          ERROR(Text006,MaintenanceLedgEntry3.TABLECAPTION,MaintenanceLedgEntry3."Entry No.",DimMgt.GetDimCombErr);
+        CLEAR(TableID);
+        CLEAR(AccNo);
+        TableID[1] := DATABASE::"Fixed Asset";
+        AccNo[1] := MaintenanceLedgEntry3."FA No.";
+        if not DimMgt.CheckDimValuePosting(TableID,AccNo,MaintenanceLedgEntry3."Dimension Set ID") then
+          ERROR(DimMgt.GetDimValuePostingErr);
+
+        TmpMaintenanceLedgEntry := MaintenanceLedgEntry3;
+        TmpMaintenanceLedgEntry.INSERT;
+        SetMaintReversalMark(MaintenanceLedgEntry3,NextMaintenanceEntryNo);
+        MaintenanceLedgEntry3."Entry No." := NextMaintenanceEntryNo;
+        MaintenanceLedgEntry3."G/L Entry No." := NewGLEntryNo;
+        MaintenanceLedgEntry3.Amount := -MaintenanceLedgEntry3.Amount;
+        MaintenanceLedgEntry3."Debit Amount" := -MaintenanceLedgEntry3."Debit Amount";
+        MaintenanceLedgEntry3."Credit Amount" := -MaintenanceLedgEntry3."Credit Amount";
+        MaintenanceLedgEntry3.Quantity := 0;
+        MaintenanceLedgEntry3."User ID" := USERID;
+        MaintenanceLedgEntry3."Source Code" := SourceCodeSetup.Reversal;
+        MaintenanceLedgEntry3."Transaction No." := TransactionNo;
+        MaintenanceLedgEntry3."VAT Amount" := -MaintenanceLedgEntry3."VAT Amount";
+        MaintenanceLedgEntry3."Amount (LCY)" := -MaintenanceLedgEntry3."Amount (LCY)";
+        MaintenanceLedgEntry3.Correction := not FALedgEntry3.Correction;
+        MaintenanceLedgEntry3."No. Series" := '';
+        MaintenanceLedgEntry3."Journal Batch Name" := '';
+        MaintenanceLedgEntry3."FA No./Budgeted FA No." := '';
+        MaintenanceLedgEntry3.INSERT;
+        InsertRegister(1,NextMaintenanceEntryNo);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckFAReverseEntry@18(FALedgEntry3@1000 : Record "FA Ledger Entry");
+    VAR
+      GLEntry@1001 : Record "G/L Entry";
+    BEGIN
+      TmpFALedgEntry := FALedgEntry3;
+      if FALedgEntry3."FA Posting Type" <> FALedgEntry3."FA Posting Type"::"Salvage Value" then begin
+        if not TmpFALedgEntry.DELETE then
+          ERROR(Text004,FALedgEntry.TABLECAPTION,GLEntry.TABLECAPTION);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckMaintReverseEntry@20(MaintenanceLedgEntry3@1001 : Record "Maintenance Ledger Entry");
+    VAR
+      GLEntry@1000 : Record "G/L Entry";
+    BEGIN
+      TmpMaintenanceLedgEntry := MaintenanceLedgEntry3;
+      if not TmpMaintenanceLedgEntry.DELETE then
+        ERROR(Text004,MaintenanceLedgEntry.TABLECAPTION,GLEntry.TABLECAPTION);
+    END;
+
+    [External]
+    PROCEDURE FinishFAReverseEntry@35(GLReg@1001 : Record "G/L Register");
+    VAR
+      GLEntry@1000 : Record "G/L Entry";
+    BEGIN
+      if TmpFALedgEntry.FINDFIRST then
+        ERROR(Text004,FALedgEntry.TABLECAPTION,GLEntry.TABLECAPTION);
+      if TmpMaintenanceLedgEntry.FINDFIRST then
+        ERROR(Text004,MaintenanceLedgEntry.TABLECAPTION,GLEntry.TABLECAPTION);
+      if RegisterInserted then begin
+        FAReg."G/L Register No." := GLReg."No.";
+        FAReg.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetFAReversalMark@21(VAR FALedgEntry@1000 : Record "FA Ledger Entry";NextEntryNo@1001 : Integer);
+    VAR
+      FALedgEntry2@1003 : Record "FA Ledger Entry";
+      CloseReversal@1004 : Boolean;
+    BEGIN
+      if FALedgEntry."Reversed Entry No." <> 0 then begin
+        FALedgEntry2.GET(FALedgEntry."Reversed Entry No.");
+        if FALedgEntry2."Reversed Entry No." <> 0 then
+          ERROR(Text005);
+        CloseReversal := true;
+        FALedgEntry2."Reversed by Entry No." := 0;
+        FALedgEntry2.Reversed := false;
+        FALedgEntry2.MODIFY;
+      end;
+      FALedgEntry."Reversed by Entry No." := NextEntryNo;
+      if CloseReversal then
+        FALedgEntry."Reversed Entry No." := NextEntryNo;
+      FALedgEntry.Reversed := true;
+      FALedgEntry.MODIFY;
+      FALedgEntry."Reversed by Entry No." := 0;
+      FALedgEntry."Reversed Entry No." := FALedgEntry."Entry No.";
+      if CloseReversal then
+        FALedgEntry."Reversed by Entry No." := FALedgEntry."Entry No.";
+    END;
+
+    LOCAL PROCEDURE SetMaintReversalMark@23(VAR MaintenanceLedgEntry@1000 : Record "Maintenance Ledger Entry";NextEntryNo@1001 : Integer);
+    VAR
+      MaintenanceLedgEntry2@1003 : Record "Maintenance Ledger Entry";
+      CloseReversal@1004 : Boolean;
+    BEGIN
+      if MaintenanceLedgEntry."Reversed Entry No." <> 0 then begin
+        MaintenanceLedgEntry2.GET(MaintenanceLedgEntry."Reversed Entry No.");
+        if MaintenanceLedgEntry2."Reversed Entry No." <> 0 then
+          ERROR(Text005);
+        CloseReversal := true;
+        MaintenanceLedgEntry2."Reversed by Entry No." := 0;
+        MaintenanceLedgEntry2.Reversed := false;
+        MaintenanceLedgEntry2.MODIFY;
+      end;
+      MaintenanceLedgEntry."Reversed by Entry No." := NextEntryNo;
+      if CloseReversal then
+        MaintenanceLedgEntry."Reversed Entry No." := NextEntryNo;
+      MaintenanceLedgEntry.Reversed := true;
+      MaintenanceLedgEntry.MODIFY;
+      MaintenanceLedgEntry."Reversed by Entry No." := 0;
+      MaintenanceLedgEntry."Reversed Entry No." := MaintenanceLedgEntry."Entry No.";
+      if CloseReversal then
+        MaintenanceLedgEntry."Reversed by Entry No." := MaintenanceLedgEntry."Entry No.";
+    END;
+
+    [External]
+    PROCEDURE SetNetdisposal@22(NetDisp2@1000 : Boolean);
+    BEGIN
+      FAInsertGLAcc.SetNetDisposal(NetDisp2);
+    END;
+
+    [External]
+    PROCEDURE SetLastEntryNo@24(FindLastEntry@1000 : Boolean);
+    VAR
+      FALedgEntry@1001 : Record "FA Ledger Entry";
+    BEGIN
+      LastEntryNo := 0;
+      if FindLastEntry then
+        if FALedgEntry.FINDLAST then
+          LastEntryNo := FALedgEntry."Entry No.";
+    END;
+
+    [External]
+    PROCEDURE SetGLRegisterNo@26(NewGLRegisterNo@1000 : Integer);
+    BEGIN
+      GLRegisterNo := NewGLRegisterNo;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

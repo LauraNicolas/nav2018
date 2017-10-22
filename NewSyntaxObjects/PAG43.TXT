@@ -1,0 +1,1635 @@
+OBJECT Page 43 Sales Invoice
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Sales Invoice;
+    SourceTable="Sales Header";
+    SourceTableView=WHERE("Document Type"=FILTER(Invoice));
+    PageType=Document;
+    RefreshOnActivate=true;
+    PromotedActionCategoriesML=ENU=New,Process,Report,Approve,Posting,Prepare,Invoice,Release,Request Approval,View;
+    OnInit=VAR
+             SalesReceivablesSetup@1001 : Record "Sales & Receivables Setup";
+           BEGIN
+             JobQueuesUsed := SalesReceivablesSetup.JobQueueActive;
+             SetExtDocNoMandatoryCondition;
+           END;
+
+    OnOpenPage=VAR
+                 OfficeMgt@1000 : Codeunit "Office Management";
+                 PermissionManager@1001 : Codeunit "Permission Manager";
+               BEGIN
+                 if UserMgt.GetSalesFilter <> '' then begin
+                   FILTERGROUP(2);
+                   SETRANGE("Responsibility Center",UserMgt.GetSalesFilter);
+                   FILTERGROUP(0);
+                 end;
+
+                 SetDocNoVisible;
+                 SetControlAppearance;
+
+                 if "Quote No." <> '' then
+                   ShowQuoteNo := true;
+
+                 if "No." = '' then
+                   if OfficeMgt.CheckForExistingInvoice("Sell-to Customer No.") then
+                     ERROR(''); // Cancel invoice creation
+                 IsSaaS := PermissionManager.SoftwareAsAService;
+                 if ("No." <> '') and ("Sell-to Customer No." = '') then
+                   DocumentIsPosted := (not GET("Document Type","No."));
+               END;
+
+    OnAfterGetRecord=BEGIN
+                       SetControlAppearance;
+                       WorkDescription := GetWorkDescription;
+                       UpdateShipToBillToGroupVisibility
+                     END;
+
+    OnNewRecord=BEGIN
+                  xRec.INIT;
+                  "Responsibility Center" := UserMgt.GetSalesFilter;
+                  if (not DocNoVisible) and ("No." = '') then
+                    SetSellToCustomerFromFilter;
+
+                  SetDefaultPaymentServices;
+                  UpdateShipToBillToGroupVisibility;
+                END;
+
+    OnInsertRecord=BEGIN
+                     if DocNoVisible then
+                       CheckCreditMaxBeforeInsert;
+
+                     if ("Sell-to Customer No." = '') and (GETFILTER("Sell-to Customer No.") <> '') then
+                       CurrPage.UPDATE(false);
+                   END;
+
+    OnDeleteRecord=BEGIN
+                     CurrPage.SAVERECORD;
+                     exit(ConfirmDeletion);
+                   END;
+
+    OnQueryClosePage=BEGIN
+                       if not DocumentIsPosted then
+                         exit(ConfirmCloseUnposted)
+                     END;
+
+    OnAfterGetCurrRecord=BEGIN
+                           CurrPage.IncomingDocAttachFactBox.PAGE.LoadDataFromRecord(Rec);
+                           CurrPage.ApprovalFactBox.PAGE.UpdateApprovalEntriesFromSourceRecord(RECORDID);
+                           ShowWorkflowStatus := CurrPage.WorkflowStatus.PAGE.SetFilterOnWorkflowRecord(RECORDID);
+
+                           UpdatePaymentService;
+                         END;
+
+    ActionList=ACTIONS
+    {
+      { 1900000003;0 ;ActionContainer;
+                      Name=ActionContainer1900000003;
+                      ActionContainerType=RelatedInformation }
+      { 57      ;1   ;ActionGroup;
+                      Name=&Invoice;
+                      CaptionML=ENU=&Invoice;
+                      Image=Invoice }
+      { 59      ;2   ;Action    ;
+                      Name=Statistics;
+                      ShortCutKey=F7;
+                      CaptionML=ENU=Statistics;
+                      ToolTipML=ENU=View statistical information, such as the value of posted entries, for the record.;
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=true;
+                      Enabled="No." <> '';
+                      Image=Statistics;
+                      PromotedCategory=Category7;
+                      OnAction=VAR
+                                 Handled@1000 : Boolean;
+                               BEGIN
+                                 OnBeforeStatisticsAction(Rec,Handled);
+                                 if not Handled then begin
+                                   CalcInvDiscForHeader;
+                                   COMMIT;
+                                   PAGE.RUNMODAL(PAGE::"Sales Statistics",Rec);
+                                   SalesCalcDiscountByType.ResetRecalculateInvoiceDisc(Rec);
+                                 end
+                               END;
+                                }
+      { 171     ;2   ;Separator ;
+                      Name=Separator171 }
+      { 61      ;2   ;Action    ;
+                      Name=Co&mments;
+                      CaptionML=ENU=Co&mments;
+                      ToolTipML=ENU=View or add comments for the record.;
+                      ApplicationArea=#Advanced;
+                      RunObject=Page "Sales Comment Sheet";
+                      RunPageLink="Document Type"=FIELD("Document Type"),
+                                  "No."=FIELD("No."),
+                                  "Document Line No."=CONST(0);
+                      Promoted=true;
+                      Image=ViewComments;
+                      PromotedCategory=Category7 }
+      { 162     ;2   ;Action    ;
+                      Name=Approvals;
+                      AccessByPermission=TableData "Approval Entry"=R;
+                      CaptionML=ENU=Approvals;
+                      ToolTipML=ENU=View a list of the records that are waiting to be approved. For example, you can see who requested the record to be approved, when it was sent, and when it is due to be approved.;
+                      ApplicationArea=#Suite;
+                      Promoted=true;
+                      PromotedIsBig=true;
+                      Image=Approvals;
+                      PromotedCategory=Category9;
+                      PromotedOnly=true;
+                      OnAction=VAR
+                                 WorkflowsEntriesBuffer@1001 : Record "Workflows Entries Buffer";
+                               BEGIN
+                                 WorkflowsEntriesBuffer.RunWorkflowEntriesPage(RECORDID,DATABASE::"Sales Header","Document Type","No.");
+                               END;
+                                }
+      { 6       ;2   ;Action    ;
+                      Name=Function_CustomerCard;
+                      ShortCutKey=Shift+F7;
+                      CaptionML=ENU=Customer;
+                      ToolTipML=ENU=View or edit detailed information about the customer on the sales document.;
+                      ApplicationArea=#Basic,#Suite;
+                      RunObject=Page "Customer Card";
+                      RunPageLink="No."=FIELD("Sell-to Customer No.");
+                      Promoted=true;
+                      Enabled=IsCustomerOrContactNotEmpty;
+                      PromotedIsBig=true;
+                      Image=Customer;
+                      PromotedCategory=Category7;
+                      PromotedOnly=true }
+      { 116     ;2   ;Action    ;
+                      Name=Dimensions;
+                      AccessByPermission=TableData Dimension=R;
+                      ShortCutKey=Shift+Ctrl+D;
+                      CaptionML=ENU=Dimensions;
+                      ToolTipML=ENU=View or edit dimensions, such as area, project, or department, that you can assign to sales and purchase documents to distribute costs and analyze transaction history.;
+                      ApplicationArea=#Suite;
+                      Promoted=true;
+                      Enabled="No." <> '';
+                      PromotedIsBig=true;
+                      Image=Dimensions;
+                      PromotedCategory=Category7;
+                      PromotedOnly=true;
+                      OnAction=BEGIN
+                                 ShowDocDim;
+                                 CurrPage.SAVERECORD;
+                               END;
+                                }
+      { 1900000004;  ;ActionContainer;
+                      Name=ActionContainer1900000004;
+                      ActionContainerType=ActionItems }
+      { 29      ;1   ;ActionGroup;
+                      Name=Approval;
+                      CaptionML=ENU=Approval }
+      { 27      ;2   ;Action    ;
+                      Name=Approve;
+                      CaptionML=ENU=Approve;
+                      ToolTipML=ENU=Approve the requested changes.;
+                      ApplicationArea=#All;
+                      Promoted=true;
+                      Visible=OpenApprovalEntriesExistForCurrUser;
+                      PromotedIsBig=true;
+                      Image=Approve;
+                      PromotedCategory=Category4;
+                      OnAction=BEGIN
+                                 ApprovalsMgmt.ApproveRecordApprovalRequest(RECORDID);
+                               END;
+                                }
+      { 25      ;2   ;Action    ;
+                      Name=Reject;
+                      CaptionML=ENU=Reject;
+                      ToolTipML=ENU=Reject the approval request.;
+                      ApplicationArea=#All;
+                      Promoted=true;
+                      Visible=OpenApprovalEntriesExistForCurrUser;
+                      PromotedIsBig=true;
+                      Image=Reject;
+                      PromotedCategory=Category4;
+                      OnAction=BEGIN
+                                 ApprovalsMgmt.RejectRecordApprovalRequest(RECORDID);
+                               END;
+                                }
+      { 23      ;2   ;Action    ;
+                      Name=Delegate;
+                      CaptionML=ENU=Delegate;
+                      ToolTipML=ENU=Delegate the approval to a substitute approver.;
+                      ApplicationArea=#All;
+                      Promoted=true;
+                      Visible=OpenApprovalEntriesExistForCurrUser;
+                      Image=Delegate;
+                      PromotedCategory=Category4;
+                      OnAction=BEGIN
+                                 ApprovalsMgmt.DelegateRecordApprovalRequest(RECORDID);
+                               END;
+                                }
+      { 21      ;2   ;Action    ;
+                      Name=Comment;
+                      CaptionML=ENU=Comments;
+                      ToolTipML=ENU=View or add comments for the record.;
+                      ApplicationArea=#All;
+                      Promoted=true;
+                      Visible=OpenApprovalEntriesExistForCurrUser;
+                      Image=ViewComments;
+                      PromotedCategory=Category4;
+                      OnAction=VAR
+                                 ApprovalsMgmt@1000 : Codeunit "Approvals Mgmt.";
+                               BEGIN
+                                 ApprovalsMgmt.GetApprovalComment(Rec);
+                               END;
+                                }
+      { 9       ;1   ;ActionGroup;
+                      Name=ActionGroup9;
+                      CaptionML=ENU=Release;
+                      Image=ReleaseDoc }
+      { 123     ;2   ;Action    ;
+                      Name=Release;
+                      ShortCutKey=Ctrl+F9;
+                      CaptionML=ENU=Re&lease;
+                      ToolTipML=ENU=Release the document to the next stage of processing. When a document is released, it will be included in all availability calculations from the expected receipt date of the items. You must reopen the document before you can make changes to it.;
+                      ApplicationArea=#Advanced;
+                      Promoted=true;
+                      Enabled=IsCustomerOrContactNotEmpty;
+                      PromotedIsBig=true;
+                      Image=ReleaseDoc;
+                      PromotedCategory=Category8;
+                      OnAction=VAR
+                                 ReleaseSalesDoc@1000 : Codeunit "Release Sales Document";
+                               BEGIN
+                                 ReleaseSalesDoc.PerformManualRelease(Rec);
+                               END;
+                                }
+      { 124     ;2   ;Action    ;
+                      Name=Reopen;
+                      CaptionML=ENU=Re&open;
+                      ToolTipML=ENU=Reopen the document to change it after it has been approved. Approved documents have the Released status and must be opened before they can be changed.;
+                      ApplicationArea=#Suite;
+                      Promoted=true;
+                      Enabled=Status <> Status::Open;
+                      PromotedIsBig=true;
+                      Image=ReOpen;
+                      PromotedCategory=Category8;
+                      PromotedOnly=true;
+                      OnAction=VAR
+                                 ReleaseSalesDoc@1001 : Codeunit "Release Sales Document";
+                               BEGIN
+                                 ReleaseSalesDoc.PerformManualReopen(Rec);
+                               END;
+                                }
+      { 62      ;1   ;ActionGroup;
+                      Name=F&unctions;
+                      CaptionML=ENU=F&unctions;
+                      Image=Action }
+      { 74      ;2   ;Action    ;
+                      Name=CreatePurchaseInvoice;
+                      CaptionML=ENU=Create Purchase Invoice;
+                      ToolTipML=ENU=Create a new purchase invoice to buy all the items that are required by the sales document, even if some of the items are already available.;
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=false;
+                      PromotedIsBig=true;
+                      Image=NewPurchaseInvoice;
+                      PromotedCategory=Category7;
+                      OnAction=VAR
+                                 SelectedSalesLine@1001 : Record "Sales Line";
+                                 PurchDocFromSalesDoc@1000 : Codeunit "Purch. Doc. From Sales Doc.";
+                               BEGIN
+                                 CurrPage.SalesLines.PAGE.SETSELECTIONFILTER(SelectedSalesLine);
+                                 PurchDocFromSalesDoc.CreatePurchaseInvoice(Rec,SelectedSalesLine);
+                               END;
+                                }
+      { 66      ;2   ;Action    ;
+                      Name=GetRecurringSalesLines;
+                      Ellipsis=true;
+                      CaptionML=ENU=Get Recurring Sales Lines;
+                      ToolTipML=ENU=Insert sales document lines that you have set up for the customer as recurring. Recurring sales lines could be for a monthly replenishment order or a fixed freight expense.;
+                      ApplicationArea=#Suite;
+                      Enabled=IsCustomerOrContactNotEmpty;
+                      PromotedIsBig=true;
+                      Image=CustomerCode;
+                      PromotedCategory=Category7;
+                      OnAction=VAR
+                                 StdCustSalesCode@1000 : Record "Standard Customer Sales Code";
+                               BEGIN
+                                 StdCustSalesCode.InsertSalesLines(Rec);
+                               END;
+                                }
+      { 63      ;2   ;Action    ;
+                      Name=CalculateInvoiceDiscount;
+                      AccessByPermission=TableData "Cust. Invoice Disc."=R;
+                      CaptionML=ENU=Calculate &Invoice Discount;
+                      ToolTipML=ENU=Calculate the invoice discount for the entire sales document when all sales invoice lines are entered.;
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=true;
+                      Enabled=IsCustomerOrContactNotEmpty;
+                      Image=CalculateInvoiceDiscount;
+                      PromotedCategory=Category6;
+                      OnAction=BEGIN
+                                 ApproveCalcInvDisc;
+                                 SalesCalcDiscountByType.ResetRecalculateInvoiceDisc(Rec);
+                               END;
+                                }
+      { 64      ;2   ;Action    ;
+                      Name=CopyDocument;
+                      Ellipsis=true;
+                      CaptionML=ENU=Copy Document;
+                      ToolTipML=ENU=Copy document lines and header information from another sales document to this document. You can copy a posted sales invoice into a new sales invoice to quickly create a similar document.;
+                      ApplicationArea=#Suite;
+                      Image=CopyDocument;
+                      OnAction=BEGIN
+                                 CopySalesDoc.SetSalesHeader(Rec);
+                                 CopySalesDoc.RUNMODAL;
+                                 CLEAR(CopySalesDoc);
+                                 if GET("Document Type","No.") then;
+                               END;
+                                }
+      { 115     ;2   ;Action    ;
+                      Name=Move Negative Lines;
+                      Ellipsis=true;
+                      CaptionML=ENU=Move Negative Lines;
+                      ToolTipML=ENU=Prepare to create a replacement sales order in a sales return process.;
+                      ApplicationArea=#Advanced;
+                      Promoted=true;
+                      Image=MoveNegativeLines;
+                      PromotedCategory=Category6;
+                      OnAction=BEGIN
+                                 CLEAR(MoveNegSalesLines);
+                                 MoveNegSalesLines.SetSalesHeader(Rec);
+                                 MoveNegSalesLines.RUNMODAL;
+                                 MoveNegSalesLines.ShowDocument;
+                               END;
+                                }
+      { 47      ;2   ;ActionGroup;
+                      Name=Incoming Document;
+                      CaptionML=ENU=Incoming Document;
+                      ActionContainerType=NewDocumentItems;
+                      Image=Documents }
+      { 45      ;3   ;Action    ;
+                      Name=IncomingDocCard;
+                      CaptionML=ENU=View Incoming Document;
+                      ToolTipML=ENU=View any incoming document records and file attachments that exist for the entry or document.;
+                      ApplicationArea=#Basic,#Suite;
+                      Enabled=HasIncomingDocument;
+                      Image=ViewOrder;
+                      OnAction=VAR
+                                 IncomingDocument@1000 : Record "Incoming Document";
+                               BEGIN
+                                 IncomingDocument.ShowCardFromEntryNo("Incoming Document Entry No.");
+                               END;
+                                }
+      { 41      ;3   ;Action    ;
+                      Name=SelectIncomingDoc;
+                      AccessByPermission=TableData "Incoming Document"=R;
+                      CaptionML=ENU=Select Incoming Document;
+                      ToolTipML=ENU=Select an incoming document record and file attachment that you want to link to the entry or document.;
+                      ApplicationArea=#Basic,#Suite;
+                      Image=SelectLineToApply;
+                      OnAction=VAR
+                                 IncomingDocument@1000 : Record "Incoming Document";
+                               BEGIN
+                                 VALIDATE("Incoming Document Entry No.",IncomingDocument.SelectIncomingDocument("Incoming Document Entry No.",RECORDID));
+                               END;
+                                }
+      { 39      ;3   ;Action    ;
+                      Name=IncomingDocAttachFile;
+                      Ellipsis=true;
+                      CaptionML=ENU=Create Incoming Document from File;
+                      ToolTipML=ENU=Create an incoming document record by selecting a file to attach, and then link the incoming document record to the entry or document.;
+                      ApplicationArea=#Basic,#Suite;
+                      Enabled=NOT HasIncomingDocument;
+                      Image=Attach;
+                      OnAction=VAR
+                                 IncomingDocumentAttachment@1000 : Record "Incoming Document Attachment";
+                               BEGIN
+                                 IncomingDocumentAttachment.NewAttachmentFromSalesDocument(Rec);
+                               END;
+                                }
+      { 37      ;3   ;Action    ;
+                      Name=RemoveIncomingDoc;
+                      CaptionML=ENU=Remove Incoming Document;
+                      ToolTipML=ENU=Remove any incoming document records and file attachments.;
+                      ApplicationArea=#Basic,#Suite;
+                      Enabled=HasIncomingDocument;
+                      Image=RemoveLine;
+                      OnAction=VAR
+                                 IncomingDocument@1000 : Record "Incoming Document";
+                               BEGIN
+                                 if IncomingDocument.GET("Incoming Document Entry No.") then
+                                   IncomingDocument.RemoveLinkToRelatedRecord;
+                                 "Incoming Document Entry No." := 0;
+                                 MODIFY(true);
+                               END;
+                                }
+      { 49      ;1   ;ActionGroup;
+                      Name=Request Approval;
+                      CaptionML=ENU=Request Approval }
+      { 159     ;2   ;Action    ;
+                      Name=SendApprovalRequest;
+                      CaptionML=ENU=Send A&pproval Request;
+                      ToolTipML=ENU=Request approval of the document.;
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=true;
+                      Enabled=NOT OpenApprovalEntriesExist AND CanRequestApprovalForFlow;
+                      Image=SendApprovalRequest;
+                      PromotedCategory=Category9;
+                      PromotedOnly=true;
+                      OnAction=BEGIN
+                                 if ApprovalsMgmt.CheckSalesApprovalPossible(Rec) then
+                                   ApprovalsMgmt.OnSendSalesDocForApproval(Rec);
+                               END;
+                                }
+      { 160     ;2   ;Action    ;
+                      Name=CancelApprovalRequest;
+                      CaptionML=ENU=Cancel Approval Re&quest;
+                      ToolTipML=ENU=Cancel the approval request.;
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=true;
+                      Enabled=CanCancelApprovalForRecord OR CanCancelApprovalForFlow;
+                      Image=CancelApprovalRequest;
+                      PromotedCategory=Category9;
+                      PromotedOnly=true;
+                      OnAction=VAR
+                                 WorkflowWebhookMgt@1000 : Codeunit "Workflow Webhook Management";
+                               BEGIN
+                                 ApprovalsMgmt.OnCancelSalesApprovalRequest(Rec);
+                                 WorkflowWebhookMgt.FindAndCancel(RECORDID);
+                               END;
+                                }
+      { 215     ;2   ;ActionGroup;
+                      Name=Flow;
+                      CaptionML=ENU=Flow;
+                      Image=Flow }
+      { 216     ;3   ;Action    ;
+                      Name=CreateFlow;
+                      CaptionML=ENU=Create a Flow;
+                      ToolTipML=ENU=Create a new Flow from a list of relevant Flow templates.;
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=true;
+                      Image=Flow;
+                      PromotedCategory=Category9;
+                      PromotedOnly=true;
+                      OnAction=VAR
+                                 FlowServiceManagement@1001 : Codeunit "Flow Service Management";
+                                 FlowTemplateSelector@1000 : Page "Flow Template Selector";
+                               BEGIN
+                                 // Opens page 6400 where the user can use filtered templates to create new flows.
+                                 FlowTemplateSelector.SetSearchText(FlowServiceManagement.GetSalesTemplateFilter);
+                                 FlowTemplateSelector.RUN;
+                               END;
+                                }
+      { 217     ;3   ;Action    ;
+                      Name=SeeFlows;
+                      CaptionML=ENU=See my Flows;
+                      ToolTipML=ENU=View and configure Flows that you created.;
+                      ApplicationArea=#Basic,#Suite;
+                      RunObject=Page "Flow Selector";
+                      Promoted=true;
+                      Image=Flow;
+                      PromotedCategory=Category9;
+                      PromotedOnly=true }
+      { 69      ;1   ;ActionGroup;
+                      Name=P&osting;
+                      CaptionML=ENU=P&osting;
+                      Image=Post }
+      { 71      ;2   ;Action    ;
+                      Name=Post;
+                      ShortCutKey=F9;
+                      CaptionML=ENU=P&ost;
+                      ToolTipML=ENU=Finalize the document or journal by posting the amounts and quantities to the related accounts in your company books.;
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=true;
+                      PromotedIsBig=true;
+                      Image=PostOrder;
+                      PromotedCategory=Category5;
+                      PromotedOnly=true;
+                      OnAction=BEGIN
+                                 Post(CODEUNIT::"Sales-Post (Yes/No)",NavigateAfterPost::"Posted Document");
+                               END;
+                                }
+      { 7       ;2   ;Action    ;
+                      Name=PostAndNew;
+                      ShortCutKey=Shift+F9;
+                      Ellipsis=true;
+                      CaptionML=ENU=Post and New;
+                      ToolTipML=ENU=Post the sales document and create a new, empty one.;
+                      ApplicationArea=#Advanced;
+                      Promoted=true;
+                      Image=PostOrder;
+                      PromotedCategory=Category5;
+                      OnAction=BEGIN
+                                 Post(CODEUNIT::"Sales-Post (Yes/No)",NavigateAfterPost::"New Document");
+                               END;
+                                }
+      { 76      ;2   ;Action    ;
+                      Name=PostAndSend;
+                      Ellipsis=true;
+                      CaptionML=ENU=Post and &Send;
+                      ToolTipML=ENU=Finalize and prepare to send the document according to the customer's sending profile, such as attached to an email. The Send document to window opens first so you can confirm or select a sending profile.;
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=true;
+                      Image=PostSendTo;
+                      PromotedCategory=Category5;
+                      PromotedOnly=true;
+                      OnAction=BEGIN
+                                 Post(CODEUNIT::"Sales-Post and Send",NavigateAfterPost::Nowhere);
+                               END;
+                                }
+      { 68      ;2   ;Action    ;
+                      Name=Preview;
+                      CaptionML=ENU=Preview Posting;
+                      ToolTipML=ENU=Review the different types of entries that will be created when you post the document or journal.;
+                      ApplicationArea=#Basic,#Suite;
+                      Image=ViewPostedOrder;
+                      PromotedCategory=Category5;
+                      OnAction=BEGIN
+                                 ShowPreview;
+                               END;
+                                }
+      { 55      ;2   ;Action    ;
+                      Name=DraftInvoice;
+                      Ellipsis=true;
+                      CaptionML=ENU=Draft Invoice;
+                      ToolTipML=ENU=View or print the sales invoice as a draft before you perform the actual posting.;
+                      ApplicationArea=#Basic,#Suite;
+                      Image=ViewPostedOrder;
+                      PromotedCategory=Category5;
+                      OnAction=VAR
+                                 DocumentPrint@1000 : Codeunit "Document-Print";
+                               BEGIN
+                                 DocumentPrint.PrintSalesHeader(Rec);
+                               END;
+                                }
+      { 50      ;2   ;Action    ;
+                      Name=ProformaInvoice;
+                      Ellipsis=true;
+                      CaptionML=ENU=Pro Forma Invoice;
+                      ToolTipML=ENU=View or print the pro forma sales invoice.;
+                      Image=ViewPostedOrder;
+                      PromotedCategory=Category5;
+                      OnAction=VAR
+                                 DocumentPrint@1000 : Codeunit "Document-Print";
+                               BEGIN
+                                 DocumentPrint.PrintProformaSalesInvoice(Rec);
+                               END;
+                                }
+      { 78      ;2   ;Action    ;
+                      Name=Test Report;
+                      Ellipsis=true;
+                      CaptionML=ENU=Test Report;
+                      ToolTipML=ENU=View a test report so that you can find and correct any errors before you perform the actual posting of the journal or document.;
+                      ApplicationArea=#Advanced;
+                      Promoted=true;
+                      Image=TestReport;
+                      PromotedCategory=Category5;
+                      OnAction=BEGIN
+                                 ReportPrint.PrintSalesHeader(Rec);
+                               END;
+                                }
+      { 3       ;2   ;Action    ;
+                      Name=Remove From Job Queue;
+                      CaptionML=ENU=Remove From Job Queue;
+                      ToolTipML=ENU=Remove the scheduled processing of this record from the job queue.;
+                      ApplicationArea=#Advanced;
+                      Image=RemoveLine;
+                      OnAction=BEGIN
+                                 CancelBackgroundPosting;
+                               END;
+                                }
+    }
+  }
+  CONTROLS
+  {
+    { 1900000001;0;Container;
+                Name=Container1900000001;
+                ContainerType=ContentArea }
+
+    { 1   ;1   ;Group     ;
+                Name=General;
+                CaptionML=ENU=General;
+                GroupType=Group }
+
+    { 2   ;2   ;Field     ;
+                Name=No.;
+                ToolTipML=ENU=Specifies the number of the sales document. The field can be filled automatically or manually and can be set up to be invisible.;
+                ApplicationArea=#All;
+                SourceExpr="No.";
+                Importance=Additional;
+                Visible=DocNoVisible;
+                OnAssistEdit=BEGIN
+                               if AssistEdit(xRec) then
+                                 CurrPage.UPDATE;
+                             END;
+
+                ImplicitType=Code20 }
+
+    { 53  ;2   ;Field     ;
+                Name=Sell-to Customer No.;
+                CaptionML=ENU=Customer No.;
+                ToolTipML=ENU=Specifies the number of the customer who will receive the products and be billed by default.;
+                ApplicationArea=#Basic,#Suite;
+                NotBlank=true;
+                SourceExpr="Sell-to Customer No.";
+                Importance=Additional;
+                Visible=NOT IsSaaS;
+                OnValidate=BEGIN
+                             SelltoCustomerNoOnAfterValidate(Rec,xRec);
+                             CurrPage.UPDATE;
+                           END;
+
+                ImplicitType=Code20 }
+
+    { 4   ;2   ;Field     ;
+                Name=Sell-to Customer Name;
+                CaptionML=ENU=Customer Name;
+                ToolTipML=ENU=Specifies the name of the customer who will receive the products and be billed by default.;
+                ApplicationArea=#Basic,#Suite;
+                NotBlank=true;
+                SourceExpr="Sell-to Customer Name";
+                Importance=Promoted;
+                OnValidate=VAR
+                             ApplicationAreaSetup@1000 : Record "Application Area Setup";
+                           BEGIN
+                             SelltoCustomerNoOnAfterValidate(Rec,xRec);
+
+                             if ApplicationAreaSetup.IsFoundationEnabled then
+                               SalesCalcDiscountByType.ApplyDefaultInvoiceDiscount(0,Rec);
+
+                             CurrPage.UPDATE;
+                           END;
+
+                ImplicitType=Text50;
+                ShowMandatory=TRUE }
+
+    { 100 ;2   ;Group     ;
+                Name=Sell-to;
+                CaptionML=ENU=Sell-to;
+                GroupType=Group }
+
+    { 75  ;3   ;Field     ;
+                Name=Sell-to Address;
+                CaptionML=ENU=Address;
+                ToolTipML=ENU=Specifies the address where the customer is located.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Sell-to Address";
+                Importance=Additional;
+                ImplicitType=Text50 }
+
+    { 77  ;3   ;Field     ;
+                Name=Sell-to Address 2;
+                CaptionML=ENU=Address 2;
+                ToolTipML=ENU=Specifies additional address information.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Sell-to Address 2";
+                Importance=Additional;
+                ImplicitType=Text50 }
+
+    { 80  ;3   ;Field     ;
+                Name=Sell-to Post Code;
+                CaptionML=ENU=Post Code;
+                ToolTipML=ENU=Specifies the postal code.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Sell-to Post Code";
+                Importance=Additional;
+                ImplicitType=Code20 }
+
+    { 79  ;3   ;Field     ;
+                Name=Sell-to City;
+                CaptionML=ENU=City;
+                ToolTipML=ENU=Specifies the city of the customer on the sales document.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Sell-to City";
+                Importance=Additional;
+                ImplicitType=Text30 }
+
+    { 87  ;3   ;Field     ;
+                Name=Sell-to Contact No.;
+                CaptionML=ENU=Contact No.;
+                ToolTipML=ENU=Specifies the number of the contact that the sales document will be sent to.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Sell-to Contact No.";
+                Importance=Additional;
+                OnValidate=BEGIN
+                             if ApplicationAreaSetup.IsAdvanced then
+                               if GETFILTER("Sell-to Contact No.") = xRec."Sell-to Contact No." then
+                                 if "Sell-to Contact No." <> xRec."Sell-to Contact No." then
+                                   SETRANGE("Sell-to Contact No.");
+                           END;
+
+                ImplicitType=Code20 }
+
+    { 8   ;2   ;Field     ;
+                Name=Sell-to Contact;
+                CaptionML=ENU=Contact;
+                ToolTipML=ENU=Specifies the name of the person to contact at the customer.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Sell-to Contact";
+                Editable="Sell-to Customer No." <> '';
+                ImplicitType=Text50 }
+
+    { 19  ;2   ;Field     ;
+                Name=Your Reference;
+                ToolTipML=ENU=Specifies the customer's reference. The contents will be printed on sales documents.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Your Reference";
+                Importance=Additional;
+                ImplicitType=Text35 }
+
+    { 43  ;2   ;Field     ;
+                Name=Document Date;
+                ToolTipML=ENU=Specifies the date on which you created the sales document.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Document Date";
+                Importance=Additional;
+                ImplicitType=Date }
+
+    { 12  ;2   ;Field     ;
+                Name=Posting Date;
+                ToolTipML=ENU=Specifies the date when the posting of the sales document will be recorded.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Posting Date";
+                Importance=Promoted;
+                ImplicitType=Date }
+
+    { 28  ;2   ;Field     ;
+                Name=Due Date;
+                ToolTipML=ENU=Specifies when the sales invoice must be paid.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Due Date";
+                Importance=Promoted;
+                ImplicitType=Date }
+
+    { 13  ;2   ;Field     ;
+                Name=Incoming Document Entry No.;
+                ToolTipML=ENU=Specifies the number of the incoming document that this sales document is created for.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Incoming Document Entry No.";
+                Importance=Additional;
+                Visible=FALSE;
+                ImplicitType=Integer }
+
+    { 126 ;2   ;Field     ;
+                Name=External Document No.;
+                ToolTipML=ENU=Specifies the number that the customer uses in their own system to refer to this sales document.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="External Document No.";
+                Importance=Additional;
+                ImplicitType=Code35;
+                ShowMandatory=ExternalDocNoMandatory }
+
+    { 10  ;2   ;Field     ;
+                Name=Salesperson Code;
+                ToolTipML=ENU=Specifies the name of the salesperson who is assigned to the customer.;
+                ApplicationArea=#Suite;
+                SourceExpr="Salesperson Code";
+                Importance=Additional;
+                OnValidate=BEGIN
+                             SalespersonCodeOnAfterValidate;
+                           END;
+
+                ImplicitType=Code20 }
+
+    { 129 ;2   ;Field     ;
+                Name=Campaign No.;
+                ToolTipML=ENU=Specifies the number of the campaign that the document is linked to.;
+                ApplicationArea=#RelationshipMgmt;
+                SourceExpr="Campaign No.";
+                Importance=Additional;
+                ImplicitType=Code20 }
+
+    { 118 ;2   ;Field     ;
+                Name=Responsibility Center;
+                AccessByPermission=TableData "Responsibility Center"=R;
+                ToolTipML=ENU=Specifies the code of the responsibility center that is associated with the user, company, or vendor.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Responsibility Center";
+                Importance=Additional;
+                ImplicitType=Code10 }
+
+    { 67  ;2   ;Field     ;
+                Name=Assigned User ID;
+                ToolTipML=ENU=Specifies the ID of the user who is responsible for the document.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Assigned User ID";
+                Importance=Additional;
+                ImplicitType=Code50 }
+
+    { 112 ;2   ;Field     ;
+                Name=Status;
+                ToolTipML=ENU=Specifies whether the document is open, waiting to be approved, has been invoiced for prepayment, or has been released to the next stage of processing.;
+                ApplicationArea=#Suite;
+                SourceExpr=Status;
+                Importance=Additional;
+                ImplicitType=Option }
+
+    { 5   ;2   ;Field     ;
+                Name=Job Queue Status;
+                ToolTipML=ENU=Specifies the status of a job queue entry or task that handles the posting of sales invoices.;
+                ApplicationArea=#All;
+                SourceExpr="Job Queue Status";
+                Importance=Additional;
+                Visible=JobQueuesUsed;
+                ImplicitType=Option }
+
+    { 135 ;2   ;Group     ;
+                Name=Work Description;
+                CaptionML=ENU=Work Description;
+                GroupType=Group }
+
+    { 117 ;3   ;Field     ;
+                Name=WorkDescription;
+                ToolTipML=ENU=Specifies the products or service being offered;
+                ApplicationArea=#Advanced;
+                SourceExpr=WorkDescription;
+                Importance=Additional;
+                MultiLine=true;
+                OnValidate=BEGIN
+                             SetWorkDescription(WorkDescription);
+                           END;
+
+                ImplicitType=Text;
+                ShowCaption=false }
+
+    { 56  ;1   ;Part      ;
+                Name=SalesLines;
+                ApplicationArea=#Basic,#Suite;
+                SubPageLink="Document No."=FIELD("No.");
+                PagePartID="Sales Invoice Subform";
+                Enabled="Sell-to Customer No." <> '';
+                Editable="Sell-to Customer No." <> '' }
+
+    { 1905885101;1;Group  ;
+                Name=Invoice Details;
+                CaptionML=ENU=Invoice Details;
+                GroupType=Group }
+
+    { 107 ;2   ;Field     ;
+                Name=Currency Code;
+                ToolTipML=ENU=Specifies the currency of amounts on the sales document.;
+                ApplicationArea=#Suite;
+                SourceExpr="Currency Code";
+                Importance=Promoted;
+                OnValidate=BEGIN
+                             CurrPage.UPDATE;
+                             SalesCalcDiscountByType.ApplyDefaultInvoiceDiscount(0,Rec);
+                           END;
+
+                OnAssistEdit=BEGIN
+                               CLEAR(ChangeExchangeRate);
+                               if "Posting Date" <> 0D then
+                                 ChangeExchangeRate.SetParameter("Currency Code","Currency Factor","Posting Date")
+                               else
+                                 ChangeExchangeRate.SetParameter("Currency Code","Currency Factor",WORKDATE);
+                               if ChangeExchangeRate.RUNMODAL = ACTION::OK then begin
+                                 VALIDATE("Currency Factor",ChangeExchangeRate.GetParameter);
+                                 CurrPage.UPDATE;
+                               end;
+                               CLEAR(ChangeExchangeRate);
+                             END;
+
+                ImplicitType=Code10 }
+
+    { 48  ;2   ;Field     ;
+                Name=Shipment Date;
+                ToolTipML=ENU=Specifies when items on the document are shipped or were shipped. A shipment date is usually calculated from a requested delivery date plus lead time.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Shipment Date";
+                Importance=Promoted;
+                ImplicitType=Date }
+
+    { 83  ;2   ;Field     ;
+                Name=Quote No.;
+                ToolTipML=ENU=Specifies the number of the sales quote that the sales order was created from. You can track the number to sales quote documents that you have printed, saved, or emailed.;
+                ApplicationArea=#All;
+                SourceExpr="Quote No.";
+                Visible=ShowQuoteNo;
+                ImplicitType=Code20 }
+
+    { 121 ;2   ;Field     ;
+                Name=Prices Including VAT;
+                ToolTipML=ENU=Specifies if the Unit Price and Line Amount fields on document lines should be shown with or without VAT.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Prices Including VAT";
+                ImplicitType=Boolean }
+
+    { 156 ;2   ;Field     ;
+                Name=VAT Bus. Posting Group;
+                ToolTipML=ENU=Specifies the customer's VAT specification to link transactions made for this customer to.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="VAT Bus. Posting Group";
+                OnValidate=VAR
+                             ApplicationAreaSetup@1000 : Record "Application Area Setup";
+                           BEGIN
+                             if ApplicationAreaSetup.IsFoundationEnabled then
+                               SalesCalcDiscountByType.ApplyDefaultInvoiceDiscount(0,Rec);
+
+                             CurrPage.UPDATE;
+                           END;
+
+                ImplicitType=Code20 }
+
+    { 26  ;2   ;Field     ;
+                Name=Payment Terms Code;
+                ToolTipML=ENU=Specifies a formula that calculates the payment due date, payment discount date, and payment discount amount on the sales document.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Payment Terms Code";
+                Importance=Promoted;
+                ImplicitType=Code10 }
+
+    { 101 ;2   ;Field     ;
+                Name=Payment Method Code;
+                ToolTipML=ENU=Specifies how the customer must pay for products on the sales document.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Payment Method Code";
+                Importance=Additional;
+                OnValidate=BEGIN
+                             UpdatePaymentService;
+                           END;
+
+                ImplicitType=Code10 }
+
+    { 72  ;2   ;Field     ;
+                Name=EU 3-Party Trade;
+                ToolTipML=ENU=Specifies if the sales document is part of a three-party trade.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="EU 3-Party Trade";
+                ImplicitType=Boolean }
+
+    { 174 ;2   ;Group     ;
+                Name=Group174;
+                Visible=PaymentServiceVisible;
+                GroupType=Group }
+
+    { 175 ;3   ;Field     ;
+                Name=SelectedPayments;
+                CaptionML=ENU=Payment Service;
+                ToolTipML=ENU=Specifies the online payment service, such as PayPal, that customers can use to pay the sales document.;
+                ApplicationArea=#All;
+                SourceExpr=GetSelectedPaymentServicesText;
+                Enabled=PaymentServiceEnabled;
+                Editable=FALSE;
+                MultiLine=true;
+                OnAssistEdit=BEGIN
+                               ChangePaymentServiceSetting;
+                             END;
+
+                ImplicitType=Text }
+
+    { 52  ;2   ;Field     ;
+                Name=Transaction Type;
+                ToolTipML=ENU=Specifies the type of transaction that the sales document represents, for the purpose of reporting to INTRASTAT.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Transaction Type";
+                ImplicitType=Code10 }
+
+    { 84  ;2   ;Field     ;
+                Name=Shortcut Dimension 1 Code;
+                ToolTipML=ENU=Specifies the code for Shortcut Dimension 1, which is one of two global dimension codes that you set up in the General Ledger Setup window.;
+                ApplicationArea=#Suite;
+                SourceExpr="Shortcut Dimension 1 Code";
+                OnValidate=BEGIN
+                             CurrPage.UPDATE;
+                           END;
+
+                ImplicitType=Code20 }
+
+    { 88  ;2   ;Field     ;
+                Name=Shortcut Dimension 2 Code;
+                ToolTipML=ENU=Specifies the code for Shortcut Dimension 2, which is one of two global dimension codes that you set up in the General Ledger Setup window.;
+                ApplicationArea=#Suite;
+                SourceExpr="Shortcut Dimension 2 Code";
+                OnValidate=BEGIN
+                             CurrPage.UPDATE;
+                           END;
+
+                ImplicitType=Code20 }
+
+    { 30  ;2   ;Field     ;
+                Name=Payment Discount %;
+                ToolTipML=ENU=Specifies the payment discount percentage granted if the customer pays on or before the date entered in the Pmt. Discount Date field.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Payment Discount %";
+                ImplicitType=Decimal }
+
+    { 32  ;2   ;Field     ;
+                Name=Pmt. Discount Date;
+                ToolTipML=ENU=Specifies the date on which the amount in the entry must be paid for a payment discount to be granted.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Pmt. Discount Date";
+                Importance=Additional;
+                ImplicitType=Date }
+
+    { 15  ;2   ;Field     ;
+                Name=Direct Debit Mandate ID;
+                ToolTipML=ENU=Specifies the direct-debit mandate that the customer has signed to allow direct debit collection of payments.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Direct Debit Mandate ID";
+                ImplicitType=Code35 }
+
+    { 90  ;2   ;Field     ;
+                Name=Location Code;
+                ToolTipML=ENU=Specifies the location from where inventory items to the customer on the sales document are to be shipped by default.;
+                ApplicationArea=#Location;
+                SourceExpr="Location Code";
+                Importance=Additional;
+                ImplicitType=Code10 }
+
+    { 1900000002;1;Group  ;
+                Name=Shipping and Billing;
+                CaptionML=ENU=Shipping and Billing;
+                Enabled="Sell-to Customer No." <> '';
+                GroupType=Group }
+
+    { 34  ;2   ;Group     ;
+                Name=Group34;
+                GroupType=Group }
+
+    { 200 ;3   ;Group     ;
+                Name=Group200;
+                GroupType=Group }
+
+    { 201 ;4   ;Field     ;
+                Name=ShippingOptions;
+                CaptionML=ENU=Ship-to;
+                ToolTipML=ENU=Specifies the address that the products on the sales document are shipped to. Default (Sell-to Address): The same as the customer's sell-to address. Alternate Ship-to Address: One of the customer's alternate ship-to addresses. Custom Address: Any ship-to address that you specify in the fields below.;
+                OptionCaptionML=ENU=Default (Sell-to Address),Alternate Shipping Address,Custom Address;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr=ShipToOptions;
+                OnValidate=VAR
+                             ShipToAddress@1001 : Record "Ship-to Address";
+                             ShipToAddressList@1000 : Page "Ship-to Address List";
+                           BEGIN
+                             case ShipToOptions of
+                               ShipToOptions::"Default (Sell-to Address)":
+                                 begin
+                                   VALIDATE("Ship-to Code",'');
+                                   CopySellToAddressToShipToAddress;
+                                 end;
+                               ShipToOptions::"Alternate Shipping Address":
+                                 begin
+                                   ShipToAddress.SETRANGE("Customer No.","Sell-to Customer No.");
+                                   ShipToAddressList.LOOKUPMODE := true;
+                                   ShipToAddressList.SETTABLEVIEW(ShipToAddress);
+
+                                   if ShipToAddressList.RUNMODAL = ACTION::LookupOK then begin
+                                     ShipToAddressList.GETRECORD(ShipToAddress);
+                                     VALIDATE("Ship-to Code",ShipToAddress.Code);
+                                   end else
+                                     ShipToOptions := ShipToOptions::"Custom Address";
+                                 end;
+                               ShipToOptions::"Custom Address":
+                                 VALIDATE("Ship-to Code",'');
+                             end;
+                           END;
+
+                ImplicitType=Option }
+
+    { 202 ;4   ;Group     ;
+                Name=Group202;
+                Visible=NOT (ShipToOptions = ShipToOptions::"Default (Sell-to Address)");
+                GroupType=Group }
+
+    { 65  ;5   ;Field     ;
+                Name=Ship-to Code;
+                CaptionML=ENU=Code;
+                ToolTipML=ENU=Specifies the code for another shipment address than the customer's own address, which is entered by default.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Code";
+                Importance=Promoted;
+                Editable=ShipToOptions = ShipToOptions::"Alternate Shipping Address";
+                OnValidate=BEGIN
+                             if (xRec."Ship-to Code" <> '') and ("Ship-to Code" = '') then
+                               ERROR(EmptyShipToCodeErr);
+                           END;
+
+                ImplicitType=Code10 }
+
+    { 36  ;5   ;Field     ;
+                Name=Ship-to Name;
+                CaptionML=ENU=Name;
+                ToolTipML=ENU=Specifies the name that products on the sales document will be shipped to.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Name";
+                Editable=ShipToOptions = ShipToOptions::"Custom Address";
+                ImplicitType=Text50 }
+
+    { 38  ;5   ;Field     ;
+                Name=Ship-to Address;
+                CaptionML=ENU=Address;
+                ToolTipML=ENU=Specifies the address that products on the sales document will be shipped to.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Address";
+                Editable=ShipToOptions = ShipToOptions::"Custom Address";
+                ImplicitType=Text50 }
+
+    { 40  ;5   ;Field     ;
+                Name=Ship-to Address 2;
+                CaptionML=ENU=Address 2;
+                ToolTipML=ENU=Specifies additional address information.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Address 2";
+                Editable=ShipToOptions = ShipToOptions::"Custom Address";
+                ImplicitType=Text50 }
+
+    { 93  ;5   ;Field     ;
+                Name=Ship-to Post Code;
+                CaptionML=ENU=Post Code;
+                ToolTipML=ENU=Specifies the postal code.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Post Code";
+                Editable=ShipToOptions = ShipToOptions::"Custom Address";
+                ImplicitType=Code20 }
+
+    { 42  ;5   ;Field     ;
+                Name=Ship-to City;
+                CaptionML=ENU=City;
+                ToolTipML=ENU=Specifies the city of the customer on the sales document.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to City";
+                Editable=ShipToOptions = ShipToOptions::"Custom Address";
+                ImplicitType=Text30 }
+
+    { 17  ;5   ;Field     ;
+                Name=Ship-to Country/Region Code;
+                CaptionML=ENU=Country/Region;
+                ToolTipML=ENU=Specifies the customer's country/region.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Country/Region Code";
+                Importance=Additional;
+                Editable=ShipToOptions = ShipToOptions::"Custom Address";
+                ImplicitType=Code10 }
+
+    { 44  ;4   ;Field     ;
+                Name=Ship-to Contact;
+                CaptionML=ENU=Contact;
+                ToolTipML=ENU=Specifies the name of the contact person at the address that products on the sales document will be shipped to.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Contact";
+                ImplicitType=Text50 }
+
+    { 16  ;3   ;Group     ;
+                Name=Shipment Method;
+                CaptionML=ENU=Shipment Method;
+                GroupType=Group }
+
+    { 46  ;4   ;Field     ;
+                Name=Shipment Method Code;
+                CaptionML=ENU=Code;
+                ToolTipML=ENU=Specifies how items on the sales document are shipped to the customer.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Shipment Method Code";
+                Importance=Additional;
+                ImplicitType=Code10 }
+
+    { 103 ;4   ;Field     ;
+                Name=Shipping Agent Code;
+                CaptionML=ENU=Agent;
+                ToolTipML=ENU=Specifies which shipping agent is used to transport the items on the sales document to the customer.;
+                ApplicationArea=#Suite;
+                SourceExpr="Shipping Agent Code";
+                Importance=Additional;
+                ImplicitType=Code10 }
+
+    { 11  ;4   ;Field     ;
+                Name=Shipping Agent Service Code;
+                CaptionML=ENU=Agent service;
+                ToolTipML=ENU=Specifies which shipping agent service is used to transport the items on the sales document to the customer.;
+                ApplicationArea=#Suite;
+                SourceExpr="Shipping Agent Service Code";
+                Importance=Additional;
+                ImplicitType=Code10 }
+
+    { 105 ;4   ;Field     ;
+                Name=Package Tracking No.;
+                ToolTipML=ENU=Specifies the shipping agent's package number.;
+                ApplicationArea=#Suite;
+                SourceExpr="Package Tracking No.";
+                Importance=Additional;
+                ImplicitType=Text30 }
+
+    { 203 ;2   ;Group     ;
+                Name=Group203;
+                GroupType=Group }
+
+    { 204 ;3   ;Field     ;
+                Name=BillToOptions;
+                CaptionML=ENU=Bill-to;
+                ToolTipML=ENU=Specifies the customer that the sales invoice will be sent to. Default (Customer): The same as the customer on the sales invoice. Another Customer: Any customer that you specify in the fields below.;
+                OptionCaptionML=ENU=Default (Customer),Another Customer;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr=BillToOptions;
+                OnValidate=BEGIN
+                             if BillToOptions = BillToOptions::"Default (Customer)" then begin
+                               VALIDATE("Bill-to Customer No.","Sell-to Customer No.");
+                               RecallModifyAddressNotification(GetModifyBillToCustomerAddressNotificationId);
+                             end;
+
+                             CopySellToAddressToBillToAddress;
+                           END;
+
+                ImplicitType=Option }
+
+    { 205 ;3   ;Group     ;
+                Name=Group205;
+                Visible=BillToOptions = BillToOptions::"Another Customer";
+                GroupType=Group }
+
+    { 14  ;4   ;Field     ;
+                Name=Bill-to Name;
+                CaptionML=ENU=Name;
+                ToolTipML=ENU=Specifies the customer to whom you will send the sales invoice, when different from the customer that you are selling to.;
+                ApplicationArea=#Basic,#Suite;
+                NotBlank=true;
+                SourceExpr="Bill-to Name";
+                Importance=Promoted;
+                OnValidate=VAR
+                             ApplicationAreaSetup@1000 : Record "Application Area Setup";
+                           BEGIN
+                             if GETFILTER("Bill-to Customer No.") = xRec."Bill-to Customer No." then
+                               if "Bill-to Customer No." <> xRec."Bill-to Customer No." then
+                                 SETRANGE("Bill-to Customer No.");
+
+                             if ApplicationAreaSetup.IsFoundationEnabled then
+                               SalesCalcDiscountByType.ApplyDefaultInvoiceDiscount(0,Rec);
+
+                             CurrPage.UPDATE;
+                           END;
+
+                ImplicitType=Text50 }
+
+    { 18  ;4   ;Field     ;
+                Name=Bill-to Address;
+                CaptionML=ENU=Address;
+                ToolTipML=ENU=Specifies the address of the customer that you will send the invoice to.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Bill-to Address";
+                Importance=Additional;
+                Enabled="Bill-to Customer No." <> "Sell-to Customer No.";
+                Editable="Bill-to Customer No." <> "Sell-to Customer No.";
+                ImplicitType=Text50 }
+
+    { 20  ;4   ;Field     ;
+                Name=Bill-to Address 2;
+                CaptionML=ENU=Address 2;
+                ToolTipML=ENU=Specifies additional address information.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Bill-to Address 2";
+                Importance=Additional;
+                Enabled="Bill-to Customer No." <> "Sell-to Customer No.";
+                Editable="Bill-to Customer No." <> "Sell-to Customer No.";
+                ImplicitType=Text50 }
+
+    { 85  ;4   ;Field     ;
+                Name=Bill-to Post Code;
+                CaptionML=ENU=Post Code;
+                ToolTipML=ENU=Specifies the postal code.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Bill-to Post Code";
+                Importance=Additional;
+                Enabled="Bill-to Customer No." <> "Sell-to Customer No.";
+                Editable="Bill-to Customer No." <> "Sell-to Customer No.";
+                ImplicitType=Code20 }
+
+    { 22  ;4   ;Field     ;
+                Name=Bill-to City;
+                CaptionML=ENU=City;
+                ToolTipML=ENU=Specifies the city of the customer on the sales document.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Bill-to City";
+                Importance=Additional;
+                Enabled="Bill-to Customer No." <> "Sell-to Customer No.";
+                Editable="Bill-to Customer No." <> "Sell-to Customer No.";
+                ImplicitType=Text30 }
+
+    { 86  ;4   ;Field     ;
+                Name=Bill-to Contact No.;
+                CaptionML=ENU=Contact No.;
+                ToolTipML=ENU=Specifies the number of the contact the invoice will be sent to.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Bill-to Contact No.";
+                Importance=Additional;
+                Enabled="Bill-to Customer No." <> "Sell-to Customer No.";
+                Editable="Bill-to Customer No." <> "Sell-to Customer No.";
+                ImplicitType=Code20 }
+
+    { 24  ;4   ;Field     ;
+                Name=Bill-to Contact;
+                CaptionML=ENU=Contact;
+                ToolTipML=ENU=Specifies the name of the person you should contact at the customer who you are sending the invoice to.;
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Bill-to Contact";
+                Enabled="Bill-to Customer No." <> "Sell-to Customer No.";
+                Editable="Bill-to Customer No." <> "Sell-to Customer No.";
+                ImplicitType=Text50 }
+
+    { 1907468901;1;Group  ;
+                Name=Foreign Trade;
+                CaptionML=ENU=Foreign Trade;
+                GroupType=Group }
+
+    { 99  ;2   ;Field     ;
+                Name=Transaction Specification;
+                ToolTipML=ENU=Specifies a code for the sales document's transaction specification, for the purpose of reporting to INTRASTAT.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Transaction Specification";
+                ImplicitType=Code10 }
+
+    { 54  ;2   ;Field     ;
+                Name=Transport Method;
+                ToolTipML=ENU=Specifies the transport method, for the purpose of reporting to INTRASTAT.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Transport Method";
+                ImplicitType=Code10 }
+
+    { 95  ;2   ;Field     ;
+                Name=Exit Point;
+                ToolTipML=ENU=Specifies the point of exit through which you ship the items out of your country/region, for reporting to Intrastat.;
+                ApplicationArea=#Advanced;
+                SourceExpr="Exit Point";
+                ImplicitType=Code10 }
+
+    { 97  ;2   ;Field     ;
+                Name=Area;
+                ToolTipML=ENU=Specifies the area of the customer's address, for the purpose of reporting to INTRASTAT.;
+                ApplicationArea=#Advanced;
+                SourceExpr=Area;
+                ImplicitType=Code10 }
+
+    { 1900000007;0;Container;
+                Name=Container1900000007;
+                ContainerType=FactBoxArea }
+
+    { 31  ;1   ;Part      ;
+                Name=Part31;
+                ApplicationArea=#All;
+                SubPageLink="Table ID"=CONST(36),
+                            "Document Type"=FIELD("Document Type"),
+                            "Document No."=FIELD("No.");
+                PagePartID="Pending Approval FactBox";
+                Visible=OpenApprovalEntriesExistForCurrUser;
+                PartType=Page }
+
+    { 1903720907;1;Part   ;
+                Name=Part1903720907;
+                ApplicationArea=#Advanced;
+                SubPageLink="No."=FIELD("Sell-to Customer No.");
+                PagePartID="Sales Hist. Sell-to FactBox";
+                Visible=FALSE;
+                PartType=Page }
+
+    { 1907234507;1;Part   ;
+                Name=Part1907234507;
+                ApplicationArea=#Advanced;
+                SubPageLink="No."=FIELD("Bill-to Customer No.");
+                PagePartID="Sales Hist. Bill-to FactBox";
+                Visible=FALSE;
+                PartType=Page }
+
+    { 1902018507;1;Part   ;
+                Name=Part1902018507;
+                ApplicationArea=#Advanced;
+                SubPageLink="No."=FIELD("Bill-to Customer No.");
+                PagePartID="Customer Statistics FactBox";
+                PartType=Page }
+
+    { 1900316107;1;Part   ;
+                Name=Part1900316107;
+                ApplicationArea=#Advanced;
+                SubPageLink="No."=FIELD("Sell-to Customer No.");
+                PagePartID="Customer Details FactBox";
+                PartType=Page }
+
+    { 1906127307;1;Part   ;
+                Name=Part1906127307;
+                ApplicationArea=#Advanced;
+                SubPageLink="Document Type"=FIELD("Document Type"),
+                            "Document No."=FIELD("Document No."),
+                            "Line No."=FIELD("Line No.");
+                PagePartID="Sales Line FactBox";
+                ProviderID=56;
+                Visible=FALSE;
+                PartType=Page }
+
+    { 1901314507;1;Part   ;
+                Name=Part1901314507;
+                ApplicationArea=#Advanced;
+                SubPageLink="No."=FIELD("No.");
+                PagePartID="Item Invoicing FactBox";
+                ProviderID=56;
+                PartType=Page }
+
+    { 33  ;1   ;Part      ;
+                Name=IncomingDocAttachFactBox;
+                ApplicationArea=#Advanced;
+                PagePartID="Incoming Doc. Attach. FactBox";
+                Visible=FALSE;
+                PartType=Page;
+                ShowFilter=false }
+
+    { 1906354007;1;Part   ;
+                Name=ApprovalFactBox;
+                ApplicationArea=#Advanced;
+                PagePartID="Approval FactBox";
+                Visible=FALSE;
+                PartType=Page }
+
+    { 1907012907;1;Part   ;
+                Name=Part1907012907;
+                ApplicationArea=#Advanced;
+                SubPageLink="No."=FIELD("No.");
+                PagePartID="Resource Details FactBox";
+                ProviderID=56;
+                Visible=FALSE;
+                PartType=Page }
+
+    { 51  ;1   ;Part      ;
+                Name=WorkflowStatus;
+                ApplicationArea=#All;
+                PagePartID="Workflow Status FactBox";
+                Visible=ShowWorkflowStatus;
+                Enabled=FALSE;
+                Editable=FALSE;
+                PartType=Page;
+                ShowFilter=false }
+
+    { 1900383207;1;Part   ;
+                Name=Part1900383207;
+                Visible=FALSE;
+                PartType=System;
+                SystemPartID=RecordLinks }
+
+    { 1905767507;1;Part   ;
+                Name=Part1905767507;
+                PartType=System;
+                SystemPartID=Notes }
+
+  }
+  CODE
+  {
+    VAR
+      ApplicationAreaSetup@1011 : Record "Application Area Setup";
+      CopySalesDoc@1002 : Report "Copy Sales Document";
+      MoveNegSalesLines@1006 : Report "Move Negative Sales Lines";
+      ReportPrint@1003 : Codeunit "Test Report-Print";
+      UserMgt@1004 : Codeunit "User Setup Management";
+      SalesCalcDiscountByType@1007 : Codeunit "Sales - Calc Discount By Type";
+      ApprovalsMgmt@1013 : Codeunit "Approvals Mgmt.";
+      LinesInstructionMgt@1015 : Codeunit "Lines Instruction Mgt.";
+      CustomerMgt@1059 : Codeunit "Customer Mgt.";
+      ChangeExchangeRate@1001 : Page "Change Exchange Rate";
+      NavigateAfterPost@1017 : '"Posted Document","New Document",Nowhere';
+      WorkDescription@1018 : Text;
+      HasIncomingDocument@1012 : Boolean;
+      DocNoVisible@1005 : Boolean;
+      ExternalDocNoMandatory@1008 : Boolean;
+      OpenApprovalEntriesExistForCurrUser@1009 : Boolean;
+      OpenApprovalEntriesExist@1000 : Boolean;
+      ShowWorkflowStatus@1010 : Boolean;
+      PaymentServiceVisible@1032 : Boolean;
+      PaymentServiceEnabled@1033 : Boolean;
+      OpenPostedSalesInvQst@1020 : TextConst 'ENU=The invoice has been posted and moved to the Posted Sales Invoices window.\\Do you want to open the posted invoice?';
+      IsCustomerOrContactNotEmpty@1021 : Boolean;
+      ShowQuoteNo@1029 : Boolean;
+      JobQueuesUsed@1031 : Boolean;
+      CanCancelApprovalForRecord@1014 : Boolean;
+      DocumentIsPosted@1016 : Boolean;
+      ShipToOptions@1050 : '"Default (Sell-to Address)","Alternate Shipping Address","Custom Address"';
+      BillToOptions@1051 : '"Default (Customer)","Another Customer"';
+      EmptyShipToCodeErr@1052 : TextConst 'ENU=The Code field can only be empty if you select Custom Address in the Ship-to field.';
+      IsSaaS@1019 : Boolean;
+      CanRequestApprovalForFlow@1023 : Boolean;
+      CanCancelApprovalForFlow@1022 : Boolean;
+
+    LOCAL PROCEDURE Post@4(PostingCodeunitID@1000 : Integer;Navigate@1005 : Option);
+    VAR
+      SalesHeader@1002 : Record "Sales Header";
+      SalesInvoiceHeader@1003 : Record "Sales Invoice Header";
+      OfficeMgt@1004 : Codeunit "Office Management";
+      InstructionMgt@1006 : Codeunit "Instruction Mgt.";
+      PreAssignedNo@1001 : Code[20];
+      IsScheduledPosting@1007 : Boolean;
+    BEGIN
+      LinesInstructionMgt.SalesCheckAllLinesHaveQuantityAssigned(Rec);
+      PreAssignedNo := "No.";
+
+      SendToPosting(PostingCodeunitID);
+
+      IsScheduledPosting := "Job Queue Status" = "Job Queue Status"::"Scheduled for Posting";
+      DocumentIsPosted := (not SalesHeader.GET("Document Type","No.")) or IsScheduledPosting;
+
+      if IsScheduledPosting then
+        CurrPage.CLOSE;
+      CurrPage.UPDATE(false);
+
+      if PostingCodeunitID <> CODEUNIT::"Sales-Post (Yes/No)" then
+        exit;
+
+      if OfficeMgt.IsAvailable then begin
+        SalesInvoiceHeader.SETCURRENTKEY("Pre-Assigned No.");
+        SalesInvoiceHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+        if SalesInvoiceHeader.FINDFIRST then
+          PAGE.RUN(PAGE::"Posted Sales Invoice",SalesInvoiceHeader);
+      end else
+        case Navigate of
+          NavigateAfterPost::"Posted Document":
+            if InstructionMgt.IsEnabled(InstructionMgt.ShowPostedConfirmationMessageCode) then
+              ShowPostedConfirmationMessage(PreAssignedNo);
+          NavigateAfterPost::"New Document":
+            if DocumentIsPosted then begin
+              SalesHeader.INIT;
+              SalesHeader.VALIDATE("Document Type",SalesHeader."Document Type"::Invoice);
+              SalesHeader.INSERT(true);
+              PAGE.RUN(PAGE::"Sales Invoice",SalesHeader);
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE ApproveCalcInvDisc@8();
+    BEGIN
+      CurrPage.SalesLines.PAGE.ApproveCalcInvDisc;
+    END;
+
+    LOCAL PROCEDURE ShowPostedConfirmationMessage@17(PreAssignedNo@1001 : Code[20]);
+    VAR
+      SalesInvoiceHeader@1000 : Record "Sales Invoice Header";
+      InstructionMgt@1002 : Codeunit "Instruction Mgt.";
+    BEGIN
+      SalesInvoiceHeader.SETCURRENTKEY("Pre-Assigned No.");
+      SalesInvoiceHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      if SalesInvoiceHeader.FINDFIRST then
+        if InstructionMgt.ShowConfirm(OpenPostedSalesInvQst,InstructionMgt.ShowPostedConfirmationMessageCode) then
+          PAGE.RUN(PAGE::"Posted Sales Invoice",SalesInvoiceHeader);
+    END;
+
+    LOCAL PROCEDURE SalespersonCodeOnAfterValidate@19011896();
+    BEGIN
+      CurrPage.SalesLines.PAGE.UpdatePage(true);
+    END;
+
+    LOCAL PROCEDURE SetDocNoVisible@3();
+    VAR
+      DocumentNoVisibility@1000 : Codeunit DocumentNoVisibility;
+      DocType@1003 : 'Quote,Order,Invoice,"Credit Memo","Blanket Order","Return Order",Reminder,FinChMemo';
+    BEGIN
+      DocNoVisible := DocumentNoVisibility.SalesDocumentNoIsVisible(DocType::Invoice,"No.");
+    END;
+
+    LOCAL PROCEDURE SetExtDocNoMandatoryCondition@2();
+    VAR
+      SalesReceivablesSetup@1000 : Record "Sales & Receivables Setup";
+    BEGIN
+      SalesReceivablesSetup.GET;
+      ExternalDocNoMandatory := SalesReceivablesSetup."Ext. Doc. No. Mandatory"
+    END;
+
+    LOCAL PROCEDURE ShowPreview@5();
+    VAR
+      SalesPostYesNo@1000 : Codeunit "Sales-Post (Yes/No)";
+    BEGIN
+      SalesPostYesNo.Preview(Rec);
+    END;
+
+    LOCAL PROCEDURE SetControlAppearance@6();
+    VAR
+      ApprovalsMgmt@1002 : Codeunit "Approvals Mgmt.";
+      WorkflowWebhookMgt@1000 : Codeunit "Workflow Webhook Management";
+    BEGIN
+      HasIncomingDocument := "Incoming Document Entry No." <> 0;
+      SetExtDocNoMandatoryCondition;
+
+      OpenApprovalEntriesExistForCurrUser := ApprovalsMgmt.HasOpenApprovalEntriesForCurrentUser(RECORDID);
+      OpenApprovalEntriesExist := ApprovalsMgmt.HasOpenApprovalEntries(RECORDID);
+      CanCancelApprovalForRecord := ApprovalsMgmt.CanCancelApprovalForRecord(RECORDID);
+
+      IsCustomerOrContactNotEmpty := ("Sell-to Customer No." <> '') or ("Sell-to Contact No." <> '');
+
+      WorkflowWebhookMgt.GetCanRequestAndCanCancel(RECORDID,CanRequestApprovalForFlow,CanCancelApprovalForFlow);
+    END;
+
+    LOCAL PROCEDURE UpdatePaymentService@7();
+    VAR
+      PaymentServiceSetup@1000 : Record "Payment Service Setup";
+    BEGIN
+      PaymentServiceVisible := PaymentServiceSetup.IsPaymentServiceVisible;
+      PaymentServiceEnabled := PaymentServiceSetup.CanChangePaymentService(Rec);
+    END;
+
+    LOCAL PROCEDURE UpdateShipToBillToGroupVisibility@9();
+    BEGIN
+      CustomerMgt.CalculateShipToBillToOptions(ShipToOptions,BillToOptions,Rec);
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnBeforeStatisticsAction@1(VAR SalesHeader@1000 : Record "Sales Header";VAR Handled@1001 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

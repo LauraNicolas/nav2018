@@ -1,0 +1,209 @@
+OBJECT Codeunit 7713 Miniform Phys.-Inventory
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20161025D;
+    Time=120000T;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Miniform Header";
+    OnRun=VAR
+            MiniformMgmt@1000 : Codeunit "Miniform Management";
+          BEGIN
+            MiniformMgmt.Initialize(
+              MiniformHeader,Rec,DOMxmlin,ReturnedNode,
+              RootNode,XMLDOMMgt,ADCSCommunication,ADCSUserId,
+              CurrentCode,StackCode,WhseEmpId,LocationFilter);
+
+            if Code <> CurrentCode then
+              PrepareData
+            else
+              ProcessInput;
+
+            CLEAR(DOMxmlin);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      MiniformHeader@1015 : Record "Miniform Header";
+      WhseJournalLine@1009 : Record "Warehouse Journal Line";
+      XMLDOMMgt@1007 : Codeunit "XML DOM Management";
+      ADCSCommunication@1003 : Codeunit "ADCS Communication";
+      ADCSMgt@1024 : Codeunit "ADCS Management";
+      RecRef@1005 : RecordRef;
+      DOMxmlin@1011 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      ReturnedNode@1012 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      RootNode@1010 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      ADCSUserId@1004 : Text[250];
+      Remark@1002 : Text[250];
+      WhseEmpId@1017 : Text[250];
+      LocationFilter@1000 : Text[250];
+      Text000@1006 : TextConst 'ENU=Function not Found.';
+      Text004@1021 : TextConst 'ENU=Invalid %1.';
+      Text006@1001 : TextConst 'ENU=No input Node found.';
+      Text007@1014 : TextConst 'ENU=Record not found.';
+      Text008@1013 : TextConst 'ENU=End of Document.';
+      CurrentCode@1008 : Text[250];
+      StackCode@1016 : Text[250];
+      ActiveInputField@1026 : Integer;
+      Text012@1027 : TextConst 'ENU=No Lines available.';
+
+    LOCAL PROCEDURE ProcessInput@10();
+    VAR
+      FuncGroup@1001 : Record "Miniform Function Group";
+      RecId@1004 : RecordID;
+      TableNo@1008 : Integer;
+      FldNo@1000 : Integer;
+      TextValue@1007 : Text[250];
+    BEGIN
+      if XMLDOMMgt.FindNode(RootNode,'Header/Input',ReturnedNode) then
+        TextValue := ReturnedNode.InnerText
+      else
+        ERROR(Text006);
+
+      EVALUATE(TableNo,ADCSCommunication.GetNodeAttribute(ReturnedNode,'TableNo'));    // Key1 = TableNo
+      RecRef.OPEN(TableNo);
+      EVALUATE(RecId,ADCSCommunication.GetNodeAttribute(ReturnedNode,'RecordID'));   // Key2 = RecordID
+      if RecRef.GET(RecId) then begin
+        RecRef.SETTABLE(WhseJournalLine);
+        WhseJournalLine.SETRANGE("Journal Template Name",WhseJournalLine."Journal Template Name");
+        WhseJournalLine.SETRANGE("Journal Batch Name",WhseJournalLine."Journal Batch Name");
+        WhseJournalLine.SETRANGE("Location Code",WhseJournalLine."Location Code");
+        RecRef.GETTABLE(WhseJournalLine);
+        ADCSCommunication.SetRecRef(RecRef);
+      end else begin
+        ADCSCommunication.RunPreviousMiniform(DOMxmlin);
+        exit;
+      end;
+
+      FuncGroup.KeyDef := ADCSCommunication.GetFunctionKey(MiniformHeader.Code,TextValue);
+      ActiveInputField := 1;
+
+      case FuncGroup.KeyDef of
+        FuncGroup.KeyDef::Esc:
+          ADCSCommunication.RunPreviousMiniform(DOMxmlin);
+        FuncGroup.KeyDef::First:
+          ADCSCommunication.FindRecRef(0,MiniformHeader."No. of Records in List");
+        FuncGroup.KeyDef::LnDn:
+          if not ADCSCommunication.FindRecRef(1,MiniformHeader."No. of Records in List") then
+            Remark := Text008;
+        FuncGroup.KeyDef::LnUp:
+          ADCSCommunication.FindRecRef(2,MiniformHeader."No. of Records in List");
+        FuncGroup.KeyDef::Last:
+          ADCSCommunication.FindRecRef(3,MiniformHeader."No. of Records in List");
+        FuncGroup.KeyDef::PgDn:
+          if not ADCSCommunication.FindRecRef(4,MiniformHeader."No. of Records in List") then
+            Remark := Text008;
+        FuncGroup.KeyDef::PgUp:
+          ADCSCommunication.FindRecRef(5,MiniformHeader."No. of Records in List");
+        FuncGroup.KeyDef::Input:
+          begin
+            EVALUATE(FldNo,ADCSCommunication.GetNodeAttribute(ReturnedNode,'FieldID'));
+
+            case FldNo of
+              WhseJournalLine.FIELDNO("Bin Code"):
+                CheckBinNo(UPPERCASE(TextValue));
+              WhseJournalLine.FIELDNO("Item No."):
+                CheckItemNo(UPPERCASE(TextValue));
+              else begin
+                ADCSCommunication.FieldSetvalue(RecRef,FldNo,TextValue);
+                RecRef.SETTABLE(WhseJournalLine);
+              end;
+            end;
+
+            WhseJournalLine.MODIFY;
+            RecRef.GETTABLE(WhseJournalLine);
+            ADCSCommunication.SetRecRef(RecRef);
+            ActiveInputField := ADCSCommunication.GetActiveInputNo(CurrentCode,FldNo);
+            if Remark = '' then
+              if ADCSCommunication.LastEntryField(CurrentCode,FldNo) then begin
+                RecRef.GETTABLE(WhseJournalLine);
+                if not ADCSCommunication.FindRecRef(1,ActiveInputField) then begin
+                  Remark := Text008;
+                end else
+                  ActiveInputField := 1;
+              end else
+                ActiveInputField += 1;
+          end;
+        else
+          ERROR(Text000);
+      end;
+
+      if not (FuncGroup.KeyDef in [FuncGroup.KeyDef::Esc,FuncGroup.KeyDef::Register]) then
+        SendForm(ActiveInputField);
+    END;
+
+    LOCAL PROCEDURE CheckBinNo@4(InputValue@1002 : Text[250]);
+    BEGIN
+      if InputValue = WhseJournalLine."Bin Code" then
+        exit;
+
+      Remark := STRSUBSTNO(Text004,WhseJournalLine.FIELDCAPTION("Bin Code"));
+    END;
+
+    LOCAL PROCEDURE CheckItemNo@2(InputValue@1005 : Text[250]);
+    VAR
+      ItemIdent@1000 : Record "Item Identifier";
+    BEGIN
+      if InputValue = WhseJournalLine."Item No." then
+        exit;
+
+      if not ItemIdent.GET(InputValue) then
+        Remark := STRSUBSTNO(Text004,ItemIdent.FIELDCAPTION(Code));
+
+      if ItemIdent."Item No." <> WhseJournalLine."Item No." then
+        Remark := STRSUBSTNO(Text004,ItemIdent.FIELDCAPTION(Code));
+
+      if (ItemIdent."Variant Code" <> '') and (ItemIdent."Variant Code" <> WhseJournalLine."Variant Code") then
+        Remark := STRSUBSTNO(Text004,ItemIdent.FIELDCAPTION(Code));
+
+      if ((ItemIdent."Unit of Measure Code" <> '') and (ItemIdent."Unit of Measure Code" <> WhseJournalLine."Unit of Measure Code"))
+      then
+        Remark := STRSUBSTNO(Text004,ItemIdent.FIELDCAPTION(Code));
+    END;
+
+    LOCAL PROCEDURE PrepareData@1();
+    VAR
+      WhseJournalBatch@1000 : Record "Warehouse Journal Batch";
+      RecId@1003 : RecordID;
+      TableNo@1001 : Integer;
+    BEGIN
+      XMLDOMMgt.FindNode(RootNode,'Header/Input',ReturnedNode);
+
+      EVALUATE(TableNo,ADCSCommunication.GetNodeAttribute(ReturnedNode,'TableNo'));
+      RecRef.OPEN(TableNo);
+      EVALUATE(RecId,ADCSCommunication.GetNodeAttribute(ReturnedNode,'RecordID'));
+      if RecRef.GET(RecId) then begin
+        RecRef.SETTABLE(WhseJournalBatch);
+        WhseJournalLine.SETRANGE("Journal Template Name",WhseJournalBatch."Journal Template Name");
+        WhseJournalLine.SETRANGE("Journal Batch Name",WhseJournalBatch.Name);
+        WhseJournalLine.SETRANGE("Location Code",WhseJournalBatch."Location Code");
+        if not WhseJournalLine.FINDFIRST then begin
+          ADCSMgt.SendError(Text012);
+          exit;
+        end;
+        RecRef.GETTABLE(WhseJournalLine);
+        ADCSCommunication.SetRecRef(RecRef);
+        ActiveInputField := 1;
+        SendForm(ActiveInputField);
+      end else
+        ERROR(Text007);
+    END;
+
+    LOCAL PROCEDURE SendForm@3(InputField@1000 : Integer);
+    BEGIN
+      // Prepare Miniform
+      ADCSCommunication.EncodeMiniForm(MiniformHeader,StackCode,DOMxmlin,InputField,Remark,ADCSUserId);
+      ADCSCommunication.GetReturnXML(DOMxmlin);
+      ADCSMgt.SendXMLReply(DOMxmlin);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

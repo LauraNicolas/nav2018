@@ -2,9 +2,9 @@ OBJECT Codeunit 5461 Graph Int. - Contact
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -15,11 +15,11 @@ OBJECT Codeunit 5461 Graph Int. - Contact
   CODE
   {
     VAR
-      BusinessTypeMissingErr@1000 : TextConst 'ENU=BusinessType is not present on Graph Contact.';
-      BusinessTypeUnknownValueErr@1001 : TextConst '@@@=%1 can be anything;ENU=BusinessType has an invalid value: %1.';
-      BusinessCategoryMissingErr@1002 : TextConst 'ENU=The Graph Contact must have 1 or more business category fields.';
-      BusinessCategoryWrongValueErr@1003 : TextConst '@@@=%1 will be the value. %2 is the PropertyId string including the value;ENU=The business category has an invalid value: %1.\%2.';
-      NoBusinessCategoryErr@1004 : TextConst 'ENU=At least one business category must be set to True.';
+      BusinessTypeMissingErr@1000 : TextConst '@@@={Locked};ENU=BusinessType is not present on Graph Contact.';
+      BusinessTypeUnknownValueErr@1001 : TextConst '@@@={Locked};ENU=BusinessType has an invalid value: %1.';
+      BusinessCategoryMissingErr@1002 : TextConst '@@@={Locked};ENU=The Graph Contact must have 1 or more business category fields.';
+      BusinessCategoryWrongValueErr@1003 : TextConst '@@@={Locked};ENU=The business category has an invalid value: %1.\%2.';
+      NoBusinessCategoryErr@1004 : TextConst '@@@={Locked};ENU=At least one business category must be set to True.';
       CannotGetGraphXrmIdErr@1005 : TextConst '@@@={Locked};ENU=Cannot find the graph XrmId for graph record id %1.';
 
     [EventSubscriber(Codeunit,5345,OnAfterTransferRecordFields)]
@@ -90,6 +90,7 @@ OBJECT Codeunit 5461 Graph Int. - Contact
     VAR
       GraphContact@1003 : Record 5450;
       Contact@1004 : Record 5050;
+      ModifySource@1005 : Boolean;
     BEGIN
       CASE GetSourceDestCode(SourceRecordRef,DestinationRecordRef) OF
         'Graph Contact-Contact':
@@ -100,6 +101,14 @@ OBJECT Codeunit 5461 Graph Int. - Contact
             SetGraphFieldsOnContact(GraphContact,Contact);
             SetContactBusinessRelations(GraphContact,Contact);
             DestinationRecordRef.GETTABLE(Contact);
+          END;
+        'Contact-Graph Contact':
+          BEGIN
+            DestinationRecordRef.SETTABLE(GraphContact);
+            SourceRecordRef.SETTABLE(Contact);
+            CheckAndFixContactBusinessRelations(GraphContact,Contact,ModifySource);
+            IF ModifySource THEN
+              DestinationRecordRef.GETTABLE(GraphContact);
           END;
       END;
     END;
@@ -116,6 +125,7 @@ OBJECT Codeunit 5461 Graph Int. - Contact
           BEGIN
             DestinationRecordRef.SETTABLE(Contact);
             SourceRecordRef.SETTABLE(GraphContact);
+            SetContactBusinessRelations(GraphContact,Contact);
             CheckAndFixContactBusinessRelations(GraphContact,Contact,ModifySourceRecord);
             CheckAndFixDisplayName(GraphContact,Contact,ModifySourceRecord);
             ModifySourceGraphContact(GraphContact,ModifySourceRecord);
@@ -139,11 +149,42 @@ OBJECT Codeunit 5461 Graph Int. - Contact
       END;
     END;
 
-    PROCEDURE FindCustomerFromGraphContact@16(GraphContactId@1000 : Text[250];VAR Customer@1001 : Record 18;VAR Contact@1006 : Record 5050) : Boolean;
+    PROCEDURE FindOrCreateCustomerFromGraphContactSafe@16(GraphContactId@1000 : Text[250];VAR Customer@1001 : Record 18;VAR Contact@1006 : Record 5050) : Boolean;
+    VAR
+      MarketingSetup@1008 : Record 5079;
+    BEGIN
+      IF NOT FindContactFromGraphId(GraphContactId,Contact) THEN BEGIN
+        SyncFromGraphSynchronously;
+        IF NOT FindContactFromGraphId(GraphContactId,Contact) THEN
+          EXIT(FALSE);
+      END;
+
+      IF FindCustomerFromContact(Customer,Contact) THEN
+        EXIT(TRUE);
+
+      // Promote contact to customer
+      IF NOT MarketingSetup.GET THEN
+        EXIT(FALSE);
+
+      IF MarketingSetup."Bus. Rel. Code for Customers" = '' THEN
+        EXIT(FALSE);
+
+      Contact.SetHideValidationDialog(TRUE);
+      Contact.CreateCustomer(MarketingSetup.GetCustomerTemplate(Contact.Type));
+
+      // This line triggers sync back to graph via Background session
+      // We need to update IsCustomer flag back to Graph
+      // FindCustomerFromGraphContact function is used in the web services
+      // We must be able to revert changes back, thus background session is needed (there are several COMMITs)
+      Contact.MODIFY(TRUE);
+
+      EXIT(FindCustomerFromContact(Customer,Contact));
+    END;
+
+    LOCAL PROCEDURE FindContactFromGraphId@22(GraphContactId@1000 : Text[250];VAR Contact@1006 : Record 5050) : Boolean;
     VAR
       DummyGraphIntegrationRecord@1002 : Record 5451;
       SearchGraphIntegrationRecord@1007 : Record 5451;
-      ContactBusinessRelation@1003 : Record 5054;
       ContactRecordID@1005 : RecordID;
       ContactXrmId@1004 : GUID;
     BEGIN
@@ -153,7 +194,7 @@ OBJECT Codeunit 5461 Graph Int. - Contact
       IF EVALUATE(ContactXrmId,GraphContactId) THEN BEGIN
         SearchGraphIntegrationRecord.SETRANGE(XRMId,ContactXrmId);
         IF NOT SearchGraphIntegrationRecord.FINDFIRST THEN
-          EXIT;
+          EXIT(FALSE);
 
         GraphContactId := SearchGraphIntegrationRecord."Graph ID";
       END;
@@ -161,9 +202,13 @@ OBJECT Codeunit 5461 Graph Int. - Contact
       IF NOT DummyGraphIntegrationRecord.FindRecordIDFromID(GraphContactId,DATABASE::Contact,ContactRecordID) THEN
         EXIT(FALSE);
 
-      IF NOT Contact.GET(ContactRecordID) THEN
-        EXIT(FALSE);
+      EXIT(Contact.GET(ContactRecordID));
+    END;
 
+    LOCAL PROCEDURE FindCustomerFromContact@26(VAR Customer@1001 : Record 18;VAR Contact@1006 : Record 5050) : Boolean;
+    VAR
+      ContactBusinessRelation@1003 : Record 5054;
+    BEGIN
       // Check primary contact first
       Customer.SETRANGE("Primary Contact No.",Contact."No.");
       IF Customer.FINDFIRST THEN
@@ -220,6 +265,35 @@ OBJECT Codeunit 5461 Graph Int. - Contact
       EXIT(FindGraphContactIdFromCustomer(GraphContactID,Customer,DummyContact));
     END;
 
+    PROCEDURE FindGraphContactIdFromVendor@27(VAR GraphContactId@1000 : Text[250];VAR Vendor@1001 : Record 23;VAR Contact@1006 : Record 5050) : Boolean;
+    VAR
+      GraphIntegrationRecord@1002 : Record 5451;
+      ContactBusinessRelation@1003 : Record 5054;
+      MarketingSetup@1007 : Record 5079;
+      ContactNo@1004 : Code[20];
+    BEGIN
+      // Use primary contact if specified
+      IF Vendor."Primary Contact No." <> '' THEN
+        ContactNo := Vendor."Primary Contact No."
+      ELSE BEGIN
+        ContactBusinessRelation.SETCURRENTKEY("Link to Table","No.");
+        ContactBusinessRelation.SETRANGE("Link to Table",ContactBusinessRelation."Link to Table"::Vendor);
+        ContactBusinessRelation.SETRANGE("No.",Vendor."No.");
+        IF MarketingSetup.GET THEN
+          ContactBusinessRelation.SETRANGE("Business Relation Code",MarketingSetup."Bus. Rel. Code for Vendors");
+
+        IF NOT ContactBusinessRelation.FINDFIRST THEN
+          EXIT(FALSE);
+
+        ContactNo := ContactBusinessRelation."Contact No.";
+      END;
+
+      IF NOT Contact.GET(ContactNo) THEN
+        EXIT(FALSE);
+
+      EXIT(GraphIntegrationRecord.FindIDFromRecordID(Contact.RECORDID,GraphContactId));
+    END;
+
     LOCAL PROCEDURE GetSourceDestCode@38(SourceRecordRef@1001 : RecordRef;DestinationRecordRef@1000 : RecordRef) : Text;
     BEGIN
       IF (SourceRecordRef.NUMBER <> 0) AND (DestinationRecordRef.NUMBER <> 0) THEN
@@ -239,9 +313,6 @@ OBJECT Codeunit 5461 Graph Int. - Contact
       GraphCollectionMgtContact@1002 : Codeunit 5458;
       EmailAddressesString@1005 : Text;
       BusinessTypeString@1006 : Text;
-      IsCustomerString@1007 : Text;
-      IsVendorString@1008 : Text;
-      IsBankString@1009 : Text;
       IsNavCreatedString@1013 : Text;
       IsLead@1010 : Boolean;
       IsPartner@1011 : Boolean;
@@ -265,29 +336,19 @@ OBJECT Codeunit 5461 Graph Int. - Contact
       // Extensions
       BusinessTypeString := GraphCollectionMgtContact.AddBusinessType(Contact.Type);
       GraphContact.SetBusinessTypeString(BusinessTypeString);
+
       // If the property exists OR IsCustomer = TRUE then set the property, else leave empty.
-      IF (NOT GraphCollectionMgtContact.IsBlankOrEmptyJsonObject(GraphContact.GetIsCustomerString)) OR CheckIsCustomer(Contact)
-      THEN BEGIN
-        IsCustomerString := GraphCollectionMgtContact.AddIsCustomer(CheckIsCustomer(Contact));
-        GraphContact.SetIsCustomerString(IsCustomerString);
-      END;
-      IF (NOT GraphCollectionMgtContact.IsBlankOrEmptyJsonObject(GraphContact.GetIsVendorString)) OR CheckIsVendor(Contact)
-      THEN BEGIN
-        IsVendorString := GraphCollectionMgtContact.AddIsVendor(CheckIsVendor(Contact));
-        GraphContact.SetIsVendorString(IsVendorString);
-      END;
-      IF (NOT GraphCollectionMgtContact.IsBlankOrEmptyJsonObject(GraphContact.GetIsBankString) OR CheckIsBank(Contact))
-      THEN BEGIN
-        IsBankString := GraphCollectionMgtContact.AddIsBank(CheckIsBank(Contact));
-        GraphContact.SetIsBankString(IsBankString);
-      END;
+      UpdateBusinessCategoriesFromNAV(Contact,GraphContact);
+
       IF GraphContact.Id = '' THEN BEGIN // new graph contact
         IsNavCreatedString := GraphCollectionMgtContact.AddIsNavCreated(TRUE);
         GraphContact.SetIsNavCreatedString(IsNavCreatedString);
       END;
+
       IsLead := GraphCollectionMgtContact.GetIsLead(GraphContact.GetIsLeadString);
       IsPartner := GraphCollectionMgtContact.GetIsPartner(GraphContact.GetIsPartnerString);
       IsContact := GraphCollectionMgtContact.GetIsContact(GraphContact.GetIsContactString);
+
       // at least 1 must be true. If none are true, set IsContact = TRUE
       IF NOT (CheckIsBank(Contact) OR CheckIsCustomer(Contact) OR CheckIsVendor(Contact) OR IsLead OR IsPartner OR IsContact) THEN
         GraphContact.SetIsContactString(GraphCollectionMgtContact.AddIsContact(TRUE));
@@ -350,6 +411,48 @@ OBJECT Codeunit 5461 Graph Int. - Contact
       END;
     END;
 
+    LOCAL PROCEDURE UpdateBusinessCategoriesFromNAV@25(VAR Contact@1000 : Record 5050;VAR GraphContact@1001 : Record 5450) Modified : Boolean;
+    VAR
+      GraphCollectionMgtContact@1005 : Codeunit 5458;
+      IsBankString@1010 : Text;
+      IsCustomerString@1011 : Text;
+      IsVendorString@1012 : Text;
+      GraphIsBank@1008 : Boolean;
+      GraphIsCustomer@1004 : Boolean;
+      GraphIsVendor@1003 : Boolean;
+      NavIsBank@1006 : Boolean;
+      NavIsCustomer@1007 : Boolean;
+      NavIsVendor@1009 : Boolean;
+    BEGIN
+      // Checks for inconsistencies in the business category fields and updates the graph contact accordingly
+
+      GraphIsBank := GraphCollectionMgtContact.GetIsBank(GraphContact.GetIsBankString);
+      GraphIsCustomer := GraphCollectionMgtContact.GetIsCustomer(GraphContact.GetIsCustomerString);
+      GraphIsVendor := GraphCollectionMgtContact.GetIsVendor(GraphContact.GetIsVendorString);
+
+      NavIsBank := CheckIsBank(Contact);
+      NavIsCustomer := CheckIsCustomer(Contact);
+      NavIsVendor := CheckIsVendor(Contact);
+
+      IF GraphIsBank <> NavIsBank THEN BEGIN
+        IsBankString := GraphCollectionMgtContact.AddIsBank(NavIsBank);
+        GraphContact.SetIsBankString(IsBankString);
+        Modified := TRUE;
+      END;
+
+      IF GraphIsCustomer <> NavIsCustomer THEN BEGIN
+        IsCustomerString := GraphCollectionMgtContact.AddIsCustomer(NavIsCustomer);
+        GraphContact.SetIsCustomerString(IsCustomerString);
+        Modified := TRUE;
+      END;
+
+      IF GraphIsVendor <> NavIsVendor THEN BEGIN
+        IsVendorString := GraphCollectionMgtContact.AddIsVendor(NavIsVendor);
+        GraphContact.SetIsVendorString(IsVendorString);
+        Modified := TRUE;
+      END;
+    END;
+
     LOCAL PROCEDURE CheckIsCustomer@5(Contact@1001 : Record 5050) : Boolean;
     VAR
       ContactBusinessRelation@1000 : Record 5054;
@@ -378,29 +481,8 @@ OBJECT Codeunit 5461 Graph Int. - Contact
     END;
 
     LOCAL PROCEDURE CheckAndFixContactBusinessRelations@3(VAR GraphContact@1001 : Record 5450;Contact@1000 : Record 5050;VAR ModifySourceRecord@1002 : Boolean);
-    VAR
-      GraphCollectionMgtContact@1004 : Codeunit 5458;
     BEGIN
-      IF CheckIsCustomer(Contact) AND
-         NOT GraphCollectionMgtContact.GetIsCustomer(GraphContact.GetIsCustomerString)
-      THEN BEGIN
-        GraphContact.SetIsCustomerString(GraphCollectionMgtContact.AddIsCustomer(TRUE));
-        ModifySourceRecord := TRUE;
-      END;
-
-      IF CheckIsVendor(Contact) AND
-         NOT GraphCollectionMgtContact.GetIsVendor(GraphContact.GetIsVendorString)
-      THEN BEGIN
-        GraphContact.SetIsVendorString(GraphCollectionMgtContact.AddIsVendor(TRUE));
-        ModifySourceRecord := TRUE;
-      END;
-
-      IF CheckIsBank(Contact) AND
-         NOT GraphCollectionMgtContact.GetIsBank(GraphContact.GetIsBankString)
-      THEN BEGIN
-        GraphContact.SetIsBankString(GraphCollectionMgtContact.AddIsBank(TRUE));
-        ModifySourceRecord := TRUE;
-      END;
+      ModifySourceRecord := UpdateBusinessCategoriesFromNAV(Contact,GraphContact) OR ModifySourceRecord;
     END;
 
     LOCAL PROCEDURE CheckAndFixDisplayName@4(VAR GraphContact@1000 : Record 5450;VAR Contact@1001 : Record 5050;VAR ModifySourceRecord@1002 : Boolean);
@@ -553,7 +635,7 @@ OBJECT Codeunit 5461 Graph Int. - Contact
       GraphContact@1004 : Record 5450;
       XrmID@1000 : GUID;
     BEGIN
-      IF NOT (GraphIntegrationRecord.RECORDID.TABLENO = DATABASE::Contact) THEN
+      IF NOT (GraphIntegrationRecord."Table ID" = DATABASE::Contact) THEN
         EXIT;
 
       IF NOT GraphContact.GET(GraphIntegrationRecord."Graph ID") THEN
@@ -604,6 +686,34 @@ OBJECT Codeunit 5461 Graph Int. - Contact
     LOCAL PROCEDURE GetGraphContact@24(VAR GraphContact@1000 : Record 5450;GraphIntegrationRecord@1001 : Record 5451);
     BEGIN
       GraphContact.GET(GraphIntegrationRecord."Graph ID");
+    END;
+
+    LOCAL PROCEDURE SyncFromGraphSynchronously@23();
+    VAR
+      SessionId@1000 : Integer;
+      Timeout@1001 : Integer;
+      TimeoutReached@1003 : Boolean;
+      StartDateTime@1004 : DateTime;
+      TimePassed@1005 : Duration;
+    BEGIN
+      // Start session will use CPU time of main thread while main thread is SLEEPing
+      // Taskscheduler cannot be used since it requires a COMMIT to start
+      SessionId := 0;
+      IF NOT STARTSESSION(SessionId,CODEUNIT::"Graph Subscription Management",COMPANYNAME) THEN
+        EXIT;
+
+      // Timeout after 30 seconds
+      Timeout := 30;
+      StartDateTime := CURRENTDATETIME;
+
+      REPEAT
+        SLEEP(100);
+        IF NOT ISSESSIONACTIVE(SessionId) THEN
+          EXIT;
+
+        TimePassed := CURRENTDATETIME - StartDateTime;
+        TimeoutReached := TimePassed > Timeout * 1000;
+      UNTIL TimeoutReached;
     END;
 
     BEGIN

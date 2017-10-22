@@ -1,0 +1,222 @@
+OBJECT Codeunit 7326 Whse. Item Tracking FEFO
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempGlobalEntrySummary@1012 : TEMPORARY Record "Entry Summary";
+      SourceReservationEntry@1010 : Record "Reservation Entry";
+      ItemTrackingMgt@1009 : Codeunit "Item Tracking Management";
+      LastSummaryEntryNo@1007 : Integer;
+      StrictExpirationPosting@1003 : Boolean;
+      HasExpiredItems@1002 : Boolean;
+      SourceSet@1000 : Boolean;
+      ExpiredItemsForPickMsg@1001 : TextConst 'ENU=\\Some items were not included in the pick due to their expiration date.';
+
+    PROCEDURE CreateEntrySummaryFEFO@5(Location@1002 : Record Location;ItemNo@1001 : Code[20];VariantCode@1000 : Code[10];UseExpDates@1231 : Boolean);
+    BEGIN
+      InitEntrySummaryFEFO;
+      LastSummaryEntryNo := 0;
+      StrictExpirationPosting := ItemTrackingMgt.StrictExpirationPosting(ItemNo);
+
+      SummarizeInventoryFEFO(Location,ItemNo,VariantCode,UseExpDates);
+      if UseExpDates then
+        SummarizeAdjustmentBinFEFO(Location,ItemNo,VariantCode);
+    END;
+
+    LOCAL PROCEDURE SummarizeInventoryFEFO@17(Location@1002 : Record Location;ItemNo@1001 : Code[20];VariantCode@1000 : Code[10];HasExpirationDate@1210 : Boolean);
+    VAR
+      ItemLedgEntry@1003 : Record "Item Ledger Entry";
+    BEGIN
+      with ItemLedgEntry do begin
+        RESET;
+        SETCURRENTKEY("Item No.",Open,"Variant Code",Positive,"Lot No.","Serial No.");
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE(Open,true);
+        SETRANGE("Variant Code",VariantCode);
+        SETRANGE(Positive,true);
+        if HasExpirationDate then
+          SETFILTER("Expiration Date",'<>%1',0D)
+        else
+          SETRANGE("Expiration Date",0D);
+        SETRANGE("Location Code",Location.Code);
+        if ISEMPTY then
+          exit;
+
+        FINDSET;
+        repeat
+          CALCFIELDS("Reserved Quantity");
+          if "Remaining Quantity" - ("Reserved Quantity" - CalcReservedToSource("Entry No.")) > 0 then
+            if not EntrySummaryFEFOExists("Lot No.","Serial No.") then
+              InsertEntrySummaryFEFO("Lot No.","Serial No.","Expiration Date");
+        until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE SummarizeAdjustmentBinFEFO@66(Location@1002 : Record Location;ItemNo@1001 : Code[20];VariantCode@1000 : Code[10]);
+    VAR
+      WhseEntry@1003 : Record "Warehouse Entry";
+      ItemTrackingMgt@1009 : Codeunit "Item Tracking Management";
+      ExpirationDate@1008 : Date;
+      EntriesExist@1007 : Boolean;
+    BEGIN
+      if Location."Adjustment Bin Code" = '' then
+        exit;
+
+      with WhseEntry do begin
+        RESET;
+        SETCURRENTKEY("Item No.","Bin Code","Location Code","Variant Code","Unit of Measure Code","Lot No.","Serial No.");
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Bin Code",Location."Adjustment Bin Code");
+        SETRANGE("Location Code",Location.Code);
+        SETRANGE("Variant Code",VariantCode);
+        if ISEMPTY then
+          exit;
+
+        if FINDSET then
+          repeat
+            if not EntrySummaryFEFOExists("Lot No.","Serial No.") then begin
+              ExpirationDate :=
+                ItemTrackingMgt.WhseExistingExpirationDate(
+                  "Item No.","Variant Code",Location,"Lot No.","Serial No.",EntriesExist);
+
+              if not EntriesExist then
+                ExpirationDate := 0D;
+
+              InsertEntrySummaryFEFO("Lot No.","Serial No.",ExpirationDate);
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE InitEntrySummaryFEFO@10();
+    BEGIN
+      with TempGlobalEntrySummary do begin
+        DELETEALL;
+        RESET;
+        SETCURRENTKEY("Lot No.","Serial No.");
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertEntrySummaryFEFO@6(LotNo@1000 : Code[20];SerialNo@1001 : Code[20];ExpirationDate@1003 : Date);
+    BEGIN
+      with TempGlobalEntrySummary do begin
+        if (not StrictExpirationPosting) or (ExpirationDate >= WORKDATE) then begin
+          INIT;
+          "Entry No." := LastSummaryEntryNo + 1;
+          "Serial No." := SerialNo;
+          "Lot No." := LotNo;
+          "Expiration Date" := ExpirationDate;
+          INSERT;
+          LastSummaryEntryNo := "Entry No.";
+        end else
+          HasExpiredItems := true;
+      end;
+    END;
+
+    LOCAL PROCEDURE EntrySummaryFEFOExists@4(LotNo@1000 : Code[20];SerialNo@1001 : Code[20]) : Boolean;
+    BEGIN
+      with TempGlobalEntrySummary do begin
+        SetTrackingFilter(SerialNo,LotNo);
+        exit(FINDSET);
+      end;
+    END;
+
+    PROCEDURE FindFirstEntrySummaryFEFO@61(VAR EntrySummary@1000 : Record "Entry Summary") : Boolean;
+    BEGIN
+      with TempGlobalEntrySummary do begin
+        RESET;
+        SETCURRENTKEY("Expiration Date");
+
+        if not FIND('-') then
+          exit(false);
+
+        EntrySummary := TempGlobalEntrySummary;
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindNextEntrySummaryFEFO@30(VAR EntrySummary@1000 : Record "Entry Summary") : Boolean;
+    BEGIN
+      with TempGlobalEntrySummary do begin
+        if NEXT = 0 then
+          exit(false);
+
+        EntrySummary := TempGlobalEntrySummary;
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetHasExpiredItems@12() : Boolean;
+    BEGIN
+      exit(HasExpiredItems);
+    END;
+
+    [External]
+    PROCEDURE GetResultMessageForExpiredItem@13() : Text[100];
+    BEGIN
+      if HasExpiredItems then
+        exit(ExpiredItemsForPickMsg);
+
+      exit('');
+    END;
+
+    [External]
+    PROCEDURE SetSource@15(SourceType2@1004 : Integer;SourceSubType2@1003 : Integer;SourceNo2@1002 : Code[20];SourceLineNo2@1001 : Integer;SourceSubLineNo2@1000 : Integer);
+    VAR
+      CreatePick@1005 : Codeunit "Create Pick";
+    BEGIN
+      SourceReservationEntry.RESET;
+      CreatePick.SetFiltersOnReservEntry(
+        SourceReservationEntry,SourceType2,SourceSubType2,SourceNo2,SourceLineNo2,SourceSubLineNo2);
+      SourceSet := true;
+    END;
+
+    LOCAL PROCEDURE CalcReservedToSource@18(ILENo@1000 : Integer) Result : Decimal;
+    BEGIN
+      Result := 0;
+      if not SourceSet then
+        exit(Result);
+
+      with SourceReservationEntry do begin
+        if FINDSET then
+          repeat
+            if ReservedFromILE(SourceReservationEntry,ILENo) then
+              Result -= "Quantity (Base)"; // "Quantity (Base)" is negative
+          until NEXT = 0;
+      end;
+
+      exit(Result);
+    END;
+
+    LOCAL PROCEDURE ReservedFromILE@49(ReservationEntry@1000 : Record "Reservation Entry";ILENo@1001 : Integer) : Boolean;
+    BEGIN
+      with ReservationEntry do begin
+        Positive := not Positive;
+        FIND;
+        exit(
+          ("Source ID" = '') and ("Source Ref. No." = ILENo) and
+          ("Source Type" = DATABASE::"Item Ledger Entry") and ("Source Subtype" = 0) and
+          ("Source Batch Name" = '') and ("Source Prod. Order Line" = 0) and
+          ("Reservation Status" = "Reservation Status"::Reservation));
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

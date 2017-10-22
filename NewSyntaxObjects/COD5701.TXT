@@ -1,0 +1,594 @@
+OBJECT Codeunit 5701 Item Subst.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=This substitute item has a different sale unit of measure.';
+      Item@1001 : Record Item;
+      ItemSubstitution@1002 : Record "Item Substitution";
+      TempItemSubstitution@1003 : TEMPORARY Record "Item Substitution";
+      SalesHeader@1004 : Record "Sales Header";
+      NonStockItem@1006 : Record "Nonstock Item";
+      TempSalesLine@1023 : TEMPORARY Record "Sales Line";
+      ServInvLine@1007 : Record "Service Line";
+      ItemUnitOfMeasure@1026 : Record "Item Unit of Measure";
+      CompanyInfo@1008 : Record "Company Information";
+      NonstockItemMgt@1011 : Codeunit "Nonstock Item Management";
+      AvailToPromise@1012 : Codeunit "Available to Promise";
+      ItemCheckAvail@1005 : Codeunit "Item-Check Avail.";
+      SaveDropShip@1013 : Boolean;
+      SetupDataIsPresent@1014 : Boolean;
+      GrossReq@1015 : Decimal;
+      SchedRcpt@1016 : Decimal;
+      SaveQty@1017 : Decimal;
+      SaveItemNo@1018 : Code[20];
+      SaveVariantCode@1019 : Code[10];
+      SaveLocation@1020 : Code[10];
+      OldSalesUOM@1021 : Code[10];
+      Text001@1022 : TextConst 'ENU=An Item Substitution with the specified variant does not exist for Item No. ''%1''.';
+      Text002@1025 : TextConst 'ENU=An Item Substitution does not exist for Item No. ''%1''';
+
+    [Internal]
+    PROCEDURE ItemSubstGet@3(VAR SalesLine@1000 : Record "Sales Line");
+    VAR
+      SalesLineReserve@1001 : Codeunit "Sales Line-Reserve";
+    BEGIN
+      TempSalesLine := SalesLine;
+      if (TempSalesLine.Type <> TempSalesLine.Type::Item) or
+         (TempSalesLine."Document Type" in
+          [TempSalesLine."Document Type"::"Return Order",TempSalesLine."Document Type"::"Credit Memo"])
+      then
+        exit;
+
+      SaveItemNo := TempSalesLine."No.";
+      SaveVariantCode := TempSalesLine."Variant Code";
+
+      Item.GET(TempSalesLine."No.");
+      Item.SETFILTER("Location Filter",TempSalesLine."Location Code");
+      Item.SETFILTER("Variant Filter",TempSalesLine."Variant Code");
+      Item.SETRANGE("Date Filter",0D,TempSalesLine."Shipment Date");
+      Item.CALCFIELDS(Inventory);
+      Item.CALCFIELDS("Qty. on Sales Order");
+      Item.CALCFIELDS("Qty. on Service Order");
+      OldSalesUOM := Item."Sales Unit of Measure";
+
+      ItemSubstitution.RESET;
+      ItemSubstitution.SETRANGE(Type,ItemSubstitution.Type::Item);
+      ItemSubstitution.SETRANGE("No.",TempSalesLine."No.");
+      ItemSubstitution.SETRANGE("Variant Code",TempSalesLine."Variant Code");
+      ItemSubstitution.SETRANGE("Location Filter",TempSalesLine."Location Code");
+      if ItemSubstitution.FIND('-') then begin
+        CalcCustPrice;
+        TempItemSubstitution.RESET;
+        TempItemSubstitution.SETRANGE("No.",TempSalesLine."No.");
+        TempItemSubstitution.SETRANGE("Variant Code",TempSalesLine."Variant Code");
+        TempItemSubstitution.SETRANGE("Location Filter",TempSalesLine."Location Code");
+        if PAGE.RUNMODAL(PAGE::"Item Substitution Entries",TempItemSubstitution) =
+           ACTION::LookupOK
+        then begin
+          if TempItemSubstitution."Substitute Type" =
+             TempItemSubstitution."Substitute Type"::"Nonstock Item"
+          then begin
+            NonStockItem.GET(TempItemSubstitution."Substitute No.");
+            if NonStockItem."Item No." = '' then begin
+              NonstockItemMgt.CreateItemFromNonstock(NonStockItem);
+              NonStockItem.GET(TempItemSubstitution."Substitute No.");
+            end;
+            TempItemSubstitution."Substitute No." := NonStockItem."Item No."
+          end;
+          TempSalesLine."No." := TempItemSubstitution."Substitute No.";
+          TempSalesLine."Variant Code" := TempItemSubstitution."Substitute Variant Code";
+          SaveQty := TempSalesLine.Quantity;
+          SaveLocation := TempSalesLine."Location Code";
+          SaveDropShip := TempSalesLine."Drop Shipment";
+          TempSalesLine.Quantity := 0;
+          TempSalesLine.VALIDATE("No.",TempItemSubstitution."Substitute No.");
+          TempSalesLine.VALIDATE("Variant Code",TempItemSubstitution."Substitute Variant Code");
+          TempSalesLine."Originally Ordered No." := SaveItemNo;
+          TempSalesLine."Originally Ordered Var. Code" := SaveVariantCode;
+          TempSalesLine."Location Code" := SaveLocation;
+          TempSalesLine."Drop Shipment" := SaveDropShip;
+          TempSalesLine.VALIDATE(Quantity,SaveQty);
+          TempSalesLine.VALIDATE("Unit of Measure Code",OldSalesUOM);
+          COMMIT;
+          if ItemCheckAvail.SalesLineCheck(TempSalesLine) then
+            TempSalesLine := SalesLine;
+        end;
+      end else
+        ERROR(Text001,TempSalesLine."No.");
+
+      if (SalesLine."No." <> TempSalesLine."No.") or (SalesLine."Variant Code" <> TempSalesLine."Variant Code") then
+        SalesLineReserve.DeleteLine(SalesLine);
+
+      SalesLine := TempSalesLine;
+    END;
+
+    LOCAL PROCEDURE CalcCustPrice@1();
+    BEGIN
+      TempItemSubstitution.RESET;
+      TempItemSubstitution.DELETEALL;
+      SalesHeader.GET(TempSalesLine."Document Type",TempSalesLine."Document No.");
+      if ItemSubstitution.FIND('-') then
+        repeat
+          TempItemSubstitution."No." := ItemSubstitution."No.";
+          TempItemSubstitution."Variant Code" := ItemSubstitution."Variant Code";
+          TempItemSubstitution."Substitute No." := ItemSubstitution."Substitute No.";
+          TempItemSubstitution."Substitute Variant Code" := ItemSubstitution."Substitute Variant Code";
+          TempItemSubstitution.Description := ItemSubstitution.Description;
+          TempItemSubstitution.Interchangeable := ItemSubstitution.Interchangeable;
+          TempItemSubstitution."Location Filter" := ItemSubstitution."Location Filter";
+          TempItemSubstitution.Condition := ItemSubstitution.Condition;
+          TempItemSubstitution."Shipment Date" := TempSalesLine."Shipment Date";
+          if ItemSubstitution."Substitute Type" = ItemSubstitution."Substitute Type"::Item then begin
+            Item.GET(ItemSubstitution."Substitute No.");
+            if not SetupDataIsPresent then
+              GetSetupData;
+            TempItemSubstitution."Quantity Avail. on Shpt. Date" :=
+              AvailToPromise.QtyAvailabletoPromise(
+                Item,GrossReq,SchedRcpt,
+                Item.GETRANGEMAX("Date Filter"),CompanyInfo."Check-Avail. Time Bucket",
+                CompanyInfo."Check-Avail. Period Calc.");
+            Item.CALCFIELDS(Inventory);
+            TempItemSubstitution.Inventory := Item.Inventory;
+          end else begin
+            TempItemSubstitution."Substitute Type" := TempItemSubstitution."Substitute Type"::"Nonstock Item";
+            TempItemSubstitution."Quantity Avail. on Shpt. Date" := 0;
+            TempItemSubstitution.Inventory := 0;
+          end;
+          TempItemSubstitution.INSERT;
+        until ItemSubstitution.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AssemblyCalcCustPrice@14(AssemblyLine@1000 : Record "Assembly Line");
+    VAR
+      AssemblyHeader@1001 : Record "Assembly Header";
+    BEGIN
+      TempItemSubstitution.RESET;
+      TempItemSubstitution.DELETEALL;
+      AssemblyHeader.GET(AssemblyLine.Type,AssemblyLine."Document No.");
+      if ItemSubstitution.FIND('-') then
+        repeat
+          TempItemSubstitution."No." := ItemSubstitution."No.";
+          TempItemSubstitution."Variant Code" := ItemSubstitution."Variant Code";
+          TempItemSubstitution."Substitute No." := ItemSubstitution."Substitute No.";
+          TempItemSubstitution."Substitute Variant Code" := ItemSubstitution."Substitute Variant Code";
+          TempItemSubstitution.Description := ItemSubstitution.Description;
+          TempItemSubstitution.Interchangeable := ItemSubstitution.Interchangeable;
+          TempItemSubstitution."Location Filter" := ItemSubstitution."Location Filter";
+          TempItemSubstitution.Condition := ItemSubstitution.Condition;
+          TempItemSubstitution."Shipment Date" := TempSalesLine."Shipment Date";
+          if ItemSubstitution."Substitute Type" = ItemSubstitution."Substitute Type"::Item then begin
+            Item.GET(ItemSubstitution."Substitute No.");
+            if not SetupDataIsPresent then
+              GetSetupData;
+            TempItemSubstitution."Quantity Avail. on Shpt. Date" :=
+              AvailToPromise.QtyAvailabletoPromise(
+                Item,GrossReq,SchedRcpt,
+                Item.GETRANGEMAX("Date Filter"),CompanyInfo."Check-Avail. Time Bucket",
+                CompanyInfo."Check-Avail. Period Calc.");
+            Item.CALCFIELDS(Inventory);
+            TempItemSubstitution.Inventory := Item.Inventory;
+          end else begin
+            TempItemSubstitution."Substitute Type" := TempItemSubstitution."Substitute Type"::"Nonstock Item";
+            TempItemSubstitution."Quantity Avail. on Shpt. Date" := 0;
+            TempItemSubstitution.Inventory := 0;
+          end;
+          TempItemSubstitution.INSERT;
+        until ItemSubstitution.NEXT = 0;
+    END;
+
+    [Internal]
+    PROCEDURE ItemServiceSubstGet@4(VAR ServInvLine2@1000 : Record "Service Line");
+    VAR
+      ServiceLineReserve@1001 : Codeunit "Service Line-Reserve";
+    BEGIN
+      ServInvLine := ServInvLine2;
+      if ServInvLine.Type <> ServInvLine.Type::Item then
+        exit;
+
+      SaveItemNo := ServInvLine."No.";
+      SaveVariantCode := ServInvLine."Variant Code";
+      Item.GET(ServInvLine."No.");
+      Item.SETFILTER("Location Filter",ServInvLine."Location Code");
+      Item.SETFILTER("Variant Filter",ServInvLine."Variant Code");
+      Item.SETRANGE("Date Filter",0D,ServInvLine."Order Date");
+      Item.CALCFIELDS(Inventory);
+      Item.CALCFIELDS("Qty. on Sales Order");
+      Item.CALCFIELDS("Qty. on Service Order");
+      OldSalesUOM := Item."Sales Unit of Measure";
+
+      ItemSubstitution.RESET;
+      ItemSubstitution.SETRANGE("No.",ServInvLine."No.");
+      ItemSubstitution.SETRANGE("Variant Code",ServInvLine."Variant Code");
+      ItemSubstitution.SETRANGE("Location Filter",ServInvLine."Location Code");
+      if ItemSubstitution.FIND('-') then begin
+        TempItemSubstitution.DELETEALL;
+        InsertInSubstServiceList(ServInvLine."No.",ItemSubstitution,1);
+        TempItemSubstitution.RESET;
+        if TempItemSubstitution.FIND('-') then;
+        if PAGE.RUNMODAL(PAGE::"Service Item Substitutions",TempItemSubstitution) =
+           ACTION::LookupOK
+        then begin
+          if TempItemSubstitution."Substitute Type" =
+             TempItemSubstitution."Substitute Type"::"Nonstock Item"
+          then begin
+            NonStockItem.GET(TempItemSubstitution."Substitute No.");
+            if NonStockItem."Item No." <> '' then
+              TempItemSubstitution."Substitute No." := NonStockItem."Item No."
+            else begin
+              ServInvLine."No." := TempItemSubstitution."Substitute No.";
+              ServInvLine."Variant Code" := TempItemSubstitution."Substitute Variant Code";
+              NonstockItemMgt.NonStockFSM(ServInvLine);
+              TempItemSubstitution."Substitute No." := ServInvLine."No.";
+            end;
+          end;
+          ServInvLine."No." := TempItemSubstitution."Substitute No.";
+          ServInvLine."Variant Code" := TempItemSubstitution."Substitute Variant Code";
+          SaveQty := ServInvLine.Quantity;
+          SaveLocation := ServInvLine."Location Code";
+          ServInvLine.Quantity := 0;
+          ServInvLine.VALIDATE("No.",TempItemSubstitution."Substitute No.");
+          ServInvLine.VALIDATE("Variant Code",TempItemSubstitution."Substitute Variant Code");
+          ServInvLine."Location Code" := SaveLocation;
+          ServInvLine.VALIDATE(Quantity,SaveQty);
+          ServInvLine.VALIDATE("Unit of Measure Code",OldSalesUOM);
+          COMMIT;
+          if ItemCheckAvail.ServiceInvLineCheck(ServInvLine) then
+            ServInvLine := ServInvLine2;
+          if Item.GET(ServInvLine."No.") and
+             (Item."Sales Unit of Measure" <> OldSalesUOM)
+          then
+            MESSAGE(Text000);
+        end;
+      end else
+        ERROR(Text001,ServInvLine."No.");
+
+      if (ServInvLine2."No." <> ServInvLine."No.") or (ServInvLine2."Variant Code" <> ServInvLine."Variant Code") then
+        ServiceLineReserve.DeleteLine(ServInvLine2);
+
+      ServInvLine2 := ServInvLine;
+    END;
+
+    LOCAL PROCEDURE InsertInSubstServiceList@5(OrgNo@1000 : Code[20];VAR ItemSubstitution3@1001 : Record "Item Substitution";RelationsLevel@1002 : Integer);
+    VAR
+      ItemSubstitution@1003 : Record "Item Substitution";
+      ItemSubstitution2@1004 : Record "Item Substitution";
+      NonStockItem@1005 : Record "Nonstock Item";
+      RelatLevel@1006 : Integer;
+    BEGIN
+      ItemSubstitution.COPY(ItemSubstitution3);
+      RelatLevel := RelationsLevel;
+
+      if ItemSubstitution.FIND('-') then
+        repeat
+          CLEAR(TempItemSubstitution);
+          TempItemSubstitution.Type := ItemSubstitution.Type;
+          TempItemSubstitution."No." := ItemSubstitution."No.";
+          TempItemSubstitution."Variant Code" := ItemSubstitution."Variant Code";
+          TempItemSubstitution."Substitute Type" := ItemSubstitution."Substitute Type";
+          TempItemSubstitution."Substitute No." := ItemSubstitution."Substitute No.";
+          TempItemSubstitution."Substitute Variant Code" := ItemSubstitution."Substitute Variant Code";
+          TempItemSubstitution.Description := ItemSubstitution.Description;
+          TempItemSubstitution.Interchangeable := ItemSubstitution.Interchangeable;
+          TempItemSubstitution."Location Filter" := ItemSubstitution."Location Filter";
+          TempItemSubstitution."Relations Level" := RelatLevel;
+
+          if TempItemSubstitution."Substitute Type" = TempItemSubstitution.Type::Item then begin
+            Item.GET(ItemSubstitution."Substitute No.");
+            if not SetupDataIsPresent then
+              GetSetupData;
+            TempItemSubstitution."Quantity Avail. on Shpt. Date" :=
+              AvailToPromise.QtyAvailabletoPromise(
+                Item,GrossReq,SchedRcpt,
+                Item.GETRANGEMAX("Date Filter"),2,
+                CompanyInfo."Check-Avail. Period Calc.");
+            Item.CALCFIELDS(Inventory);
+            TempItemSubstitution.Inventory := Item.Inventory;
+          end;
+
+          if TempItemSubstitution.INSERT and
+             (ItemSubstitution."Substitute No." <> '')
+          then begin
+            ItemSubstitution2.SETRANGE(Type,ItemSubstitution.Type);
+            ItemSubstitution2.SETRANGE("No.",ItemSubstitution."Substitute No.");
+            ItemSubstitution2.SETFILTER("Substitute No.",'<>%1&<>%2',ItemSubstitution."No.",OrgNo);
+            ItemSubstitution.COPYFILTER("Variant Code",ItemSubstitution2."Variant Code");
+            ItemSubstitution.COPYFILTER("Location Filter",ItemSubstitution2."Location Filter");
+            if ItemSubstitution2.FINDFIRST then
+              InsertInSubstServiceList(OrgNo,ItemSubstitution2,(RelatLevel + 1));
+          end else begin
+            TempItemSubstitution.FIND;
+            if RelatLevel < TempItemSubstitution."Relations Level" then begin
+              TempItemSubstitution."Relations Level" := RelatLevel;
+              TempItemSubstitution.MODIFY;
+            end;
+          end;
+
+          if (ItemSubstitution."Substitute Type" = ItemSubstitution."Substitute Type"::"Nonstock Item") and
+             (ItemSubstitution."Substitute No." <> '') and
+             NonStockItem.GET(ItemSubstitution."Substitute No.") and
+             (NonStockItem."Item No." <> '')
+          then begin
+            CLEAR(TempItemSubstitution);
+            TempItemSubstitution.Type := ItemSubstitution.Type;
+            TempItemSubstitution."No." := ItemSubstitution."No.";
+            TempItemSubstitution."Variant Code" := ItemSubstitution."Variant Code";
+            TempItemSubstitution."Substitute Type" := TempItemSubstitution."Substitute Type"::Item;
+            TempItemSubstitution."Substitute No." := NonStockItem."Item No.";
+            TempItemSubstitution."Substitute Variant Code" := '';
+            TempItemSubstitution.Description := ItemSubstitution.Description;
+            TempItemSubstitution.Interchangeable := ItemSubstitution.Interchangeable;
+            TempItemSubstitution."Location Filter" := ItemSubstitution."Location Filter";
+            TempItemSubstitution."Relations Level" := RelatLevel;
+            if TempItemSubstitution.INSERT then begin
+              ItemSubstitution2.SETRANGE(Type,ItemSubstitution2.Type::"Nonstock Item");
+              ItemSubstitution2.SETRANGE("No.",NonStockItem."Item No.");
+              ItemSubstitution2.SETFILTER("Substitute No.",'<>%1&<>%2',NonStockItem."Item No.",OrgNo);
+              ItemSubstitution.COPYFILTER("Variant Code",ItemSubstitution2."Variant Code");
+              ItemSubstitution.COPYFILTER("Location Filter",ItemSubstitution2."Location Filter");
+              if ItemSubstitution2.FINDFIRST then
+                InsertInSubstServiceList(OrgNo,ItemSubstitution2,(RelatLevel + 1));
+            end else begin
+              TempItemSubstitution.FIND;
+              if RelatLevel < TempItemSubstitution."Relations Level" then begin
+                TempItemSubstitution."Relations Level" := RelatLevel;
+                TempItemSubstitution.MODIFY;
+              end;
+            end;
+          end;
+        until ItemSubstitution.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetSetupData@7();
+    BEGIN
+      CompanyInfo.GET;
+      SetupDataIsPresent := true;
+    END;
+
+    [External]
+    PROCEDURE GetCompSubst@8(VAR ProdOrderComp@1001 : Record "Prod. Order Component");
+    BEGIN
+      if not PrepareSubstList(
+           ProdOrderComp."Item No.",
+           ProdOrderComp."Variant Code",
+           ProdOrderComp."Location Code",
+           ProdOrderComp."Due Date",
+           true)
+      then
+        ErrorMessage(ProdOrderComp."Item No.",ProdOrderComp."Variant Code");
+
+      TempItemSubstitution.RESET;
+      TempItemSubstitution.SETRANGE("Variant Code",ProdOrderComp."Variant Code");
+      TempItemSubstitution.SETRANGE("Location Filter",ProdOrderComp."Location Code");
+      if TempItemSubstitution.FIND('-') then;
+      if PAGE.RUNMODAL(PAGE::"Item Substitution Entries",TempItemSubstitution) = ACTION::LookupOK then
+        UpdateComponent(ProdOrderComp,TempItemSubstitution."Substitute No.",TempItemSubstitution."Substitute Variant Code");
+    END;
+
+    [External]
+    PROCEDURE UpdateComponent@12(VAR ProdOrderComp@1000 : Record "Prod. Order Component";SubstItemNo@1002 : Code[20];SubstVariantCode@1003 : Code[10]);
+    VAR
+      TempProdOrderComp@1001 : TEMPORARY Record "Prod. Order Component";
+      ProdOrderCompReserve@1004 : Codeunit "Prod. Order Comp.-Reserve";
+    BEGIN
+      if (ProdOrderComp."Item No." <> SubstItemNo) or (ProdOrderComp."Variant Code" <> SubstVariantCode) then
+        ProdOrderCompReserve.DeleteLine(ProdOrderComp);
+
+      TempProdOrderComp := ProdOrderComp;
+
+      with TempProdOrderComp do begin
+        SaveQty := "Quantity per";
+
+        "Item No." := SubstItemNo;
+        "Variant Code" := SubstVariantCode;
+        "Location Code" := ProdOrderComp."Location Code";
+        "Quantity per" := 0;
+        VALIDATE("Item No.");
+        VALIDATE("Variant Code");
+
+        "Original Item No." := ProdOrderComp."Item No.";
+        "Original Variant Code" := ProdOrderComp."Variant Code";
+
+        if ProdOrderComp."Qty. per Unit of Measure" <> 1 then begin
+          if ItemUnitOfMeasure.GET(Item."No.",ProdOrderComp."Unit of Measure Code") and
+             (ItemUnitOfMeasure."Qty. per Unit of Measure" = ProdOrderComp."Qty. per Unit of Measure")
+          then
+            VALIDATE("Unit of Measure Code",ProdOrderComp."Unit of Measure Code")
+          else
+            SaveQty := ROUND(ProdOrderComp."Quantity per" * ProdOrderComp."Qty. per Unit of Measure",0.00001);
+        end;
+        VALIDATE("Quantity per",SaveQty);
+      end;
+
+      ProdOrderComp := TempProdOrderComp;
+    END;
+
+    [External]
+    PROCEDURE PrepareSubstList@9(ItemNo@1003 : Code[20];VariantCode@1002 : Code[10];LocationCode@1001 : Code[10];DemandDate@1000 : Date;CalcATP@1004 : Boolean) : Boolean;
+    BEGIN
+      Item.GET(ItemNo);
+      Item.SETFILTER("Location Filter",LocationCode);
+      Item.SETFILTER("Variant Filter",VariantCode);
+      Item.SETRANGE("Date Filter",0D,DemandDate);
+
+      ItemSubstitution.RESET;
+      ItemSubstitution.SETRANGE(Type,ItemSubstitution.Type::Item);
+      ItemSubstitution.SETRANGE("No.",ItemNo);
+      ItemSubstitution.SETRANGE("Variant Code",VariantCode);
+      ItemSubstitution.SETRANGE("Location Filter",LocationCode);
+      if ItemSubstitution.FIND('-') then begin
+        TempItemSubstitution.DELETEALL;
+        CreateSubstList(ItemNo,ItemSubstitution,1,DemandDate,CalcATP);
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE CreateSubstList@11(OrgNo@1000 : Code[20];VAR ItemSubstitution3@1001 : Record "Item Substitution";RelationsLevel@1002 : Integer;DemandDate@1007 : Date;CalcATP@1008 : Boolean);
+    VAR
+      ItemSubstitution@1003 : Record "Item Substitution";
+      ItemSubstitution2@1004 : Record "Item Substitution";
+      RelationsLevel2@1006 : Integer;
+      ODF@1009 : DateFormula;
+    BEGIN
+      ItemSubstitution.COPY(ItemSubstitution3);
+      RelationsLevel2 := RelationsLevel;
+
+      if ItemSubstitution.FIND('-') then
+        repeat
+          CLEAR(TempItemSubstitution);
+          TempItemSubstitution.Type := ItemSubstitution.Type;
+          TempItemSubstitution."No." := ItemSubstitution."No.";
+          TempItemSubstitution."Variant Code" := ItemSubstitution."Variant Code";
+          TempItemSubstitution."Substitute Type" := ItemSubstitution."Substitute Type";
+          TempItemSubstitution."Substitute No." := ItemSubstitution."Substitute No.";
+          TempItemSubstitution."Substitute Variant Code" := ItemSubstitution."Substitute Variant Code";
+          TempItemSubstitution.Description := ItemSubstitution.Description;
+          TempItemSubstitution.Interchangeable := ItemSubstitution.Interchangeable;
+          TempItemSubstitution."Location Filter" := ItemSubstitution."Location Filter";
+          TempItemSubstitution."Relations Level" := RelationsLevel2;
+          TempItemSubstitution."Shipment Date" := DemandDate;
+
+          if CalcATP then begin
+            Item.GET(ItemSubstitution."Substitute No.");
+            TempItemSubstitution."Quantity Avail. on Shpt. Date" :=
+              AvailToPromise.QtyAvailabletoPromise(
+                Item,GrossReq,SchedRcpt,
+                Item.GETRANGEMAX("Date Filter"),2,ODF);
+            Item.CALCFIELDS(Inventory);
+            TempItemSubstitution.Inventory := Item.Inventory;
+          end;
+
+          if IsSubstitutionInserted(TempItemSubstitution,ItemSubstitution) then begin
+            ItemSubstitution2.SETRANGE(Type,ItemSubstitution.Type);
+            ItemSubstitution2.SETRANGE("No.",ItemSubstitution."Substitute No.");
+            ItemSubstitution2.SETFILTER("Substitute No.",'<>%1&<>%2',ItemSubstitution."No.",OrgNo);
+            ItemSubstitution.COPYFILTER("Variant Code",ItemSubstitution2."Variant Code");
+            ItemSubstitution.COPYFILTER("Location Filter",ItemSubstitution2."Location Filter");
+            if ItemSubstitution2.FINDFIRST then
+              CreateSubstList(OrgNo,ItemSubstitution2,RelationsLevel2 + 1,DemandDate,CalcATP);
+          end else begin
+            TempItemSubstitution.RESET;
+            if TempItemSubstitution.FIND then
+              if RelationsLevel2 < TempItemSubstitution."Relations Level" then begin
+                TempItemSubstitution."Relations Level" := RelationsLevel2;
+                TempItemSubstitution.MODIFY;
+              end;
+          end;
+        until ItemSubstitution.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE GetTempItemSubstList@10(VAR TempItemSubstitutionList@1000 : TEMPORARY Record "Item Substitution");
+    BEGIN
+      TempItemSubstitutionList.DELETEALL;
+
+      TempItemSubstitution.RESET;
+      if TempItemSubstitution.FIND('-') then
+        repeat
+          TempItemSubstitutionList := TempItemSubstitution;
+          TempItemSubstitutionList.INSERT;
+        until TempItemSubstitution.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE ErrorMessage@2(ItemNo@1001 : Code[20];VariantCode@1000 : Code[10]);
+    BEGIN
+      if VariantCode <> '' then
+        ERROR(Text001,ItemNo);
+
+      ERROR(Text002,ItemNo);
+    END;
+
+    [Internal]
+    PROCEDURE ItemAssemblySubstGet@13(VAR AssemblyLine@1000 : Record "Assembly Line");
+    VAR
+      TempAssemblyLine@1001 : TEMPORARY Record "Assembly Line";
+      AssemblyLineReserve@1002 : Codeunit "Assembly Line-Reserve";
+    BEGIN
+      TempAssemblyLine := AssemblyLine;
+      if TempAssemblyLine.Type <> TempAssemblyLine.Type::Item then
+        exit;
+
+      SaveItemNo := TempAssemblyLine."No.";
+      SaveVariantCode := TempAssemblyLine."Variant Code";
+
+      Item.GET(TempAssemblyLine."No.");
+      Item.SETFILTER("Location Filter",TempAssemblyLine."Location Code");
+      Item.SETFILTER("Variant Filter",TempAssemblyLine."Variant Code");
+      Item.SETRANGE("Date Filter",0D,TempAssemblyLine."Due Date");
+      Item.CALCFIELDS(Inventory);
+      Item.CALCFIELDS("Qty. on Sales Order");
+      Item.CALCFIELDS("Qty. on Service Order");
+      OldSalesUOM := Item."Sales Unit of Measure";
+
+      ItemSubstitution.RESET;
+      ItemSubstitution.SETRANGE(Type,ItemSubstitution.Type::Item);
+      ItemSubstitution.SETRANGE("No.",TempAssemblyLine."No.");
+      ItemSubstitution.SETRANGE("Variant Code",TempAssemblyLine."Variant Code");
+      ItemSubstitution.SETRANGE("Location Filter",TempAssemblyLine."Location Code");
+      if ItemSubstitution.FIND('-') then begin
+        AssemblyCalcCustPrice(TempAssemblyLine);
+        TempItemSubstitution.RESET;
+        TempItemSubstitution.SETRANGE(Type,TempItemSubstitution.Type::Item);
+        TempItemSubstitution.SETRANGE("No.",TempAssemblyLine."No.");
+        TempItemSubstitution.SETRANGE("Variant Code",TempAssemblyLine."Variant Code");
+        TempItemSubstitution.SETRANGE("Location Filter",TempAssemblyLine."Location Code");
+        if PAGE.RUNMODAL(PAGE::"Item Substitution Entries",TempItemSubstitution) =
+           ACTION::LookupOK
+        then begin
+          TempAssemblyLine."No." := TempItemSubstitution."Substitute No.";
+          TempAssemblyLine."Variant Code" := TempItemSubstitution."Substitute Variant Code";
+          SaveQty := TempAssemblyLine.Quantity;
+          SaveLocation := TempAssemblyLine."Location Code";
+          TempAssemblyLine.Quantity := 0;
+          TempAssemblyLine.VALIDATE("No.",TempItemSubstitution."Substitute No.");
+          TempAssemblyLine.VALIDATE("Variant Code",TempItemSubstitution."Substitute Variant Code");
+          TempAssemblyLine."Location Code" := SaveLocation;
+          TempAssemblyLine.VALIDATE(Quantity,SaveQty);
+          TempAssemblyLine.VALIDATE("Unit of Measure Code",OldSalesUOM);
+          COMMIT;
+          if ItemCheckAvail.AssemblyLineCheck(TempAssemblyLine) then
+            TempAssemblyLine := AssemblyLine;
+        end;
+      end else
+        ERROR(Text001,TempAssemblyLine."No.");
+
+      if (AssemblyLine."No." <> TempAssemblyLine."No.") or (AssemblyLine."Variant Code" <> TempAssemblyLine."Variant Code") then
+        AssemblyLineReserve.DeleteLine(AssemblyLine);
+
+      AssemblyLine := TempAssemblyLine;
+    END;
+
+    LOCAL PROCEDURE IsSubstitutionInserted@15(VAR ItemSubstitutionToCheck@1000 : Record "Item Substitution";ItemSubstitution@1004 : Record "Item Substitution") : Boolean;
+    BEGIN
+      if ItemSubstitution."Substitute No." <> '' then
+        with ItemSubstitutionToCheck do begin
+          RESET;
+          SETRANGE("Substitute Type",ItemSubstitution."Substitute Type");
+          SETRANGE("Substitute No.",ItemSubstitution."Substitute No.");
+          SETRANGE("Substitute Variant Code",ItemSubstitution."Substitute Variant Code");
+          if ISEMPTY then
+            exit(INSERT);
+        end;
+      exit(false);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

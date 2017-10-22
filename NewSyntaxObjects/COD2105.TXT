@@ -1,0 +1,169 @@
+OBJECT Codeunit 2105 O365 Sales Invoice Payment
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PaymentRegistrationMgt@1000 : Codeunit "Payment Registration Mgt.";
+      NoDetailedCustomerLedgerEntryForPaymentErr@1002 : TextConst 'ENU=No Detailed Customer Ledger Entry could be found for the payment of the invoice.';
+      MarkedPaidMsg@1003 : TextConst 'ENU=Invoice payment was registered.';
+      MarkedUnpaidMsg@1001 : TextConst 'ENU=Payment registration was removed.';
+
+    [External]
+    PROCEDURE ShowHistory@5(SalesInvoiceDocumentNo@1000 : Code[20]) : Boolean;
+    VAR
+      O365PaymentHistoryList@1001 : Page "O365 Payment History List";
+    BEGIN
+      O365PaymentHistoryList.ShowHistory(SalesInvoiceDocumentNo);
+      if O365PaymentHistoryList.RUNMODAL <> ACTION::OK then
+        exit(false);
+
+      // The returned action is OK even when X is selected: find if records have been deleted
+      exit(O365PaymentHistoryList.RecordDeleted);
+    END;
+
+    [Internal]
+    PROCEDURE MarkAsPaid@4(SalesInvoiceDocumentNo@1000 : Code[20]) : Boolean;
+    VAR
+      TempPaymentRegistrationBuffer@1002 : TEMPORARY Record "Payment Registration Buffer";
+      O365MarkAsPaid@1003 : Page "O365 Mark As Paid";
+    BEGIN
+      if not CalculatePaymentRegistrationBuffer(SalesInvoiceDocumentNo,TempPaymentRegistrationBuffer) then
+        exit(false);
+
+      O365MarkAsPaid.SetPaymentRegistrationBuffer(TempPaymentRegistrationBuffer);
+
+      if O365MarkAsPaid.RUNMODAL = ACTION::OK then begin
+        PaymentRegistrationMgt.Post(TempPaymentRegistrationBuffer,false);
+        MESSAGE(MarkedPaidMsg);
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    [Internal]
+    PROCEDURE CancelSalesInvoicePayment@3(SalesInvoiceDocumentNo@1000 : Code[20]) : Boolean;
+    VAR
+      TempO365PaymentHistoryBuffer@1001 : TEMPORARY Record "O365 Payment History Buffer";
+    BEGIN
+      TempO365PaymentHistoryBuffer.FillPaymentHistory(SalesInvoiceDocumentNo,false);
+      case TempO365PaymentHistoryBuffer.COUNT of
+        0:
+          exit(true); // All payments for the invoice has already been cancelled :)
+        1:
+          if TempO365PaymentHistoryBuffer.FINDFIRST then
+            exit(TempO365PaymentHistoryBuffer.CancelPayment);
+        else
+          // There are multiple payments, so show the history list instead and let the user specify the entries to cancel
+          exit(ShowHistory(SalesInvoiceDocumentNo));
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE CancelCustLedgerEntry@6(CustomerLedgerEntry@1004 : Integer);
+    VAR
+      PaymentCustLedgerEntry@1003 : Record "Cust. Ledger Entry";
+      ReversalEntry@1002 : Record "Reversal Entry";
+      DetailedCustLedgEntry@1001 : Record "Detailed Cust. Ledg. Entry";
+      CustEntryApplyPostedEntries@1000 : Codeunit "CustEntry-Apply Posted Entries";
+    BEGIN
+      if not PaymentCustLedgerEntry.GET(CustomerLedgerEntry) then
+        exit;
+
+      // Get detailed ledger entry for the payment, making sure it's a payment
+      DetailedCustLedgEntry.SETRANGE("Document Type",DetailedCustLedgEntry."Document Type"::Payment);
+      DetailedCustLedgEntry.SETRANGE("Document No.",PaymentCustLedgerEntry."Document No.");
+      DetailedCustLedgEntry.SETRANGE("Cust. Ledger Entry No.",CustomerLedgerEntry);
+      DetailedCustLedgEntry.SETRANGE(Unapplied,false);
+      if not DetailedCustLedgEntry.FINDLAST then
+        ERROR(NoDetailedCustomerLedgerEntryForPaymentErr);
+
+      CustEntryApplyPostedEntries.PostUnApplyCustomerCommit(
+        DetailedCustLedgEntry,DetailedCustLedgEntry."Document No.",DetailedCustLedgEntry."Posting Date",false);
+
+      ReversalEntry.SetHideWarningDialogs;
+      ReversalEntry.ReverseTransaction(PaymentCustLedgerEntry."Transaction No.");
+
+      MESSAGE(MarkedUnpaidMsg);
+    END;
+
+    LOCAL PROCEDURE CreatePaymentRegistrationSetup@16();
+    VAR
+      PaymentRegistrationSetup@1000 : Record "Payment Registration Setup";
+    BEGIN
+      with PaymentRegistrationSetup do begin
+        if GET(USERID) then
+          exit;
+        if GET then begin
+          "User ID" := USERID;
+          INSERT(true);
+          COMMIT;
+          exit;
+        end;
+        CODEUNIT.RUN(CODEUNIT::"O365 Sales Initial Setup");
+        COMMIT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetPaymentCustLedgerEntry@1(VAR PaymentCustLedgerEntry@1001 : Record "Cust. Ledger Entry";SalesInvoiceDocumentNo@1002 : Code[20]) : Boolean;
+    VAR
+      InvoiceCustLedgerEntry@1000 : Record "Cust. Ledger Entry";
+    BEGIN
+      // Find the customer ledger entry related to the invoice
+      InvoiceCustLedgerEntry.SETRANGE("Document Type",InvoiceCustLedgerEntry."Document Type"::Invoice);
+      InvoiceCustLedgerEntry.SETRANGE("Document No.",SalesInvoiceDocumentNo);
+      if not InvoiceCustLedgerEntry.FINDFIRST then
+        exit(false); // The invoice does not exist
+
+      // find the customer ledger entry related to the payment of the invoice
+      if not PaymentCustLedgerEntry.GET(InvoiceCustLedgerEntry."Closed by Entry No.") then
+        exit(false); // The invoice has not been closed
+
+      exit(true);
+    END;
+
+    PROCEDURE CalculatePaymentRegistrationBuffer@7(SalesInvoiceDocumentNo@1000 : Code[20];VAR PaymentRegistrationBuffer@1001 : Record "Payment Registration Buffer") : Boolean;
+    VAR
+      SalesInvoiceHeader@1002 : Record "Sales Invoice Header";
+    BEGIN
+      // Returns whether the table has been filled
+      if not SalesInvoiceHeader.GET(SalesInvoiceDocumentNo) then
+        exit(false);
+
+      if not CollectRemainingPayments(SalesInvoiceDocumentNo,PaymentRegistrationBuffer) then
+        exit(false); // Invoice has already been paid
+
+      PaymentRegistrationBuffer.VALIDATE("Payment Made",true);
+      PaymentRegistrationBuffer.VALIDATE("Limit Amount Received",true);
+      PaymentRegistrationBuffer.MODIFY(true);
+
+      exit(true);
+    END;
+
+    PROCEDURE CollectRemainingPayments@159(SalesInvoiceDocumentNo@1003 : Code[20];VAR PaymentRegistrationBuffer@1002 : Record "Payment Registration Buffer") : Boolean;
+    BEGIN
+      CreatePaymentRegistrationSetup;
+      PaymentRegistrationBuffer.PopulateTable;
+      PaymentRegistrationBuffer.SETRANGE("Document Type",PaymentRegistrationBuffer."Document Type"::Invoice);
+      PaymentRegistrationBuffer.SETRANGE("Document No.",SalesInvoiceDocumentNo);
+      exit(PaymentRegistrationBuffer.FINDFIRST);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

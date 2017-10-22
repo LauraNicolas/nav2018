@@ -1,0 +1,233 @@
+OBJECT Page 2155 O365 Sales Invoice Discount
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Edit Discount;
+    DeleteAllowed=false;
+    SourceTable="Sales Header";
+    PageType=Card;
+    OnInit=BEGIN
+             SalesSetup.GET;
+           END;
+
+    OnOpenPage=BEGIN
+                 CalculateTotals;
+               END;
+
+    OnQueryClosePage=BEGIN
+                       if not (CloseAction in [ACTION::LookupOK,ACTION::OK]) then
+                         RestoreInvoiceDiscountPercent(OriginalInvoiceDiscount);
+                       CalcInvDiscForHeader;
+                     END;
+
+    OnAfterGetCurrRecord=BEGIN
+                           CalculateTotals;
+                           if not HasSetOriginalInvoiceDiscount then begin
+                             OriginalInvoiceDiscount := InvoiceDiscountPct;
+                             HasSetOriginalInvoiceDiscount := true;
+                           end;
+                         END;
+
+  }
+  CONTROLS
+  {
+    { 1   ;0   ;Container ;
+                Name=Container1;
+                ContainerType=ContentArea }
+
+    { 2   ;1   ;Group     ;
+                Name=Group2;
+                GroupType=Group }
+
+    { 8   ;2   ;Field     ;
+                Name=Subtotal Amount;
+                CaptionML=ENU=Before Discount;
+                ToolTipML=ENU=Specifies the subtotal amount of invoice without discount;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=SubTotalAmount;
+                AutoFormatType=10;
+                AutoFormatExpr='1';
+                Editable=FALSE;
+                ImplicitType=Decimal }
+
+    { 4   ;2   ;Group     ;
+                Name=Specify Discount;
+                CaptionML=ENU=Specify Discount;
+                GroupType=Group }
+
+    { 5   ;3   ;Field     ;
+                Name=Invoice Disc. Pct.;
+                CaptionML=ENU=Discount %;
+                ToolTipML=ENU=Specifies a discount percentage that is granted if criteria that you have set up for the customer are met.;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                DecimalPlaces=1:3;
+                SourceExpr=InvoiceDiscountPct;
+                OnValidate=BEGIN
+                             InvoiceDiscountPct := GetValueWithinBounds(InvoiceDiscountPct,0,100);
+                             ValidateInvoiceDiscountPercent;
+                           END;
+
+                ImplicitType=Decimal }
+
+    { 6   ;3   ;Field     ;
+                Name=Invoice Discount Amount;
+                CaptionML=ENU=Discount Amount;
+                ToolTipML=ENU=Specifies a discount amount that is deducted from the value in the Total Incl. VAT field. You can enter or change the amount manually.;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=InvoiceDiscountAmount;
+                AutoFormatType=1;
+                AutoFormatExpr="Currency Code";
+                OnValidate=BEGIN
+                             InvoiceDiscountAmount := GetValueWithinBounds(InvoiceDiscountAmount,0,SubTotalAmount);
+                             if SubTotalAmount <> 0 then
+                               InvoiceDiscountPct := InvoiceDiscountAmount / SubTotalAmount * 100
+                             else
+                               InvoiceDiscountPct := 0;
+                             ValidateInvoiceDiscountPercent;
+                           END;
+
+                ImplicitType=Decimal }
+
+    { 7   ;2   ;Group     ;
+                Name=Totals;
+                CaptionML=ENU=Total After Discount;
+                GroupType=Group }
+
+    { 3   ;3   ;Field     ;
+                Name=TotalAmount;
+                ToolTipML=ENU=Specifies the sum of the value in the Line Amount Excl. VAT field on all lines in the document minus any discount amount in the Invoice Discount Amount field.;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=TotalAmount;
+                AutoFormatType=1;
+                AutoFormatExpr="Currency Code";
+                CaptionClass=GetCaptionClass;
+                OnValidate=BEGIN
+                             TotalAmount := GetValueWithinBounds(TotalAmount,0,SubTotalAmount);
+                             if SubTotalAmount <> 0 then
+                               InvoiceDiscountPct := (SubTotalAmount - TotalAmount) / SubTotalAmount * 100
+                             else
+                               InvoiceDiscountAmount := 0;
+                             ValidateInvoiceDiscountPercent;
+                           END;
+
+                ImplicitType=Decimal }
+
+  }
+  CODE
+  {
+    VAR
+      TotalSalesHeader@1003 : Record "Sales Header";
+      TotalSalesLine@1002 : Record "Sales Line";
+      Currency@1004 : Record Currency;
+      SalesSetup@1008 : Record "Sales & Receivables Setup";
+      SalesCalcDiscByType@1005 : Codeunit "Sales - Calc Discount By Type";
+      DocumentTotals@1006 : Codeunit "Document Totals";
+      O365Discounts@1014 : Codeunit "O365 Discounts";
+      InvoiceDiscountPct@1000 : Decimal;
+      InvoiceDiscountAmount@1001 : Decimal;
+      SubTotalAmount@1009 : Decimal;
+      TotalAmount@1010 : Decimal;
+      TotalTxt@1012 : TextConst 'ENU=Total';
+      VATAmount@1007 : Decimal;
+      AmountOutsideRangeMsg@1040 : TextConst 'ENU=We adjusted the discount to not exceed the line amount.';
+      OriginalInvoiceDiscount@1011 : Decimal;
+      HasSetOriginalInvoiceDiscount@1013 : Boolean;
+      AmountOutsideOfBoundsNotificationSend@1041 : Boolean;
+
+    LOCAL PROCEDURE CalculateTotals@6();
+    VAR
+      SalesLine@1000 : Record "Sales Line";
+      CustInvoiceDisc@1001 : Record "Cust. Invoice Disc.";
+    BEGIN
+      GetTotalSalesHeader;
+      SalesLine.SETRANGE("Document Type","Document Type");
+      SalesLine.SETRANGE("Document No.","No.");
+      if SalesLine.FINDFIRST then begin
+        CODEUNIT.RUN(CODEUNIT::"Sales-Calc. Discount",SalesLine);
+
+        DocumentTotals.CalculateSalesTotals(TotalSalesLine,VATAmount,SalesLine);
+        SubTotalAmount := TotalSalesLine."Line Amount";
+
+        if "Prices Including VAT" then
+          TotalAmount := TotalSalesLine.Amount + VATAmount
+        else
+          TotalAmount := TotalSalesLine.Amount;
+
+        InvoiceDiscountAmount := TotalSalesLine."Inv. Discount Amount";
+        InvoiceDiscountPct := SalesCalcDiscByType.GetCustInvoiceDiscountPct(SalesLine);
+      end;
+
+      if CustInvoiceDisc.GET("Invoice Disc. Code","Currency Code",0) then;
+      InvoiceDiscountPct := CustInvoiceDisc."Discount %";
+    END;
+
+    LOCAL PROCEDURE GetTotalSalesHeader@13();
+    BEGIN
+      if not TotalSalesHeader.GET("Document Type","No.") then
+        CLEAR(TotalSalesHeader);
+      if Currency.Code <> TotalSalesHeader."Currency Code" then
+        if not Currency.GET(TotalSalesHeader."Currency Code") then
+          Currency.InitRoundingPrecision;
+    END;
+
+    LOCAL PROCEDURE ValidateInvoiceDiscountPercent@22();
+    BEGIN
+      O365Discounts.ApplyInvoiceDiscountPercentage(Rec,InvoiceDiscountPct);
+      CurrPage.UPDATE(true);
+    END;
+
+    LOCAL PROCEDURE GetCaptionClass@2() : Text;
+    BEGIN
+      if "Prices Including VAT" then
+        exit('2,1,' + TotalTxt);
+
+      exit('2,0,' + TotalTxt);
+    END;
+
+    LOCAL PROCEDURE GetValueWithinBounds@1027(Value@1000 : Decimal;MinValue@1001 : Decimal;MaxValue@1002 : Decimal) : Decimal;
+    BEGIN
+      if Value < MinValue then begin
+        SendOutsideRangeNotification;
+        exit(MinValue);
+      end;
+      if Value > MaxValue then begin
+        SendOutsideRangeNotification;
+        exit(MaxValue);
+      end;
+      exit(Value);
+    END;
+
+    LOCAL PROCEDURE SendOutsideRangeNotification@1028();
+    VAR
+      AmountOutOfBoundsNotification@1000 : Notification;
+    BEGIN
+      if AmountOutsideOfBoundsNotificationSend then
+        exit;
+      AmountOutOfBoundsNotification.ID := CREATEGUID;
+      AmountOutOfBoundsNotification.MESSAGE := AmountOutsideRangeMsg;
+      AmountOutOfBoundsNotification.SCOPE := NOTIFICATIONSCOPE::LocalScope;
+      AmountOutOfBoundsNotification.SEND;
+      AmountOutsideOfBoundsNotificationSend := true;
+    END;
+
+    LOCAL PROCEDURE RestoreInvoiceDiscountPercent@7(OldInvoiceDiscountPercent@1001 : Decimal);
+    VAR
+      CustInvoiceDisc@1002 : Record "Cust. Invoice Disc.";
+    BEGIN
+      if CustInvoiceDisc.GET("Invoice Disc. Code","Currency Code",0) then begin
+        CustInvoiceDisc."Discount %" := OldInvoiceDiscountPercent;
+        CustInvoiceDisc.MODIFY(true);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

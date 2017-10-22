@@ -1,0 +1,336 @@
+OBJECT Codeunit 5813 Undo Purchase Receipt Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Purch. Rcpt. Line";
+    Permissions=TableData "Purchase Line"=imd,
+                TableData "Purch. Rcpt. Line"=imd,
+                TableData "Item Entry Relation"=ri,
+                TableData "Whse. Item Entry Relation"=rimd;
+    OnRun=BEGIN
+            SETRANGE(Type,Type::Item);
+            if not FIND('-') then
+              ERROR(Text005);
+
+            if not HideDialog then
+              if not CONFIRM(Text000) then
+                exit;
+
+            PurchRcptLine.COPY(Rec);
+            Code;
+            Rec := PurchRcptLine;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1001 : TextConst 'ENU=Do you really want to undo the selected Receipt lines?';
+      Text001@1012 : TextConst 'ENU=Undo quantity posting...';
+      PurchRcptLine@1004 : Record "Purch. Rcpt. Line";
+      TempWhseJnlLine@1014 : TEMPORARY Record "Warehouse Journal Line";
+      TempGlobalItemLedgEntry@1017 : TEMPORARY Record "Item Ledger Entry";
+      TempGlobalItemEntryRelation@1005 : TEMPORARY Record "Item Entry Relation";
+      InvtSetup@1002 : Record "Inventory Setup";
+      UndoPostingMgt@1022 : Codeunit "Undo Posting Management";
+      Text002@1003 : TextConst 'ENU=There is not enough space to insert correction lines.';
+      WhseUndoQty@1016 : Codeunit "Whse. Undo Quantity";
+      InvtAdjmt@1006 : Codeunit "Inventory Adjustment";
+      HideDialog@1007 : Boolean;
+      JobItem@1018 : Boolean;
+      Text003@1009 : TextConst 'ENU=Checking lines...';
+      NextLineNo@1015 : Integer;
+      Text004@1010 : TextConst 'ENU=This receipt has already been invoiced. Undo Receipt can be applied only to posted, but not invoiced receipts.';
+      Text005@1011 : TextConst 'ENU=Undo Receipt can be performed only for lines of type Item. Please select a line of the Item type and repeat the procedure.';
+
+    [External]
+    PROCEDURE SetHideDialog@6(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    LOCAL PROCEDURE Code@4();
+    VAR
+      PostedWhseRcptLine@1001 : Record "Posted Whse. Receipt Line";
+      PurchLine@1005 : Record "Purchase Line";
+      Window@1003 : Dialog;
+      ItemRcptEntryNo@1002 : Integer;
+      DocLineNo@1000 : Integer;
+      PostedWhseRcptLineFound@1004 : Boolean;
+    BEGIN
+      with PurchRcptLine do begin
+        SETRANGE(Correction,false);
+
+        repeat
+          if not HideDialog then
+            Window.OPEN(Text003);
+          CheckPurchRcptLine(PurchRcptLine);
+        until NEXT = 0;
+
+        FIND('-');
+        repeat
+          TempGlobalItemLedgEntry.RESET;
+          if not TempGlobalItemLedgEntry.ISEMPTY then
+            TempGlobalItemLedgEntry.DELETEALL;
+          TempGlobalItemEntryRelation.RESET;
+          if not TempGlobalItemEntryRelation.ISEMPTY then
+            TempGlobalItemEntryRelation.DELETEALL;
+
+          if not HideDialog then
+            Window.OPEN(Text001);
+
+          PostedWhseRcptLineFound :=
+            WhseUndoQty.FindPostedWhseRcptLine(
+              PostedWhseRcptLine,
+              DATABASE::"Purch. Rcpt. Line",
+              "Document No.",
+              DATABASE::"Purchase Line",
+              PurchLine."Document Type"::Order,
+              "Order No.",
+              "Order Line No.");
+
+          ItemRcptEntryNo := PostItemJnlLine(PurchRcptLine,DocLineNo);
+
+          InsertNewReceiptLine(PurchRcptLine,ItemRcptEntryNo,DocLineNo);
+          if PostedWhseRcptLineFound then
+            WhseUndoQty.UndoPostedWhseRcptLine(PostedWhseRcptLine);
+
+          UpdateOrderLine(PurchRcptLine);
+          if PostedWhseRcptLineFound then
+            WhseUndoQty.UpdateRcptSourceDocLines(PostedWhseRcptLine);
+
+          if ("Blanket Order No." <> '') and ("Blanket Order Line No." <> 0) then
+            UpdateBlanketOrder(PurchRcptLine);
+
+          "Quantity Invoiced" := Quantity;
+          "Qty. Invoiced (Base)" := "Quantity (Base)";
+          "Qty. Rcd. Not Invoiced" := 0;
+          Correction := true;
+
+          MODIFY;
+          OnAfterPurchRcptLineModify(PurchRcptLine);
+
+          if not JobItem then
+            JobItem := (Type = Type::Item) and ("Job No." <> '');
+        until NEXT = 0;
+
+        InvtSetup.GET;
+        if InvtSetup."Automatic Cost Adjustment" <>
+           InvtSetup."Automatic Cost Adjustment"::Never
+        then begin
+          InvtAdjmt.SetProperties(true,InvtSetup."Automatic Cost Posting");
+          InvtAdjmt.SetJobUpdateProperties(not JobItem);
+          InvtAdjmt.MakeMultiLevelAdjmt;
+        end;
+
+        WhseUndoQty.PostTempWhseJnlLine(TempWhseJnlLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckPurchRcptLine@2(PurchRcptLine@1000 : Record "Purch. Rcpt. Line");
+    VAR
+      TempItemLedgEntry@1003 : TEMPORARY Record "Item Ledger Entry";
+    BEGIN
+      with PurchRcptLine do begin
+        TESTFIELD(Type,Type::Item);
+        if "Qty. Rcd. Not Invoiced" <> Quantity then
+          ERROR(Text004);
+        TESTFIELD("Prod. Order No.",'');
+        TESTFIELD("Sales Order No.",'');
+        TESTFIELD("Sales Order Line No.",0);
+
+        UndoPostingMgt.TestPurchRcptLine(PurchRcptLine);
+        UndoPostingMgt.CollectItemLedgEntries(TempItemLedgEntry,DATABASE::"Purch. Rcpt. Line",
+          "Document No.","Line No.","Quantity (Base)","Item Rcpt. Entry No.");
+        UndoPostingMgt.CheckItemLedgEntries(TempItemLedgEntry,"Line No.");
+      end;
+    END;
+
+    LOCAL PROCEDURE PostItemJnlLine@13(PurchRcptLine@1000 : Record "Purch. Rcpt. Line";VAR DocLineNo@1005 : Integer) : Integer;
+    VAR
+      ItemJnlLine@1002 : Record "Item Journal Line";
+      PurchLine@1004 : Record "Purchase Line";
+      PurchRcptHeader@1003 : Record "Purch. Rcpt. Header";
+      PurchRcptLine2@1007 : Record "Purch. Rcpt. Line";
+      SourceCodeSetup@1001 : Record "Source Code Setup";
+      TempApplyToEntryList@1008 : TEMPORARY Record "Item Ledger Entry";
+      ItemApplicationEntry@1010 : Record "Item Application Entry";
+      ItemJnlPostLine@1011 : Codeunit "Item Jnl.-Post Line";
+      LineSpacing@1006 : Integer;
+    BEGIN
+      with PurchRcptLine do begin
+        PurchRcptLine2.SETRANGE("Document No.","Document No.");
+        PurchRcptLine2."Document No." := "Document No.";
+        PurchRcptLine2."Line No." := "Line No.";
+        PurchRcptLine2.FIND('=');
+
+        if PurchRcptLine2.FIND('>') then begin
+          LineSpacing := (PurchRcptLine2."Line No." - "Line No.") div 2;
+          if LineSpacing = 0 then
+            ERROR(Text002);
+        end else
+          LineSpacing := 10000;
+        DocLineNo := "Line No." + LineSpacing;
+
+        SourceCodeSetup.GET;
+        PurchRcptHeader.GET("Document No.");
+        ItemJnlLine.INIT;
+        ItemJnlLine."Entry Type" := ItemJnlLine."Entry Type"::Purchase;
+        ItemJnlLine."Item No." := "No.";
+        ItemJnlLine."Posting Date" := PurchRcptHeader."Posting Date";
+        ItemJnlLine."Document No." := "Document No.";
+        ItemJnlLine."Document Line No." := DocLineNo;
+        ItemJnlLine."Document Type" := ItemJnlLine."Document Type"::"Purchase Receipt";
+        ItemJnlLine."Gen. Bus. Posting Group" := "Gen. Bus. Posting Group";
+        ItemJnlLine."Gen. Prod. Posting Group" := "Gen. Prod. Posting Group";
+        ItemJnlLine."Location Code" := "Location Code";
+        ItemJnlLine."Source Code" := SourceCodeSetup.Purchases;
+        ItemJnlLine."Variant Code" := "Variant Code";
+        ItemJnlLine."Bin Code" := "Bin Code";
+        ItemJnlLine."Unit of Measure Code" := "Unit of Measure Code";
+        ItemJnlLine."Qty. per Unit of Measure" := "Qty. per Unit of Measure";
+        ItemJnlLine."Document Date" := PurchRcptHeader."Document Date";
+        ItemJnlLine."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        ItemJnlLine."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+        ItemJnlLine."Dimension Set ID" := "Dimension Set ID";
+
+        if "Job No." = '' then begin
+          ItemJnlLine.Correction := true;
+          ItemJnlLine."Applies-to Entry" := "Item Rcpt. Entry No.";
+        end else begin
+          ItemJnlLine."Job No." := "Job No.";
+          ItemJnlLine."Job Task No." := "Job Task No.";
+          ItemJnlLine."Job Purchase" := true;
+          ItemJnlLine."Unit Cost" := "Unit Cost (LCY)";
+        end;
+        ItemJnlLine.Quantity := -Quantity;
+        ItemJnlLine."Quantity (Base)" := -"Quantity (Base)";
+
+        WhseUndoQty.InsertTempWhseJnlLine(ItemJnlLine,
+          DATABASE::"Purchase Line",
+          PurchLine."Document Type"::Order,
+          "Order No.",
+          "Line No.",
+          TempWhseJnlLine."Reference Document"::"Posted Rcpt.",
+          TempWhseJnlLine,
+          NextLineNo);
+
+        if "Item Rcpt. Entry No." <> 0 then begin
+          if "Job No." <> '' then
+            UndoPostingMgt.TransferSourceValues(ItemJnlLine,"Item Rcpt. Entry No.");
+          UndoPostingMgt.PostItemJnlLine(ItemJnlLine);
+          if "Job No." <> '' then begin
+            UndoPostingMgt.FindItemReceiptApplication(ItemApplicationEntry,"Item Rcpt. Entry No.");
+            ItemJnlPostLine.UndoValuePostingWithJob("Item Rcpt. Entry No.",ItemApplicationEntry."Outbound Item Entry No.");
+
+            UndoPostingMgt.FindItemShipmentApplication(ItemApplicationEntry,ItemJnlLine."Item Shpt. Entry No.");
+            ItemJnlPostLine.UndoValuePostingWithJob(ItemApplicationEntry."Inbound Item Entry No.",ItemJnlLine."Item Shpt. Entry No.");
+
+            UndoPostingMgt.ReapplyJobConsumption("Item Rcpt. Entry No.");
+          end;
+
+          exit(ItemJnlLine."Item Shpt. Entry No.");
+        end;
+
+        UndoPostingMgt.CollectItemLedgEntries(
+          TempApplyToEntryList,DATABASE::"Purch. Rcpt. Line","Document No.","Line No.","Quantity (Base)","Item Rcpt. Entry No.");
+
+        if "Job No." <> '' then
+          if TempApplyToEntryList.FINDSET then
+            repeat
+              UndoPostingMgt.ReapplyJobConsumption(TempApplyToEntryList."Entry No.");
+            until TempApplyToEntryList.NEXT = 0;
+
+        UndoPostingMgt.PostItemJnlLineAppliedToList(ItemJnlLine,TempApplyToEntryList,
+          Quantity,"Quantity (Base)",TempGlobalItemLedgEntry,TempGlobalItemEntryRelation);
+
+        exit(0); // "Item Shpt. Entry No."
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertNewReceiptLine@1(OldPurchRcptLine@1000 : Record "Purch. Rcpt. Line";ItemRcptEntryNo@1002 : Integer;DocLineNo@1004 : Integer);
+    VAR
+      NewPurchRcptLine@1001 : Record "Purch. Rcpt. Line";
+    BEGIN
+      with OldPurchRcptLine do begin
+        NewPurchRcptLine.INIT;
+        NewPurchRcptLine.COPY(OldPurchRcptLine);
+        NewPurchRcptLine."Line No." := DocLineNo;
+        NewPurchRcptLine."Appl.-to Item Entry" := "Item Rcpt. Entry No.";
+        NewPurchRcptLine."Item Rcpt. Entry No." := ItemRcptEntryNo;
+        NewPurchRcptLine.Quantity := -Quantity;
+        NewPurchRcptLine."Quantity (Base)" := -"Quantity (Base)";
+        NewPurchRcptLine."Quantity Invoiced" := NewPurchRcptLine.Quantity;
+        NewPurchRcptLine."Qty. Invoiced (Base)" := NewPurchRcptLine."Quantity (Base)";
+        NewPurchRcptLine."Qty. Rcd. Not Invoiced" := 0;
+        NewPurchRcptLine.Correction := true;
+        NewPurchRcptLine."Dimension Set ID" := "Dimension Set ID";
+        NewPurchRcptLine.INSERT;
+
+        InsertItemEntryRelation(TempGlobalItemEntryRelation,NewPurchRcptLine);
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateOrderLine@3(PurchRcptLine@1000 : Record "Purch. Rcpt. Line");
+    VAR
+      PurchLine@1002 : Record "Purchase Line";
+    BEGIN
+      with PurchRcptLine do begin
+        PurchLine.GET(PurchLine."Document Type"::Order,"Order No.","Order Line No.");
+        UndoPostingMgt.UpdatePurchLine(PurchLine,Quantity,"Quantity (Base)",TempGlobalItemLedgEntry);
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateBlanketOrder@5(PurchRcptLine@1000 : Record "Purch. Rcpt. Line");
+    VAR
+      BlanketOrderPurchaseLine@1001 : Record "Purchase Line";
+    BEGIN
+      with PurchRcptLine do
+        if BlanketOrderPurchaseLine.GET(
+             BlanketOrderPurchaseLine."Document Type"::"Blanket Order","Blanket Order No.","Blanket Order Line No.")
+        then begin
+          BlanketOrderPurchaseLine.TESTFIELD(Type,Type);
+          BlanketOrderPurchaseLine.TESTFIELD("No.","No.");
+          BlanketOrderPurchaseLine.TESTFIELD("Buy-from Vendor No.","Buy-from Vendor No.");
+
+          if BlanketOrderPurchaseLine."Qty. per Unit of Measure" = "Qty. per Unit of Measure" then
+            BlanketOrderPurchaseLine."Quantity Received" := BlanketOrderPurchaseLine."Quantity Received" - Quantity
+          else
+            BlanketOrderPurchaseLine."Quantity Received" :=
+              BlanketOrderPurchaseLine."Quantity Received" -
+              ROUND("Qty. per Unit of Measure" / BlanketOrderPurchaseLine."Qty. per Unit of Measure" * Quantity,0.00001);
+
+          BlanketOrderPurchaseLine."Qty. Received (Base)" := BlanketOrderPurchaseLine."Qty. Received (Base)" - "Quantity (Base)";
+          BlanketOrderPurchaseLine.InitOutstanding;
+          BlanketOrderPurchaseLine.MODIFY;
+        end;
+    END;
+
+    LOCAL PROCEDURE InsertItemEntryRelation@10(VAR TempItemEntryRelation@1006 : TEMPORARY Record "Item Entry Relation";NewPurchRcptLine@1002 : Record "Purch. Rcpt. Line");
+    VAR
+      ItemEntryRelation@1001 : Record "Item Entry Relation";
+    BEGIN
+      if TempItemEntryRelation.FIND('-') then
+        repeat
+          ItemEntryRelation := TempItemEntryRelation;
+          ItemEntryRelation.TransferFieldsPurchRcptLine(NewPurchRcptLine);
+          ItemEntryRelation.INSERT;
+        until TempItemEntryRelation.NEXT = 0;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterPurchRcptLineModify@7(VAR PurchRcptLine@1000 : Record "Purch. Rcpt. Line");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

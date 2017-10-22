@@ -1,0 +1,530 @@
+OBJECT Codeunit 762 Acc. Sched. Chart Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1000 : TextConst 'ENU=Account Schedule %1 has duplicate Description values.';
+      Text002@1001 : TextConst 'ENU=Column Layout %1 has duplicate Column Header values.';
+      GeneralLedgerSetup@1008 : Record "General Ledger Setup";
+      AccSchedManagement@1002 : Codeunit AccSchedManagement;
+      Text003@1003 : TextConst 'ENU=Column formula: %1.';
+      Text005@1006 : TextConst '@@@=The default name of the chart setup.;ENU=DEFAULT';
+      Text006@1004 : TextConst 'ENU=The account schedule or column layout definition has been modified since the chart setup was created. Please reset your chart setup.';
+      GLSetupLoaded@1007 : Boolean;
+
+    [External]
+    PROCEDURE GetSetupRecordset@10(VAR AccountSchedulesChartSetup@1000 : Record "Account Schedules Chart Setup";ChartName@1001 : Text[60];Move@1003 : Integer);
+    BEGIN
+      FindRecordset(AccountSchedulesChartSetup,ChartName);
+      if (AccountSchedulesChartSetup.COUNT <= 1) or (Move = 0) then
+        exit;
+
+      if AccountSchedulesChartSetup.NEXT(Move) = 0 then
+        if Move < 0 then
+          AccountSchedulesChartSetup.FINDLAST
+        else
+          AccountSchedulesChartSetup.FINDFIRST;
+
+      AccountSchedulesChartSetup.SetLastViewed;
+    END;
+
+    LOCAL PROCEDURE FindRecordset@3(VAR AccountSchedulesChartSetup@1000 : Record "Account Schedules Chart Setup";ChartName@1001 : Text[60]);
+    VAR
+      Found@1002 : Boolean;
+    BEGIN
+      with AccountSchedulesChartSetup do begin
+        SETFILTER("User ID",'%1|%2',USERID,'');
+
+        if GET(USERID,ChartName) or GET('',ChartName) then begin
+          SetLastViewed;
+          exit;
+        end;
+
+        SETRANGE("Last Viewed",true);
+        Found := FINDLAST;
+        SETRANGE("Last Viewed");
+        if Found then
+          exit;
+
+        if FINDFIRST then begin
+          SetLastViewed;
+          exit;
+        end;
+
+        INIT;
+        "User ID" := USERID;
+        Name := Text005;
+        "Base X-Axis on" := "Base X-Axis on"::Period;
+        "Start Date" := WORKDATE;
+        "Period Length" := "Period Length"::Day;
+        "Last Viewed" := true;
+        INSERT;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE DrillDown@4(VAR BusChartBuf@1002 : Record "Business Chart Buffer";AccountSchedulesChartSetup@1000 : Record "Account Schedules Chart Setup");
+    VAR
+      AccScheduleLine@1004 : Record "Acc. Schedule Line";
+      ColumnLayout@1007 : Record "Column Layout";
+      AccScheduleOverview@1001 : Page "Acc. Schedule Overview";
+    BEGIN
+      GetAccScheduleAndColumnLayoutForDrillDown(AccScheduleLine,ColumnLayout,BusChartBuf,AccountSchedulesChartSetup);
+
+      if ColumnLayout."Column Type" = ColumnLayout."Column Type"::Formula then begin
+        MESSAGE(Text003,ColumnLayout.Formula);
+        exit;
+      end;
+
+      if AccScheduleLine."Totaling Type" in [AccScheduleLine."Totaling Type"::Formula,
+                                             AccScheduleLine."Totaling Type"::"Set Base For Percent"]
+      then begin
+        AccScheduleOverview.SetAccSchedName(AccScheduleLine."Schedule Name");
+        AccScheduleOverview.SETTABLEVIEW(AccScheduleLine);
+        AccScheduleOverview.SETRECORD(AccScheduleLine);
+        AccScheduleOverview.SetPeriodType(BusChartBuf."Period Length");
+        AccScheduleOverview.RUN;
+        exit;
+      end;
+
+      if AccScheduleLine.Totaling = '' then
+        exit;
+
+      if AccScheduleLine."Totaling Type" in [AccScheduleLine."Totaling Type"::"Cash Flow Entry Accounts",
+                                             AccScheduleLine."Totaling Type"::"Cash Flow Total Accounts"]
+      then
+        DrillDownOnCFAccount(AccScheduleLine,ColumnLayout)
+      else
+        if AccScheduleLine."Totaling Type" in [AccScheduleLine."Totaling Type"::"Cost Type",
+                                               AccScheduleLine."Totaling Type"::"Cost Type Total"]
+        then
+          DrillDownOnCostType(AccScheduleLine,ColumnLayout)
+        else
+          DrillDownOnGLAccount(AccScheduleLine,ColumnLayout);
+    END;
+
+    [Internal]
+    PROCEDURE UpdateData@6(VAR BusChartBuf@1004 : Record "Business Chart Buffer";Period@1006 : '" ",Next,Previous';AccountSchedulesChartSetup@1014 : Record "Account Schedules Chart Setup");
+    VAR
+      BusChartMapColumn@1005 : Record "Business Chart Map";
+      AccSchedChartSetupLine@1008 : Record "Acc. Sched. Chart Setup Line";
+      AccSchedChartSetupLine2@1012 : Record "Acc. Sched. Chart Setup Line";
+      AccScheduleLine@1000 : Record "Acc. Schedule Line";
+      ColumnLayout@1002 : Record "Column Layout";
+      FromDate@1007 : Date;
+      ToDate@1001 : Date;
+      NoOfPeriods@1009 : Integer;
+      PeriodCounter@1010 : Integer;
+      XCounter@1003 : Integer;
+    BEGIN
+      CheckDuplicateAccScheduleLineDescription(AccountSchedulesChartSetup."Account Schedule Name");
+      CheckDuplicateColumnLayoutColumnHeader(AccountSchedulesChartSetup."Column Layout Name");
+
+      with BusChartBuf do begin
+        "Period Length" := AccountSchedulesChartSetup."Period Length";
+
+        case AccountSchedulesChartSetup."Base X-Axis on" of
+          AccountSchedulesChartSetup."Base X-Axis on"::Period:
+            begin
+              if Period = Period::" " then begin
+                FromDate := 0D;
+                ToDate := 0D;
+              end else
+                if FindMidColumn(BusChartMapColumn) then
+                  GetPeriodFromMapColumn(BusChartMapColumn.Index,FromDate,ToDate);
+            end;
+          AccountSchedulesChartSetup."Base X-Axis on"::"Acc. Sched. Line",
+          AccountSchedulesChartSetup."Base X-Axis on"::"Acc. Sched. Column":
+            begin
+              if ("Period Filter Start Date" = 0D) and (AccountSchedulesChartSetup."Start Date" <> 0D) then
+                InitializePeriodFilter(AccountSchedulesChartSetup."Start Date",AccountSchedulesChartSetup."End Date")
+              else
+                RecalculatePeriodFilter("Period Filter Start Date","Period Filter End Date",Period);
+            end;
+        end;
+
+        Initialize;
+        case AccountSchedulesChartSetup."Base X-Axis on" of
+          AccountSchedulesChartSetup."Base X-Axis on"::Period:
+            begin
+              SetPeriodXAxis;
+              NoOfPeriods := AccountSchedulesChartSetup."No. of Periods";
+              CalcAndInsertPeriodAxis(BusChartBuf,AccountSchedulesChartSetup,Period,NoOfPeriods,FromDate,ToDate);
+            end;
+          AccountSchedulesChartSetup."Base X-Axis on"::"Acc. Sched. Line":
+            SetXAxis(AccScheduleLine.FIELDCAPTION(Description),"Data Type"::String);
+          AccountSchedulesChartSetup."Base X-Axis on"::"Acc. Sched. Column":
+            SetXAxis(ColumnLayout.FIELDCAPTION("Column Header"),"Data Type"::String);
+        end;
+
+        AddMeasures(BusChartBuf,AccountSchedulesChartSetup);
+
+        case AccountSchedulesChartSetup."Base X-Axis on" of
+          AccountSchedulesChartSetup."Base X-Axis on"::Period:
+            begin
+              FindFirstColumn(BusChartMapColumn);
+              for PeriodCounter := 1 to NoOfPeriods do begin
+                AccountSchedulesChartSetup.SetLinkToMeasureLines(AccSchedChartSetupLine);
+                AccSchedChartSetupLine.SETFILTER("Chart Type",'<>%1',AccSchedChartSetupLine."Chart Type"::" ");
+                if AccSchedChartSetupLine.FINDSET then
+                  repeat
+                    GetPeriodFromMapColumn(PeriodCounter - 1,FromDate,ToDate);
+                    AccScheduleLine.SETRANGE("Date Filter",FromDate,ToDate);
+                    if (not AccScheduleLine.GET(
+                          AccSchedChartSetupLine."Account Schedule Name",AccSchedChartSetupLine."Account Schedule Line No.")) or
+                       (not ColumnLayout.GET(
+                          AccSchedChartSetupLine."Column Layout Name",AccSchedChartSetupLine."Column Layout Line No."))
+                    then
+                      ERROR(Text006);
+                    SetValue(
+                      AccSchedChartSetupLine."Measure Name",PeriodCounter - 1,
+                      RoundAmount(AccSchedManagement.CalcCell(AccScheduleLine,ColumnLayout,false)));
+                  until AccSchedChartSetupLine.NEXT = 0;
+              end;
+            end;
+          AccountSchedulesChartSetup."Base X-Axis on"::"Acc. Sched. Line":
+            begin
+              AccountSchedulesChartSetup.SetLinkToDimensionLines(AccSchedChartSetupLine);
+              AccSchedChartSetupLine.SETFILTER("Chart Type",'<>%1',AccSchedChartSetupLine."Chart Type"::" ");
+              AccountSchedulesChartSetup.SetLinkToMeasureLines(AccSchedChartSetupLine2);
+              AccSchedChartSetupLine2.SETFILTER("Chart Type",'<>%1',AccSchedChartSetupLine2."Chart Type"::" ");
+              XCounter := 0;
+              AccScheduleLine.SETRANGE("Date Filter","Period Filter Start Date","Period Filter End Date");
+              if AccSchedChartSetupLine.FINDSET then
+                repeat
+                  AddColumn(AccSchedChartSetupLine."Measure Name");
+                  if not AccScheduleLine.GET(
+                       AccSchedChartSetupLine."Account Schedule Name",AccSchedChartSetupLine."Account Schedule Line No.")
+                  then
+                    ERROR(Text006);
+                  if AccSchedChartSetupLine2.FINDSET then
+                    repeat
+                      if not ColumnLayout.GET(
+                           AccSchedChartSetupLine2."Column Layout Name",AccSchedChartSetupLine2."Column Layout Line No.")
+                      then
+                        ERROR(Text006);
+                      SetValue(
+                        AccSchedChartSetupLine2."Measure Name",XCounter,
+                        RoundAmount(AccSchedManagement.CalcCell(AccScheduleLine,ColumnLayout,false)));
+                    until AccSchedChartSetupLine2.NEXT = 0;
+                  XCounter += 1;
+                until AccSchedChartSetupLine.NEXT = 0;
+            end;
+          AccountSchedulesChartSetup."Base X-Axis on"::"Acc. Sched. Column":
+            begin
+              AccountSchedulesChartSetup.SetLinkToDimensionLines(AccSchedChartSetupLine);
+              AccSchedChartSetupLine.SETFILTER("Chart Type",'<>%1',AccSchedChartSetupLine."Chart Type"::" ");
+              AccountSchedulesChartSetup.SetLinkToMeasureLines(AccSchedChartSetupLine2);
+              AccSchedChartSetupLine2.SETFILTER("Chart Type",'<>%1',AccSchedChartSetupLine2."Chart Type"::" ");
+              AccScheduleLine.SETRANGE("Date Filter","Period Filter Start Date","Period Filter End Date");
+              XCounter := 0;
+              if AccSchedChartSetupLine.FINDSET then
+                repeat
+                  AddColumn(AccSchedChartSetupLine."Measure Name");
+                  if not ColumnLayout.GET(AccSchedChartSetupLine."Column Layout Name",AccSchedChartSetupLine."Column Layout Line No.") then
+                    ERROR(Text006);
+                  if AccSchedChartSetupLine2.FINDSET then
+                    repeat
+                      if not AccScheduleLine.GET(
+                           AccSchedChartSetupLine2."Account Schedule Name",AccSchedChartSetupLine2."Account Schedule Line No.")
+                      then
+                        ERROR(Text006);
+                      SetValue(
+                        AccSchedChartSetupLine2."Measure Name",XCounter,
+                        RoundAmount(AccSchedManagement.CalcCell(AccScheduleLine,ColumnLayout,false)));
+                    until AccSchedChartSetupLine2.NEXT = 0;
+                  XCounter += 1;
+                until AccSchedChartSetupLine.NEXT = 0;
+            end;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE AddMeasures@13(VAR BusChartBuf@1004 : Record "Business Chart Buffer";AccountSchedulesChartSetup@1001 : Record "Account Schedules Chart Setup");
+    VAR
+      AccSchedChartSetupLine@1000 : Record "Acc. Sched. Chart Setup Line";
+      BusChartType@1003 : Option;
+    BEGIN
+      with AccSchedChartSetupLine do begin
+        AccountSchedulesChartSetup.SetLinkToMeasureLines(AccSchedChartSetupLine);
+        SETFILTER("Chart Type",'<>%1',"Chart Type"::" ");
+        if FINDSET then
+          repeat
+            case "Chart Type" of
+              "Chart Type"::Line:
+                BusChartType := BusChartBuf."Chart Type"::Line;
+              "Chart Type"::StepLine:
+                BusChartType := BusChartBuf."Chart Type"::StepLine;
+              "Chart Type"::Column:
+                BusChartType := BusChartBuf."Chart Type"::Column;
+              "Chart Type"::StackedColumn:
+                BusChartType := BusChartBuf."Chart Type"::StackedColumn;
+            end;
+            BusChartBuf.AddMeasure("Measure Name","Measure Value",BusChartBuf."Data Type"::Decimal,BusChartType);
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcAndInsertPeriodAxis@8(VAR BusChartBuf@1000 : Record "Business Chart Buffer";AccountSchedulesChartSetup@1009 : Record "Account Schedules Chart Setup";Period@1005 : ',Next,Previous';MaxPeriodNo@1008 : Integer;StartDate@1012 : Date;EndDate@1013 : Date);
+    VAR
+      PeriodDate@1002 : Date;
+    BEGIN
+      if (StartDate = 0D) and (AccountSchedulesChartSetup."Start Date" <> 0D) then
+        PeriodDate := CALCDATE(STRSUBSTNO('<-1%1>',BusChartBuf.GetPeriodLength),AccountSchedulesChartSetup."Start Date")
+      else begin
+        BusChartBuf.RecalculatePeriodFilter(StartDate,EndDate,Period);
+        PeriodDate := CALCDATE(STRSUBSTNO('<-%1%2>',MaxPeriodNo - (MaxPeriodNo div 2),BusChartBuf.GetPeriodLength),EndDate);
+      end;
+
+      BusChartBuf.AddPeriods(GetCorrectedDate(BusChartBuf,PeriodDate,1),GetCorrectedDate(BusChartBuf,PeriodDate,MaxPeriodNo));
+    END;
+
+    [External]
+    PROCEDURE GetCorrectedDate@18(BusChartBuf@1001 : Record "Business Chart Buffer";InputDate@1000 : Date;PeriodNo@1002 : Integer) OutputDate : Date;
+    BEGIN
+      OutputDate := CALCDATE(STRSUBSTNO('<%1%2>',PeriodNo,BusChartBuf.GetPeriodLength),InputDate);
+      if BusChartBuf."Period Length" <> BusChartBuf."Period Length"::Day then
+        OutputDate := CALCDATE(STRSUBSTNO('<C%1>',BusChartBuf.GetPeriodLength),OutputDate);
+    END;
+
+    LOCAL PROCEDURE GetAccScheduleAndColumnLayoutForDrillDown@9(VAR AccScheduleLine@1001 : Record "Acc. Schedule Line";VAR ColumnLayout@1002 : Record "Column Layout";VAR BusChartBuf@1003 : Record "Business Chart Buffer";AccountSchedulesChartSetup@1009 : Record "Account Schedules Chart Setup");
+    VAR
+      XName@1004 : Variant;
+      FromDate@1000 : Date;
+      ToDate@1005 : Date;
+      MeasureValueString@1006 : Text;
+      AccScheduleLineLineNo@1007 : Integer;
+      ColumnLayoutLineNo@1008 : Integer;
+    BEGIN
+      case AccountSchedulesChartSetup."Base X-Axis on" of
+        AccountSchedulesChartSetup."Base X-Axis on"::Period:
+          begin
+            BusChartBuf."Period Length" := AccountSchedulesChartSetup."Period Length";
+            ToDate := BusChartBuf.GetXValueAsDate(BusChartBuf."Drill-Down X Index");
+            FromDate := BusChartBuf.CalcFromDate(ToDate);
+            MeasureValueString := BusChartBuf.GetMeasureValueString(BusChartBuf."Drill-Down Measure Index");
+            EVALUATE(AccScheduleLineLineNo,COPYSTR(MeasureValueString,1,STRPOS(MeasureValueString,' ') - 1));
+            AccScheduleLine.GET(AccountSchedulesChartSetup."Account Schedule Name",AccScheduleLineLineNo);
+            EVALUATE(ColumnLayoutLineNo,COPYSTR(MeasureValueString,STRPOS(MeasureValueString,' ') + 1));
+            ColumnLayout.GET(AccountSchedulesChartSetup."Column Layout Name",ColumnLayoutLineNo);
+          end;
+        AccountSchedulesChartSetup."Base X-Axis on"::"Acc. Sched. Line":
+          begin
+            FromDate := BusChartBuf."Period Filter Start Date";
+            ToDate := BusChartBuf."Period Filter End Date";
+            AccountSchedulesChartSetup.FilterAccSchedLines(AccScheduleLine);
+            BusChartBuf.GetXValue(BusChartBuf."Drill-Down X Index",XName);
+            AccScheduleLine.SETRANGE(Description,FORMAT(XName));
+            AccScheduleLine.FINDFIRST;
+            MeasureValueString := BusChartBuf.GetMeasureValueString(BusChartBuf."Drill-Down Measure Index");
+            EVALUATE(ColumnLayoutLineNo,MeasureValueString);
+            ColumnLayout.GET(AccountSchedulesChartSetup."Column Layout Name",ColumnLayoutLineNo);
+          end;
+        AccountSchedulesChartSetup."Base X-Axis on"::"Acc. Sched. Column":
+          begin
+            FromDate := BusChartBuf."Period Filter Start Date";
+            ToDate := BusChartBuf."Period Filter End Date";
+            AccountSchedulesChartSetup.FilterColumnLayout(ColumnLayout);
+            BusChartBuf.GetXValue(BusChartBuf."Drill-Down X Index",XName);
+            ColumnLayout.SETRANGE("Column Header",FORMAT(XName));
+            ColumnLayout.FINDFIRST;
+            MeasureValueString := BusChartBuf.GetMeasureValueString(BusChartBuf."Drill-Down Measure Index");
+            EVALUATE(AccScheduleLineLineNo,MeasureValueString);
+            AccScheduleLine.GET(AccountSchedulesChartSetup."Account Schedule Name",AccScheduleLineLineNo);
+          end;
+      end;
+
+      AccScheduleLine.SETRANGE("Date Filter",FromDate,ToDate);
+      AccSchedManagement.SetStartDateEndDate(FromDate,ToDate);
+    END;
+
+    [External]
+    PROCEDURE CheckDuplicateAccScheduleLineDescription@11(AccScheduleName@1000 : Code[10]);
+    VAR
+      AccScheduleLineQuery@1001 : Query "Acc. Sched. Line Desc. Count";
+    BEGIN
+      AccScheduleLineQuery.SETRANGE(Schedule_Name,AccScheduleName);
+      AccScheduleLineQuery.OPEN;
+      if AccScheduleLineQuery.READ then
+        ERROR(Text001,AccScheduleName);
+    END;
+
+    [External]
+    PROCEDURE CheckDuplicateColumnLayoutColumnHeader@12(ColumnLayoutName@1000 : Code[10]);
+    VAR
+      ColumnLayoutQuery@1001 : Query "Colm. Layt. Colm. Header Count";
+    BEGIN
+      ColumnLayoutQuery.SETRANGE(Column_Layout_Name,ColumnLayoutName);
+      ColumnLayoutQuery.SETFILTER(Column_Header,'<>''''');
+
+      ColumnLayoutQuery.OPEN;
+      if ColumnLayoutQuery.READ then
+        ERROR(Text002,ColumnLayoutName);
+    END;
+
+    LOCAL PROCEDURE DrillDownOnCFAccount@14(VAR AccScheduleLine@1001 : Record "Acc. Schedule Line";VAR ColumnLayout@1000 : Record "Column Layout");
+    VAR
+      CFAccount@1002 : Record "Cash Flow Account";
+      AccSchedName@1004 : Record "Acc. Schedule Name";
+      GLAccAnalysisView@1005 : Record "G/L Account (Analysis View)";
+      ChartOfAccsAnalysisView@1006 : Page "Chart of Accs. (Analysis View)";
+    BEGIN
+      AccSchedManagement.SetCFAccRowFilter(CFAccount,AccScheduleLine);
+      AccSchedManagement.SetCFAccColumnFilter(CFAccount,AccScheduleLine,ColumnLayout);
+      AccSchedName.GET(AccScheduleLine."Schedule Name");
+      if AccSchedName."Analysis View Name" = '' then begin
+        CFAccount.FILTERGROUP(2);
+        CFAccount.SETFILTER(
+          "Global Dimension 1 Filter",AccSchedManagement.GetDimTotalingFilter(1,AccScheduleLine."Dimension 1 Totaling"));
+        CFAccount.SETFILTER(
+          "Global Dimension 2 Filter",AccSchedManagement.GetDimTotalingFilter(2,AccScheduleLine."Dimension 2 Totaling"));
+        CFAccount.FILTERGROUP(8);
+        CFAccount.SETFILTER(
+          "Global Dimension 1 Filter",AccSchedManagement.GetDimTotalingFilter(1,ColumnLayout."Dimension 1 Totaling"));
+        CFAccount.SETFILTER(
+          "Global Dimension 2 Filter",AccSchedManagement.GetDimTotalingFilter(2,ColumnLayout."Dimension 2 Totaling"));
+        CFAccount.FILTERGROUP(0);
+        PAGE.RUN(PAGE::"Chart of Cash Flow Accounts",CFAccount)
+      end else begin
+        CFAccount.COPYFILTER("Date Filter",GLAccAnalysisView."Date Filter");
+        CFAccount.COPYFILTER("Cash Flow Forecast Filter",GLAccAnalysisView."Cash Flow Forecast Filter");
+        GLAccAnalysisView.SETRANGE("Analysis View Filter",AccSchedName."Analysis View Name");
+        GLAccAnalysisView.FILTERGROUP(2);
+        GLAccAnalysisView.SetDimFilters(
+          AccSchedManagement.GetDimTotalingFilter(1,AccScheduleLine."Dimension 1 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(2,AccScheduleLine."Dimension 2 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(3,AccScheduleLine."Dimension 3 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(4,AccScheduleLine."Dimension 4 Totaling"));
+        GLAccAnalysisView.FILTERGROUP(8);
+        GLAccAnalysisView.SetDimFilters(
+          AccSchedManagement.GetDimTotalingFilter(1,ColumnLayout."Dimension 1 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(2,ColumnLayout."Dimension 2 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(3,ColumnLayout."Dimension 3 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(4,ColumnLayout."Dimension 4 Totaling"));
+        GLAccAnalysisView.FILTERGROUP(0);
+        CLEAR(ChartOfAccsAnalysisView);
+        ChartOfAccsAnalysisView.InsertTempCFAccountAnalysisVie(CFAccount);
+        ChartOfAccsAnalysisView.SETTABLEVIEW(GLAccAnalysisView);
+        ChartOfAccsAnalysisView.RUN;
+      end;
+    END;
+
+    LOCAL PROCEDURE DrillDownOnCostType@15(VAR AccScheduleLine@1001 : Record "Acc. Schedule Line";VAR ColumnLayout@1000 : Record "Column Layout");
+    VAR
+      CostType@1003 : Record "Cost Type";
+    BEGIN
+      AccSchedManagement.SetCostTypeRowFilters(CostType,AccScheduleLine,ColumnLayout);
+      AccSchedManagement.SetCostTypeColumnFilters(CostType,AccScheduleLine,ColumnLayout);
+      PAGE.RUN(PAGE::"Chart of Cost Types",CostType);
+    END;
+
+    LOCAL PROCEDURE DrillDownOnGLAccount@16(VAR AccScheduleLine@1001 : Record "Acc. Schedule Line";VAR ColumnLayout@1000 : Record "Column Layout");
+    VAR
+      GLAcc@1007 : Record "G/L Account";
+      GLAccAnalysisView@1006 : Record "G/L Account (Analysis View)";
+      AccSchedName@1009 : Record "Acc. Schedule Name";
+      ChartOfAccsAnalysisView@1004 : Page "Chart of Accs. (Analysis View)";
+      Dimension1Totaling@1003 : Code[1024];
+      Dimension2Totaling@1002 : Code[1024];
+    BEGIN
+      AccSchedManagement.SetGLAccRowFilters(GLAcc,AccScheduleLine);
+      AccSchedManagement.SetGLAccColumnFilters(GLAcc,AccScheduleLine,ColumnLayout);
+      AccSchedName.GET(AccScheduleLine."Schedule Name");
+      if AccSchedName."Analysis View Name" = '' then begin
+        GLAcc.FILTERGROUP(2);
+        Dimension1Totaling := AccSchedManagement.GetDimTotalingFilter(1,ColumnLayout."Dimension 1 Totaling");
+        Dimension2Totaling := AccSchedManagement.GetDimTotalingFilter(2,ColumnLayout."Dimension 2 Totaling");
+        GLAcc.SETFILTER("Global Dimension 1 Filter",Dimension1Totaling);
+        GLAcc.SETFILTER("Global Dimension 2 Filter",Dimension2Totaling);
+        GLAcc.FILTERGROUP(8);
+        GLAcc.SETFILTER("Business Unit Filter",ColumnLayout."Business Unit Totaling");
+        if Dimension1Totaling <> '' then
+          GLAcc.SETFILTER("Global Dimension 1 Filter",Dimension1Totaling);
+        if Dimension2Totaling <> '' then
+          GLAcc.SETFILTER("Global Dimension 2 Filter",Dimension2Totaling);
+        GLAcc.FILTERGROUP(0);
+        PAGE.RUN(PAGE::"Chart of Accounts (G/L)",GLAcc)
+      end else begin
+        GLAcc.COPYFILTER("Date Filter",GLAccAnalysisView."Date Filter");
+        GLAcc.COPYFILTER("Budget Filter",GLAccAnalysisView."Budget Filter");
+        GLAcc.COPYFILTER("Business Unit Filter",GLAccAnalysisView."Business Unit Filter");
+        GLAccAnalysisView.SETRANGE("Analysis View Filter",AccSchedName."Analysis View Name");
+        GLAccAnalysisView.FILTERGROUP(2);
+        GLAccAnalysisView.SetDimFilters(
+          AccSchedManagement.GetDimTotalingFilter(1,AccScheduleLine."Dimension 1 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(2,AccScheduleLine."Dimension 2 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(3,AccScheduleLine."Dimension 3 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(4,AccScheduleLine."Dimension 4 Totaling"));
+        GLAccAnalysisView.FILTERGROUP(8);
+        GLAccAnalysisView.SetDimFilters(
+          AccSchedManagement.GetDimTotalingFilter(1,ColumnLayout."Dimension 1 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(2,ColumnLayout."Dimension 2 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(3,ColumnLayout."Dimension 3 Totaling"),
+          AccSchedManagement.GetDimTotalingFilter(4,ColumnLayout."Dimension 4 Totaling"));
+        GLAccAnalysisView.SETFILTER("Business Unit Filter",ColumnLayout."Business Unit Totaling");
+        GLAccAnalysisView.FILTERGROUP(0);
+        CLEAR(ChartOfAccsAnalysisView);
+        ChartOfAccsAnalysisView.InsertTempGLAccAnalysisViews(GLAcc);
+        ChartOfAccsAnalysisView.SETTABLEVIEW(GLAccAnalysisView);
+        ChartOfAccsAnalysisView.RUN;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SelectAll@1(AccSchedChartSetupLine@1000 : Record "Acc. Sched. Chart Setup Line";IsMeasure@1002 : Boolean);
+    VAR
+      AccountSchedulesChartSetup@1001 : Record "Account Schedules Chart Setup";
+    BEGIN
+      AccountSchedulesChartSetup.GET(AccSchedChartSetupLine."User ID",AccSchedChartSetupLine.Name);
+      if IsMeasure then
+        AccountSchedulesChartSetup.SetMeasureChartTypesToDefault(AccSchedChartSetupLine)
+      else
+        AccountSchedulesChartSetup.SetDimensionChartTypesToDefault(AccSchedChartSetupLine);
+    END;
+
+    [External]
+    PROCEDURE DeselectAll@2(AccSchedChartSetupLine@1000 : Record "Acc. Sched. Chart Setup Line";IsMeasure@1001 : Boolean);
+    VAR
+      AccountSchedulesChartSetup@1002 : Record "Account Schedules Chart Setup";
+    BEGIN
+      AccountSchedulesChartSetup.GET(AccSchedChartSetupLine."User ID",AccSchedChartSetupLine.Name);
+      if IsMeasure then
+        AccountSchedulesChartSetup.SetLinkToMeasureLines(AccSchedChartSetupLine)
+      else
+        AccountSchedulesChartSetup.SetLinkToDimensionLines(AccSchedChartSetupLine);
+      AccSchedChartSetupLine.MODIFYALL("Chart Type",AccSchedChartSetupLine."Chart Type"::" ");
+    END;
+
+    [External]
+    PROCEDURE GetAccSchedMgtRef@7(VAR RefAccSchedManagement@1000 : Codeunit AccSchedManagement);
+    BEGIN
+      RefAccSchedManagement := AccSchedManagement;
+    END;
+
+    LOCAL PROCEDURE RoundAmount@5(Amount@1000 : Decimal) : Decimal;
+    BEGIN
+      if not GLSetupLoaded then begin
+        GeneralLedgerSetup.GET;
+        GLSetupLoaded := true;
+      end;
+
+      exit(ROUND(Amount,GeneralLedgerSetup."Amount Rounding Precision"));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

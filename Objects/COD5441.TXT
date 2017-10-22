@@ -2,13 +2,17 @@ OBJECT Codeunit 5441 Graph Sync. - Business Profile
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
-    OnRun=BEGIN
+    OnRun=VAR
+            GraphSyncRunner@1000 : Codeunit 5452;
+          BEGIN
+            IF GraphSyncRunner.IsGraphSyncEnabled AND SyncEnabled THEN
+              GraphSyncRunner.RunDeltaSyncForEntity(DATABASE::"Company Information");
           END;
 
   }
@@ -20,6 +24,13 @@ OBJECT Codeunit 5441 Graph Sync. - Business Profile
       SubscriptionConnectionNameTxt@1003 : TextConst '@@@={Locked};ENU=SubscribeBusinessProfile';
       SynchronizeConnectionNameTxt@1000 : TextConst '@@@={Locked};ENU=SynchronizeBusinessProfile';
       BusinessProfileReadWriteRoleTxt@1004 : TextConst '@@@={Locked};ENU=BusinessProfiles-Internal.ReadWrite';
+      EnablingBusinessProfileSyncTxt@1005 : TextConst '@@@={Locked};ENU=Enabling Business Profile sync.';
+      DisablingBusinessProfileSyncTxt@1006 : TextConst '@@@={Locked};ENU=Disabling Business Profile sync.';
+      GraphSubscriptionManagement@1007 : Codeunit 5450;
+      FoundUncoupledBusinessProfileTxt@1008 : TextConst '@@@={Locked};ENU=Found uncoupled record for Business Profile.';
+      MissingUncoupledBusinessProfileTxt@1009 : TextConst '@@@={Locked};ENU=Could not find uncoupled record for Business Profile.';
+      FullSyncTxt@1011 : TextConst '@@@={Locked};ENU=Starting full Graph sync for Business Profile.';
+      DeltaSyncTxt@1010 : TextConst '@@@={Locked};ENU=Starting delta Graph sync for Business Profile.';
 
     LOCAL PROCEDURE CanHandleMapping@13(MappingCode@1000 : Code[20]) : Boolean;
     BEGIN
@@ -86,26 +97,30 @@ OBJECT Codeunit 5441 Graph Sync. - Business Profile
     VAR
       CompanyInformation@1000 : Record 79;
     BEGIN
-      CompanyInformation.GET;
-      EXIT(CompanyInformation."Sync with O365 Bus. profile");
+      EXIT(CompanyInformation.GET AND CompanyInformation."Sync with O365 Bus. profile");
     END;
 
     [EventSubscriber(Table,5079,OnBeforeModifyEvent)]
     LOCAL PROCEDURE EnableBusinessProfileSyncOnEnableGraphSync@23(VAR Rec@1000 : Record 5079;VAR xRec@1001 : Record 5079;RunTrigger@1002 : Boolean);
     VAR
       CompanyInformation@1003 : Record 79;
+      GraphIntBusinessProfile@1005 : Codeunit 5442;
     BEGIN
       IF NOT RunTrigger OR Rec.ISTEMPORARY THEN
         EXIT;
 
       IF xRec.FIND AND (Rec."Sync with Microsoft Graph" <> xRec."Sync with Microsoft Graph") THEN BEGIN
+        CompanyInformation.LOCKTABLE;
         CompanyInformation.GET;
         IF Rec."Sync with Microsoft Graph" AND NOT CompanyInformation.IsSyncEnabledForOtherCompany THEN BEGIN
+          SENDTRACETAG('00001B8',GraphSubscriptionManagement.TraceCategory,VERBOSITY::Normal,EnablingBusinessProfileSyncTxt);
           CompanyInformation."Sync with O365 Bus. profile" := TRUE;
           CompanyInformation.MODIFY;
         END ELSE BEGIN
+          SENDTRACETAG('00001B9',GraphSubscriptionManagement.TraceCategory,VERBOSITY::Normal,DisablingBusinessProfileSyncTxt);
           CompanyInformation."Sync with O365 Bus. profile" := FALSE;
           CompanyInformation.MODIFY;
+          GraphIntBusinessProfile.UpdateCompanyBusinessProfileId('');
         END;
       END;
     END;
@@ -116,7 +131,7 @@ OBJECT Codeunit 5441 Graph Sync. - Business Profile
       CompanyInformation@1005 : Record 79;
       GraphBusinessProfile@1006 : Record 5456;
     BEGIN
-      IF CanHandleMapping(IntegrationTableMapping.Name) THEN
+      IF CanHandleMapping(IntegrationTableMapping.Name) THEN BEGIN
         IF SourceRecordRef.NUMBER = DATABASE::"Graph Business Profile" THEN BEGIN
           CompanyInformation.GET;
           DestinationRecordRef.GETTABLE(CompanyInformation);
@@ -126,13 +141,19 @@ OBJECT Codeunit 5441 Graph Sync. - Business Profile
             DestinationRecordRef.GETTABLE(GraphBusinessProfile);
             DestinationFound := TRUE;
           END;
+
+        IF DestinationFound THEN
+          SENDTRACETAG('00001BA',GraphSubscriptionManagement.TraceCategory,VERBOSITY::Normal,FoundUncoupledBusinessProfileTxt)
+        ELSE
+          SENDTRACETAG('00001BB',GraphSubscriptionManagement.TraceCategory,VERBOSITY::Normal,MissingUncoupledBusinessProfileTxt);
+      END;
     END;
 
     [EventSubscriber(Codeunit,5455,OnAddIntegrationMapping)]
     LOCAL PROCEDURE OnAddBusinessProfileIntegrationMapping@4(MappingCode@1000 : Code[20]);
     VAR
       CompanyInformation@1002 : Record 79;
-      GraphBusinessProfile@1003 : Record 5456;
+      TempGraphBusinessProfile@1003 : TEMPORARY Record 5456;
       GraphDataSetup@1001 : Codeunit 5455;
     BEGIN
       IF NOT CanHandleMapping(MappingCode) THEN
@@ -140,45 +161,58 @@ OBJECT Codeunit 5441 Graph Sync. - Business Profile
 
       // Add Graph Business Profile <=> Company information table mapping
       GraphDataSetup.AddIntegrationTableMapping(MappingCode,DATABASE::"Company Information",DATABASE::"Graph Business Profile",
-        GraphBusinessProfile.FIELDNO(Id),GraphBusinessProfile.FIELDNO(LastModifiedDate),'',0,GraphBusinessProfile.FIELDNO(ETag),0);
+        TempGraphBusinessProfile.FIELDNO(Id),TempGraphBusinessProfile.FIELDNO(LastModifiedDate),'',0,
+        TempGraphBusinessProfile.FIELDNO(ETag),0);
 
       // Add Graph Business Profile <=> Company Information field mapping
-      MapField(CompanyInformation.FIELDNO(Name),GraphBusinessProfile.FIELDNO(Name),FALSE);
-      MapField(CompanyInformation.FIELDNO("VAT Registration No."),GraphBusinessProfile.FIELDNO("Tax Id"),FALSE);
-      MapField(CompanyInformation.FIELDNO("Industrial Classification"),GraphBusinessProfile.FIELDNO(Industry),FALSE);
-      MapField(CompanyInformation.FIELDNO("Brand Color Value"),GraphBusinessProfile.FIELDNO(BrandColor),TRUE);
+      MapField(CompanyInformation.FIELDNO(Name),TempGraphBusinessProfile.FIELDNO(Name),FALSE);
+      MapField(CompanyInformation.FIELDNO("VAT Registration No."),TempGraphBusinessProfile.FIELDNO("Tax Id"),FALSE);
+      MapField(CompanyInformation.FIELDNO("Industrial Classification"),TempGraphBusinessProfile.FIELDNO(Industry),FALSE);
+      MapField(CompanyInformation.FIELDNO("Brand Color Value"),TempGraphBusinessProfile.FIELDNO(BrandColor),TRUE);
+    END;
+
+    [EventSubscriber(Codeunit,5452,OnCheckAuxiliarySyncEnabled)]
+    LOCAL PROCEDURE OnCheckAuxiliarySyncEnabled@30(VAR AuxSyncEnabled@1000 : Boolean);
+    BEGIN
+      IF AuxSyncEnabled THEN
+        EXIT;
+      AuxSyncEnabled := SyncEnabled;
     END;
 
     [EventSubscriber(Codeunit,5455,OnCreateIntegrationMappings)]
     LOCAL PROCEDURE OnCreateBusinessProfileIntegrationMappings@6();
     VAR
+      GraphIntegrationRecord@1001 : Record 5451;
       GraphDataSetup@1000 : Codeunit 5455;
+      GraphIntBusinessProfile@1002 : Codeunit 5442;
     BEGIN
       GraphDataSetup.CreateIntegrationMapping(IntegrationMappingCodeTxt);
+      GraphIntegrationRecord.SETRANGE("Table ID",GetEntityTableID);
+      IF GraphIntegrationRecord.FINDFIRST THEN
+        GraphIntBusinessProfile.UpdateCompanyBusinessProfileId(GraphIntegrationRecord."Graph ID");
     END;
 
     [EventSubscriber(Codeunit,5446,OnFindWebhookSubscription)]
     LOCAL PROCEDURE OnFindWebhookSubscription@7(VAR WebhookSubscription@1000 : Record 2000000199;SubscriptionID@1001 : Text[150];VAR IntegrationMappingCode@1002 : Code[20]);
-    VAR
-      WebhookManagement@1003 : Codeunit 5377;
     BEGIN
-      IF IntegrationMappingCode <> '' THEN
-        EXIT;
-
-      IF NOT WebhookManagement.FindWebhookSubscriptionSafe(WebhookSubscription,SubscriptionID,EntityListEndpoint) THEN
-        EXIT;
-
-      IntegrationMappingCode := IntegrationMappingCodeTxt;
+      IF IntegrationMappingCode = '' THEN
+        IF WebhookSubscription.GET(SubscriptionID,EntityListEndpoint) THEN
+          IntegrationMappingCode := IntegrationMappingCodeTxt;
     END;
 
     [EventSubscriber(Codeunit,5455,OnGetGraphRecord)]
-    LOCAL PROCEDURE OnGetGraphRecord@11(VAR GraphRecordRef@1000 : RecordRef;DestinationGraphID@1001 : Text[250];TableID@1002 : Integer);
+    LOCAL PROCEDURE OnGetGraphRecord@11(VAR GraphRecordRef@1000 : RecordRef;DestinationGraphID@1001 : Text[250];TableID@1002 : Integer;VAR Found@1004 : Boolean);
     VAR
       GraphBusinessProfile@1003 : Record 5456;
     BEGIN
-      IF TableID = GetEntityTableID THEN BEGIN
-        GraphBusinessProfile.GET(DestinationGraphID);
+      IF Found THEN
+        EXIT;
+      IF TableID <> GetEntityTableID THEN
+        EXIT;
+
+      IF GraphBusinessProfile.GET(DestinationGraphID) THEN BEGIN
         GraphRecordRef.GETTABLE(GraphBusinessProfile);
+        Found := GraphBusinessProfile.Id <> '';
       END;
     END;
 
@@ -288,8 +322,10 @@ OBJECT Codeunit 5441 Graph Sync. - Business Profile
     VAR
       GraphSyncRunner@1000 : Codeunit 5452;
     BEGIN
-      IF SyncEnabled THEN
+      IF SyncEnabled THEN BEGIN
+        SENDTRACETAG('00001BC',GraphSubscriptionManagement.TraceCategory,VERBOSITY::Normal,DeltaSyncTxt);
         GraphSyncRunner.RunDeltaSyncForEntity(GetEntityTableID);
+      END;
     END;
 
     [EventSubscriber(Codeunit,5452,OnRunGraphFullSync)]
@@ -297,24 +333,21 @@ OBJECT Codeunit 5441 Graph Sync. - Business Profile
     VAR
       GraphSyncRunner@1000 : Codeunit 5452;
     BEGIN
-      IF SyncEnabled THEN
+      IF SyncEnabled THEN BEGIN
+        SENDTRACETAG('00001BD',GraphSubscriptionManagement.TraceCategory,VERBOSITY::Normal,FullSyncTxt);
         GraphSyncRunner.RunFullSyncForEntity(GetEntityTableID);
+      END;
     END;
 
     [EventSubscriber(Table,79,OnAfterModifyEvent)]
     LOCAL PROCEDURE UpdateGraphOnAfterCompanyInformationModify@22(VAR Rec@1000 : Record 79;VAR xRec@1001 : Record 79;RunTrigger@1002 : Boolean);
     VAR
-      GraphIntegrationRecord@1004 : Record 5451;
       GraphSubscriptionManagement@1008 : Codeunit 5450;
       EntityRecordRef@1003 : RecordRef;
-      GraphID@1005 : Text[250];
     BEGIN
       IF RunTrigger AND SyncEnabled THEN BEGIN
-        IF GraphIntegrationRecord.FindIDFromRecordID(Rec.RECORDID,GraphID) THEN BEGIN
-          EntityRecordRef.GETTABLE(Rec);
-          GraphSubscriptionManagement.UpdateGraphOnAfterModify(EntityRecordRef);
-        END ELSE
-          OnRunBusinessProfileFullSync;
+        EntityRecordRef.GETTABLE(Rec);
+        GraphSubscriptionManagement.UpdateGraphOnAfterModify(EntityRecordRef);
       END;
     END;
 

@@ -1,0 +1,182 @@
+OBJECT Table 9001 User Group Member
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    DataPerCompany=false;
+    OnInsert=VAR
+               UserGroupAccessControl@1000 : Record "User Group Access Control";
+             BEGIN
+               UserGroupAccessControl.AddUserGroupMember("User Group Code","User Security ID","Company Name");
+               CopyDefaultProfileFromUserGroupToUser("User Group Code",false);
+             END;
+
+    OnModify=BEGIN
+               if ("User Group Code" <> xRec."User Group Code") or
+                  ("User Security ID" <> xRec."User Security ID") or
+                  ("Company Name" <> xRec."Company Name")
+               then
+                 ModifyUserGroupMembership;
+             END;
+
+    OnDelete=VAR
+               UserGroupAccessControl@1000 : Record "User Group Access Control";
+               PermissionManager@1001 : Codeunit "Permission Manager";
+             BEGIN
+               UserGroupAccessControl.RemoveUserGroupMember("User Group Code","User Security ID","Company Name");
+
+               // In SaaS the default profile comes from the plan and not from the user group
+               if not PermissionManager.SoftwareAsAService then
+                 UpdateDefaultProfileOfUser("User Group Code");
+             END;
+
+    OnRename=BEGIN
+               ModifyUserGroupMembership;
+             END;
+
+    CaptionML=ENU=User Group Member;
+  }
+  FIELDS
+  {
+    { 1   ;   ;User Group Code     ;Code20        ;TableRelation="User Group";
+                                                   CaptionML=ENU=User Group Code;
+                                                   NotBlank=true }
+    { 2   ;   ;User Security ID    ;GUID          ;TableRelation=User;
+                                                   CaptionML=ENU=User Security ID;
+                                                   NotBlank=true }
+    { 3   ;   ;Company Name        ;Text30        ;TableRelation=Company;
+                                                   CaptionML=ENU=Company Name }
+    { 4   ;   ;User Name           ;Code50        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(User."User Name" WHERE ("User Security ID"=FIELD("User Security ID")));
+                                                   CaptionML=ENU=User Name;
+                                                   Editable=false }
+    { 5   ;   ;User Full Name      ;Text80        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(User."Full Name" WHERE ("User Security ID"=FIELD("User Security ID")));
+                                                   CaptionML=ENU=User Full Name;
+                                                   Editable=false }
+    { 6   ;   ;User Group Name     ;Text50        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("User Group".Name WHERE (Code=FIELD("User Group Code")));
+                                                   CaptionML=ENU=User Group Name;
+                                                   Editable=false }
+  }
+  KEYS
+  {
+    {    ;"User Group Code","User Security ID","Company Name";
+                                                   Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+
+    [Internal]
+    PROCEDURE AddUsers@1(SelectedCompany@1002 : Text[30]);
+    VAR
+      User@1001 : Record User;
+      UserLookup@1003 : Page "User Lookup";
+    BEGIN
+      if GETFILTER("User Group Code") = '' then
+        exit;
+
+      UserLookup.LOOKUPMODE := true;
+      if UserLookup.RUNMODAL = ACTION::LookupOK then begin
+        UserLookup.GetSelectionFilter(User);
+        if User.FINDSET then
+          repeat
+            "User Group Code" := GETRANGEMIN("User Group Code");
+            "User Security ID" := User."User Security ID";
+            "Company Name" := SelectedCompany;
+            if INSERT(true) then;
+          until User.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE ModifyUserGroupMembership@5();
+    VAR
+      UserGroupAccessControl@1001 : Record "User Group Access Control";
+      UserGroupMember@1003 : Record "User Group Member";
+      DefaultProfile@1004 : Record "All Profile";
+      ConfPersonalizationMgt@1002 : Codeunit "Conf./Personalization Mgt.";
+    BEGIN
+      if ISNULLGUID("User Security ID") or ("User Group Code" = '') then
+        exit;
+      UserGroupAccessControl.RemoveUserGroupMember(xRec."User Group Code",xRec."User Security ID",xRec."Company Name");
+      UserGroupAccessControl.AddUserGroupMember("User Group Code","User Security ID","Company Name");
+
+      // If there is more than one User group assigned to a user, then use the company default profile
+      UserGroupMember.SETRANGE("User Security ID","User Security ID");
+      UserGroupMember.SETFILTER("User Group Code",'<>%1',xRec."User Group Code");
+      if not UserGroupMember.ISEMPTY then begin
+        // When there are more than two user groups assigned to this user, assign to him the default profile
+        ConfPersonalizationMgt.GetDefaultProfile(DefaultProfile);
+        CopyDefaultProfileToUser(DefaultProfile,true);
+        exit;
+      end;
+
+      // Else assign the profile of the current user group
+      UpdateDefaultProfileOfUser(xRec."User Group Code");
+      CopyDefaultProfileFromUserGroupToUser("User Group Code",false);
+    END;
+
+    LOCAL PROCEDURE UpdateDefaultProfileOfUser@12(UserGroupCode@1003 : Code[20]);
+    VAR
+      UserGroupMember@1002 : Record "User Group Member";
+      UserPersonalization@1001 : Record "User Personalization";
+    BEGIN
+      UserGroupMember.SETRANGE("User Security ID","User Security ID");
+      UserGroupMember.SETFILTER("User Group Code",'<>%1',UserGroupCode);
+      if not UserGroupMember.FINDFIRST then begin
+        if not UserPersonalization.GET("User Security ID") then
+          exit;
+        UserPersonalization."Profile ID" := '';
+        UserPersonalization.MODIFY(true);
+      end else
+        CopyDefaultProfileFromUserGroupToUser(UserGroupMember."User Group Code",true);
+    END;
+
+    LOCAL PROCEDURE CopyDefaultProfileFromUserGroupToUser@16(UserGroupCode@1003 : Code[20];Force@1000 : Boolean);
+    VAR
+      UserGroup@1001 : Record "User Group";
+      DefaultProfile@1002 : Record "All Profile";
+    BEGIN
+      // Updates the user's personalization, if empty, with the current default profile
+      if not UserGroup.GET(UserGroupCode) then
+        exit; // there is no default profile to add
+      if DefaultProfile.GET(UserGroup."Default Profile Scope",UserGroup."Default Profile App ID",UserGroup."Default Profile ID") then
+        CopyDefaultProfileToUser(DefaultProfile,Force);
+    END;
+
+    LOCAL PROCEDURE CopyDefaultProfileToUser@9(DefaultProfile@1003 : Record "All Profile";Force@1000 : Boolean);
+    VAR
+      UserPersonalization@1002 : Record "User Personalization";
+    BEGIN
+      if DefaultProfile."Profile ID" = '' then
+        exit;
+      // Force = TRUE overwrites the current default profile
+      if not UserPersonalization.GET("User Security ID") then begin
+        UserPersonalization.INIT;
+        UserPersonalization."User SID" := "User Security ID";
+        UserPersonalization."Profile ID" := DefaultProfile."Profile ID";
+        UserPersonalization."App ID" := DefaultProfile."App ID";
+        UserPersonalization.Scope := DefaultProfile.Scope;
+        UserPersonalization.INSERT(true);
+      end else
+        if (UserPersonalization."Profile ID" = '') or Force then begin
+          UserPersonalization."Profile ID" := DefaultProfile."Profile ID";
+          UserPersonalization."App ID" := DefaultProfile."App ID";
+          UserPersonalization.Scope := DefaultProfile.Scope;
+          UserPersonalization.MODIFY(true);
+        end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

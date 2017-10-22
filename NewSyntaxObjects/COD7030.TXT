@@ -1,0 +1,270 @@
+OBJECT Codeunit 7030 Campaign Target Group Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ContBusRel@1000 : Record "Contact Business Relation";
+      SegLine@1001 : Record "Segment Line";
+      CampaignTargetGr@1002 : Record "Campaign Target Group";
+      Text000@1003 : TextConst 'ENU=%1 %2 is now activated.';
+      Text001@1004 : TextConst 'ENU=%1 %2 is now deactivated.';
+      Text002@1005 : TextConst 'ENU=To activate the sales prices and/or line discounts, you must apply the relevant %1(s) to the %2 and place a check mark in the %3 field on the %1.';
+      InteractLogEntry@1010 : Record "Interaction Log Entry";
+      Text004@1006 : TextConst 'ENU=There are no Sales Prices or Sales Line Discounts currently linked to this %1. Do you still want to activate?';
+      Text006@1011 : TextConst 'ENU=Activating prices for the Contacts...\\';
+      Text007@1007 : TextConst 'ENU=Segment Lines  @1@@@@@@@@@@';
+      Text008@1012 : TextConst 'ENU=Logged Segment Lines  @1@@@@@@@@@@';
+
+    [External]
+    PROCEDURE ActivateCampaign@1(VAR Campaign@1000 : Record Campaign);
+    VAR
+      SalesPrice@1002 : Record "Sales Price";
+      SalesLineDisc@1003 : Record "Sales Line Discount";
+      Window@1005 : Dialog;
+      Found@1001 : Boolean;
+      Continue@1004 : Boolean;
+      NoOfRecords@1006 : Integer;
+      i@1007 : Integer;
+    BEGIN
+      SalesPrice.SETCURRENTKEY("Sales Type","Sales Code");
+      SalesPrice.SETRANGE("Sales Type",SalesPrice."Sales Type"::Campaign);
+      SalesPrice.SETRANGE("Sales Code",Campaign."No.");
+      SalesLineDisc.SETCURRENTKEY("Sales Type","Sales Code");
+      SalesLineDisc.SETRANGE("Sales Type",SalesLineDisc."Sales Type"::Campaign);
+      SalesLineDisc.SETRANGE("Sales Code",Campaign."No.");
+      if not (SalesPrice.FINDFIRST or SalesLineDisc.FINDFIRST) then begin
+        Continue := CONFIRM(Text004,true,Campaign.TABLECAPTION);
+        if Continue = false then
+          exit;
+      end;
+      CampaignTargetGr.LOCKTABLE;
+      Found := false;
+
+      with SegLine do begin
+        SETCURRENTKEY("Campaign No.");
+        SETRANGE("Campaign No.",Campaign."No.");
+        SETRANGE("Campaign Target",true);
+
+        if FIND('-') then begin
+          Found := true;
+          i := 0;
+          Window.OPEN(
+            Text006 +
+            Text007);
+          NoOfRecords := COUNT;
+          repeat
+            i := i + 1;
+            AddSegLinetoTargetGr(SegLine);
+            Window.UPDATE(1,ROUND(i / NoOfRecords * 10000,1));
+          until NEXT = 0;
+          Window.CLOSE;
+        end;
+      end;
+
+      with InteractLogEntry do begin
+        SETCURRENTKEY("Campaign No.","Campaign Target");
+        SETRANGE("Campaign No.",Campaign."No.");
+        SETRANGE("Campaign Target",true);
+        SETRANGE(Postponed,false);
+        if FIND('-') then begin
+          Found := true;
+          i := 0;
+          Window.OPEN(
+            Text006 +
+            Text008);
+          NoOfRecords := COUNT;
+          repeat
+            i := i + 1;
+            AddInteractionLogEntry(InteractLogEntry);
+            Window.UPDATE(1,ROUND(i / NoOfRecords * 10000,1));
+          until NEXT = 0;
+          Window.CLOSE;
+        end;
+      end;
+      if Found then begin
+        COMMIT;
+        MESSAGE(Text000,Campaign.TABLECAPTION,Campaign."No.")
+      end else
+        ERROR(Text002,SegLine.TABLECAPTION,Campaign.TABLECAPTION,SegLine.FIELDCAPTION("Campaign Target"));
+    END;
+
+    [External]
+    PROCEDURE DeactivateCampaign@2(VAR Campaign@1000 : Record Campaign;ShowMessage@1001 : Boolean);
+    BEGIN
+      CampaignTargetGr.LOCKTABLE;
+
+      CampaignTargetGr.SETCURRENTKEY("Campaign No.");
+      CampaignTargetGr.SETRANGE("Campaign No.",Campaign."No.");
+      if CampaignTargetGr.FIND('-') then
+        repeat
+          CampaignTargetGr.DELETE;
+        until CampaignTargetGr.NEXT = 0;
+      if ShowMessage then
+        MESSAGE(Text001,Campaign.TABLECAPTION,Campaign."No.");
+    END;
+
+    [External]
+    PROCEDURE AddSegLinetoTargetGr@3(SegLine@1001 : Record "Segment Line");
+    BEGIN
+      with SegLine do
+        if ("Campaign No." <> '') and "Campaign Target" then begin
+          ContBusRel.SETCURRENTKEY("Link to Table","Contact No.");
+          ContBusRel.SETRANGE("Link to Table",ContBusRel."Link to Table"::Customer);
+          ContBusRel.SETRANGE("Contact No.","Contact Company No.");
+          if ContBusRel.FINDFIRST then
+            InsertTargetGroup(CampaignTargetGr.Type::Customer,ContBusRel."No.","Campaign No.")
+          else
+            InsertTargetGroup(
+              CampaignTargetGr.Type::Contact,"Contact Company No.","Campaign No.");
+          if CampaignTargetGr.INSERT(true) then;
+        end;
+    END;
+
+    [External]
+    PROCEDURE DeleteSegfromTargetGr@5(SegLine@1001 : Record "Segment Line");
+    VAR
+      SegLine2@1000 : Record "Segment Line";
+    BEGIN
+      with SegLine do
+        if "Campaign No." <> '' then begin
+          SegLine2.SETCURRENTKEY("Campaign No.","Contact Company No.","Campaign Target");
+          SegLine2.SETRANGE("Campaign No.","Campaign No.");
+          SegLine2.SETRANGE("Contact Company No.","Contact Company No.");
+          SegLine2.SETRANGE("Campaign Target",true);
+
+          InteractLogEntry.SETCURRENTKEY("Campaign No.","Contact Company No.","Campaign Target");
+          InteractLogEntry.SETRANGE("Campaign No.","Campaign No.");
+          InteractLogEntry.SETRANGE("Contact Company No.","Contact Company No.");
+          InteractLogEntry.SETRANGE("Campaign Target",true);
+          InteractLogEntry.SETRANGE(Postponed,false);
+
+          if SegLine2.COUNT + InteractLogEntry.COUNT = 1 then begin
+            ContBusRel.SETCURRENTKEY("Link to Table","Contact No.");
+            ContBusRel.SETRANGE("Link to Table",ContBusRel."Link to Table"::Customer);
+            ContBusRel.SETRANGE("Contact No.","Contact Company No.");
+
+            if ContBusRel.FINDFIRST then begin
+              if CampaignTargetGr.GET(
+                   CampaignTargetGr.Type::Customer,ContBusRel."No.","Campaign No.")
+              then
+                CampaignTargetGr.DELETE;
+            end else
+              if CampaignTargetGr.GET(
+                   CampaignTargetGr.Type::Contact,"Contact No.","Campaign No.")
+              then
+                CampaignTargetGr.DELETE;
+          end;
+        end;
+    END;
+
+    LOCAL PROCEDURE AddInteractionLogEntry@6(InteractionLogEntry@1000 : Record "Interaction Log Entry");
+    BEGIN
+      with InteractionLogEntry do
+        if ("Campaign No." <> '') and "Campaign Target" then begin
+          ContBusRel.SETCURRENTKEY("Link to Table","Contact No.");
+          ContBusRel.SETRANGE("Link to Table",ContBusRel."Link to Table"::Customer);
+          ContBusRel.SETRANGE("Contact No.","Contact Company No.");
+          if ContBusRel.FINDFIRST then
+            InsertTargetGroup(CampaignTargetGr.Type::Customer,ContBusRel."No.","Campaign No.")
+          else
+            InsertTargetGroup(
+              CampaignTargetGr.Type::Contact,"Contact Company No.","Campaign No.");
+          if CampaignTargetGr.INSERT(true) then;
+        end;
+    END;
+
+    [External]
+    PROCEDURE DeleteContfromTargetGr@7(InteractLogEntry@1000 : Record "Interaction Log Entry");
+    VAR
+      InteractLogEntry2@1001 : Record "Interaction Log Entry";
+    BEGIN
+      with InteractLogEntry do
+        if "Campaign No." <> '' then begin
+          InteractLogEntry2.SETCURRENTKEY("Campaign No.","Contact Company No.","Campaign Target");
+          InteractLogEntry2.SETRANGE("Campaign No.","Campaign No.");
+          InteractLogEntry2.SETRANGE("Contact Company No.","Contact Company No.");
+          InteractLogEntry2.SETRANGE("Campaign Target",true);
+          InteractLogEntry2.SETRANGE(Postponed,false);
+
+          SegLine.SETCURRENTKEY("Campaign No.","Contact Company No.","Campaign Target");
+          SegLine.SETRANGE("Campaign No.","Campaign No.");
+          SegLine.SETRANGE("Contact Company No.","Contact Company No.");
+          SegLine.SETRANGE("Campaign Target",true);
+
+          if InteractLogEntry2.COUNT + COUNT = 1 then begin
+            ContBusRel.SETCURRENTKEY("Link to Table","Contact No.");
+            ContBusRel.SETRANGE("Link to Table",ContBusRel."Link to Table"::Customer);
+            ContBusRel.SETRANGE("Contact No.","Contact Company No.");
+
+            if ContBusRel.FINDFIRST then begin
+              if CampaignTargetGr.GET(
+                   CampaignTargetGr.Type::Customer,ContBusRel."No.","Campaign No.")
+              then
+                CampaignTargetGr.DELETE;
+            end else
+              if CampaignTargetGr.GET(
+                   CampaignTargetGr.Type::Contact,"Contact No.","Campaign No.")
+              then
+                CampaignTargetGr.DELETE;
+          end;
+        end;
+    END;
+
+    [External]
+    PROCEDURE ConverttoCustomer@9(Contact@1000 : Record Contact;Customer@1002 : Record Customer);
+    VAR
+      CampaignTargetGr2@1001 : Record "Campaign Target Group";
+    BEGIN
+      with Contact do begin
+        CampaignTargetGr2.SETCURRENTKEY("No.");
+        CampaignTargetGr2.SETRANGE("No.","No.");
+        if CampaignTargetGr2.FIND('-') then
+          repeat
+            InsertTargetGroup(
+              CampaignTargetGr2.Type::Customer,Customer."No.",CampaignTargetGr2."Campaign No.");
+            CampaignTargetGr2.DELETE;
+          until CampaignTargetGr2.NEXT = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ConverttoContact@8(Cust@1000 : Record Customer;CompanyContNo@1001 : Code[20]);
+    VAR
+      CampaignTargetGr2@1002 : Record "Campaign Target Group";
+    BEGIN
+      with Cust do begin
+        CampaignTargetGr2.SETRANGE("No.","No.");
+        if CampaignTargetGr2.FIND('-') then
+          repeat
+            InsertTargetGroup(
+              CampaignTargetGr2.Type::Contact,CompanyContNo,CampaignTargetGr2."Campaign No.");
+            CampaignTargetGr2.DELETE;
+          until CampaignTargetGr2.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertTargetGroup@4(Type@1000 : Option;No@1001 : Code[20];CampaignNo@1002 : Code[20]);
+    BEGIN
+      CampaignTargetGr.Type := Type;
+      CampaignTargetGr."No." := No;
+      CampaignTargetGr."Campaign No." := CampaignNo;
+      if CampaignTargetGr.INSERT then;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,202 @@
+OBJECT Codeunit 5653 Insurance Jnl.-Post Batch
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20150915D;
+    Time=120000T;
+    Version List=NAVW19.00;
+  }
+  PROPERTIES
+  {
+    TableNo="Insurance Journal Line";
+    Permissions=TableData "Insurance Journal Batch"=imd;
+    OnRun=BEGIN
+            InsuranceJnlLine.COPY(Rec);
+            Code;
+            Rec := InsuranceJnlLine;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=cannot exceed %1 characters';
+      Text001@1001 : TextConst 'ENU=Journal Batch Name    #1##########\\';
+      Text002@1002 : TextConst 'ENU=Checking lines        #2######\';
+      Text003@1003 : TextConst 'ENU=Posting lines         #3###### @4@@@@@@@@@@@@@';
+      Text004@1004 : TextConst 'ENU=A maximum of %1 posting number series can be used in each journal.';
+      InsuranceJnlLine@1005 : Record "Insurance Journal Line";
+      InsuranceJnlTempl@1006 : Record "Insurance Journal Template";
+      InsuranceJnlBatch@1007 : Record "Insurance Journal Batch";
+      InsuranceReg@1008 : Record "Insurance Register";
+      InsCoverageLedgEntry@1010 : Record "Ins. Coverage Ledger Entry";
+      InsuranceJnlLine2@1011 : Record "Insurance Journal Line";
+      InsuranceJnlLine3@1012 : Record "Insurance Journal Line";
+      NoSeries@1013 : TEMPORARY Record "No. Series";
+      FAJnlSetup@1014 : Record "FA Journal Setup";
+      InsuranceJnlPostLine@1015 : Codeunit "Insurance Jnl.-Post Line";
+      InsuranceJnlCheckLine@1016 : Codeunit "Insurance Jnl.-Check Line";
+      NoSeriesMgt@1017 : Codeunit NoSeriesManagement;
+      NoSeriesMgt2@1018 : ARRAY [10] OF Codeunit NoSeriesManagement;
+      Window@1020 : Dialog;
+      LineCount@1021 : Integer;
+      StartLineNo@1022 : Integer;
+      NoOfRecords@1023 : Integer;
+      InsuranceRegNo@1024 : Integer;
+      LastDocNo@1025 : Code[20];
+      LastDocNo2@1026 : Code[20];
+      LastPostedDocNo@1027 : Code[20];
+      NoOfPostingNoSeries@1028 : Integer;
+      PostingNoSeriesNo@1029 : Integer;
+
+    LOCAL PROCEDURE Code@1();
+    VAR
+      UpdateAnalysisView@1002 : Codeunit "Update Analysis View";
+    BEGIN
+      with InsuranceJnlLine do begin
+        SETRANGE("Journal Template Name","Journal Template Name");
+        SETRANGE("Journal Batch Name","Journal Batch Name");
+        LOCKTABLE;
+
+        InsuranceJnlTempl.GET("Journal Template Name");
+        InsuranceJnlBatch.GET("Journal Template Name","Journal Batch Name");
+        if STRLEN(INCSTR(InsuranceJnlBatch.Name)) > MAXSTRLEN(InsuranceJnlBatch.Name) then
+          InsuranceJnlBatch.FIELDERROR(
+            Name,
+            STRSUBSTNO(
+              Text000,
+              MAXSTRLEN(InsuranceJnlBatch.Name)));
+
+        if not FIND('=><') then begin
+          COMMIT;
+          "Line No." := 0;
+          exit;
+        end;
+
+        Window.OPEN(
+          Text001 +
+          Text002 +
+          Text003);
+        Window.UPDATE(1,"Journal Batch Name");
+
+        // Check lines
+        LineCount := 0;
+        StartLineNo := "Line No.";
+        repeat
+          LineCount := LineCount + 1;
+          Window.UPDATE(2,LineCount);
+          InsuranceJnlCheckLine.RunCheck(InsuranceJnlLine);
+          if NEXT = 0 then
+            FIND('-');
+        until "Line No." = StartLineNo;
+        NoOfRecords := LineCount;
+
+        InsCoverageLedgEntry.LOCKTABLE;
+        if InsCoverageLedgEntry.FINDLAST then;
+        InsuranceReg.LOCKTABLE;
+        if InsuranceReg.FINDLAST then
+          InsuranceRegNo := InsuranceReg."No." + 1
+        else
+          InsuranceRegNo := 1;
+
+        // Post lines
+        LineCount := 0;
+        LastDocNo := '';
+        LastDocNo2 := '';
+        LastPostedDocNo := '';
+        FIND('-');
+        repeat
+          LineCount := LineCount + 1;
+          Window.UPDATE(3,LineCount);
+          Window.UPDATE(4,ROUND(LineCount / NoOfRecords * 10000,1));
+          if not ("Insurance No." = '') and
+             (InsuranceJnlBatch."No. Series" <> '') and
+             ("Document No." <> LastDocNo2)
+          then
+            TESTFIELD("Document No.",NoSeriesMgt.GetNextNo(InsuranceJnlBatch."No. Series","Posting Date",false));
+          if not ("Insurance No." = '') then
+            LastDocNo2 := "Document No.";
+          if "Posting No. Series" = '' then
+            "Posting No. Series" := InsuranceJnlBatch."No. Series"
+          else
+            if not ("Insurance No." = '') then
+              if "Document No." = LastDocNo then
+                "Document No." := LastPostedDocNo
+              else begin
+                if not NoSeries.GET("Posting No. Series") then begin
+                  NoOfPostingNoSeries := NoOfPostingNoSeries + 1;
+                  if NoOfPostingNoSeries > ARRAYLEN(NoSeriesMgt2) then
+                    ERROR(
+                      Text004,
+                      ARRAYLEN(NoSeriesMgt2));
+                  NoSeries.Code := "Posting No. Series";
+                  NoSeries.Description := FORMAT(NoOfPostingNoSeries);
+                  NoSeries.INSERT;
+                end;
+                LastDocNo := "Document No.";
+                EVALUATE(PostingNoSeriesNo,NoSeries.Description);
+                "Document No." := NoSeriesMgt2[PostingNoSeriesNo].GetNextNo("Posting No. Series","Posting Date",false);
+                LastPostedDocNo := "Document No.";
+              end;
+          InsuranceJnlPostLine.RunWithOutCheck(InsuranceJnlLine);
+        until NEXT = 0;
+
+        if InsuranceReg.FINDLAST then;
+        if InsuranceReg."No." <> InsuranceRegNo then
+          InsuranceRegNo := 0;
+
+        INIT;
+        "Line No." := InsuranceRegNo;
+
+        // Update/delete lines
+        if InsuranceRegNo <> 0 then begin
+          InsuranceJnlLine2.COPYFILTERS(InsuranceJnlLine);
+          InsuranceJnlLine2.SETFILTER("Insurance No.",'<>%1','');
+          if InsuranceJnlLine2.FINDLAST then; // Remember the last line
+          InsuranceJnlLine3.COPY(InsuranceJnlLine);
+          InsuranceJnlLine3.DELETEALL;
+          InsuranceJnlLine3.RESET;
+          InsuranceJnlLine3.SETRANGE("Journal Template Name","Journal Template Name");
+          InsuranceJnlLine3.SETRANGE("Journal Batch Name","Journal Batch Name");
+          if not InsuranceJnlLine3.FINDLAST then
+            if INCSTR("Journal Batch Name") <> '' then begin
+              InsuranceJnlBatch.GET("Journal Template Name","Journal Batch Name");
+              InsuranceJnlBatch.DELETE;
+              FAJnlSetup.IncInsuranceJnlBatchName(InsuranceJnlBatch);
+              InsuranceJnlBatch.Name := INCSTR("Journal Batch Name");
+              if InsuranceJnlBatch.INSERT then;
+              "Journal Batch Name" := InsuranceJnlBatch.Name;
+            end;
+
+          InsuranceJnlLine3.SETRANGE("Journal Batch Name","Journal Batch Name");
+          if (InsuranceJnlBatch."No. Series" = '') and not InsuranceJnlLine3.FINDLAST then begin
+            InsuranceJnlLine3.INIT;
+            InsuranceJnlLine3."Journal Template Name" := "Journal Template Name";
+            InsuranceJnlLine3."Journal Batch Name" := "Journal Batch Name";
+            InsuranceJnlLine3."Line No." := 10000;
+            InsuranceJnlLine3.INSERT;
+            InsuranceJnlLine3.SetUpNewLine(InsuranceJnlLine2);
+            InsuranceJnlLine3.MODIFY;
+          end;
+        end;
+        if InsuranceJnlBatch."No. Series" <> '' then
+          NoSeriesMgt.SaveNoSeries;
+        if NoSeries.FIND('-') then
+          repeat
+            EVALUATE(PostingNoSeriesNo,NoSeries.Description);
+            NoSeriesMgt2[PostingNoSeriesNo].SaveNoSeries;
+          until NoSeries.NEXT = 0;
+
+        COMMIT;
+        CLEAR(InsuranceJnlCheckLine);
+        CLEAR(InsuranceJnlPostLine);
+      end;
+      UpdateAnalysisView.UpdateAll(0,true);
+      COMMIT;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

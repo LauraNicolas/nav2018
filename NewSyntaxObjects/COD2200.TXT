@@ -1,0 +1,186 @@
+OBJECT Codeunit 2200 Azure Key Vault Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    SingleInstance=true;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      NavAzureKeyVaultClient@1000 : DotNet "'Microsoft.Dynamics.Nav.AzureKeyVaultClient, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.AzureKeyVaultClient.MachineLearningCredentialsHelper";
+      AzureKeyVaultSecretProvider@1001 : DotNet "'Microsoft.Dynamics.Nav.Ncl, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Runtime.Encryption.IAzureKeyVaultSecretProvider";
+      ApplicationSecretsTxt@1002 : TextConst '@@@={Locked};ENU=ml-forecast,qbo-consumerkey,qbo-consumersecret,amcname,amcpassword,YodleeCobrandName,YodleeCobrandPassword,YodleeServiceUri,YodleeFastlinkUrl,ExchangeAuthMethod,NpsApiUrl,NpsCacheLifeTime,NpsTimeBetweenRequests,webhooksadapteruri,webhooksadapterclientid,webhooksadapterclientsecret,webhooksadapterresourceuri,webhooksadapterauthority,c2graphclientid,c2graphsecret,c2graphresource,c2graphauthority,xeroimportapp-key,xeroimportapp-secret,qbo-businesscenter-consumerkey,qbo-businesscenter-consumersecret,walletpaymentrequesturl,qbo-datamigration-consumerkey,qbo-datamigration-consumersecret,govtalk-vendorid,MSWalletAADAppID,MSWalletAADAppKey,MSWalletAADIdentityService';
+      ImageAnalysisSecretTxt@1008 : TextConst '@@@={Locked};ENU=cognitive-vision-params';
+      SecretNotFoundErr@1003 : TextConst '@@@="%1 = Secret Name. %2 = Available secrets.";ENU=%1 is not an application secret. Choose one of the following secrets: %2';
+      AzureMLApiUriTxt@1005 : TextConst '@@@={Locked};ENU=AzureMLApiUri';
+      AzureMLApiKeyTxt@1006 : TextConst '@@@={Locked};ENU=AzureMLApiKey';
+      AzureMLLimitTxt@1007 : TextConst '@@@={Locked};ENU=AzureMLLimit';
+      MissingImageAnalysisSecretErr@1011 : TextConst 'ENU=There is a missing configuration value on our end. Try again later.';
+      CachedSecretsDictionary@1010 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.Dictionary`2";
+
+    [TryFunction]
+    [Internal]
+    PROCEDURE GetMachineLearningCredentials@2(VAR ApiUri@1000 : Text[250];VAR ApiKey@1001 : Text[200];VAR Limit@1002 : Decimal);
+    VAR
+      ResultArray@1003 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Array";
+      LimitAsText@1004 : Text;
+    BEGIN
+      if KeyValuePairInBuffer(AzureMLApiUriTxt,ApiUri) and
+         KeyValuePairInBuffer(AzureMLApiKeyTxt,ApiKey) and
+         KeyValuePairInBuffer(AzureMLLimitTxt,LimitAsText)
+      then begin
+        EVALUATE(Limit,LimitAsText);
+        exit;
+      end;
+
+      NavAzureKeyVaultClient := NavAzureKeyVaultClient.MachineLearningCredentialsHelper;
+      NavAzureKeyVaultClient.SetAzureKeyVaultProvider(AzureKeyVaultSecretProvider);
+      ResultArray := NavAzureKeyVaultClient.GetMLCredentials;
+      ApiKey := FORMAT(ResultArray.GetValue(0));
+      ApiUri := FORMAT(ResultArray.GetValue(1));
+      if not ISNULL(ResultArray.GetValue(2)) then
+        EVALUATE(Limit,FORMAT(ResultArray.GetValue(2)));
+
+      StoreKeyValuePairInBuffer(AzureMLApiUriTxt,ApiUri);
+      StoreKeyValuePairInBuffer(AzureMLApiKeyTxt,ApiKey);
+      StoreKeyValuePairInBuffer(AzureMLLimitTxt,FORMAT(Limit));
+    END;
+
+    [TryFunction]
+    PROCEDURE GetImageAnalysisCredentials@8(VAR ApiKey@1000 : Text;VAR ApiUri@1001 : Text;VAR LimitType@1006 : 'Year,Month,Day,Hour';VAR LimitValue@1002 : Integer);
+    VAR
+      JSONManagement@1005 : Codeunit "JSON Management";
+      ImageAnalysisParameter@1004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      ImageAnalysisParametersText@1003 : Text;
+      LimitTypeTxt@1008 : Text;
+      LimitValueTxt@1007 : Text;
+    BEGIN
+      GetAzureKeyVaultSecret(ImageAnalysisParametersText,ImageAnalysisSecretTxt);
+      JSONManagement.InitializeCollection(ImageAnalysisParametersText);
+      if JSONManagement.GetCollectionCount = 0 then
+        exit;
+      JSONManagement.GetJObjectFromCollectionByIndex(
+        ImageAnalysisParameter,
+        GetTenantBasedIdInRange(JSONManagement.GetCollectionCount) - 1);
+      JSONManagement.GetStringPropertyValueFromJObjectByName(ImageAnalysisParameter,'key',ApiKey);
+      JSONManagement.GetStringPropertyValueFromJObjectByName(ImageAnalysisParameter,'endpoint',ApiUri);
+
+      JSONManagement.GetStringPropertyValueFromJObjectByName(ImageAnalysisParameter,'limittype',LimitTypeTxt);
+      if LimitTypeTxt = '' then
+        ERROR(MissingImageAnalysisSecretErr);
+
+      case LimitTypeTxt of
+        'Year':
+          LimitType := LimitType::Year;
+        'Month':
+          LimitType := LimitType::Month;
+        'Day':
+          LimitType := LimitType::Day;
+        'Hour':
+          LimitType := LimitType::Hour;
+      end;
+
+      // EVALUATE(LimitType,LimitTypeTxt); // Bug 215359
+
+      JSONManagement.GetStringPropertyValueFromJObjectByName(ImageAnalysisParameter,'limitvalue',LimitValueTxt);
+      if LimitValueTxt = '' then
+        ERROR(MissingImageAnalysisSecretErr);
+      EVALUATE(LimitValue,LimitValueTxt);
+    END;
+
+    [TryFunction]
+    [Internal]
+    PROCEDURE GetAzureKeyVaultSecret@1(VAR Secret@1001 : Text;SecretName@1000 : Text);
+    VAR
+      TypeHelper@1002 : Codeunit "Type Helper";
+    BEGIN
+      if TypeHelper.GetOptionNo(SecretName,GetAllowedSecrets) = -1 then
+        ERROR(STRSUBSTNO(SecretNotFoundErr,SecretName,GetAllowedSecrets));
+
+      if KeyValuePairInBuffer(SecretName,Secret) then
+        exit;
+
+      NavAzureKeyVaultClient := NavAzureKeyVaultClient.MachineLearningCredentialsHelper;
+      NavAzureKeyVaultClient.SetAzureKeyVaultProvider(AzureKeyVaultSecretProvider);
+      Secret := NavAzureKeyVaultClient.GetAzureKeyVaultSecret(SecretName);
+
+      StoreKeyValuePairInBuffer(SecretName,Secret);
+    END;
+
+    [Internal]
+    PROCEDURE SetAzureKeyVaultSecretProvider@5(NewAzureKeyVaultSecretProvider@1000 : DotNet "'Microsoft.Dynamics.Nav.Ncl, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Runtime.Encryption.IAzureKeyVaultSecretProvider");
+    BEGIN
+      ClearBufferAndDotNetKeyvaultObjects;
+      AzureKeyVaultSecretProvider := NewAzureKeyVaultSecretProvider;
+    END;
+
+    [Internal]
+    PROCEDURE IsEnable@3() : Boolean;
+    BEGIN
+      NavAzureKeyVaultClient := NavAzureKeyVaultClient.MachineLearningCredentialsHelper;
+      exit(NavAzureKeyVaultClient.Enable);
+    END;
+
+    LOCAL PROCEDURE KeyValuePairInBuffer@6(Key@1001 : Text;VAR Value@1000 : Text) : Boolean;
+    VAR
+      ValueFound@1002 : Boolean;
+      ValueToReturn@1003 : Text;
+    BEGIN
+      InitBuffer;
+
+      ValueFound := CachedSecretsDictionary.TryGetValue(Key,ValueToReturn);
+      Value := ValueToReturn;
+      exit(ValueFound);
+    END;
+
+    LOCAL PROCEDURE StoreKeyValuePairInBuffer@7(Key@1001 : Text;Value@1000 : Text);
+    BEGIN
+      InitBuffer;
+
+      CachedSecretsDictionary.Add(Key,Value);
+    END;
+
+    LOCAL PROCEDURE ClearBufferAndDotNetKeyvaultObjects@4();
+    BEGIN
+      CLEAR(NavAzureKeyVaultClient);
+      CLEAR(AzureKeyVaultSecretProvider);
+
+      InitBuffer;
+
+      CachedSecretsDictionary.Clear;
+    END;
+
+    LOCAL PROCEDURE GetTenantBasedIdInRange@17(MaxNumber@1000 : Integer) : Integer;
+    VAR
+      TenantIdString@1001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+    BEGIN
+      TenantIdString := TENANTID;
+      RANDOMIZE(TenantIdString.GetHashCode);
+      exit(RANDOM(MaxNumber));
+    END;
+
+    LOCAL PROCEDURE GetAllowedSecrets@9() : Text;
+    BEGIN
+      exit(ApplicationSecretsTxt + ',' + ImageAnalysisSecretTxt);
+    END;
+
+    LOCAL PROCEDURE InitBuffer@16();
+    BEGIN
+      if ISNULL(CachedSecretsDictionary) then
+        CachedSecretsDictionary := CachedSecretsDictionary.Dictionary;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

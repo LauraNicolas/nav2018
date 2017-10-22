@@ -1,0 +1,395 @@
+OBJECT Codeunit 763 Aged Acc. Receivable
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OverdueTxt@1001 : TextConst 'ENU=Overdue';
+      AmountTxt@1000 : TextConst 'ENU=Amount';
+      NotDueTxt@1002 : TextConst 'ENU=Not Overdue';
+      OlderTxt@1003 : TextConst 'ENU=Older';
+      GeneralLedgerSetup@1004 : Record "General Ledger Setup";
+      GLSetupLoaded@1005 : Boolean;
+      StatusNonPeriodicTxt@1013 : TextConst 'ENU=All receivables, not overdue and overdue';
+      StatusPeriodLengthTxt@1012 : TextConst 'ENU="Period Length: "';
+      Status2WeekOverdueTxt@1011 : TextConst 'ENU=2 weeks overdue';
+      Status3MonthsOverdueTxt@1010 : TextConst 'ENU=3 months overdue';
+      Status1YearOverdueTxt@1009 : TextConst 'ENU=1 year overdue';
+      Status3YearsOverdueTxt@1008 : TextConst 'ENU=3 years overdue';
+      Status5YearsOverdueTxt@1007 : TextConst 'ENU=5 years overdue';
+      ChartDescriptionMsg@1006 : TextConst 'ENU=Shows customers'' pending payment amounts summed for a period that you select.\\The first column shows the amount on pending payments that are not past the due date. The following column or columns show overdue amounts within the selected period from the payment due date. The chart shows overdue payment amounts going back up to five years from today''s date depending on the period that you select.';
+      ChartPerCustomerDescriptionMsg@1014 : TextConst 'ENU=Shows the customer''s pending payment amount summed for a period that you select.\\The first column shows the amount on pending payments that are not past the due date. The following column or columns show overdue amounts within the selected period from the payment due date. The chart shows overdue payment amounts going back up to five years from today''s date depending on the period that you select.';
+      Status1MonthOverdueTxt@1015 : TextConst 'ENU=1 month overdue';
+      Status1QuarterOverdueTxt@1016 : TextConst 'ENU=1 quarter overdue';
+
+    [Internal]
+    PROCEDURE UpdateDataPerCustomer@7(VAR BusChartBuf@1000 : Record "Business Chart Buffer";CustomerNo@1007 : Code[20];VAR TempEntryNoAmountBuf@1002 : TEMPORARY Record "Entry No. Amount Buffer");
+    VAR
+      PeriodIndex@1006 : Integer;
+      PeriodLength@1001 : Text[1];
+      NoOfPeriods@1004 : Integer;
+    BEGIN
+      with BusChartBuf do begin
+        Initialize;
+        SetXAxis(OverDueText,"Data Type"::String);
+        AddMeasure(AmountText,1,"Data Type"::Decimal,"Chart Type"::Column);
+
+        InitParameters(BusChartBuf,PeriodLength,NoOfPeriods,TempEntryNoAmountBuf);
+        CalculateAgedAccReceivable(
+          CustomerNo,'',"Period Filter Start Date",PeriodLength,NoOfPeriods,
+          TempEntryNoAmountBuf);
+
+        if TempEntryNoAmountBuf.FINDSET then
+          repeat
+            PeriodIndex := TempEntryNoAmountBuf."Entry No.";
+            AddColumn(FormatColumnName(PeriodIndex,PeriodLength,NoOfPeriods,"Period Length"));
+            SetValueByIndex(0,PeriodIndex,RoundAmount(TempEntryNoAmountBuf.Amount));
+          until TempEntryNoAmountBuf.NEXT = 0
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE UpdateDataPerGroup@15(VAR BusChartBuf@1000 : Record "Business Chart Buffer";VAR TempEntryNoAmountBuf@1002 : TEMPORARY Record "Entry No. Amount Buffer");
+    VAR
+      CustPostingGroup@1005 : Record "Customer Posting Group";
+      PeriodIndex@1006 : Integer;
+      GroupIndex@1010 : Integer;
+      PeriodLength@1001 : Text[1];
+      NoOfPeriods@1004 : Integer;
+    BEGIN
+      with BusChartBuf do begin
+        Initialize;
+        SetXAxis(OverdueTxt,"Data Type"::String);
+
+        InitParameters(BusChartBuf,PeriodLength,NoOfPeriods,TempEntryNoAmountBuf);
+        CalculateAgedAccReceivablePerGroup(
+          "Period Filter Start Date",PeriodLength,NoOfPeriods,
+          TempEntryNoAmountBuf);
+
+        if CustPostingGroup.FINDSET then
+          repeat
+            AddMeasure(CustPostingGroup.Code,GroupIndex,"Data Type"::Decimal,"Chart Type"::StackedColumn);
+
+            TempEntryNoAmountBuf.RESET;
+            TempEntryNoAmountBuf.SETRANGE("Business Unit Code",CustPostingGroup.Code);
+            if TempEntryNoAmountBuf.FINDSET then
+              repeat
+                PeriodIndex := TempEntryNoAmountBuf."Entry No.";
+                if GroupIndex = 0 then
+                  AddColumn(FormatColumnName(PeriodIndex,PeriodLength,NoOfPeriods,"Period Length"));
+                SetValueByIndex(GroupIndex,PeriodIndex,RoundAmount(TempEntryNoAmountBuf.Amount));
+              until TempEntryNoAmountBuf.NEXT = 0;
+            GroupIndex += 1;
+          until CustPostingGroup.NEXT = 0;
+        TempEntryNoAmountBuf.RESET;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalculateAgedAccReceivable@1(CustomerNo@1000 : Code[20];CustomerGroupCode@1009 : Code[20];StartDate@1001 : Date;PeriodLength@1002 : Text[1];NoOfPeriods@1003 : Integer;VAR TempEntryNoAmountBuffer@1004 : TEMPORARY Record "Entry No. Amount Buffer");
+    VAR
+      CustLedgEntryRemainAmt@1006 : Query "Cust. Ledg. Entry Remain. Amt.";
+      RemainingAmountLCY@1008 : Decimal;
+      EndDate@1007 : Date;
+      Index@1005 : Integer;
+    BEGIN
+      if CustomerNo <> '' then
+        CustLedgEntryRemainAmt.SETRANGE(Customer_No,CustomerNo);
+      if CustomerGroupCode <> '' then
+        CustLedgEntryRemainAmt.SETRANGE(Customer_Posting_Group,CustomerGroupCode);
+      CustLedgEntryRemainAmt.SETRANGE(IsOpen,true);
+
+      for Index := 0 to NoOfPeriods - 1 do begin
+        RemainingAmountLCY := 0;
+        CustLedgEntryRemainAmt.SETFILTER(
+          Due_Date,
+          DateFilterByAge(Index,StartDate,PeriodLength,NoOfPeriods,EndDate));
+        CustLedgEntryRemainAmt.OPEN;
+        if CustLedgEntryRemainAmt.READ then
+          RemainingAmountLCY := CustLedgEntryRemainAmt.Sum_Remaining_Amt_LCY;
+
+        InsertAmountBuffer(Index,CustomerGroupCode,RemainingAmountLCY,StartDate,EndDate,TempEntryNoAmountBuffer)
+      end;
+    END;
+
+    LOCAL PROCEDURE CalculateAgedAccReceivablePerGroup@12(StartDate@1001 : Date;PeriodLength@1000 : Text[1];NoOfPeriods@1003 : Integer;VAR TempEntryNoAmountBuffer@1004 : TEMPORARY Record "Entry No. Amount Buffer");
+    VAR
+      CustPostingGroup@1009 : Record "Customer Posting Group";
+    BEGIN
+      if CustPostingGroup.FINDSET then
+        repeat
+          CalculateAgedAccReceivable(
+            '',CustPostingGroup.Code,StartDate,PeriodLength,NoOfPeriods,
+            TempEntryNoAmountBuffer);
+        until CustPostingGroup.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE DateFilterByAge@14(Index@1000 : Integer;VAR StartDate@1007 : Date;PeriodLength@1006 : Text[1];NoOfPeriods@1005 : Integer;VAR EndDate@1002 : Date) : Text;
+    BEGIN
+      if Index = 0 then // First period - Not due remaining amounts
+        exit(STRSUBSTNO('>=%1',StartDate));
+
+      EndDate := CALCDATE('<-1D>',StartDate);
+      if Index = NoOfPeriods - 1 then // Last period - Older remaining amounts
+        StartDate := 0D
+      else
+        StartDate := CALCDATE(STRSUBSTNO('<-1%1>',PeriodLength),StartDate);
+
+      exit(STRSUBSTNO('%1..%2',StartDate,EndDate));
+    END;
+
+    [External]
+    PROCEDURE InsertAmountBuffer@3(Index@1000 : Integer;BussUnitCode@1005 : Code[20];AmountLCY@1001 : Decimal;StartDate@1003 : Date;EndDate@1004 : Date;VAR TempEntryNoAmountBuffer@1002 : TEMPORARY Record "Entry No. Amount Buffer");
+    BEGIN
+      with TempEntryNoAmountBuffer do begin
+        INIT;
+        "Entry No." := Index;
+        "Business Unit Code" := BussUnitCode;
+        Amount := AmountLCY;
+        "Start Date" := StartDate;
+        "End Date" := EndDate;
+        INSERT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE InitParameters@13(BusChartBuf@1000 : Record "Business Chart Buffer";VAR PeriodLength@1001 : Text[1];VAR NoOfPeriods@1002 : Integer;VAR TempEntryNoAmountBuf@1004 : TEMPORARY Record "Entry No. Amount Buffer");
+    BEGIN
+      TempEntryNoAmountBuf.DELETEALL;
+      PeriodLength := GetPeriod(BusChartBuf);
+      NoOfPeriods := GetNoOfPeriods(BusChartBuf);
+    END;
+
+    LOCAL PROCEDURE GetPeriod@19(BusChartBuf@1000 : Record "Business Chart Buffer") : Text[1];
+    BEGIN
+      if BusChartBuf."Period Length" = BusChartBuf."Period Length"::None then
+        exit('W');
+      exit(BusChartBuf.GetPeriodLength);
+    END;
+
+    LOCAL PROCEDURE GetNoOfPeriods@20(BusChartBuf@1000 : Record "Business Chart Buffer") : Integer;
+    VAR
+      OfficeMgt@1001 : Codeunit "Office Management";
+      NoOfPeriods@1002 : Integer;
+    BEGIN
+      NoOfPeriods := 14;
+      case BusChartBuf."Period Length" of
+        BusChartBuf."Period Length"::Day:
+          NoOfPeriods := 16;
+        BusChartBuf."Period Length"::Week,
+        BusChartBuf."Period Length"::Quarter:
+          if OfficeMgt.IsAvailable then
+            NoOfPeriods := 6
+          else
+            NoOfPeriods := 14;
+        BusChartBuf."Period Length"::Month:
+          if OfficeMgt.IsAvailable then
+            NoOfPeriods := 5
+          else
+            NoOfPeriods := 14;
+        BusChartBuf."Period Length"::Year:
+          if OfficeMgt.IsAvailable then
+            NoOfPeriods := 5
+          else
+            NoOfPeriods := 7;
+        BusChartBuf."Period Length"::None:
+          NoOfPeriods := 2;
+      end;
+      exit(NoOfPeriods);
+    END;
+
+    [External]
+    PROCEDURE FormatColumnName@6(Index@1000 : Integer;PeriodLength@1001 : Text[1];NoOfColumns@1003 : Integer;Period@1004 : Option) : Text;
+    VAR
+      BusChartBuf@1005 : Record "Business Chart Buffer";
+      PeriodDateFormula@1002 : DateFormula;
+    BEGIN
+      if Index = 0 then
+        exit(NotDueTxt);
+
+      if Index = NoOfColumns - 1 then begin
+        if Period = BusChartBuf."Period Length"::None then
+          exit(OverdueTxt);
+        exit(OlderTxt);
+      end;
+
+      // Period length text localized by date formula
+      EVALUATE(PeriodDateFormula,STRSUBSTNO('<1%1>',PeriodLength));
+      exit(STRSUBSTNO('%1%2',Index,DELCHR(FORMAT(PeriodDateFormula),'=','1')));
+    END;
+
+    [External]
+    PROCEDURE DrillDown@18(VAR BusChartBuf@1000 : Record "Business Chart Buffer";CustomerNo@1001 : Code[20];VAR TempEntryNoAmountBuf@1003 : TEMPORARY Record "Entry No. Amount Buffer");
+    VAR
+      MeasureName@1002 : Text;
+      CustomerGroupCode@1005 : Code[20];
+    BEGIN
+      with TempEntryNoAmountBuf do begin
+        if CustomerNo <> '' then
+          CustomerGroupCode := ''
+        else begin
+          MeasureName := BusChartBuf.GetMeasureName(BusChartBuf."Drill-Down Measure Index");
+          CustomerGroupCode := COPYSTR(MeasureName,1,MAXSTRLEN(CustomerGroupCode));
+        end;
+        if GET(CustomerGroupCode,BusChartBuf."Drill-Down X Index") then
+          DrillDownCustLedgEntries(CustomerNo,CustomerGroupCode,"Start Date","End Date");
+      end;
+    END;
+
+    [External]
+    PROCEDURE DrillDownByGroup@35(VAR BusChartBuf@1000 : Record "Business Chart Buffer";VAR TempEntryNoAmountBuf@1003 : TEMPORARY Record "Entry No. Amount Buffer");
+    BEGIN
+      DrillDown(BusChartBuf,'',TempEntryNoAmountBuf);
+    END;
+
+    [External]
+    PROCEDURE DrillDownCustLedgEntries@2(CustomerNo@1000 : Code[20];CustomerGroupCode@1003 : Code[20];StartDate@1001 : Date;EndDate@1002 : Date);
+    VAR
+      CustLedgEntry@1004 : Record "Cust. Ledger Entry";
+    BEGIN
+      CustLedgEntry.SETCURRENTKEY("Customer No.",Open,Positive,"Due Date");
+      if CustomerNo <> '' then
+        CustLedgEntry.SETRANGE("Customer No.",CustomerNo);
+      if EndDate = 0D then
+        CustLedgEntry.SETFILTER("Due Date",'>=%1',StartDate)
+      else
+        CustLedgEntry.SETRANGE("Due Date",StartDate,EndDate);
+      CustLedgEntry.SETRANGE(Open,true);
+      if CustomerGroupCode <> '' then
+        CustLedgEntry.SETRANGE("Customer Posting Group",CustomerGroupCode);
+      if CustLedgEntry.ISEMPTY then
+        exit;
+      PAGE.RUN(PAGE::"Customer Ledger Entries",CustLedgEntry);
+    END;
+
+    [External]
+    PROCEDURE Description@10(PerCustomer@1000 : Boolean) : Text;
+    BEGIN
+      if PerCustomer then
+        exit(ChartPerCustomerDescriptionMsg);
+      exit(ChartDescriptionMsg);
+    END;
+
+    [External]
+    PROCEDURE UpdateStatusText@11(BusChartBuf@1000 : Record "Business Chart Buffer") : Text;
+    VAR
+      OfficeMgt@1001 : Codeunit "Office Management";
+      StatusText@1002 : Text;
+    BEGIN
+      StatusText := StatusPeriodLengthTxt + FORMAT(BusChartBuf."Period Length");
+
+      case BusChartBuf."Period Length" of
+        BusChartBuf."Period Length"::Day:
+          StatusText := StatusText + ' | ' + Status2WeekOverdueTxt;
+        BusChartBuf."Period Length"::Week:
+          if OfficeMgt.IsAvailable then
+            StatusText := StatusText + ' | ' + Status1MonthOverdueTxt
+          else
+            StatusText := StatusText + ' | ' + Status3MonthsOverdueTxt;
+        BusChartBuf."Period Length"::Month:
+          if OfficeMgt.IsAvailable then
+            StatusText := StatusText + ' | ' + Status1QuarterOverdueTxt
+          else
+            StatusText := StatusText + ' | ' + Status1YearOverdueTxt;
+        BusChartBuf."Period Length"::Quarter:
+          if OfficeMgt.IsAvailable then
+            StatusText := StatusText + ' | ' + Status1YearOverdueTxt
+          else
+            StatusText := StatusText + ' | ' + Status3YearsOverdueTxt;
+        BusChartBuf."Period Length"::Year:
+          if OfficeMgt.IsAvailable then
+            StatusText := StatusText + ' | ' + Status3YearsOverdueTxt
+          else
+            StatusText := StatusText + ' | ' + Status5YearsOverdueTxt;
+        BusChartBuf."Period Length"::None:
+          StatusText := StatusNonPeriodicTxt;
+      end;
+
+      exit(StatusText);
+    END;
+
+    [External]
+    PROCEDURE SaveSettings@8(BusChartBuf@1001 : Record "Business Chart Buffer");
+    VAR
+      BusChartUserSetup@1000 : Record "Business Chart User Setup";
+    BEGIN
+      BusChartUserSetup."Period Length" := BusChartBuf."Period Length";
+      BusChartUserSetup.SaveSetupCU(BusChartUserSetup,CODEUNIT::"Aged Acc. Receivable");
+    END;
+
+    [External]
+    PROCEDURE InvoicePaymentDaysAverage@4(CustomerNo@1000 : Code[20]) : Decimal;
+    BEGIN
+      exit(ROUND(CalcInvPmtDaysAverage(CustomerNo),1));
+    END;
+
+    LOCAL PROCEDURE CalcInvPmtDaysAverage@9(CustomerNo@1000 : Code[20]) : Decimal;
+    VAR
+      CustLedgEntry@1001 : Record "Cust. Ledger Entry";
+      DetailedCustLedgEntry@1002 : Record "Detailed Cust. Ledg. Entry";
+      PaymentDays@1004 : Integer;
+      InvoiceCount@1003 : Integer;
+    BEGIN
+      CustLedgEntry.SETCURRENTKEY("Document Type","Customer No.");
+      if CustomerNo <> '' then
+        CustLedgEntry.SETRANGE("Customer No.",CustomerNo);
+      CustLedgEntry.SETRANGE("Document Type",CustLedgEntry."Document Type"::Invoice);
+      CustLedgEntry.SETRANGE(Open,false);
+      if not CustLedgEntry.FINDSET then
+        exit(0);
+
+      repeat
+        DetailedCustLedgEntry.SETCURRENTKEY("Cust. Ledger Entry No.");
+        DetailedCustLedgEntry.SETRANGE("Cust. Ledger Entry No.",CustLedgEntry."Entry No.");
+        DetailedCustLedgEntry.SETRANGE("Document Type",DetailedCustLedgEntry."Document Type"::Payment);
+        if DetailedCustLedgEntry.FINDLAST then begin
+          PaymentDays += DetailedCustLedgEntry."Posting Date" - CustLedgEntry."Due Date";
+          InvoiceCount += 1;
+        end;
+      until CustLedgEntry.NEXT = 0;
+
+      if InvoiceCount = 0 then
+        exit(0);
+
+      exit(PaymentDays / InvoiceCount);
+    END;
+
+    [External]
+    PROCEDURE RoundAmount@5(Amount@1000 : Decimal) : Decimal;
+    BEGIN
+      if not GLSetupLoaded then begin
+        GeneralLedgerSetup.GET;
+        GLSetupLoaded := true;
+      end;
+
+      exit(ROUND(Amount,GeneralLedgerSetup."Amount Rounding Precision"));
+    END;
+
+    [External]
+    PROCEDURE OverDueText@16() : Text;
+    BEGIN
+      exit(OverdueTxt);
+    END;
+
+    [External]
+    PROCEDURE AmountText@17() : Text;
+    BEGIN
+      exit(AmountTxt);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,498 @@
+OBJECT Codeunit 5340 CRM Integration Table Synch.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Integration Table Mapping";
+    OnRun=VAR
+            CRMConnectionSetup@1002 : Record "CRM Connection Setup";
+            Field@1003 : Record Field;
+            OriginalJobQueueEntry@1000 : Record "Job Queue Entry";
+            ConnectionName@1001 : Text;
+            LatestModifiedOn@1004 : ARRAY [2] OF DateTime;
+          BEGIN
+            ConnectionName := InitConnection;
+
+            if "Int. Table UID Field Type" = Field.Type::Option then
+              SynchOption(Rec)
+            else begin
+              SetOriginalCRMJobQueueEntryOnHold(Rec,OriginalJobQueueEntry);
+              if Direction in [Direction::ToIntegrationTable,Direction::Bidirectional] then
+                LatestModifiedOn[1] := PerformScheduledSynchToIntegrationTable(Rec);
+              if Direction in [Direction::FromIntegrationTable,Direction::Bidirectional] then
+                LatestModifiedOn[2] :=
+                  PerformScheduledSynchFromIntegrationTable(Rec,CRMConnectionSetup.GetIntegrationUserID);
+              UpdateTableMappingModifiedOn(Rec,LatestModifiedOn);
+              SetOriginalCRMJobQueueEntryReady(Rec,OriginalJobQueueEntry);
+            end;
+
+            CloseConnection(ConnectionName);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ConnectionNotEnabledErr@1005 : TextConst '@@@="%1 = CRM product name";ENU=The %1 connection is not enabled.';
+      RecordNotFoundErr@1006 : TextConst '@@@="%1 = Source table caption, %2 = The lookup value when searching for the source record";ENU=Cannot find %1 record %2.';
+      SourceRecordIsNotInMappingErr@1007 : TextConst '@@@=%1 Integration Table Mapping caption, %2 Integration Table Mapping Name;ENU=Cannot find the mapping %2 in table %1.';
+      CannotDetermineSourceOriginErr@1009 : TextConst '@@@=%1 the value of the source id;ENU=Cannot determine the source origin: %1.';
+      SynchronizeEmptySetErr@1001 : TextConst 'ENU=Attempted to synchronize an empty set of records.';
+      CRMIntTableSubscriber@1000 : Codeunit "CRM Int. Table. Subscriber";
+      CRMProductName@1004 : Codeunit "CRM Product Name";
+      SupportedSourceType@1002 : ',RecordID,GUID';
+      NoMappingErr@1003 : TextConst '@@@="%1=Table Caption";ENU=No mapping is set for %1.';
+
+    LOCAL PROCEDURE InitConnection@21() ConnectionName : Text;
+    VAR
+      CRMConnectionSetup@1001 : Record "CRM Connection Setup";
+    BEGIN
+      CRMConnectionSetup.GET;
+      if not CRMConnectionSetup."Is Enabled" then
+        ERROR(STRSUBSTNO(ConnectionNotEnabledErr,CRMProductName.FULL));
+
+      ConnectionName := FORMAT(CREATEGUID);
+
+      if CRMConnectionSetup."Is User Mapping Required" then
+        ConnectionName := CRMConnectionSetup.RegisterUserConnection
+      else
+        CRMConnectionSetup.RegisterConnectionWithName(ConnectionName);
+      ClearCache;
+    END;
+
+    LOCAL PROCEDURE CloseConnection@23(ConnectionName@1000 : Text);
+    VAR
+      CRMConnectionSetup@1001 : Record "CRM Connection Setup";
+    BEGIN
+      ClearCache;
+      CRMConnectionSetup.UnregisterConnectionWithName(ConnectionName);
+    END;
+
+    LOCAL PROCEDURE ClearCache@28();
+    BEGIN
+      CRMIntTableSubscriber.ClearCache;
+      CLEAR(CRMIntTableSubscriber);
+    END;
+
+    LOCAL PROCEDURE CacheTable@10(VAR RecordRef@1005 : RecordRef;VAR TempRecordRef@1000 : RecordRef);
+    VAR
+      OutlookSynchNAVMgt@1003 : Codeunit "Outlook Synch. NAV Mgt";
+    BEGIN
+      TempRecordRef.OPEN(RecordRef.NUMBER,true);
+      if RecordRef.FINDSET then
+        repeat
+          OutlookSynchNAVMgt.CopyRecordReference(RecordRef,TempRecordRef,false);
+        until RecordRef.NEXT = 0;
+      RecordRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE CacheFilteredCRMTable@13(TempSourceRecordRef@1001 : RecordRef;IntegrationTableMapping@1000 : Record "Integration Table Mapping";IntegrationUserId@1004 : GUID);
+    VAR
+      CRMRecordRef@1002 : RecordRef;
+      ModifyByFieldRef@1003 : FieldRef;
+    BEGIN
+      CRMRecordRef.OPEN(IntegrationTableMapping."Integration Table ID");
+      IntegrationTableMapping.SetIntRecordRefFilter(CRMRecordRef);
+      // Exclude modifications by background job
+      ModifyByFieldRef := CRMRecordRef.FIELD(GetModifyByFieldNo(IntegrationTableMapping."Integration Table ID"));
+      ModifyByFieldRef.SETFILTER('<>%1',IntegrationUserId);
+      CacheTable(CRMRecordRef,TempSourceRecordRef);
+      CRMRecordRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE CacheFilteredNAVTable@16(TempSourceRecordRef@1000 : RecordRef;IntegrationTableMapping@1001 : Record "Integration Table Mapping");
+    VAR
+      SourceRecordRef@1002 : RecordRef;
+    BEGIN
+      SourceRecordRef.OPEN(IntegrationTableMapping."Table ID");
+      IntegrationTableMapping.SetRecordRefFilter(SourceRecordRef);
+      CacheTable(SourceRecordRef,TempSourceRecordRef);
+      SourceRecordRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE GetSourceRecordRef@15(IntegrationTableMapping@1004 : Record "Integration Table Mapping";SourceID@1000 : Variant;VAR RecordRef@1001 : RecordRef);
+    VAR
+      RecordID@1003 : RecordID;
+      CRMID@1002 : GUID;
+    BEGIN
+      case GetSourceType(SourceID) of
+        SupportedSourceType::RecordID:
+          begin
+            RecordID := SourceID;
+            if RecordID.TABLENO = 0 then
+              ERROR(CannotDetermineSourceOriginErr,SourceID);
+            if not (RecordID.TABLENO = IntegrationTableMapping."Table ID") then
+              ERROR(SourceRecordIsNotInMappingErr,IntegrationTableMapping.TABLECAPTION,IntegrationTableMapping.Name);
+            if not RecordRef.GET(RecordID) then
+              ERROR(RecordNotFoundErr,RecordRef.CAPTION,FORMAT(RecordID,0,1));
+          end;
+        SupportedSourceType::GUID:
+          begin
+            CRMID := SourceID;
+            if ISNULLGUID(CRMID) then
+              ERROR(CannotDetermineSourceOriginErr,SourceID);
+            if not IntegrationTableMapping.GetRecordRef(CRMID,RecordRef) then
+              ERROR(RecordNotFoundErr,IntegrationTableMapping.GetExtendedIntegrationTableCaption,CRMID);
+          end;
+        else
+          ERROR(CannotDetermineSourceOriginErr,SourceID);
+      end;
+    END;
+
+    LOCAL PROCEDURE GetSourceType@11(Source@1000 : Variant) : Integer;
+    BEGIN
+      if Source.ISRECORDID then
+        exit(SupportedSourceType::RecordID);
+      if Source.ISGUID then
+        exit(SupportedSourceType::GUID);
+      exit(0);
+    END;
+
+    LOCAL PROCEDURE FillCodeBufferFromOption@17(FieldRef@1005 : FieldRef;VAR TempNameValueBuffer@1000 : TEMPORARY Record "Name/Value Buffer") : Boolean;
+    VAR
+      TempNameValueBufferWithValue@1001 : TEMPORARY Record "Name/Value Buffer";
+    BEGIN
+      CollectOptionValues(FieldRef.OPTIONSTRING,TempNameValueBuffer);
+      CollectOptionValues(FieldRef.OPTIONCAPTION,TempNameValueBufferWithValue);
+      MergeBuffers(TempNameValueBuffer,TempNameValueBufferWithValue);
+      exit(TempNameValueBuffer.FINDSET);
+    END;
+
+    LOCAL PROCEDURE FindModifiedIntegrationRecords@18(VAR IntegrationRecord@1000 : Record "Integration Record";IntegrationTableMapping@1001 : Record "Integration Table Mapping") : Boolean;
+    BEGIN
+      IntegrationRecord.SETRANGE("Table ID",IntegrationTableMapping."Table ID");
+      if IntegrationTableMapping."Synch. Modified On Filter" <> 0DT then
+        IntegrationRecord.SETFILTER("Modified On",'>%1',IntegrationTableMapping."Synch. Modified On Filter");
+      exit(IntegrationRecord.FINDSET);
+    END;
+
+    LOCAL PROCEDURE CollectOptionValues@12(OptionString@1001 : Text;VAR TempNameValueBuffer@1000 : TEMPORARY Record "Name/Value Buffer");
+    VAR
+      CommaPos@1005 : Integer;
+      OptionValue@1003 : Text;
+      OptionValueInt@1002 : Integer;
+    BEGIN
+      OptionValueInt := 0;
+      TempNameValueBuffer.DELETEALL;
+      while STRLEN(OptionString) > 0 do begin
+        CommaPos := STRPOS(OptionString,',');
+        if CommaPos = 0 then begin
+          OptionValue := OptionString;
+          OptionString := '';
+        end else begin
+          OptionValue := COPYSTR(OptionString,1,CommaPos - 1);
+          OptionString := COPYSTR(OptionString,CommaPos + 1);
+        end;
+        if DELCHR(OptionValue,'=',' ') <> '' then begin
+          TempNameValueBuffer.INIT;
+          TempNameValueBuffer.ID := OptionValueInt;
+          TempNameValueBuffer.Name := COPYSTR(OptionValue,1,MAXSTRLEN(TempNameValueBuffer.Name));
+          TempNameValueBuffer.INSERT
+        end;
+        OptionValueInt += 1;
+      end;
+    END;
+
+    LOCAL PROCEDURE MergeBuffers@9(VAR TempNameValueBuffer@1000 : TEMPORARY Record "Name/Value Buffer";VAR TempNameValueBufferWithValue@1001 : TEMPORARY Record "Name/Value Buffer");
+    BEGIN
+      with TempNameValueBuffer do begin
+        if FINDSET then
+          repeat
+            if TempNameValueBufferWithValue.GET(ID) then begin
+              Value := TempNameValueBufferWithValue.Name;
+              MODIFY
+            end;
+          until NEXT = 0;
+        TempNameValueBufferWithValue.DELETEALL;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE SynchOption@8(IntegrationTableMapping@1003 : Record "Integration Table Mapping");
+    VAR
+      CRMOptionMapping@1007 : Record "CRM Option Mapping";
+      Field@1000 : Record Field;
+      TempNameValueBuffer@1004 : TEMPORARY Record "Name/Value Buffer";
+      FieldRef@1001 : FieldRef;
+      KeyRef@1005 : KeyRef;
+      RecordRef@1002 : RecordRef;
+      NewPK@1006 : Text;
+    BEGIN
+      if Field.GET(IntegrationTableMapping."Integration Table ID",IntegrationTableMapping."Integration Table UID Fld. No.") then
+        if Field.Type = Field.Type::Option then begin
+          RecordRef.OPEN(Field.TableNo);
+          FieldRef := RecordRef.FIELD(Field."No.");
+          RecordRef.CLOSE;
+          if FillCodeBufferFromOption(FieldRef,TempNameValueBuffer) then begin
+            CRMOptionMapping.SETRANGE("Table ID",IntegrationTableMapping."Table ID");
+            CRMOptionMapping.DELETEALL;
+
+            RecordRef.OPEN(IntegrationTableMapping."Table ID");
+            KeyRef := RecordRef.KEYINDEX(1);
+            FieldRef := KeyRef.FIELDINDEX(1);
+            repeat
+              NewPK := COPYSTR(TempNameValueBuffer.Name,1,FieldRef.LENGTH);
+              FieldRef.SETRANGE(NewPK);
+              if not RecordRef.FINDFIRST then begin
+                RecordRef.INIT;
+                FieldRef.VALUE := NewPK;
+                RecordRef.INSERT(true);
+              end;
+
+              CRMOptionMapping.INIT;
+              CRMOptionMapping."Record ID" := RecordRef.RECORDID;
+              CRMOptionMapping."Option Value" := TempNameValueBuffer.ID;
+              CRMOptionMapping."Option Value Caption" := TempNameValueBuffer.Value;
+              CRMOptionMapping."Table ID" := IntegrationTableMapping."Table ID";
+              CRMOptionMapping."Integration Table ID" := IntegrationTableMapping."Integration Table ID";
+              CRMOptionMapping."Integration Field ID" := IntegrationTableMapping."Integration Table UID Fld. No.";
+              CRMOptionMapping.INSERT;
+            until TempNameValueBuffer.NEXT = 0;
+            RecordRef.CLOSE;
+          end;
+        end;
+    END;
+
+    [Internal]
+    PROCEDURE SynchRecord@1(IntegrationTableMapping@1002 : Record "Integration Table Mapping";SourceID@1000 : Variant;ForceModify@1003 : Boolean;IgnoreSynchOnlyCoupledRecords@1011 : Boolean) JobID : GUID;
+    VAR
+      IntegrationTableSynch@1010 : Codeunit "Integration Table Synch.";
+      FromRecordRef@1008 : RecordRef;
+      ToRecordRef@1009 : RecordRef;
+    BEGIN
+      GetSourceRecordRef(IntegrationTableMapping,SourceID,FromRecordRef);
+      JobID := IntegrationTableSynch.BeginIntegrationSynchJob(TABLECONNECTIONTYPE::CRM,IntegrationTableMapping,FromRecordRef.NUMBER);
+      if not ISNULLGUID(JobID) then begin
+        IntegrationTableSynch.Synchronize(FromRecordRef,ToRecordRef,ForceModify,IgnoreSynchOnlyCoupledRecords);
+        IntegrationTableSynch.EndIntegrationSynchJob;
+      end;
+    END;
+
+    [Internal]
+    PROCEDURE SynchRecordsToIntegrationTable@6(RecordsToSynchRecordRef@1002 : RecordRef;IgnoreChanges@1001 : Boolean;IgnoreSynchOnlyCoupledRecords@1000 : Boolean) JobID : GUID;
+    VAR
+      IntegrationTableMapping@1003 : Record "Integration Table Mapping";
+      IntegrationTableSynch@1010 : Codeunit "Integration Table Synch.";
+      IntegrationRecordRef@1008 : RecordRef;
+    BEGIN
+      if not IntegrationTableMapping.FindMappingForTable(RecordsToSynchRecordRef.NUMBER) then
+        ERROR(STRSUBSTNO(NoMappingErr,RecordsToSynchRecordRef.NAME));
+
+      if not RecordsToSynchRecordRef.FINDSET then
+        ERROR(SynchronizeEmptySetErr);
+
+      JobID :=
+        IntegrationTableSynch.BeginIntegrationSynchJob(
+          TABLECONNECTIONTYPE::CRM,IntegrationTableMapping,RecordsToSynchRecordRef.NUMBER);
+      if not ISNULLGUID(JobID) then begin
+        repeat
+          IntegrationTableSynch.Synchronize(RecordsToSynchRecordRef,IntegrationRecordRef,IgnoreChanges,IgnoreSynchOnlyCoupledRecords)
+        until RecordsToSynchRecordRef.NEXT = 0;
+        IntegrationTableSynch.EndIntegrationSynchJob;
+      end;
+    END;
+
+    LOCAL PROCEDURE SynchNAVTableToCRM@14(IntegrationTableMapping@1002 : Record "Integration Table Mapping";VAR IntegrationTableSynch@1000 : Codeunit "Integration Table Synch.") LatestModifiedOn : DateTime;
+    VAR
+      IntegrationRecord@1012 : Record "Integration Record";
+      TempCRMIntegrationRecord@1010 : TEMPORARY Record "CRM Integration Record";
+      SourceRecordRef@1008 : RecordRef;
+      DestinationRecordRef@1007 : RecordRef;
+      IgnoreRecord@1001 : Boolean;
+      ForceModify@1003 : Boolean;
+      ModifiedOn@1005 : DateTime;
+    BEGIN
+      LatestModifiedOn := 0DT;
+      if FindModifiedIntegrationRecords(IntegrationRecord,IntegrationTableMapping) then begin
+        CreateCRMIntegrationRecordClone(IntegrationTableMapping."Table ID",TempCRMIntegrationRecord);
+        CacheFilteredNAVTable(SourceRecordRef,IntegrationTableMapping);
+        ForceModify := IntegrationTableMapping."Delete After Synchronization";
+        repeat
+          IgnoreRecord := false;
+          if SourceRecordRef.GET(IntegrationRecord."Record ID") then begin
+            OnQueryPostFilterIgnoreRecord(SourceRecordRef,IgnoreRecord);
+            if not IgnoreRecord then begin
+              if not TempCRMIntegrationRecord.IsIntegrationIdCoupled(IntegrationRecord."Integration ID") then
+                IgnoreRecord := IntegrationTableMapping."Synch. Only Coupled Records";
+              if not IgnoreRecord then
+                if IntegrationTableSynch.Synchronize(SourceRecordRef,DestinationRecordRef,ForceModify,false) then begin
+                  ModifiedOn := IntegrationTableSynch.GetRowLastModifiedOn(IntegrationTableMapping,SourceRecordRef);
+                  if ModifiedOn > LatestModifiedOn then
+                    LatestModifiedOn := ModifiedOn;
+                end;
+            end;
+          end;
+        until IntegrationRecord.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE SynchCRMTableToNAV@25(IntegrationTableMapping@1000 : Record "Integration Table Mapping";IntegrationUserId@1005 : GUID;VAR IntegrationTableSynch@1003 : Codeunit "Integration Table Synch.") LatestModifiedOn : DateTime;
+    VAR
+      TempCRMIntegrationRecord@1012 : TEMPORARY Record "CRM Integration Record";
+      SourceRecordRef@1008 : RecordRef;
+      DestinationRecordRef@1007 : RecordRef;
+      ModifiedOn@1004 : DateTime;
+      IgnoreRecord@1001 : Boolean;
+      ForceModify@1002 : Boolean;
+    BEGIN
+      LatestModifiedOn := 0DT;
+      CacheFilteredCRMTable(SourceRecordRef,IntegrationTableMapping,IntegrationUserId);
+      CreateCRMIntegrationRecordClone(IntegrationTableMapping."Table ID",TempCRMIntegrationRecord);
+      ForceModify := IntegrationTableMapping."Delete After Synchronization";
+      if SourceRecordRef.FINDSET then
+        repeat
+          IgnoreRecord := false;
+          OnQueryPostFilterIgnoreRecord(SourceRecordRef,IgnoreRecord);
+          if not IgnoreRecord then begin
+            if TempCRMIntegrationRecord.IsCRMRecordRefCoupled(SourceRecordRef) then
+              TempCRMIntegrationRecord.DELETE
+            else
+              IgnoreRecord := IntegrationTableMapping."Synch. Only Coupled Records";
+            if not IgnoreRecord then
+              if IntegrationTableSynch.Synchronize(SourceRecordRef,DestinationRecordRef,ForceModify,false) then begin
+                ModifiedOn := IntegrationTableSynch.GetRowLastModifiedOn(IntegrationTableMapping,SourceRecordRef);
+                if ModifiedOn > LatestModifiedOn then
+                  LatestModifiedOn := ModifiedOn;
+              end;
+          end;
+        until SourceRecordRef.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetModifyByFieldNo@27(CRMTableID@1000 : Integer) : Integer;
+    VAR
+      Field@1002 : Record Field;
+    BEGIN
+      Field.SETRANGE(TableNo,CRMTableID);
+      Field.SETRANGE(FieldName,'ModifiedBy'); // All CRM tables should have "ModifiedBy" field
+      Field.FINDFIRST;
+      exit(Field."No.");
+    END;
+
+    LOCAL PROCEDURE PerformScheduledSynchToIntegrationTable@3(VAR IntegrationTableMapping@1000 : Record "Integration Table Mapping") LatestModifiedOn : DateTime;
+    VAR
+      CRMFullSynchReviewLine@1004 : Record "CRM Full Synch. Review Line";
+      IntegrationTableSynch@1001 : Codeunit "Integration Table Synch.";
+      JobId@1003 : GUID;
+    BEGIN
+      JobId :=
+        IntegrationTableSynch.BeginIntegrationSynchJob(
+          TABLECONNECTIONTYPE::CRM,IntegrationTableMapping,IntegrationTableMapping."Table ID");
+      if not ISNULLGUID(JobId) then begin
+        CRMFullSynchReviewLine.FullSynchStarted(IntegrationTableMapping,JobId,IntegrationTableMapping.Direction::ToIntegrationTable);
+        LatestModifiedOn := SynchNAVTableToCRM(IntegrationTableMapping,IntegrationTableSynch);
+        if LatestModifiedOn = 0DT then
+          LatestModifiedOn := IntegrationTableSynch.GetStartDateTime;
+        IntegrationTableSynch.EndIntegrationSynchJob;
+        CRMFullSynchReviewLine.FullSynchFinished(IntegrationTableMapping,IntegrationTableMapping.Direction::ToIntegrationTable);
+      end;
+    END;
+
+    LOCAL PROCEDURE PerformScheduledSynchFromIntegrationTable@4(VAR IntegrationTableMapping@1000 : Record "Integration Table Mapping";IntegrationUserId@1001 : GUID) LatestModifiedOn : DateTime;
+    VAR
+      CRMFullSynchReviewLine@1005 : Record "CRM Full Synch. Review Line";
+      IntegrationTableSynch@1003 : Codeunit "Integration Table Synch.";
+      JobId@1004 : GUID;
+    BEGIN
+      JobId :=
+        IntegrationTableSynch.BeginIntegrationSynchJob(
+          TABLECONNECTIONTYPE::CRM,IntegrationTableMapping,IntegrationTableMapping."Integration Table ID");
+      if not ISNULLGUID(JobId) then begin
+        CRMFullSynchReviewLine.FullSynchStarted(IntegrationTableMapping,JobId,IntegrationTableMapping.Direction::FromIntegrationTable);
+        LatestModifiedOn := SynchCRMTableToNAV(IntegrationTableMapping,IntegrationUserId,IntegrationTableSynch);
+        if LatestModifiedOn = 0DT then
+          LatestModifiedOn := IntegrationTableSynch.GetStartDateTime;
+        IntegrationTableSynch.EndIntegrationSynchJob;
+        CRMFullSynchReviewLine.FullSynchFinished(IntegrationTableMapping,IntegrationTableMapping.Direction::FromIntegrationTable);
+      end;
+    END;
+
+    LOCAL PROCEDURE SetOriginalCRMJobQueueEntryOnHold@22(IntegrationTableMapping@1001 : Record "Integration Table Mapping";VAR JobQueueEntry@1002 : Record "Job Queue Entry");
+    VAR
+      OriginalIntegrationTableMapping@1000 : Record "Integration Table Mapping";
+    BEGIN
+      if IntegrationTableMapping."Full Sync is Running" then begin
+        OriginalIntegrationTableMapping.GET(IntegrationTableMapping."Parent Name");
+        JobQueueEntry.SETRANGE("Record ID to Process",OriginalIntegrationTableMapping.RECORDID);
+        if JobQueueEntry.FINDFIRST then
+          JobQueueEntry.SetStatus(JobQueueEntry.Status::"On Hold");
+      end;
+    END;
+
+    LOCAL PROCEDURE SetOriginalCRMJobQueueEntryReady@20(IntegrationTableMapping@1002 : Record "Integration Table Mapping";VAR JobQueueEntry@1001 : Record "Job Queue Entry");
+    VAR
+      OriginalIntegrationTableMapping@1000 : Record "Integration Table Mapping";
+    BEGIN
+      if IntegrationTableMapping."Full Sync is Running" then begin
+        OriginalIntegrationTableMapping.GET(IntegrationTableMapping."Parent Name");
+        OriginalIntegrationTableMapping.CopyModifiedOnFilters(IntegrationTableMapping);
+        if JobQueueEntry.FINDFIRST then
+          JobQueueEntry.SetStatus(JobQueueEntry.Status::Ready);
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateTableMappingModifiedOn@26(VAR IntegrationTableMapping@1001 : Record "Integration Table Mapping";ModifiedOn@1000 : ARRAY [2] OF DateTime);
+    BEGIN
+      with IntegrationTableMapping do
+        if (ModifiedOn[1] > "Synch. Modified On Filter") or (ModifiedOn[2] > "Synch. Int. Tbl. Mod. On Fltr.") then begin
+          "Synch. Modified On Filter" := ModifiedOn[1];
+          "Synch. Int. Tbl. Mod. On Fltr." := ModifiedOn[2];
+          MODIFY(true);
+        end;
+    END;
+
+    LOCAL PROCEDURE CreateCRMIntegrationRecordClone@5(ForTable@1000 : Integer;VAR TempCRMIntegrationRecord@1001 : TEMPORARY Record "CRM Integration Record");
+    VAR
+      CRMIntegrationRecord@1002 : Record "CRM Integration Record";
+    BEGIN
+      TempCRMIntegrationRecord.RESET;
+      TempCRMIntegrationRecord.DELETEALL;
+
+      CRMIntegrationRecord.SETRANGE("Table ID",ForTable);
+      if not CRMIntegrationRecord.FINDSET then
+        exit;
+
+      repeat
+        TempCRMIntegrationRecord.COPY(CRMIntegrationRecord,false);
+        TempCRMIntegrationRecord.INSERT;
+      until CRMIntegrationRecord.NEXT = 0;
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnQueryPostFilterIgnoreRecord@2(SourceRecordRef@1001 : RecordRef;VAR IgnoreRecord@1002 : Boolean);
+    BEGIN
+    END;
+
+    [EventSubscriber(Codeunit,5340,OnQueryPostFilterIgnoreRecord)]
+    LOCAL PROCEDURE IgnoreCompanyContactOnQueryPostFilterIgnoreRecord@19(SourceRecordRef@1000 : RecordRef;VAR IgnoreRecord@1001 : Boolean);
+    VAR
+      Contact@1002 : Record Contact;
+    BEGIN
+      if IgnoreRecord then
+        exit;
+
+      if SourceRecordRef.NUMBER = DATABASE::Contact then begin
+        SourceRecordRef.SETTABLE(Contact);
+        if Contact.Type = Contact.Type::Company then
+          IgnoreRecord := true;
+      end;
+    END;
+
+    [EventSubscriber(Table,472,OnBeforeModifyEvent)]
+    LOCAL PROCEDURE OnBeforeModifyJobQueueEntry@7(VAR Rec@1000 : Record "Job Queue Entry";VAR xRec@1001 : Record "Job Queue Entry";RunTrigger@1002 : Boolean);
+    VAR
+      CRMFullSynchReviewLine@1003 : Record "CRM Full Synch. Review Line";
+    BEGIN
+      CRMFullSynchReviewLine.OnBeforeModifyJobQueueEntry(Rec);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

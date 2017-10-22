@@ -1,0 +1,152 @@
+OBJECT Codeunit 5771 Whse.-Sales Release
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      WhseRqst@1000 : Record "Warehouse Request";
+      SalesLine@1001 : Record "Sales Line";
+      Location@1002 : Record Location;
+      OldLocationCode@1003 : Code[10];
+      First@1004 : Boolean;
+
+    [External]
+    PROCEDURE Release@1(SalesHeader@1000 : Record "Sales Header");
+    VAR
+      WhseType@1001 : 'Inbound,Outbound';
+      OldWhseType@1002 : 'Inbound,Outbound';
+    BEGIN
+      with SalesHeader do begin
+        case "Document Type" of
+          "Document Type"::Order:
+            WhseRqst."Source Document" := WhseRqst."Source Document"::"Sales Order";
+          "Document Type"::"Return Order":
+            WhseRqst."Source Document" := WhseRqst."Source Document"::"Sales Return Order";
+          else
+            exit;
+        end;
+
+        SalesLine.SETCURRENTKEY("Document Type","Document No.","Location Code");
+        SalesLine.SETRANGE("Document Type","Document Type");
+        SalesLine.SETRANGE("Document No.","No.");
+        SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+        SalesLine.SETRANGE("Drop Shipment",false);
+        SalesLine.SETRANGE("Job No.",'');
+        if SalesLine.FINDSET then begin
+          First := true;
+          repeat
+            if (("Document Type" = "Document Type"::Order) and
+                (SalesLine.Quantity >= 0)) or
+               (("Document Type" = "Document Type"::"Return Order") and
+                (SalesLine.Quantity < 0))
+            then
+              WhseType := WhseType::Outbound
+            else
+              WhseType := WhseType::Inbound;
+
+            if First or (SalesLine."Location Code" <> OldLocationCode) or
+               (WhseType <> OldWhseType)
+            then
+              CreateWhseRqst(SalesHeader,WhseType);
+
+            First := false;
+            OldLocationCode := SalesLine."Location Code";
+            OldWhseType := WhseType;
+          until SalesLine.NEXT = 0;
+        end;
+
+        WhseRqst.RESET;
+        WhseRqst.SETCURRENTKEY("Source Type","Source Subtype","Source No.");
+        WhseRqst.SETRANGE(Type,WhseRqst.Type);
+        WhseRqst.SETRANGE("Source Type",DATABASE::"Sales Line");
+        WhseRqst.SETRANGE("Source Subtype","Document Type");
+        WhseRqst.SETRANGE("Source No.","No.");
+        WhseRqst.SETRANGE("Document Status",Status::Open);
+        if not WhseRqst.ISEMPTY then
+          WhseRqst.DELETEALL(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE Reopen@2(SalesHeader@1000 : Record "Sales Header");
+    VAR
+      WhseRqst@1001 : Record "Warehouse Request";
+    BEGIN
+      with SalesHeader do begin
+        case "Document Type" of
+          "Document Type"::Order:
+            WhseRqst.Type := WhseRqst.Type::Outbound;
+          "Document Type"::"Return Order":
+            WhseRqst.Type := WhseRqst.Type::Inbound;
+        end;
+
+        WhseRqst.RESET;
+        WhseRqst.SETCURRENTKEY("Source Type","Source Subtype","Source No.");
+        WhseRqst.SETRANGE(Type,WhseRqst.Type);
+        WhseRqst.SETRANGE("Source Type",DATABASE::"Sales Line");
+        WhseRqst.SETRANGE("Source Subtype","Document Type");
+        WhseRqst.SETRANGE("Source No.","No.");
+        WhseRqst.SETRANGE("Document Status",Status::Released);
+        WhseRqst.LOCKTABLE;
+        if not WhseRqst.ISEMPTY then
+          WhseRqst.MODIFYALL("Document Status",WhseRqst."Document Status"::Open);
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateWhseRqst@3(VAR SalesHeader@1000 : Record "Sales Header";WhseType@1002 : 'Inbound,Outbound');
+    VAR
+      SalesLine2@1001 : Record "Sales Line";
+    BEGIN
+      if ((WhseType = WhseType::Outbound) and
+          (Location.RequireShipment(SalesLine."Location Code") or
+           Location.RequirePicking(SalesLine."Location Code"))) or
+         ((WhseType = WhseType::Inbound) and
+          (Location.RequireReceive(SalesLine."Location Code") or
+           Location.RequirePutaway(SalesLine."Location Code")))
+      then begin
+        SalesLine2.COPY(SalesLine);
+        SalesLine2.SETRANGE("Location Code",SalesLine."Location Code");
+        SalesLine2.SETRANGE("Unit of Measure Code",'');
+        if SalesLine2.FINDFIRST then
+          SalesLine2.TESTFIELD("Unit of Measure Code");
+
+        WhseRqst.Type := WhseType;
+        WhseRqst."Source Type" := DATABASE::"Sales Line";
+        WhseRqst."Source Subtype" := SalesHeader."Document Type";
+        WhseRqst."Source No." := SalesHeader."No.";
+        WhseRqst."Shipment Method Code" := SalesHeader."Shipment Method Code";
+        WhseRqst."Shipping Agent Code" := SalesHeader."Shipping Agent Code";
+        WhseRqst."Shipping Advice" := SalesHeader."Shipping Advice";
+        WhseRqst."Document Status" := SalesHeader.Status::Released;
+        WhseRqst."Location Code" := SalesLine."Location Code";
+        WhseRqst."Destination Type" := WhseRqst."Destination Type"::Customer;
+        WhseRqst."Destination No." := SalesHeader."Sell-to Customer No.";
+        WhseRqst."External Document No." := SalesHeader."External Document No.";
+        if WhseType = WhseType::Inbound then
+          WhseRqst."Expected Receipt Date" := SalesHeader."Shipment Date"
+        else
+          WhseRqst."Shipment Date" := SalesHeader."Shipment Date";
+        SalesHeader.SETRANGE("Location Filter",SalesLine."Location Code");
+        SalesHeader.CALCFIELDS("Completely Shipped");
+        WhseRqst."Completely Handled" := SalesHeader."Completely Shipped";
+        if not WhseRqst.INSERT then
+          WhseRqst.MODIFY;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

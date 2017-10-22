@@ -1,0 +1,478 @@
+OBJECT Codeunit 8612 Config. Template Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1001 : TextConst 'ENU=The template %1 is in this hierarchy and contains the same field.';
+      Text001@1003 : TextConst '@@@="%1 = Table ID, %2 = Table caption";ENU=A number series has not been set up for table %1 %2. The instance could not be created.';
+      Text002@1000 : TextConst '@@@="%2 = Table ID, %3 = Table caption";ENU=The instance %1 already exists in table %2 %3.';
+      Text003@1004 : TextConst 'ENU=The value for the key field %1 is not filled for the instance.';
+      UpdatingRelatedTable@1002 : Boolean;
+
+    [Internal]
+    PROCEDURE UpdateFromTemplateSelection@4(VAR RecRef@1000 : RecordRef);
+    VAR
+      ConfigTemplateHeader@1001 : Record "Config. Template Header";
+    BEGIN
+      ConfigTemplateHeader.SETRANGE("Table ID",RecRef.NUMBER);
+      if PAGE.RUNMODAL(PAGE::"Config. Template List",ConfigTemplateHeader,ConfigTemplateHeader.Code) = ACTION::LookupOK then
+        UpdateRecord(ConfigTemplateHeader,RecRef);
+    END;
+
+    [External]
+    PROCEDURE UpdateRecord@1(ConfigTemplateHeader@1000 : Record "Config. Template Header";VAR RecRef@1001 : RecordRef);
+    VAR
+      TempDummyField@1002 : TEMPORARY Record Field;
+    BEGIN
+      UpdateRecordWithSkipFields(ConfigTemplateHeader,RecRef,false,TempDummyField);
+    END;
+
+    LOCAL PROCEDURE UpdateRecordWithSkipFields@25(ConfigTemplateHeader@1000 : Record "Config. Template Header";VAR RecRef@1001 : RecordRef;SkipFields@1002 : Boolean;VAR TempSkipFields@1003 : TEMPORARY Record Field);
+    BEGIN
+      if TestKeyFields(RecRef) then
+        InsertTemplate(RecRef,ConfigTemplateHeader,SkipFields,TempSkipFields)
+      else begin
+        InsertRecordWithKeyFields(RecRef,ConfigTemplateHeader);
+        if TestKeyFields(RecRef) then
+          InsertTemplate(RecRef,ConfigTemplateHeader,SkipFields,TempSkipFields)
+        else
+          ERROR(STRSUBSTNO(Text001,RecRef.NUMBER,RecRef.CAPTION));
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertTemplate@3(VAR RecRef@1000 : RecordRef;ConfigTemplateHeader@1001 : Record "Config. Template Header";SkipFields@1006 : Boolean;VAR TempSkipField@1007 : Record Field);
+    VAR
+      ConfigTemplateLine@1002 : Record "Config. Template Line";
+      ConfigTemplateHeader2@1004 : Record "Config. Template Header";
+      FieldRef@1003 : FieldRef;
+      RecRef2@1005 : RecordRef;
+      SkipCurrentField@1008 : Boolean;
+    BEGIN
+      ConfigTemplateLine.SETRANGE("Data Template Code",ConfigTemplateHeader.Code);
+      if ConfigTemplateLine.FINDSET then
+        repeat
+          case ConfigTemplateLine.Type of
+            ConfigTemplateLine.Type::Field:
+              if ConfigTemplateLine."Field ID" <> 0 then begin
+                if SkipFields then
+                  SkipCurrentField := ShouldSkipField(TempSkipField,ConfigTemplateLine."Field ID",ConfigTemplateLine."Table ID")
+                else
+                  SkipCurrentField := false;
+
+                if not SkipCurrentField then begin
+                  FieldRef := RecRef.FIELD(ConfigTemplateLine."Field ID");
+                  ModifyRecordWithField(RecRef,FieldRef,ConfigTemplateLine."Default Value",ConfigTemplateLine."Language ID");
+                end;
+              end;
+            ConfigTemplateLine.Type::Template:
+              if ConfigTemplateLine."Template Code" <> '' then
+                if ConfigTemplateHeader2.GET(ConfigTemplateLine."Template Code") then
+                  if ConfigTemplateHeader2."Table ID" = ConfigTemplateHeader."Table ID" then
+                    InsertTemplate(RecRef,ConfigTemplateHeader2,SkipFields,TempSkipField)
+                  else begin
+                    UpdatingRelatedTable := true;
+                    RecRef2.OPEN(ConfigTemplateHeader2."Table ID");
+                    UpdateRecord(ConfigTemplateHeader2,RecRef2);
+                    UpdatingRelatedTable := false;
+                  end;
+          end;
+        until ConfigTemplateLine.NEXT = 0;
+    END;
+
+    PROCEDURE ApplyTemplate@7(VAR OriginalRecRef@1002 : RecordRef;VAR TempFieldsAssigned@1001 : TEMPORARY Record Field;VAR TemplateAppliedRecRef@1007 : RecordRef) : Boolean;
+    VAR
+      ConfigTmplSelectionRules@1009 : Record "Config. Tmpl. Selection Rules";
+      ConfigTemplateHeader@1008 : Record "Config. Template Header";
+      BackupRecRef@1005 : RecordRef;
+      AssignedFieldRef@1004 : FieldRef;
+      APIFieldRef@1003 : FieldRef;
+      SkipFields@1000 : Boolean;
+    BEGIN
+      if not ConfigTmplSelectionRules.FindTemplateBasedOnRecordFields(OriginalRecRef,ConfigTemplateHeader) then
+        exit(false);
+
+      TempFieldsAssigned.RESET;
+      SkipFields := TempFieldsAssigned.FINDSET;
+
+      BackupRecRef := OriginalRecRef.DUPLICATE;
+      TemplateAppliedRecRef := OriginalRecRef.DUPLICATE;
+
+      UpdateRecordWithSkipFields(ConfigTemplateHeader,TemplateAppliedRecRef,SkipFields,TempFieldsAssigned);
+
+      // Assign values set back in case validating unrelated field has modified them
+      if SkipFields then
+        repeat
+          AssignedFieldRef := BackupRecRef.FIELD(TempFieldsAssigned."No.");
+          APIFieldRef := TemplateAppliedRecRef.FIELD(TempFieldsAssigned."No.");
+          APIFieldRef.VALUE := AssignedFieldRef.VALUE;
+        until TempFieldsAssigned.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE ModifyRecordWithField@39(VAR RecRef@1004 : RecordRef;FieldRef@1005 : FieldRef;Value@1002 : Text[250];LanguageID@1001 : Integer);
+    VAR
+      ConfigValidateMgt@1000 : Codeunit "Config. Validate Management";
+    BEGIN
+      ConfigValidateMgt.ValidateFieldValue(RecRef,FieldRef,Value,false,LanguageID);
+      RecRef.MODIFY(true);
+    END;
+
+    LOCAL PROCEDURE TestKeyFields@2(VAR RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      KeyRef@1003 : KeyRef;
+      FieldRef@1002 : FieldRef;
+      KeyFieldCount@1001 : Integer;
+    BEGIN
+      KeyRef := RecRef.KEYINDEX(1);
+      for KeyFieldCount := 1 to KeyRef.FIELDCOUNT do begin
+        FieldRef := KeyRef.FIELDINDEX(KeyFieldCount);
+        if FORMAT(FieldRef.VALUE) = '' then
+          exit(false);
+      end;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE TestHierarchy@6(ConfigTemplateLine@1001 : Record "Config. Template Line");
+    VAR
+      TempConfigTemplateLine@1002 : TEMPORARY Record "Config. Template Line";
+    BEGIN
+      GetHierarchicalLines(TempConfigTemplateLine,ConfigTemplateLine);
+      with TempConfigTemplateLine do begin
+        SETFILTER("Field ID",'>%1',0); // exclude config. lines not handled yet
+        if FINDSET then
+          repeat
+            SETRANGE("Field ID","Field ID");
+            if COUNT > 1 then
+              ERROR(STRSUBSTNO(Text000,"Data Template Code"));
+            DELETEALL;
+            SETFILTER("Field ID",'>%1',0);
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetHierarchicalLines@24(VAR ConfigTemplateLineBuf@1000 : Record "Config. Template Line";ConfigTemplateLine@1001 : Record "Config. Template Line");
+    VAR
+      SubConfigTemplateLine@1002 : Record "Config. Template Line";
+      CurrConfigTemplateLine@1004 : Record "Config. Template Line";
+    BEGIN
+      with CurrConfigTemplateLine do begin
+        SETRANGE("Data Template Code",ConfigTemplateLine."Data Template Code");
+        if FINDSET then
+          repeat
+            // get current version of record because it's may not be in DB yet
+            if "Line No." = ConfigTemplateLine."Line No." then
+              CurrConfigTemplateLine := ConfigTemplateLine;
+            if Type = Type::Field then begin
+              ConfigTemplateLineBuf := CurrConfigTemplateLine;
+              if not ConfigTemplateLineBuf.FIND then
+                ConfigTemplateLineBuf.INSERT;
+            end else begin
+              SubConfigTemplateLine.INIT;
+              SubConfigTemplateLine."Data Template Code" := "Template Code";
+              GetHierarchicalLines(ConfigTemplateLineBuf,SubConfigTemplateLine);
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertRecordWithKeyFields@40(VAR RecRef@1000 : RecordRef;ConfigTemplateHeader@1002 : Record "Config. Template Header");
+    VAR
+      ConfigTemplateLine@1001 : Record "Config. Template Line";
+      ConfigValidateMgt@1007 : Codeunit "Config. Validate Management";
+      RecRef1@1006 : RecordRef;
+      KeyRef@1003 : KeyRef;
+      FieldRef@1004 : FieldRef;
+      KeyFieldCount@1005 : Integer;
+      MessageString@1008 : Text[250];
+    BEGIN
+      ConfigTemplateLine.SETRANGE("Data Template Code",ConfigTemplateHeader.Code);
+
+      KeyRef := RecRef.KEYINDEX(1);
+      for KeyFieldCount := 1 to KeyRef.FIELDCOUNT do begin
+        FieldRef := KeyRef.FIELDINDEX(KeyFieldCount);
+        ConfigTemplateLine.SETRANGE("Field ID",FieldRef.NUMBER);
+        if ConfigTemplateLine.FINDFIRST then begin
+          ConfigValidateMgt.ValidateFieldValue(
+            RecRef,FieldRef,ConfigTemplateLine."Default Value",false,ConfigTemplateLine."Language ID");
+        end else
+          if KeyRef.FIELDCOUNT <> 1 then
+            ERROR(STRSUBSTNO(Text003,FieldRef.NAME));
+      end;
+
+      RecRef1 := RecRef.DUPLICATE;
+
+      if RecRef1.FIND('=') then
+        if not UpdatingRelatedTable then begin
+          MessageString := MessageString + ' ' + FORMAT(FieldRef.VALUE);
+          MessageString := DELCHR(MessageString,'<');
+          ERROR(STRSUBSTNO(Text002,MessageString,RecRef.NUMBER,RecRef.CAPTION));
+        end else
+          exit;
+
+      RecRef.INSERT(true);
+    END;
+
+    [External]
+    PROCEDURE SetUpdatingRelatedTable@5(NewUpdatingRelatedTable@1000 : Boolean);
+    BEGIN
+      UpdatingRelatedTable := NewUpdatingRelatedTable;
+    END;
+
+    [External]
+    PROCEDURE CreateConfigTemplateAndLines@10(VAR Code@1006 : Code[10];Description@1007 : Text[50];TableID@1008 : Integer;DefaultValuesFieldRefArray@1009 : ARRAY [100] OF FieldRef);
+    VAR
+      ConfigTemplateHeader@1001 : Record "Config. Template Header";
+      FieldRef@1004 : FieldRef;
+      I@1002 : Integer;
+    BEGIN
+      ConfigTemplateHeader.INIT;
+
+      if Code = '' then
+        Code := GetNextAvailableCode(TableID);
+
+      ConfigTemplateHeader.Code := Code;
+      ConfigTemplateHeader.Description := Description;
+      ConfigTemplateHeader."Table ID" := TableID;
+      ConfigTemplateHeader.INSERT(true);
+
+      for I := 1 to ARRAYLEN(DefaultValuesFieldRefArray) do begin
+        FieldRef := DefaultValuesFieldRefArray[I];
+        InsertConfigTemplateLineFromField(Code,FieldRef,TableID);
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdateConfigTemplateAndLines@9(Code@1008 : Code[10];Description@1007 : Text[50];TableID@1006 : Integer;DefaultValuesFieldRefArray@1005 : ARRAY [100] OF FieldRef);
+    VAR
+      ConfigTemplateHeader@1001 : Record "Config. Template Header";
+      ConfigTemplateLine@1003 : Record "Config. Template Line";
+      FieldRef@1004 : FieldRef;
+      I@1002 : Integer;
+      Value@1000 : Text[250];
+    BEGIN
+      ConfigTemplateHeader.GET(Code);
+      ConfigTemplateHeader.Description := Description;
+      ConfigTemplateHeader.MODIFY;
+
+      for I := 1 to ARRAYLEN(DefaultValuesFieldRefArray) do begin
+        FieldRef := DefaultValuesFieldRefArray[I];
+        ConfigTemplateLine.SETFILTER("Data Template Code",Code);
+        ConfigTemplateLine.SETFILTER(Type,'=%1',ConfigTemplateLine.Type::Field);
+        ConfigTemplateLine.SETFILTER("Field ID",'=%1',FieldRef.NUMBER);
+        ConfigTemplateLine.SETFILTER("Table ID",'=%1',TableID);
+
+        if ConfigTemplateLine.FINDLAST then begin
+          Value := FORMAT(FieldRef.VALUE);
+          if Value <> ConfigTemplateLine."Default Value" then begin
+            ConfigTemplateLine."Default Value" := Value;
+            ConfigTemplateLine."Language ID" := GLOBALLANGUAGE;
+            ConfigTemplateLine.MODIFY(true);
+          end;
+        end else
+          InsertConfigTemplateLineFromField(Code,FieldRef,TableID);
+      end;
+    END;
+
+    [External]
+    PROCEDURE ApplyTemplateLinesWithoutValidation@8(ConfigTemplateHeader@1000 : Record "Config. Template Header";VAR RecordRef@1002 : RecordRef);
+    VAR
+      ConfigTemplateLine@1001 : Record "Config. Template Line";
+      ConfigValidateMgt@1005 : Codeunit "Config. Validate Management";
+      FieldRef@1004 : FieldRef;
+    BEGIN
+      ConfigTemplateLine.SETFILTER("Data Template Code",ConfigTemplateHeader.Code);
+
+      if ConfigTemplateLine.FINDSET then
+        repeat
+          if ConfigTemplateLine.Type = ConfigTemplateLine.Type::Field then
+            if RecordRef.FIELDEXIST(ConfigTemplateLine."Field ID") then begin
+              FieldRef := RecordRef.FIELD(ConfigTemplateLine."Field ID");
+              ConfigValidateMgt.ValidateFieldValue(
+                RecordRef,FieldRef,ConfigTemplateLine."Default Value",true,ConfigTemplateLine."Language ID");
+              RecordRef.MODIFY(false);
+              OnApplyTemplLinesWithoutValidationAfterRecRefCheck(ConfigTemplateHeader,ConfigTemplateLine,RecordRef);
+            end;
+        until ConfigTemplateLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE GetNextAvailableCode@14(TableID@1002 : Integer) : Code[10];
+    VAR
+      ConfigTemplateHeader@1001 : Record "Config. Template Header";
+      NextCode@1000 : Code[10];
+      TplExists@1003 : Boolean;
+    BEGIN
+      if TableID in [DATABASE::Customer,DATABASE::Vendor,DATABASE::Item] then begin
+        ConfigTemplateHeader.SETRANGE("Table ID",TableID);
+        TplExists := ConfigTemplateHeader.FINDLAST;
+
+        if TplExists and (INCSTR(ConfigTemplateHeader.Code) <> '') then
+          NextCode := ConfigTemplateHeader.Code
+        else begin
+          ConfigTemplateHeader."Table ID" := TableID;
+          ConfigTemplateHeader.CALCFIELDS("Table Caption");
+          NextCode := COPYSTR(ConfigTemplateHeader."Table Caption",1,4) + '000001';
+        end;
+
+        while ConfigTemplateHeader.GET(NextCode) do
+          NextCode := INCSTR(NextCode);
+      end else begin
+        NextCode := '0000000001';
+        while ConfigTemplateHeader.GET(NextCode) do
+          NextCode := INCSTR(NextCode);
+      end;
+      exit(NextCode);
+    END;
+
+    [External]
+    PROCEDURE AddRelatedTemplate@11(Code@1004 : Code[10];RelatedTemplateCode@1005 : Code[10]);
+    VAR
+      ConfigTemplateLine@1002 : Record "Config. Template Line";
+    BEGIN
+      ConfigTemplateLine.SETRANGE("Data Template Code",Code);
+      ConfigTemplateLine.SETRANGE(Type,ConfigTemplateLine.Type::"Related Template");
+      ConfigTemplateLine.SETRANGE("Template Code",RelatedTemplateCode);
+
+      if not ConfigTemplateLine.ISEMPTY then
+        exit;
+
+      CLEAR(ConfigTemplateLine);
+      ConfigTemplateLine."Data Template Code" := Code;
+      ConfigTemplateLine."Template Code" := RelatedTemplateCode;
+      ConfigTemplateLine."Line No." := GetNextLineNo(Code);
+      ConfigTemplateLine.Type := ConfigTemplateLine.Type::"Related Template";
+      ConfigTemplateLine.INSERT(true);
+    END;
+
+    [External]
+    PROCEDURE RemoveRelatedTemplate@13(Code@1004 : Code[10];RelatedTemplateCode@1005 : Code[10]);
+    VAR
+      ConfigTemplateLine@1002 : Record "Config. Template Line";
+    BEGIN
+      ConfigTemplateLine.SETRANGE("Data Template Code",Code);
+      ConfigTemplateLine.SETRANGE(Type,ConfigTemplateLine.Type::"Related Template");
+      ConfigTemplateLine.SETRANGE("Template Code",RelatedTemplateCode);
+
+      if ConfigTemplateLine.FINDFIRST then
+        ConfigTemplateLine.DELETE(true);
+    END;
+
+    [External]
+    PROCEDURE DeleteRelatedTemplates@12(ConfigTemplateHeaderCode@1000 : Code[10];TableID@1001 : Integer);
+    VAR
+      ConfigTemplateLine@1002 : Record "Config. Template Line";
+      RelatedConfigTemplateHeader@1003 : Record "Config. Template Header";
+    BEGIN
+      ConfigTemplateLine.SETRANGE("Data Template Code",ConfigTemplateHeaderCode);
+      ConfigTemplateLine.SETRANGE(Type,ConfigTemplateLine.Type::"Related Template");
+
+      if ConfigTemplateLine.FINDSET then
+        repeat
+          RelatedConfigTemplateHeader.GET(ConfigTemplateLine."Template Code");
+          if RelatedConfigTemplateHeader."Table ID" = TableID then begin
+            RelatedConfigTemplateHeader.DELETE(true);
+            ConfigTemplateLine.DELETE(true);
+          end;
+        until ConfigTemplateLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE ReplaceDefaultValueForAllTemplates@20(TableID@1000 : Integer;FieldID@1001 : Integer;DefaultValue@1002 : Text[250]);
+    VAR
+      ConfigTemplateHeader@1003 : Record "Config. Template Header";
+      ConfigTemplateLine@1004 : Record "Config. Template Line";
+    BEGIN
+      ConfigTemplateHeader.SETRANGE("Table ID",TableID);
+      if ConfigTemplateHeader.FINDSET then
+        repeat
+          ConfigTemplateLine.SETRANGE("Data Template Code",ConfigTemplateHeader.Code);
+          ConfigTemplateLine.SETRANGE("Field ID",FieldID);
+          ConfigTemplateLine.DELETEALL;
+          InsertConfigTemplateLine(ConfigTemplateHeader.Code,FieldID,DefaultValue,TableID);
+        until ConfigTemplateHeader.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE InsertConfigTemplateLineFromField@16(ConfigTemplateHeaderCode@1001 : Code[10];FieldRef@1003 : FieldRef;TableID@1004 : Integer);
+    VAR
+      DummyConfigTemplateLine@1000 : Record "Config. Template Line";
+    BEGIN
+      DummyConfigTemplateLine."Default Value" := FieldRef.VALUE;
+      InsertConfigTemplateLine(ConfigTemplateHeaderCode,FieldRef.NUMBER,DummyConfigTemplateLine."Default Value",TableID);
+    END;
+
+    [External]
+    PROCEDURE InsertConfigTemplateLine@21(ConfigTemplateHeaderCode@1001 : Code[10];FieldID@1002 : Integer;DefaultValue@1003 : Text[250];TableID@1004 : Integer);
+    VAR
+      ConfigTemplateLine@1000 : Record "Config. Template Line";
+    BEGIN
+      ConfigTemplateLine.INIT;
+      ConfigTemplateLine."Data Template Code" := ConfigTemplateHeaderCode;
+      ConfigTemplateLine.Type := ConfigTemplateLine.Type::Field;
+      ConfigTemplateLine."Line No." := GetNextLineNo(ConfigTemplateHeaderCode);
+      ConfigTemplateLine."Field ID" := FieldID;
+      ConfigTemplateLine."Table ID" := TableID;
+      ConfigTemplateLine."Default Value" := DefaultValue;
+
+      ConfigTemplateLine.INSERT(true);
+    END;
+
+    LOCAL PROCEDURE GetNextLineNo@19(ConfigTemplateHeaderCode@1000 : Code[10]) : Integer;
+    VAR
+      ConfigTemplateLine@1001 : Record "Config. Template Line";
+    BEGIN
+      ConfigTemplateLine.SETFILTER("Data Template Code",ConfigTemplateHeaderCode);
+
+      if ConfigTemplateLine.FINDLAST then
+        exit(ConfigTemplateLine."Line No." + 10000);
+
+      exit(10000);
+    END;
+
+    PROCEDURE RemoveEmptyFieldsFromTemplateHeader@15(VAR RecRef@1000 : RecordRef;ConfigTemplateHeader@1001 : Record "Config. Template Header");
+    VAR
+      ConfigTemplateLine@1002 : Record "Config. Template Line";
+      FieldRef@1003 : FieldRef;
+    BEGIN
+      ConfigTemplateLine.SETRANGE("Data Template Code",ConfigTemplateHeader.Code);
+      if ConfigTemplateLine.FINDSET then
+        repeat
+          if ConfigTemplateLine.Type = ConfigTemplateLine.Type::Field then
+            if ConfigTemplateLine."Field ID" <> 0 then begin
+              FieldRef := RecRef.FIELD(ConfigTemplateLine."Field ID");
+              if FORMAT(FieldRef.VALUE) = '' then
+                ConfigTemplateLine.DELETE;
+            end;
+        until ConfigTemplateLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ShouldSkipField@33(VAR TempSkipField@1001 : Record Field;CurrentFieldNo@1002 : Integer;CurrentTableNo@1003 : Integer) : Boolean;
+    BEGIN
+      TempSkipField.RESET;
+      exit(TempSkipField.GET(CurrentTableNo,CurrentFieldNo));
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnApplyTemplLinesWithoutValidationAfterRecRefCheck@17(ConfigTemplateHeader@1001 : Record "Config. Template Header";ConfigTemplateLine@1002 : Record "Config. Template Line";VAR RecordRef@1000 : RecordRef);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

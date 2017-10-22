@@ -1,0 +1,153 @@
+OBJECT Codeunit 6703 Exchange Contact Sync.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            LocalExchangeSync@1000 : Record "Exchange Sync";
+          BEGIN
+            LocalExchangeSync.SETRANGE(Enabled,true);
+            if LocalExchangeSync.FINDSET then
+              repeat
+                O365SyncManagement.SyncExchangeContacts(LocalExchangeSync,false);
+              until LocalExchangeSync.NEXT = 0;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempContact@1007 : TEMPORARY Record Contact;
+      O365SyncManagement@1001 : Codeunit "O365 Sync. Management";
+      O365ContactSyncHelper@1010 : Codeunit "O365 Contact Sync. Helper";
+      SkipDateFilters@1002 : Boolean;
+      ProcessExchangeContactsMsg@1005 : TextConst 'ENU=Processing contacts from Exchange.';
+      ProcessNavContactsMsg@1004 : TextConst 'ENU=Processing contacts in your company.';
+
+    [External]
+    PROCEDURE GetRequestParameters@2(VAR ExchangeSync@1000 : Record "Exchange Sync") : Text;
+    VAR
+      LocalContact@1005 : Record Contact;
+      FilterPage@1004 : FilterPageBuilder;
+      FilterText@1003 : Text;
+      ContactTxt@1001 : Text;
+    BEGIN
+      FilterText := ExchangeSync.GetSavedFilter;
+
+      ContactTxt := LocalContact.TABLECAPTION;
+      FilterPage.PAGECAPTION := ContactTxt;
+      FilterPage.ADDTABLE(ContactTxt,DATABASE::Contact);
+
+      if FilterText <> '' then
+        FilterPage.SETVIEW(ContactTxt,FilterText);
+
+      FilterPage.ADDFIELD(ContactTxt,LocalContact."Territory Code");
+      FilterPage.ADDFIELD(ContactTxt,LocalContact."Company No.");
+      FilterPage.ADDFIELD(ContactTxt,LocalContact."Salesperson Code");
+      FilterPage.ADDFIELD(ContactTxt,LocalContact.City);
+      FilterPage.ADDFIELD(ContactTxt,LocalContact.County);
+      FilterPage.ADDFIELD(ContactTxt,LocalContact."Post Code");
+      FilterPage.ADDFIELD(ContactTxt,LocalContact."Country/Region Code");
+
+      if FilterPage.RUNMODAL then
+        FilterText := FilterPage.GETVIEW(ContactTxt);
+
+      if FilterText <> '' then begin
+        ExchangeSync.SaveFilter(FilterText);
+        ExchangeSync.MODIFY(true);
+      end;
+
+      exit(FilterText);
+    END;
+
+    [External]
+    PROCEDURE GetRequestParametersFullSync@23(VAR ExchangeSync@1000 : Record "Exchange Sync");
+    BEGIN
+      SkipDateFilters := true;
+
+      GetRequestParameters(ExchangeSync);
+    END;
+
+    [Internal]
+    PROCEDURE SyncRecords@1(VAR ExchangeSync@1000 : Record "Exchange Sync";FullSync@1001 : Boolean);
+    BEGIN
+      SkipDateFilters := FullSync;
+      O365ContactSyncHelper.GetO365Contacts(ExchangeSync,TempContact);
+
+      O365SyncManagement.ShowProgress(ProcessNavContactsMsg);
+      ProcessNavContacts(ExchangeSync,TempContact,SkipDateFilters);
+
+      O365SyncManagement.ShowProgress(ProcessExchangeContactsMsg);
+      ProcessExchangeContacts(ExchangeSync,TempContact,SkipDateFilters);
+
+      O365SyncManagement.CloseProgress;
+      ExchangeSync."Last Sync Date Time" := CREATEDATETIME(TODAY,TIME);
+      ExchangeSync.MODIFY(true);
+    END;
+
+    LOCAL PROCEDURE ProcessExchangeContacts@22(VAR ExchangeSync@1002 : Record "Exchange Sync";VAR TempContact@1001 : TEMPORARY Record Contact;SkipDateFilters@1003 : Boolean);
+    BEGIN
+      TempContact.RESET;
+      if not SkipDateFilters then
+        TempContact.SetLastDateTimeFilter(ExchangeSync."Last Sync Date Time");
+
+      ProcessExchangeContactRecordSet(TempContact,ExchangeSync);
+    END;
+
+    LOCAL PROCEDURE ProcessExchangeContactRecordSet@21(VAR LocalContact@1000 : Record Contact;VAR ExchangeSync@1003 : Record "Exchange Sync");
+    VAR
+      Contact@1004 : Record Contact;
+      found@1001 : Boolean;
+      ContactNo@1002 : Text;
+    BEGIN
+      if LocalContact.FINDSET then
+        repeat
+          found := false;
+          ContactNo := '';
+          Contact.RESET;
+          CLEAR(Contact);
+          Contact.SETRANGE("Search E-Mail",UPPERCASE(LocalContact."E-Mail"));
+          if Contact.FINDFIRST then begin
+            found := true;
+            ContactNo := Contact."No.";
+          end;
+
+          O365ContactSyncHelper.TransferExchangeContactToNavContact(LocalContact,Contact,ExchangeSync);
+          if found then begin
+            Contact."No." := COPYSTR(ContactNo,1,20);
+            Contact.MODIFY(true);
+          end else begin
+            Contact."No." := '';
+            Contact.INSERT(true);
+          end;
+        until (LocalContact.NEXT = 0)
+    END;
+
+    LOCAL PROCEDURE ProcessNavContacts@10(VAR ExchangeSync@1000 : Record "Exchange Sync";VAR TempContact@1002 : TEMPORARY Record Contact;SkipDateFilters@1003 : Boolean);
+    VAR
+      Contact@1001 : Record Contact;
+    BEGIN
+      SetContactFilter(Contact,ExchangeSync);
+      if not SkipDateFilters then
+        Contact.SetLastDateTimeFilter(ExchangeSync."Last Sync Date Time");
+
+      O365ContactSyncHelper.ProcessNavContactRecordSet(Contact,TempContact,ExchangeSync);
+    END;
+
+    LOCAL PROCEDURE SetContactFilter@16(VAR Contact@1000 : Record Contact;VAR ExchangeSync@1001 : Record "Exchange Sync");
+    BEGIN
+      Contact.SETVIEW(ExchangeSync.GetSavedFilter);
+      Contact.SETRANGE(Type,Contact.Type::Person);
+      Contact.SETFILTER("E-Mail",'<>%1','');
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

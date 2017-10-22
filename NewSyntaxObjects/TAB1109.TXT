@@ -1,0 +1,278 @@
+OBJECT Table 1109 Cost Budget Entry
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               if "Entry No." = 0 then
+                 "Entry No." := GetNextEntryNo;
+               CheckEntries;
+               "Last Modified By User" := USERID;
+
+               HandleCostBudgetRegister;
+             END;
+
+    OnModify=VAR
+               CostBudgetEntry@1000 : Record "Cost Budget Entry";
+             BEGIN
+               CheckEntries;
+               CostBudgetEntry.GET("Entry No.");
+               if Amount <> CostBudgetEntry.Amount then
+                 CostAccMgt.UpdateCostBudgetRegister(CurrRegNo,"Entry No.",Amount - CostBudgetEntry.Amount);
+               Modified;
+             END;
+
+    CaptionML=ENU=Cost Budget Entry;
+    LookupPageID="Cost Budget Entries";
+    DrillDownPageID="Cost Budget Entries";
+  }
+  FIELDS
+  {
+    { 1   ;   ;Entry No.           ;Integer       ;CaptionML=ENU=Entry No.;
+                                                   Editable=false }
+    { 2   ;   ;Budget Name         ;Code10        ;TableRelation="Cost Budget Name";
+                                                   CaptionML=ENU=Budget Name }
+    { 3   ;   ;Cost Type No.       ;Code20        ;TableRelation="Cost Type";
+                                                   CaptionML=ENU=Cost Type No. }
+    { 4   ;   ;Date                ;Date          ;CaptionML=ENU=Date;
+                                                   ClosingDates=true }
+    { 5   ;   ;Cost Center Code    ;Code20        ;TableRelation="Cost Center";
+                                                   CaptionML=ENU=Cost Center Code }
+    { 6   ;   ;Cost Object Code    ;Code20        ;TableRelation="Cost Object";
+                                                   CaptionML=ENU=Cost Object Code }
+    { 7   ;   ;Amount              ;Decimal       ;CaptionML=ENU=Amount }
+    { 9   ;   ;Description         ;Text80        ;CaptionML=ENU=Description }
+    { 20  ;   ;Document No.        ;Code20        ;CaptionML=ENU=Document No. }
+    { 30  ;   ;Source Code         ;Code10        ;TableRelation="Source Code";
+                                                   CaptionML=ENU=Source Code }
+    { 31  ;   ;System-Created Entry;Boolean       ;CaptionML=ENU=System-Created Entry;
+                                                   Editable=false }
+    { 32  ;   ;Allocated           ;Boolean       ;CaptionML=ENU=Allocated }
+    { 33  ;   ;Allocated with Journal No.;Integer ;CaptionML=ENU=Allocated with Journal No. }
+    { 40  ;   ;Last Modified By User;Code50       ;TableRelation=User."User Name";
+                                                   OnLookup=VAR
+                                                              UserMgt@1000 : Codeunit "User Management";
+                                                            BEGIN
+                                                              UserMgt.LookupUserID("Last Modified By User");
+                                                            END;
+
+                                                   TestTableRelation=false;
+                                                   CaptionML=ENU=Last Modified By User;
+                                                   Editable=false }
+    { 42  ;   ;Last Date Modified  ;Date          ;CaptionML=ENU=Last Date Modified;
+                                                   Editable=false }
+    { 50  ;   ;Allocation Description;Text80      ;CaptionML=ENU=Allocation Description }
+    { 51  ;   ;Allocation ID       ;Code10        ;TableRelation="Cost Allocation Source";
+                                                   CaptionML=ENU=Allocation ID }
+  }
+  KEYS
+  {
+    {    ;"Entry No."                             ;Clustered=true }
+    {    ;"Budget Name","Cost Type No.",Date      ;SumIndexFields=Amount }
+    {    ;"Budget Name","Cost Type No.","Cost Center Code","Cost Object Code",Date;
+                                                   SumIndexFields=Amount }
+    {    ;"Budget Name","Cost Center Code","Cost Type No.",Allocated,Date;
+                                                   SumIndexFields=Amount }
+    {    ;"Budget Name","Cost Object Code","Cost Type No.",Allocated,Date;
+                                                   SumIndexFields=Amount }
+    {    ;"Budget Name","Allocation ID",Date       }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      CostAccMgt@1000 : Codeunit "Cost Account Mgt";
+      CurrRegNo@1001 : Integer;
+      Text000@1002 : TextConst 'ENU=This function must be started with a budget name.';
+      Text001@1003 : TextConst 'ENU=The entries in budget %1 will be compressed. Entries with identical cost type, cost center, cost object, and date will be combined.\\The first entry of each group remains unchanged. The amounts from all subsequent entries will be added to the first entry.\\Additional information such as text and allocation on other entries will be deleted.\\Are you sure that you want to continue?';
+      Text002@1004 : TextConst 'ENU=Compress budget entries\Entry       #1#######\Processed   #2#######\Compressed  #3#######';
+      Text003@1005 : TextConst 'ENU=%1 entries in budget %2 processed. %3 entries compressed.';
+      Text004@1006 : TextConst 'ENU=A cost center or cost object is missing. Define a corresponding filter in the Budget window.';
+      Text005@1007 : TextConst 'ENU=You cannot define both cost center and cost object.';
+
+    [External]
+    PROCEDURE CompressBudgetEntries@1(BudName@1000 : Code[20]);
+    VAR
+      CostBudgetEntrySource@1001 : Record "Cost Budget Entry";
+      CostBudgetEntryTarget@1002 : Record "Cost Budget Entry";
+      Window@1003 : Dialog;
+      NoProcessed@1004 : Integer;
+      QtyPerGrp@1005 : Integer;
+      NoCompressed@1006 : Integer;
+    BEGIN
+      if BudName = '' then
+        ERROR(Text000);
+
+      if not CONFIRM(Text001,true,BudName) then
+        ERROR('');
+
+      CostBudgetEntrySource.SETCURRENTKEY("Budget Name","Cost Type No.","Cost Center Code","Cost Object Code",Date);
+      CostBudgetEntrySource.SETRANGE("Budget Name",BudName);
+
+      Window.OPEN(Text002);
+
+      Window.UPDATE(1,COUNT);
+
+      if CostBudgetEntrySource.FIND('-') then
+        repeat
+          if (CostBudgetEntrySource."Cost Type No." = CostBudgetEntryTarget."Cost Type No.") and
+             (CostBudgetEntrySource."Cost Center Code" = CostBudgetEntryTarget."Cost Center Code") and
+             (CostBudgetEntrySource."Cost Object Code" = CostBudgetEntryTarget."Cost Object Code") and
+             (CostBudgetEntrySource.Date = CostBudgetEntryTarget.Date)
+          then begin
+            CostBudgetEntryTarget.Amount := CostBudgetEntryTarget.Amount + CostBudgetEntrySource.Amount;
+            CostBudgetEntrySource.DELETE;
+            NoCompressed := NoCompressed + 1;
+            QtyPerGrp := QtyPerGrp + 1;
+          end else begin
+            // Write total
+            if QtyPerGrp > 1 then begin
+              if CostBudgetEntryTarget.Amount = 0 then
+                CostBudgetEntryTarget.DELETE
+              else
+                CostBudgetEntryTarget.MODIFY;
+              QtyPerGrp := 0;
+            end;
+
+            // Save new rec.
+            CostBudgetEntryTarget := CostBudgetEntrySource;
+            QtyPerGrp := QtyPerGrp + 1;
+          end;
+
+          NoProcessed := NoProcessed + 1;
+          if (NoProcessed < 50) or ((NoProcessed mod 100) = 0) then begin
+            Window.UPDATE(2,NoProcessed);
+            Window.UPDATE(3,NoCompressed);
+          end;
+
+        until CostBudgetEntrySource.NEXT = 0;
+
+      if CostBudgetEntryTarget.Amount <> 0 then
+        CostBudgetEntryTarget.MODIFY;
+
+      Window.CLOSE;
+      MESSAGE(Text003,NoProcessed,BudName,NoCompressed);
+    END;
+
+    [External]
+    PROCEDURE CheckEntries@2();
+    BEGIN
+      TESTFIELD(Date);
+      TESTFIELD("Budget Name");
+      TESTFIELD("Cost Type No.");
+
+      if ("Cost Center Code" = '') and ("Cost Object Code" = '') then
+        ERROR(Text004);
+
+      if ("Cost Center Code" <> '') and ("Cost Object Code" <> '') then
+        ERROR(Text005);
+    END;
+
+    LOCAL PROCEDURE GetNextEntryNo@3() : Integer;
+    VAR
+      CostBudgetEntry@1000 : Record "Cost Budget Entry";
+    BEGIN
+      CostBudgetEntry.SETCURRENTKEY("Entry No.");
+      if CostBudgetEntry.FINDLAST then
+        exit(CostBudgetEntry."Entry No." + 1);
+      exit(1);
+    END;
+
+    LOCAL PROCEDURE Modified@4();
+    BEGIN
+      "Last Modified By User" := USERID;
+      "Last Date Modified" := TODAY;
+    END;
+
+    LOCAL PROCEDURE HandleCostBudgetRegister@5();
+    VAR
+      CostBudgetReg@1000 : Record "Cost Budget Register";
+    BEGIN
+      if CostBudgetReg.GET(CurrRegNo) then;
+      if (CurrRegNo = 0) or (CostBudgetReg."To Cost Budget Entry No." <> "Entry No." - 1) then
+        CurrRegNo := CostAccMgt.InsertCostBudgetRegister("Entry No.","Budget Name",Amount)
+      else
+        CostAccMgt.UpdateCostBudgetRegister(CurrRegNo,"Entry No.",Amount);
+    END;
+
+    [External]
+    PROCEDURE SetCostBudgetRegNo@7(RegNo@1000 : Integer);
+    BEGIN
+      CurrRegNo := RegNo;
+    END;
+
+    [External]
+    PROCEDURE GetCostBudgetRegNo@6() : Integer;
+    BEGIN
+      exit(CurrRegNo);
+    END;
+
+    [External]
+    PROCEDURE GetFirstCostType@11(CostTypeFilter@1000 : Text[250]) : Text[20];
+    VAR
+      CostType@1001 : Record "Cost Type";
+    BEGIN
+      CostType.SETFILTER("No.",CostTypeFilter);
+      if CostType.FINDFIRST then
+        exit(CostType."No.");
+      exit('')
+    END;
+
+    [External]
+    PROCEDURE GetFirstDate@10(DateFilter@1000 : Text) : Date;
+    VAR
+      Period@1001 : Record Date;
+      HiddenDate@1002 : Date;
+    BEGIN
+      FILTERGROUP := 26;
+      if GETFILTER(Date) <> '' then begin
+        DateFilter := GETFILTER(Date);
+        FILTERGROUP := 0;
+        EVALUATE(HiddenDate,COPYSTR(DateFilter,STRPOS(DateFilter,'..') + 2,STRPOS(DateFilter,'|') - (STRPOS(DateFilter,'..') + 2)));
+        exit(HiddenDate);
+      end;
+      FILTERGROUP := 0;
+      if DateFilter = '' then
+        exit(WORKDATE);
+
+      Period.SETRANGE("Period Type",Period."Period Type"::Date);
+      Period.SETFILTER("Period Start",DateFilter);
+      if Period.FINDFIRST then
+        exit(Period."Period Start");
+      exit(0D)
+    END;
+
+    [External]
+    PROCEDURE GetFirstCostCenter@9(CostCenterFilter@1000 : Text[250]) : Code[20];
+    VAR
+      CostCenter@1001 : Record "Cost Center";
+    BEGIN
+      CostCenter.SETFILTER(Code,CostCenterFilter);
+      if CostCenter.FINDFIRST then
+        exit(CostCenter.Code);
+      exit('')
+    END;
+
+    [External]
+    PROCEDURE GetFirstCostObject@8(CostObjectFilter@1000 : Text[250]) : Code[20];
+    VAR
+      CostObject@1001 : Record "Cost Object";
+    BEGIN
+      CostObject.SETFILTER(Code,CostObjectFilter);
+      if CostObject.FINDFIRST then
+        exit(CostObject.Code);
+      exit('')
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

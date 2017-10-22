@@ -1,0 +1,1783 @@
+OBJECT Codeunit 7302 WMS Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=must not be %1';
+      Text002@1011 : TextConst 'ENU=\Do you still want to use this %1 ?';
+      Text003@1009 : TextConst 'ENU=You must set-up a default location code for user %1.';
+      Text004@1019 : TextConst 'ENU=%1 to place (%2) exceeds the available capacity (%3) on %4 %5.';
+      Text005@1027 : TextConst 'ENU="%1 = ''%2'', %3 = ''%4'':\The total base quantity to take %5 must be equal to the total base quantity to place %6."';
+      ItemUnitOfMeasure@1021 : Record "Item Unit of Measure";
+      Location@1020 : Record Location;
+      Bin@1018 : Record Bin;
+      TempErrorLog@1006 : TEMPORARY Record "License Information";
+      Item@1003 : Record Item;
+      ItemTrackingCode@1015 : Record "Item Tracking Code";
+      WhseMgt@1007 : Codeunit "Whse. Management";
+      ShowError@1005 : Boolean;
+      NextLineNo@1002 : Integer;
+      LogErrors@1001 : Boolean;
+      Text006@1013 : TextConst 'ENU="You must enter a %1 in %2 %3 = %4, %5 = %6."';
+      Text007@1014 : TextConst 'ENU=Cancelled.';
+      Text008@1004 : TextConst 'ENU=Destination Name';
+      Text009@1008 : TextConst 'ENU=Sales Order';
+      Text010@1023 : TextConst 'ENU="You cannot change the %1 because this item journal line is created from warehouse entries.\%2 %3 is set up with %4 and therefore changes must be made in a %5. "';
+      Text011@1017 : TextConst 'ENU=You cannot use %1 %2 because it is set up with %3.\Adjustments to this location must therefore be made in a %4.';
+      Text012@1022 : TextConst 'ENU=You cannot reclassify %1 %2 because it is set up with %3.\You can change this location code by creating a %4.';
+      Text013@1025 : TextConst 'ENU=You cannot change item tracking because it is created from warehouse entries.\The %1 is set up with warehouse tracking, and %2 %3 is set up with %4.\Adjustments to item tracking must therefore be made in a warehouse journal.';
+      Text014@1026 : TextConst 'ENU=You cannot change item tracking because the %1 is set up with warehouse tracking and %2 %3 is set up with %4.\Adjustments to item tracking must therefore be made in a warehouse journal.';
+      Text015@1016 : TextConst 'ENU=You cannot use a %1 because %2 %3 is set up with %4.';
+      Text016@1028 : TextConst 'ENU="%1 = ''%2'', %3 = ''%4'', %5 = ''%6'', %7 = ''%8'': The total base quantity to take %9 must be equal to the total base quantity to place %10."';
+      UserIsNotWhseEmployeeErr@1012 : TextConst 'ENU=You must first set up user %1 as a warehouse employee.';
+      UserIsNotWhseEmployeeAtWMSLocationErr@1010 : TextConst '@@@=%1: USERID;ENU=You must first set up user %1 as a warehouse employee at a location with the Bin Mandatory setting.';
+      DefaultLocationNotDirectedPutawayPickErr@1024 : TextConst '@@@=%1: USERID;ENU=You must set up a location with the Directed Put-away and Pick setting and assign it to user %1.';
+
+    [External]
+    PROCEDURE CreateWhseJnlLine@1(ItemJnlLine@1000 : Record "Item Journal Line";ItemJnlTemplateType@1002 : Option;VAR WhseJnlLine@1001 : Record "Warehouse Journal Line";ToTransfer@1003 : Boolean) : Boolean;
+    BEGIN
+      with ItemJnlLine do begin
+        if ((not "Phys. Inventory") and (Quantity = 0) and ("Invoiced Quantity" = 0)) or
+           ("Value Entry Type" in ["Value Entry Type"::Rounding,"Value Entry Type"::Revaluation]) or
+           Adjustment
+        then
+          exit(false);
+
+        if ToTransfer then
+          "Location Code" := "New Location Code";
+        GetLocation("Location Code");
+        InitWhseJnlLine(ItemJnlLine,WhseJnlLine,"Quantity (Base)");
+        SetZoneAndBins(ItemJnlLine,WhseJnlLine,ToTransfer);
+        if ("Journal Template Name" <> '') and ("Journal Batch Name" <> '') then begin
+          WhseJnlLine.SetSource(DATABASE::"Item Journal Line",ItemJnlTemplateType,"Document No.","Line No.",0);
+          WhseJnlLine."Source Document" := WhseMgt.GetSourceDocument(WhseJnlLine."Source Type",WhseJnlLine."Source Subtype");
+        end else
+          if "Job No." <> '' then begin
+            WhseJnlLine.SetSource(DATABASE::"Job Journal Line",ItemJnlTemplateType,"Document No.","Line No.",0);
+            WhseJnlLine."Source Document" := WhseMgt.GetSourceDocument(WhseJnlLine."Source Type",WhseJnlLine."Source Subtype");
+          end;
+        WhseJnlLine."Whse. Document Type" := WhseJnlLine."Whse. Document Type"::" ";
+        if "Job No." = '' then
+          WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Item Journal"
+        else
+          WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Job Journal";
+        WhseJnlLine."Reference No." := "Document No.";
+        TransferWhseItemTrkg(WhseJnlLine,ItemJnlLine);
+        WhseJnlLine.Description := Description;
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CreateWhseJnlLineFromOutputJnl@5(ItemJnlLine@1000 : Record "Item Journal Line";VAR WhseJnlLine@1001 : Record "Warehouse Journal Line") : Boolean;
+    BEGIN
+      with ItemJnlLine do begin
+        if Adjustment or
+           ("Value Entry Type" in ["Value Entry Type"::Rounding,"Value Entry Type"::Revaluation])
+        then
+          exit(false);
+
+        TESTFIELD("Order Type","Order Type"::Production);
+        GetLocation("Location Code");
+        InitWhseJnlLine(ItemJnlLine,WhseJnlLine,"Output Quantity (Base)");
+        SetZoneAndBinsForOutput(ItemJnlLine,WhseJnlLine);
+        WhseJnlLine.SetSource(DATABASE::"Item Journal Line",5,"Order No.","Order Line No.",0); // Output Journal
+        WhseJnlLine."Source Document" := WhseMgt.GetSourceDocument(WhseJnlLine."Source Type",WhseJnlLine."Source Subtype");
+        WhseJnlLine.SetWhseDoc(WhseJnlLine."Whse. Document Type"::Production,"Order No.","Order Line No.");
+        WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Prod.";
+        WhseJnlLine."Reference No." := "Order No.";
+        TransferWhseItemTrkg(WhseJnlLine,ItemJnlLine);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CreateWhseJnlLineFromConsumJnl@18(ItemJnlLine@1000 : Record "Item Journal Line";VAR WhseJnlLine@1001 : Record "Warehouse Journal Line") : Boolean;
+    BEGIN
+      with ItemJnlLine do begin
+        if Adjustment or
+           ("Value Entry Type" in ["Value Entry Type"::Rounding,"Value Entry Type"::Revaluation])
+        then
+          exit(false);
+
+        TESTFIELD("Order Type","Order Type"::Production);
+        GetLocation("Location Code");
+        InitWhseJnlLine(ItemJnlLine,WhseJnlLine,"Quantity (Base)");
+        SetZoneAndBinsForConsumption(ItemJnlLine,WhseJnlLine);
+        WhseJnlLine.SetSource(DATABASE::"Item Journal Line",4,"Order No.","Order Line No.","Prod. Order Comp. Line No."); // Consumption Journal
+        WhseJnlLine."Source Document" := WhseMgt.GetSourceDocument(WhseJnlLine."Source Type",WhseJnlLine."Source Subtype");
+        WhseJnlLine.SetWhseDoc(WhseJnlLine."Whse. Document Type"::Production,"Order No.","Order Line No.");
+        WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Prod.";
+        WhseJnlLine."Reference No." := "Order No.";
+        TransferWhseItemTrkg(WhseJnlLine,ItemJnlLine);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckWhseJnlLine@2(VAR WhseJnlLine@1000 : Record "Warehouse Journal Line";SourceJnl@1001 : '" ",ItemJnl,OutputJnl,ConsumpJnl,WhseJnl';DecreaseQtyBase@1002 : Decimal;ToTransfer@1004 : Boolean);
+    VAR
+      BinContent@1003 : Record "Bin Content";
+      ItemTrackingCode@1005 : Record "Item Tracking Code";
+      ItemTrackingMgt@1007 : Codeunit "Item Tracking Management";
+      QtyAbsBase@1006 : Decimal;
+      WhseSNRequired@1008 : Boolean;
+      WhseLNRequired@1009 : Boolean;
+    BEGIN
+      GetItem(WhseJnlLine."Item No.");
+      with WhseJnlLine do begin
+        TESTFIELD("Location Code");
+        GetLocation("Location Code");
+
+        if SourceJnl = SourceJnl::WhseJnl then
+          CheckAdjBinCode(WhseJnlLine);
+
+        if ItemTrackingCode.GET(Item."Item Tracking Code") then begin
+          if ("Serial No." <> '') and
+             ("From Bin Code" <> '') and
+             ItemTrackingCode."SN Specific Tracking" and
+             ("From Bin Code" <> Location."Adjustment Bin Code") and
+             (((Location."Adjustment Bin Code" <> '') and
+               ("Entry Type" = "Entry Type"::Movement)) or
+              (("Entry Type" <> "Entry Type"::Movement) or
+               ("Source Document" = "Source Document"::"Reclass. Jnl.")))
+          then
+            CheckSerialNo(
+              "Item No.","Variant Code","Location Code","From Bin Code",
+              "Unit of Measure Code","Serial No.",CalcReservEntryQuantity(WhseJnlLine));
+
+          if ("Lot No." <> '') and
+             ("From Bin Code" <> '') and
+             ItemTrackingCode."Lot Specific Tracking" and
+             ("From Bin Code" <> Location."Adjustment Bin Code") and
+             (((Location."Adjustment Bin Code" <> '') and
+               ("Entry Type" = "Entry Type"::Movement)) or
+              (("Entry Type" <> "Entry Type"::Movement) or
+               ("Source Document" = "Source Document"::"Reclass. Jnl.")))
+          then
+            CheckLotNo(
+              "Item No.","Variant Code","Location Code","From Bin Code",
+              "Unit of Measure Code","Lot No.",CalcReservEntryQuantity(WhseJnlLine))
+        end;
+
+        if "Entry Type" in ["Entry Type"::"Positive Adjmt.","Entry Type"::Movement] then
+          if SourceJnl = SourceJnl::" " then begin
+            if Location."Directed Put-away and Pick" and ("To Zone Code" = '') then
+              ERROR(
+                Text006,
+                FIELDCAPTION("Zone Code"),"Whse. Document Type",
+                FIELDCAPTION("Whse. Document No."),"Whse. Document No.",
+                FIELDCAPTION("Line No."),"Whse. Document Line No.");
+            if "To Bin Code" = '' then
+              ERROR(
+                Text006,
+                FIELDCAPTION("Bin Code"),"Whse. Document Type",
+                FIELDCAPTION("Whse. Document No."),"Whse. Document No.",
+                FIELDCAPTION("Line No."),"Whse. Document Line No.");
+          end else
+            if ("Entry Type" <> "Entry Type"::Movement) or ToTransfer then begin
+              if Location."Directed Put-away and Pick" then
+                TESTFIELD("To Zone Code");
+              TESTFIELD("To Bin Code");
+            end;
+        if "Entry Type" in ["Entry Type"::"Negative Adjmt.","Entry Type"::Movement] then
+          if SourceJnl = SourceJnl::" " then begin
+            if Location."Directed Put-away and Pick" and ("From Zone Code" = '') then
+              ERROR(
+                Text006,
+                FIELDCAPTION("Zone Code"),"Whse. Document Type",
+                FIELDCAPTION("Whse. Document No."),"Whse. Document No.",
+                FIELDCAPTION("Line No."),"Whse. Document Line No.");
+            if "From Bin Code" = '' then
+              ERROR(
+                Text006,
+                FIELDCAPTION("Bin Code"),"Whse. Document Type",
+                FIELDCAPTION("Whse. Document No."),"Whse. Document No.",
+                FIELDCAPTION("Line No."),"Whse. Document Line No.");
+          end else
+            if ("Entry Type" <> "Entry Type"::Movement) or not ToTransfer then begin
+              if Location."Directed Put-away and Pick" then
+                TESTFIELD("From Zone Code");
+              TESTFIELD("From Bin Code");
+            end;
+
+        QtyAbsBase := "Qty. (Absolute, Base)";
+        case SourceJnl of
+          SourceJnl::" ",SourceJnl::ItemJnl:
+            begin
+              if ("From Bin Code" <> '') and
+                 ("From Bin Code" <> Location."Adjustment Bin Code") and
+                 Location."Directed Put-away and Pick"
+              then begin
+                BinContent.GET(
+                  "Location Code","From Bin Code",
+                  "Item No.","Variant Code","Unit of Measure Code");
+                BinContent.CheckDecreaseBinContent("Qty. (Absolute)","Qty. (Absolute, Base)",DecreaseQtyBase);
+              end;
+
+              if ("To Bin Code" <> '') and
+                 ("To Bin Code" <> Location."Adjustment Bin Code") and
+                 Location."Directed Put-away and Pick"
+              then
+                if BinContent.GET(
+                     "Location Code","To Bin Code",
+                     "Item No.","Variant Code","Unit of Measure Code")
+                then begin
+                  if ("Reference Document" = "Reference Document"::"Posted Rcpt.") or
+                     ("Reference Document" = "Reference Document"::"Posted Rtrn. Rcpt.") or
+                     ("Reference Document" = "Reference Document"::"Posted T. Receipt")
+                  then
+                    BinContent.CheckIncreaseBinContent(
+                      "Qty. (Absolute, Base)",0,Cubage,Weight,Cubage,Weight,true,false)
+                  else
+                    BinContent.CheckIncreaseBinContent(
+                      "Qty. (Absolute, Base)","Qty. (Absolute, Base)",Cubage,Weight,Cubage,Weight,true,false)
+                end else begin
+                  GetBin("Location Code","To Bin Code");
+                  Bin.CheckIncreaseBin(
+                    Bin.Code,"Item No.","Qty. (Absolute)",Cubage,Weight,Cubage,Weight,true,false);
+                end;
+            end;
+          SourceJnl::OutputJnl,SourceJnl::ConsumpJnl:
+            begin
+              if ("From Bin Code" <> '') and
+                 Location."Directed Put-away and Pick"
+              then begin
+                BinContent.GET(
+                  "Location Code","From Bin Code",
+                  "Item No.","Variant Code","Unit of Measure Code");
+                BinContent.CheckDecreaseBinContent("Qty. (Absolute)","Qty. (Absolute, Base)",DecreaseQtyBase);
+              end;
+
+              if ("To Bin Code" <> '') and
+                 Location."Directed Put-away and Pick"
+              then
+                if BinContent.GET(
+                     "Location Code","To Bin Code",
+                     "Item No.","Variant Code","Unit of Measure Code")
+                then
+                  BinContent.CheckIncreaseBinContent(
+                    "Qty. (Absolute)","Qty. (Absolute)",Cubage,Weight,Cubage,Weight,true,false)
+                else begin
+                  GetBin("Location Code","To Bin Code");
+                  Bin.CheckIncreaseBin(
+                    Bin.Code,"Item No.","Qty. (Absolute)",Cubage,Weight,Cubage,Weight,true,false);
+                end;
+            end;
+          SourceJnl::WhseJnl:
+            begin
+              if ("From Bin Code" <> '') and
+                 ("From Bin Code" <> Location."Adjustment Bin Code") and
+                 Location."Directed Put-away and Pick"
+              then begin
+                ItemTrackingMgt.CheckWhseItemTrkgSetup("Item No.",WhseSNRequired,WhseLNRequired,false);
+                if not (WhseSNRequired or WhseLNRequired) then begin
+                  BinContent.GET(
+                    "Location Code","From Bin Code",
+                    "Item No.","Variant Code","Unit of Measure Code");
+                  BinContent.CheckDecreaseBinContent("Qty. (Absolute)","Qty. (Absolute, Base)",DecreaseQtyBase);
+                end;
+              end;
+              if ("To Bin Code" <> '') and
+                 ("To Bin Code" <> Location."Adjustment Bin Code") and
+                 Location."Directed Put-away and Pick"
+              then begin
+                GetBin("Location Code","To Bin Code");
+                Bin.CheckWhseClass("Item No.",false);
+              end;
+            end;
+        end;
+        if QtyAbsBase <> "Qty. (Absolute, Base)" then begin
+          VALIDATE("Qty. (Absolute, Base)");
+          MODIFY;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckAdjBinCode@91(WhseJnlLine@1000 : Record "Warehouse Journal Line");
+    VAR
+      WarehouseJournalTemplate@1001 : Record "Warehouse Journal Template";
+      FieldCapTxt@1002 : Text;
+    BEGIN
+      with WhseJnlLine do begin
+        if "Entry Type" = "Entry Type"::Movement then
+          exit;
+
+        GetLocation("Location Code");
+        if not Location."Directed Put-away and Pick" then
+          exit;
+
+        WarehouseJournalTemplate.GET("Journal Template Name");
+        if WarehouseJournalTemplate.Type = WarehouseJournalTemplate.Type::Reclassification then
+          exit;
+
+        Location.TESTFIELD("Adjustment Bin Code");
+        case "Entry Type" of
+          "Entry Type"::"Positive Adjmt.":
+            if ("From Bin Code" <> '') and ("From Bin Code" <> Location."Adjustment Bin Code") then
+              FieldCapTxt := FIELDCAPTION("From Bin Code");
+          "Entry Type"::"Negative Adjmt.":
+            if ("To Bin Code" <> '') and ("To Bin Code" <> Location."Adjustment Bin Code") then
+              FieldCapTxt := FIELDCAPTION("To Bin Code");
+        end;
+        if FieldCapTxt <> '' then
+          ERROR(
+            Text006,
+            STRSUBSTNO('%1 = ''%2''',FieldCapTxt,Location."Adjustment Bin Code"),
+            "Whse. Document Type",
+            FIELDCAPTION("Whse. Document No."),"Whse. Document No.",
+            FIELDCAPTION("Line No."),"Line No.");
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckItemJnlLineFieldChange@54(ItemJnlLine@1000 : Record "Item Journal Line";xItemJnlLine@1001 : Record "Item Journal Line";CurrFieldCaption@1005 : Text[30]);
+    VAR
+      ProdOrderLine@1004 : Record "Prod. Order Line";
+      ProdOrderComponent@1006 : Record "Prod. Order Component";
+      WhseItemJnl@1002 : Page "Whse. Item Journal";
+      WhsePhysInvJnl@1003 : Page "Whse. Phys. Invt. Journal";
+      BinIsEligible@1007 : Boolean;
+    BEGIN
+      with ItemJnlLine do begin
+        if ("Order Type" = "Order Type"::Production) and ("Entry Type" = "Entry Type"::Output) then
+          if ProdOrderLine.GET(ProdOrderLine.Status::Released,"Order No.","Order Line No.") then
+            BinIsEligible := ("Location Code" = ProdOrderLine."Location Code") and ("Bin Code" = ProdOrderLine."Bin Code");
+        if ("Order Type" = "Order Type"::Production) and ("Entry Type" = "Entry Type"::Consumption) then
+          if ProdOrderComponent.GET(ProdOrderComponent.Status::Released,"Order No.","Order Line No.","Prod. Order Comp. Line No.") then
+            BinIsEligible := ("Location Code" = ProdOrderComponent."Location Code") and ("Bin Code" = ProdOrderComponent."Bin Code");
+
+        ShowError := CheckBinCodeChange("Location Code","Bin Code",xItemJnlLine."Bin Code") and not BinIsEligible;
+        if not ShowError then
+          ShowError := CheckBinCodeChange("New Location Code","New Bin Code",xItemJnlLine."New Bin Code");
+
+        if ShowError then
+          ERROR(Text015,
+            CurrFieldCaption,
+            LOWERCASE(Location.TABLECAPTION),Location.Code,Location.FIELDCAPTION("Directed Put-away and Pick"));
+
+        if "Entry Type" in
+           ["Entry Type"::"Negative Adjmt.","Entry Type"::"Positive Adjmt.","Entry Type"::Sale,"Entry Type"::Purchase]
+        then begin
+          if ("Location Code" <> xItemJnlLine."Location Code") and (xItemJnlLine."Location Code" <> '') then begin
+            GetLocation(xItemJnlLine."Location Code");
+            ShowError := Location."Directed Put-away and Pick";
+          end;
+
+          if (("Item No." <> xItemJnlLine."Item No.") and (xItemJnlLine."Item No." <> '')) or
+             ((Quantity <> xItemJnlLine.Quantity) and (xItemJnlLine.Quantity <> 0)) or
+             ("Variant Code" <> xItemJnlLine."Variant Code") or
+             ("Unit of Measure Code" <> xItemJnlLine."Unit of Measure Code") or
+             ("Entry Type" <> xItemJnlLine."Entry Type") or
+             ("Phys. Inventory" and
+              ("Qty. (Phys. Inventory)" <> xItemJnlLine."Qty. (Phys. Inventory)") or
+              (Quantity <> xItemJnlLine.Quantity))
+          then begin
+            GetLocation("Location Code");
+            ShowError := Location."Directed Put-away and Pick";
+          end;
+
+          if ShowError then begin
+            if "Phys. Inventory" then
+              ERROR(Text010,
+                CurrFieldCaption,
+                Location.TABLECAPTION,Location.Code,Location.FIELDCAPTION("Directed Put-away and Pick"),
+                WhsePhysInvJnl.CAPTION);
+
+            ERROR(Text010,
+              CurrFieldCaption,
+              Location.TABLECAPTION,Location.Code,Location.FIELDCAPTION("Directed Put-away and Pick"),
+              WhseItemJnl.CAPTION);
+          end;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckItemJnlLineLocation@57(VAR ItemJnlLine@1001 : Record "Item Journal Line";xItemJnlLine@1000 : Record "Item Journal Line");
+    VAR
+      WhseItemJnl@1005 : Page "Whse. Item Journal";
+      TransferOrder@1003 : Page "Transfer Order";
+    BEGIN
+      with ItemJnlLine do begin
+        if "Entry Type" in
+           ["Entry Type"::"Negative Adjmt.","Entry Type"::"Positive Adjmt.","Entry Type"::Sale,"Entry Type"::Purchase]
+        then
+          if "Location Code" <> xItemJnlLine."Location Code" then begin
+            GetLocation(xItemJnlLine."Location Code");
+            if not Location."Directed Put-away and Pick" then begin
+              GetLocation("Location Code");
+              if Location."Directed Put-away and Pick" then
+                ERROR(Text011,
+                  LOWERCASE(Location.TABLECAPTION),Location.Code,Location.FIELDCAPTION("Directed Put-away and Pick"),
+                  WhseItemJnl.CAPTION);
+            end;
+          end;
+
+        if "Entry Type" = "Entry Type"::Transfer then begin
+          if ("New Location Code" <> "Location Code") and
+             (("Location Code" <> xItemJnlLine."Location Code") or
+              ("New Location Code" <> xItemJnlLine."New Location Code"))
+          then begin
+            GetLocation("Location Code");
+            ShowError := Location."Directed Put-away and Pick";
+            if not Location."Directed Put-away and Pick" then begin
+              GetLocation("New Location Code");
+              ShowError := Location."Directed Put-away and Pick";
+            end;
+          end;
+
+          if ShowError then
+            ERROR(Text012,
+              LOWERCASE(Location.TABLECAPTION),Location.Code,Location.FIELDCAPTION("Directed Put-away and Pick"),
+              TransferOrder.CAPTION);
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckItemTrackingChange@55(TrackingSpecification@1000 : Record "Tracking Specification";xTrackingSpecification@1001 : Record "Tracking Specification");
+    BEGIN
+      with TrackingSpecification do
+        if ("Source Type" = DATABASE::"Item Journal Line") and
+           ("Item No." <> '') and
+           ("Location Code" <> '')
+        then begin
+          if "Source Subtype" in [0,1,2,3] then
+            if ("Lot No." <> xTrackingSpecification."Lot No.") or
+               ("Serial No." <> xTrackingSpecification."Serial No.") or
+               ((xTrackingSpecification."Expiration Date" <> 0D) and
+                ("Expiration Date" <> xTrackingSpecification."Expiration Date")) or
+               ("Quantity (Base)" <> xTrackingSpecification."Quantity (Base)")
+            then begin
+              GetLocation("Location Code");
+              if Location."Directed Put-away and Pick" then begin
+                GetItem("Item No.");
+                if ItemTrackingCode."SN Warehouse Tracking" or ItemTrackingCode."Lot Warehouse Tracking" then
+                  ERROR(Text013,
+                    LOWERCASE(Item.TABLECAPTION),
+                    LOWERCASE(Location.TABLECAPTION),Location.Code,Location.FIELDCAPTION("Directed Put-away and Pick"));
+              end;
+            end;
+
+          if IsReclass then
+            if ("New Lot No." <> "Lot No.") and
+               (("Lot No." <> xTrackingSpecification."Lot No.") or
+                ("New Lot No." <> xTrackingSpecification."New Lot No.")) or
+               ("New Serial No." <> "Serial No.") and
+               (("Serial No." <> xTrackingSpecification."Serial No.") or
+                ("New Serial No." <> xTrackingSpecification."New Serial No.")) or
+               ("New Expiration Date" <> "Expiration Date") and
+               (("Expiration Date" <> xTrackingSpecification."Expiration Date") or
+                ("New Expiration Date" <> xTrackingSpecification."New Expiration Date"))
+            then begin
+              GetLocation("Location Code");
+              if Location."Directed Put-away and Pick" then begin
+                GetItem("Item No.");
+                if ItemTrackingCode."SN Warehouse Tracking" or ItemTrackingCode."Lot Warehouse Tracking" then
+                  ERROR(Text014,
+                    LOWERCASE(Item.TABLECAPTION),
+                    LOWERCASE(Location.TABLECAPTION),Location.Code,Location.FIELDCAPTION("Directed Put-away and Pick"));
+              end;
+            end;
+        end;
+    END;
+
+    LOCAL PROCEDURE CheckBinCodeChange@6(LocationCode@1002 : Code[10];BinCode@1000 : Code[20];xRecBinCode@1001 : Code[20]) : Boolean;
+    BEGIN
+      if (BinCode <> xRecBinCode) and (BinCode <> '') then begin
+        GetLocation(LocationCode);
+        exit(Location."Directed Put-away and Pick");
+      end;
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE CheckAdjmtBin@3(Location@1002 : Record Location;Quantity@1000 : Decimal;PosEntryType@1001 : Boolean);
+    BEGIN
+      if not Location."Directed Put-away and Pick" then
+        exit;
+
+      Location.TESTFIELD(Code);
+      Location.TESTFIELD("Adjustment Bin Code");
+      GetBin(Location.Code,Location."Adjustment Bin Code");
+
+      // Test whether bin movement is blocked for current Entry Type
+      if (PosEntryType and (Quantity > 0)) or
+         (not PosEntryType and (Quantity < 0))
+      then
+        ShowError := (Bin."Block Movement" in
+                      [Bin."Block Movement"::Inbound,Bin."Block Movement"::All])
+      else
+        if (PosEntryType and (Quantity < 0)) or
+           (not PosEntryType and (Quantity > 0))
+        then
+          ShowError := (Bin."Block Movement" in
+                        [Bin."Block Movement"::Outbound,Bin."Block Movement"::All]);
+
+      if ShowError then
+        Bin.FIELDERROR(
+          "Block Movement",
+          STRSUBSTNO(
+            Text000,
+            Bin."Block Movement"));
+    END;
+
+    [External]
+    PROCEDURE CheckInbOutbBin@7(LocationCode@1000 : Code[10];BinCode@1001 : Code[20];CheckInbound@1002 : Boolean);
+    BEGIN
+      GetLocation(LocationCode);
+      GetBin(LocationCode,BinCode);
+
+      // Test whether bin movement is blocked for current Entry Type
+      if CheckInbound then
+        if Bin."Block Movement" in [Bin."Block Movement"::Inbound,Bin."Block Movement"::All] then
+          Bin.FIELDERROR("Block Movement",STRSUBSTNO(Text000,Bin."Block Movement"));
+
+      if not CheckInbound then
+        if Bin."Block Movement" in [Bin."Block Movement"::Outbound,Bin."Block Movement"::All] then
+          Bin.FIELDERROR("Block Movement",STRSUBSTNO(Text000,Bin."Block Movement"));
+    END;
+
+    [External]
+    PROCEDURE CheckUserIsWhseEmployee@67();
+    VAR
+      WhseEmployee@1000 : Record "Warehouse Employee";
+    BEGIN
+      if USERID <> '' then begin
+        WhseEmployee.SETRANGE("User ID",USERID);
+        if WhseEmployee.ISEMPTY then
+          ERROR(UserIsNotWhseEmployeeErr,USERID);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CalcCubageAndWeight@15(ItemNo@1002 : Code[20];UOMCode@1003 : Code[10];Qty@1004 : Decimal;VAR Cubage@1000 : Decimal;VAR Weight@1001 : Decimal);
+    BEGIN
+      if ItemNo <> '' then begin
+        GetItemUnitOfMeasure(ItemNo,UOMCode);
+        Cubage := Qty * ItemUnitOfMeasure.Cubage;
+        Weight := Qty * ItemUnitOfMeasure.Weight;
+      end else begin
+        Cubage := 0;
+        Weight := 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetDefaultLocation@16() : Code[10];
+    VAR
+      WhseEmployee@1000 : Record "Warehouse Employee";
+    BEGIN
+      if USERID <> '' then begin
+        WhseEmployee.SETCURRENTKEY(Default);
+        WhseEmployee.SETRANGE(Default,true);
+        WhseEmployee.SETRANGE("User ID",USERID);
+        if not WhseEmployee.FINDFIRST then
+          ERROR(Text003,USERID);
+        exit(WhseEmployee."Location Code");
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetWMSLocation@68(VAR CurrentLocationCode@1002 : Code[10]);
+    VAR
+      Location@1001 : Record Location;
+      WhseEmployee@1000 : Record "Warehouse Employee";
+    BEGIN
+      CheckUserIsWhseEmployee;
+      if WhseEmployee.GET(USERID,CurrentLocationCode) and Location.GET(CurrentLocationCode) then
+        if Location."Bin Mandatory" then
+          exit;
+
+      WhseEmployee.SETRANGE("User ID",USERID);
+      WhseEmployee.FIND('-');
+      repeat
+        if Location.GET(WhseEmployee."Location Code") then
+          if Location."Bin Mandatory" then begin
+            CurrentLocationCode := Location.Code;
+            exit;
+          end;
+      until WhseEmployee.NEXT = 0;
+
+      ERROR(UserIsNotWhseEmployeeAtWMSLocationErr,USERID);
+    END;
+
+    [External]
+    PROCEDURE GetDefaultDirectedPutawayAndPickLocation@37() : Code[10];
+    VAR
+      Location@1001 : Record Location;
+    BEGIN
+      if Location.GET(GetDefaultLocation) then
+        if Location."Directed Put-away and Pick" then
+          exit(Location.Code);
+      ERROR(DefaultLocationNotDirectedPutawayPickErr,USERID);
+    END;
+
+    [External]
+    PROCEDURE GetDefaultBin@4(ItemNo@1000 : Code[20];VariantCode@1002 : Code[10];LocationCode@1001 : Code[10];VAR BinCode@1004 : Code[20]) : Boolean;
+    VAR
+      BinContent@1005 : Record "Bin Content";
+    BEGIN
+      BinContent.SETCURRENTKEY(Default);
+      BinContent.SETRANGE(Default,true);
+      BinContent.SETRANGE("Location Code",LocationCode);
+      BinContent.SETRANGE("Item No.",ItemNo);
+      BinContent.SETRANGE("Variant Code",VariantCode);
+      if BinContent.FINDFIRST then begin
+        BinCode := BinContent."Bin Code";
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckDefaultBin@25(ItemNo@1001 : Code[20];VariantCode@1002 : Code[10];LocationCode@1005 : Code[10];BinCode@1003 : Code[20]) : Boolean;
+    VAR
+      BinContent@1000 : Record "Bin Content";
+    BEGIN
+      BinContent.SETCURRENTKEY(Default);
+      BinContent.SETRANGE(Default,true);
+      BinContent.SETRANGE("Location Code",LocationCode);
+      BinContent.SETRANGE("Item No.",ItemNo);
+      BinContent.SETRANGE("Variant Code",VariantCode);
+      BinContent.SETFILTER("Bin Code",'<>%1',BinCode);
+      exit(not BinContent.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE CheckBalanceQtyToHandle@19(VAR WhseActivLine2@1000 : Record "Warehouse Activity Line");
+    VAR
+      WhseActivLine@1004 : Record "Warehouse Activity Line";
+      WhseActivLine3@1007 : Record "Warehouse Activity Line";
+      TempWhseActivLine@1005 : TEMPORARY Record "Warehouse Activity Line";
+      QtyToPick@1002 : Decimal;
+      QtyToPutAway@1003 : Decimal;
+      ErrorText@1001 : Text[250];
+    BEGIN
+      WhseActivLine.COPY(WhseActivLine2);
+      with WhseActivLine do begin
+        SETCURRENTKEY("Activity Type","No.","Item No.","Variant Code","Action Type");
+        SETRANGE("Activity Type","Activity Type");
+        SETRANGE("No.","No.");
+        SETRANGE("Action Type");
+        if FINDSET then
+          repeat
+            if not TempWhseActivLine.GET("Activity Type","No.","Line No.") then begin
+              WhseActivLine3.COPY(WhseActivLine);
+
+              WhseActivLine3.SETRANGE("Item No.","Item No.");
+              WhseActivLine3.SETRANGE("Variant Code","Variant Code");
+              WhseActivLine3.SetTrackingFilter("Serial No.","Lot No.");
+
+              if (WhseActivLine2."Action Type" = WhseActivLine2."Action Type"::Take) or
+                 (WhseActivLine2.GETFILTER("Action Type") = '')
+              then begin
+                WhseActivLine3.SETRANGE("Action Type",WhseActivLine3."Action Type"::Take);
+                if WhseActivLine3.FINDSET then
+                  repeat
+                    QtyToPick := QtyToPick + WhseActivLine3."Qty. to Handle (Base)";
+                    TempWhseActivLine := WhseActivLine3;
+                    TempWhseActivLine.INSERT;
+                  until WhseActivLine3.NEXT = 0;
+              end;
+
+              if (WhseActivLine2."Action Type" = WhseActivLine2."Action Type"::Place) or
+                 (WhseActivLine2.GETFILTER("Action Type") = '')
+              then begin
+                WhseActivLine3.SETRANGE("Action Type",WhseActivLine3."Action Type"::Place);
+                if WhseActivLine3.FINDSET then
+                  repeat
+                    QtyToPutAway := QtyToPutAway + WhseActivLine3."Qty. to Handle (Base)";
+                    TempWhseActivLine := WhseActivLine3;
+                    TempWhseActivLine.INSERT;
+                  until WhseActivLine3.NEXT = 0;
+              end;
+
+              if QtyToPick <> QtyToPutAway then begin
+                if (WhseActivLine3.GETFILTER("Serial No.") <> '') or
+                   (WhseActivLine3.GETFILTER("Lot No.") <> '')
+                then
+                  ErrorText :=
+                    STRSUBSTNO(
+                      Text016,
+                      FIELDCAPTION("Item No."),"Item No.",
+                      FIELDCAPTION("Variant Code"),"Variant Code",
+                      FIELDCAPTION("Lot No."),"Lot No.",
+                      FIELDCAPTION("Serial No."),"Serial No.",
+                      QtyToPick,QtyToPutAway)
+                else
+                  ErrorText :=
+                    STRSUBSTNO(
+                      Text005,
+                      FIELDCAPTION("Item No."),"Item No.",FIELDCAPTION("Variant Code"),
+                      "Variant Code",QtyToPick,QtyToPutAway);
+                HandleError(ErrorText);
+              end;
+
+              QtyToPick := 0;
+              QtyToPutAway := 0;
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE CheckPutAwayAvailability@14(BinCode@1006 : Code[20];CheckFieldCaption@1003 : Text[100];CheckTableCaption@1002 : Text[100];ValueToPutAway@1000 : Decimal;ValueAvailable@1001 : Decimal;Prohibit@1005 : Boolean);
+    BEGIN
+      if ValueToPutAway <= ValueAvailable then
+        exit;
+      if Prohibit then
+        ERROR(
+          STRSUBSTNO(
+            Text004,CheckFieldCaption,ValueToPutAway,ValueAvailable,
+            CheckTableCaption,BinCode));
+
+      if not CONFIRM(
+           STRSUBSTNO(
+             Text004,CheckFieldCaption,ValueToPutAway,ValueAvailable,
+             CheckTableCaption,BinCode) + STRSUBSTNO(Text002,CheckTableCaption),false)
+      then
+        ERROR(Text007);
+    END;
+
+    LOCAL PROCEDURE InitWhseJnlLine@12(ItemJnlLine@1000 : Record "Item Journal Line";VAR WhseJnlLine@1001 : Record "Warehouse Journal Line";QuantityBase@1002 : Decimal);
+    BEGIN
+      with WhseJnlLine do begin
+        INIT;
+        "Journal Template Name" := ItemJnlLine."Journal Template Name";
+        "Journal Batch Name" := ItemJnlLine."Journal Batch Name";
+        "Location Code" := ItemJnlLine."Location Code";
+        "Item No." := ItemJnlLine."Item No.";
+        "Registering Date" := ItemJnlLine."Posting Date";
+        "User ID" := USERID;
+        "Variant Code" := ItemJnlLine."Variant Code";
+        if ItemJnlLine."Qty. per Unit of Measure" = 0 then
+          ItemJnlLine."Qty. per Unit of Measure" := 1;
+        if Location."Directed Put-away and Pick" then begin
+          Quantity := ROUND(QuantityBase / ItemJnlLine."Qty. per Unit of Measure",0.00001);
+          "Unit of Measure Code" := ItemJnlLine."Unit of Measure Code";
+          "Qty. per Unit of Measure" := ItemJnlLine."Qty. per Unit of Measure";
+        end else begin
+          Quantity := QuantityBase;
+          "Unit of Measure Code" := GetBaseUOM(ItemJnlLine."Item No.");
+          "Qty. per Unit of Measure" := 1;
+        end;
+        "Qty. (Base)" := QuantityBase;
+        "Qty. (Absolute)" := ABS(Quantity);
+        "Qty. (Absolute, Base)" := ABS(QuantityBase);
+
+        "Source Code" := ItemJnlLine."Source Code";
+        "Reason Code" := ItemJnlLine."Reason Code";
+        "Registering No. Series" := ItemJnlLine."Posting No. Series";
+        if Location."Directed Put-away and Pick" then
+          CalcCubageAndWeight(
+            ItemJnlLine."Item No.",ItemJnlLine."Unit of Measure Code","Qty. (Absolute)",Cubage,Weight);
+      end;
+    END;
+
+    [External]
+    PROCEDURE InitErrorLog@27();
+    BEGIN
+      LogErrors := true;
+      TempErrorLog.DELETEALL;
+      NextLineNo := 1;
+    END;
+
+    LOCAL PROCEDURE HandleError@30(ErrorText@1000 : Text[250]);
+    VAR
+      Position@1001 : Integer;
+    BEGIN
+      if LogErrors then begin
+        Position := STRPOS(ErrorText,'\');
+        if Position = 0 then
+          InsertErrorLog(ErrorText)
+        else begin
+          repeat
+            InsertErrorLog(COPYSTR(ErrorText,1,Position - 1));
+            ErrorText := DELSTR(ErrorText,1,Position);
+            Position := STRPOS(ErrorText,'\');
+          until Position = 0;
+          InsertErrorLog(ErrorText);
+          InsertErrorLog('');
+        end;
+      end else
+        ERROR(ErrorText);
+    END;
+
+    LOCAL PROCEDURE InsertErrorLog@20(ErrorText@1000 : Text[250]);
+    BEGIN
+      TempErrorLog."Line No." := NextLineNo;
+      TempErrorLog.Text := ErrorText;
+      TempErrorLog.INSERT;
+      NextLineNo := NextLineNo + 1;
+    END;
+
+    [External]
+    PROCEDURE GetAllowedLocation@65(LocationCode@1000 : Code[10]) : Code[10];
+    VAR
+      WhseEmployee@1001 : Record "Warehouse Employee";
+    BEGIN
+      CheckUserIsWhseEmployee;
+      if WhseEmployee.GET(USERID,LocationCode) then
+        exit(LocationCode);
+      exit(GetDefaultLocation);
+    END;
+
+    [External]
+    PROCEDURE LocationIsAllowed@17(LocationCode@1001 : Code[10]) : Boolean;
+    VAR
+      WhseEmployee@1002 : Record "Warehouse Employee";
+    BEGIN
+      exit(WhseEmployee.GET(USERID,LocationCode) or (USERID = ''))
+    END;
+
+    [External]
+    PROCEDURE LocationIsAllowedToView@56(LocationCode@1000 : Code[10]) : Boolean;
+    BEGIN
+      exit((LocationCode = '') or LocationIsAllowed(LocationCode))
+    END;
+
+    LOCAL PROCEDURE GetLocation@10(LocationCode@1000 : Code[10]);
+    BEGIN
+      if LocationCode = '' then
+        CLEAR(Location)
+      else
+        if Location.Code <> LocationCode then
+          Location.GET(LocationCode);
+    END;
+
+    LOCAL PROCEDURE GetBin@8(LocationCode@1000 : Code[10];BinCode@1002 : Code[20]);
+    BEGIN
+      if (Bin."Location Code" <> LocationCode) or
+         (Bin.Code <> BinCode)
+      then
+        Bin.GET(LocationCode,BinCode);
+
+      GetLocation(LocationCode);
+      if Location."Directed Put-away and Pick" then
+        Bin.TESTFIELD("Zone Code");
+    END;
+
+    LOCAL PROCEDURE GetItemUnitOfMeasure@9(ItemNo@1000 : Code[20];UOMCode@1001 : Code[10]);
+    BEGIN
+      if (ItemUnitOfMeasure."Item No." <> ItemNo) or
+         (ItemUnitOfMeasure.Code <> UOMCode)
+      then
+        if not ItemUnitOfMeasure.GET(ItemNo,UOMCode) then
+          ItemUnitOfMeasure.INIT;
+    END;
+
+    [External]
+    PROCEDURE GetBaseUOM@31(ItemNo@1000 : Code[20]) : Code[10];
+    BEGIN
+      GetItem(ItemNo);
+      exit(Item."Base Unit of Measure");
+    END;
+
+    LOCAL PROCEDURE GetItem@35(ItemNo@1000 : Code[20]);
+    BEGIN
+      if ItemNo = Item."No." then
+        exit;
+
+      Item.GET(ItemNo);
+      if Item."Item Tracking Code" <> '' then
+        ItemTrackingCode.GET(Item."Item Tracking Code")
+      else
+        CLEAR(ItemTrackingCode);
+    END;
+
+    LOCAL PROCEDURE GetProdOrderCompLine@11(VAR ProdOrderCompLine@1004 : Record "Prod. Order Component";Status@1000 : Option;ProdOrderNo@1001 : Code[20];ProdOrderLineNo@1002 : Integer;ProdOrdCompLineNo@1003 : Integer) : Boolean;
+    BEGIN
+      if (ProdOrderNo = '') or
+         (ProdOrderLineNo = 0) or
+         (ProdOrdCompLineNo = 0)
+      then
+        exit(false);
+      if (ProdOrderCompLine.Status <> Status) or
+         (ProdOrderCompLine."Prod. Order No." <> ProdOrderNo) or
+         (ProdOrderCompLine."Prod. Order Line No." <> ProdOrderLineNo) or
+         (ProdOrderCompLine."Line No." <> ProdOrdCompLineNo)
+      then begin
+        if ProdOrderCompLine.GET(Status,ProdOrderNo,ProdOrderLineNo,ProdOrdCompLineNo) then
+          exit(true);
+
+        exit(false);
+      end;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE ShowWhseDocLine@13(WhseDocType@1008 : 'Receipt,"Posted Receipt",Shipment,"Internal Put-away","Internal Pick",Production,,Assembly';WhseDocNo@1009 : Code[20];WhseDocLineNo@1010 : Integer);
+    VAR
+      WhseRcptLine@1011 : Record "Warehouse Receipt Line";
+      WhseShptLine@1007 : Record "Warehouse Shipment Line";
+      PostedWhseRcptLine@1006 : Record "Posted Whse. Receipt Line";
+      WhseInternalPickLine@1005 : Record "Whse. Internal Pick Line";
+      WhseInternalPutawayLine@1004 : Record "Whse. Internal Put-away Line";
+      ProdOrderLine@1013 : Record "Prod. Order Line";
+      AssemblyLine@1015 : Record "Assembly Line";
+    BEGIN
+      case WhseDocType of
+        WhseDocType::Receipt:
+          begin
+            WhseRcptLine.RESET;
+            WhseRcptLine.SETRANGE("No.",WhseDocNo);
+            WhseRcptLine.SETRANGE("Line No.",WhseDocLineNo);
+            PAGE.RUNMODAL(PAGE::"Whse. Receipt Lines",WhseRcptLine);
+          end;
+        WhseDocType::"Posted Receipt":
+          begin
+            PostedWhseRcptLine.RESET;
+            PostedWhseRcptLine.SETRANGE("No.",WhseDocNo);
+            PostedWhseRcptLine.SETRANGE("Line No.",WhseDocLineNo);
+            PAGE.RUNMODAL(PAGE::"Posted Whse. Receipt Lines",PostedWhseRcptLine);
+          end;
+        WhseDocType::Shipment:
+          begin
+            WhseShptLine.RESET;
+            WhseShptLine.SETRANGE("No.",WhseDocNo);
+            WhseShptLine.SETRANGE("Line No.",WhseDocLineNo);
+            PAGE.RUNMODAL(PAGE::"Whse. Shipment Lines",WhseShptLine);
+          end;
+        WhseDocType::"Internal Put-away":
+          begin
+            WhseInternalPutawayLine.RESET;
+            WhseInternalPutawayLine.SETRANGE("No.",WhseDocNo);
+            WhseInternalPutawayLine.SETRANGE("Line No.",WhseDocLineNo);
+            PAGE.RUNMODAL(PAGE::"Whse. Internal Put-away Lines",WhseInternalPutawayLine);
+          end;
+        WhseDocType::"Internal Pick":
+          begin
+            WhseInternalPickLine.RESET;
+            WhseInternalPickLine.SETRANGE("No.",WhseDocNo);
+            WhseInternalPickLine.SETRANGE("Line No.",WhseDocLineNo);
+            PAGE.RUNMODAL(PAGE::"Whse. Internal Pick Lines",WhseInternalPickLine);
+          end;
+        WhseDocType::Production:
+          begin
+            ProdOrderLine.RESET;
+            ProdOrderLine.SETRANGE(Status,ProdOrderLine.Status::Released);
+            ProdOrderLine.SETRANGE("Prod. Order No.",WhseDocNo);
+            ProdOrderLine.SETRANGE("Line No.",WhseDocLineNo);
+            PAGE.RUNMODAL(PAGE::"Prod. Order Line List",ProdOrderLine);
+          end;
+        WhseDocType::Assembly:
+          begin
+            AssemblyLine.SETRANGE("Document Type",AssemblyLine."Document Type"::Order);
+            AssemblyLine.SETRANGE("Document No.",WhseDocNo);
+            AssemblyLine.SETRANGE("Line No.",WhseDocLineNo);
+            PAGE.RUNMODAL(PAGE::"Assembly Lines",AssemblyLine);
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ShowPostedWhseShptLine@46(WhseDocNo@1009 : Code[20];WhseDocLineNo@1010 : Integer);
+    VAR
+      PostedWhseShptLine@1007 : Record "Posted Whse. Shipment Line";
+    BEGIN
+      PostedWhseShptLine.RESET;
+      PostedWhseShptLine.SETCURRENTKEY("Whse. Shipment No.","Whse Shipment Line No.");
+      PostedWhseShptLine.SETRANGE("Whse. Shipment No.",WhseDocNo);
+      PostedWhseShptLine.SETRANGE("Whse Shipment Line No.",WhseDocLineNo);
+      PAGE.RUNMODAL(PAGE::"Posted Whse. Shipment Lines",PostedWhseShptLine);
+    END;
+
+    [External]
+    PROCEDURE ShowSourceDocLine@21(SourceType@1004 : Integer;SourceSubType@1011 : Option;SourceNo@1012 : Code[20];SourceLineNo@1013 : Integer;SourceSubLineNo@1014 : Integer);
+    VAR
+      SalesLine@1001 : Record "Sales Line";
+      PurchLine@1002 : Record "Purchase Line";
+      TransLine@1003 : Record "Transfer Line";
+      ProdOrderComp@1005 : Record "Prod. Order Component";
+      AssemblyLine@1000 : Record "Assembly Line";
+      ServiceLine@1006 : Record "Service Line";
+    BEGIN
+      case SourceType of
+        DATABASE::"Sales Line":
+          begin
+            SalesLine.RESET;
+            SalesLine.SETRANGE("Document Type",SourceSubType);
+            SalesLine.SETRANGE("Document No.",SourceNo);
+            SalesLine.SETRANGE("Line No.",SourceLineNo);
+            PAGE.RUNMODAL(PAGE::"Sales Lines",SalesLine);
+          end;
+        DATABASE::"Purchase Line":
+          begin
+            PurchLine.RESET;
+            PurchLine.SETRANGE("Document Type",SourceSubType);
+            PurchLine.SETRANGE("Document No.",SourceNo);
+            PurchLine.SETRANGE("Line No.",SourceLineNo);
+            PAGE.RUNMODAL(PAGE::"Purchase Lines",PurchLine);
+          end;
+        DATABASE::"Transfer Line":
+          begin
+            TransLine.RESET;
+            TransLine.SETRANGE("Document No.",SourceNo);
+            TransLine.SETRANGE("Line No.",SourceLineNo);
+            PAGE.RUNMODAL(PAGE::"Transfer Lines",TransLine);
+          end;
+        DATABASE::"Prod. Order Component":
+          begin
+            ProdOrderComp.RESET;
+            ProdOrderComp.SETRANGE(Status,SourceSubType);
+            ProdOrderComp.SETRANGE("Prod. Order No.",SourceNo);
+            ProdOrderComp.SETRANGE("Prod. Order Line No.",SourceLineNo);
+            ProdOrderComp.SETRANGE("Line No.",SourceSubLineNo);
+            case SourceSubType of
+              3: // Released
+                PAGE.RUNMODAL(PAGE::"Prod. Order Comp. Line List",ProdOrderComp);
+            end;
+          end;
+        DATABASE::"Assembly Line":
+          begin
+            AssemblyLine.SETRANGE("Document Type",SourceSubType);
+            AssemblyLine.SETRANGE("Document No.",SourceNo);
+            AssemblyLine.SETRANGE("Line No.",SourceLineNo);
+            PAGE.RUNMODAL(PAGE::"Assembly Lines",AssemblyLine);
+          end;
+        DATABASE::"Service Line":
+          begin
+            ServiceLine.SETRANGE("Document Type",SourceSubType);
+            ServiceLine.SETRANGE("Document No.",SourceNo);
+            ServiceLine.SETRANGE("Line No.",SourceLineNo);
+            PAGE.RUN(PAGE::"Service Line List",ServiceLine);
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ShowPostedSourceDoc@22(PostedSourceDoc@1004 : '" ","Posted Receipt",,"Posted Return Receipt",,"Posted Shipment",,"Posted Return Shipment",,"Posted Transfer Receipt","Posted Transfer Shipment"';PostedSourceNo@1012 : Code[20]);
+    VAR
+      SalesShipmentHeader@1001 : Record "Sales Shipment Header";
+      PurchRcptHeader@1000 : Record "Purch. Rcpt. Header";
+      ReturnShipmentHeader@1002 : Record "Return Shipment Header";
+      ReturnReceiptHeader@1005 : Record "Return Receipt Header";
+      TransShipmentHeader@1003 : Record "Transfer Shipment Header";
+      TransReceiptHeader@1011 : Record "Transfer Receipt Header";
+    BEGIN
+      case PostedSourceDoc of
+        PostedSourceDoc::"Posted Shipment":
+          begin
+            SalesShipmentHeader.RESET;
+            SalesShipmentHeader.SETRANGE("No.",PostedSourceNo);
+            PAGE.RUNMODAL(PAGE::"Posted Sales Shipment",SalesShipmentHeader);
+          end;
+        PostedSourceDoc::"Posted Receipt":
+          begin
+            PurchRcptHeader.RESET;
+            PurchRcptHeader.SETRANGE("No.",PostedSourceNo);
+            PAGE.RUNMODAL(PAGE::"Posted Purchase Receipt",PurchRcptHeader);
+          end;
+        PostedSourceDoc::"Posted Return Shipment":
+          begin
+            ReturnShipmentHeader.RESET;
+            ReturnShipmentHeader.SETRANGE("No.",PostedSourceNo);
+            PAGE.RUNMODAL(PAGE::"Posted Return Shipment",ReturnShipmentHeader);
+          end;
+        PostedSourceDoc::"Posted Return Receipt":
+          begin
+            ReturnReceiptHeader.RESET;
+            ReturnReceiptHeader.SETRANGE("No.",PostedSourceNo);
+            PAGE.RUNMODAL(PAGE::"Posted Return Receipt",ReturnReceiptHeader);
+          end;
+        PostedSourceDoc::"Posted Transfer Shipment":
+          begin
+            TransShipmentHeader.RESET;
+            TransShipmentHeader.SETRANGE("No.",PostedSourceNo);
+            PAGE.RUNMODAL(PAGE::"Posted Transfer Shipment",TransShipmentHeader);
+          end;
+        PostedSourceDoc::"Posted Transfer Receipt":
+          begin
+            TransReceiptHeader.RESET;
+            TransReceiptHeader.SETRANGE("No.",PostedSourceNo);
+            PAGE.RUNMODAL(PAGE::"Posted Transfer Receipt",TransReceiptHeader);
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ShowSourceDocCard@41(SourceType@1002 : Integer;SourceSubType@1001 : Option;SourceNo@1000 : Code[20]);
+    VAR
+      SalesHeader@1008 : Record "Sales Header";
+      PurchHeader@1007 : Record "Purchase Header";
+      TransHeader@1006 : Record "Transfer Header";
+      ProdOrder@1009 : Record "Production Order";
+      AssemblyHeader@1013 : Record "Assembly Header";
+    BEGIN
+      case SourceType of
+        DATABASE::"Sales Line":
+          begin
+            SalesHeader.SETRANGE("Document Type",SourceSubType);
+            if SalesHeader.GET(SourceSubType,SourceNo) then
+              if SalesHeader."Document Type" = SalesHeader."Document Type"::Order then
+                PAGE.RUNMODAL(PAGE::"Sales Order",SalesHeader)
+              else
+                PAGE.RUNMODAL(PAGE::"Sales Return Order",SalesHeader);
+          end;
+        DATABASE::"Purchase Line":
+          begin
+            PurchHeader.SETRANGE("Document Type",SourceSubType);
+            if PurchHeader.GET(SourceSubType,SourceNo) then
+              if PurchHeader."Document Type" = PurchHeader."Document Type"::Order then
+                PAGE.RUNMODAL(PAGE::"Purchase Order",PurchHeader)
+              else
+                PAGE.RUNMODAL(PAGE::"Purchase Return Order",PurchHeader);
+          end;
+        DATABASE::"Transfer Line":
+          begin
+            if TransHeader.GET(SourceNo) then
+              PAGE.RUNMODAL(PAGE::"Transfer Order",TransHeader);
+          end;
+        DATABASE::"Prod. Order Line", DATABASE::"Prod. Order Component":
+          begin
+            ProdOrder.SETRANGE(Status,SourceSubType);
+            if ProdOrder.GET(SourceSubType,SourceNo) then
+              PAGE.RUNMODAL(PAGE::"Released Production Order",ProdOrder);
+          end;
+        DATABASE::"Assembly Line":
+          begin
+            AssemblyHeader.SETRANGE("Document Type",SourceSubType);
+            if AssemblyHeader.GET(SourceSubType,SourceNo) then
+              PAGE.RUNMODAL(PAGE::"Assembly Order",AssemblyHeader);
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE TransferWhseItemTrkg@24(VAR WhseJnlLine@1000 : Record "Warehouse Journal Line";ItemJnlLine@1001 : Record "Item Journal Line");
+    VAR
+      ItemTrackingMgt@1002 : Codeunit "Item Tracking Management";
+      WhseSNRequired@1003 : Boolean;
+      WhseLNRequired@1004 : Boolean;
+    BEGIN
+      ItemTrackingMgt.CheckWhseItemTrkgSetup(
+        ItemJnlLine."Item No.",WhseSNRequired,WhseLNRequired,false);
+      if not (WhseSNRequired or WhseLNRequired) then
+        exit;
+      if WhseSNRequired then begin
+        WhseJnlLine.TESTFIELD("Qty. per Unit of Measure",1);
+        WhseJnlLine."Serial No." := ItemJnlLine."Serial No.";
+      end;
+      if WhseLNRequired then
+        WhseJnlLine."Lot No." := ItemJnlLine."Lot No.";
+      WhseJnlLine."Warranty Date" := ItemJnlLine."Warranty Date";
+      WhseJnlLine."Expiration Date" := ItemJnlLine."Item Expiration Date";
+    END;
+
+    [External]
+    PROCEDURE SetTransferLine@29(TransferLine@1000 : Record "Transfer Line";VAR WhseJnlLine@1001 : Record "Warehouse Journal Line";PostingType@1002 : 'Shipment,Receipt';PostedDocNo@1003 : Code[20]);
+    BEGIN
+      with TransferLine do begin
+        WhseJnlLine.SetSource(DATABASE::"Transfer Line",PostingType,"Document No.","Line No.",0);
+        WhseJnlLine."Source Document" := WhseMgt.GetSourceDocument(WhseJnlLine."Source Type",WhseJnlLine."Source Subtype");
+        if PostingType = PostingType::Shipment then
+          WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Posted T. Shipment"
+        else
+          WhseJnlLine."Reference Document" := WhseJnlLine."Reference Document"::"Posted T. Receipt";
+        WhseJnlLine."Reference No." := PostedDocNo;
+        WhseJnlLine."Entry Type" := PostingType;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetZoneAndBins@71(ItemJnlLine@1001 : Record "Item Journal Line";VAR WhseJnlLine@1000 : Record "Warehouse Journal Line";ToTransfer@1002 : Boolean);
+    BEGIN
+      with ItemJnlLine do
+        if (("Entry Type" in
+             ["Entry Type"::Purchase,"Entry Type"::"Positive Adjmt.","Entry Type"::"Assembly Output"]) and
+            (Quantity > 0)) or
+           (("Entry Type" in
+             ["Entry Type"::Sale,"Entry Type"::"Negative Adjmt.","Entry Type"::"Assembly Consumption"]) and
+            (Quantity < 0)) or
+           ToTransfer
+        then begin
+          if "Entry Type" = "Entry Type"::Transfer then
+            WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::Movement
+          else
+            WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Positive Adjmt.";
+          if Location."Directed Put-away and Pick" then
+            if "Entry Type" in ["Entry Type"::"Assembly Output","Entry Type"::"Assembly Consumption"] then
+              WhseJnlLine."To Bin Code" := "Bin Code"
+            else
+              WhseJnlLine."To Bin Code" := GetWhseJnlLineBinCode("Source Code","Bin Code",Location."Adjustment Bin Code")
+          else
+            if ToTransfer then
+              WhseJnlLine."To Bin Code" := "New Bin Code"
+            else
+              WhseJnlLine."To Bin Code" := "Bin Code";
+          GetBin("Location Code",WhseJnlLine."To Bin Code");
+          WhseJnlLine."To Zone Code" := Bin."Zone Code";
+        end else
+          if (("Entry Type" in
+               ["Entry Type"::Purchase,"Entry Type"::"Positive Adjmt.","Entry Type"::"Assembly Output"]) and
+              (Quantity < 0)) or
+             (("Entry Type" in
+               ["Entry Type"::Sale,"Entry Type"::"Negative Adjmt.","Entry Type"::"Assembly Consumption"]) and
+              (Quantity > 0)) or
+             (("Entry Type" = "Entry Type"::Transfer) and (not ToTransfer))
+          then begin
+            if "Entry Type" = "Entry Type"::Transfer then
+              WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::Movement
+            else
+              WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Negative Adjmt.";
+            if Location."Directed Put-away and Pick" then
+              if "Entry Type" in ["Entry Type"::"Assembly Output","Entry Type"::"Assembly Consumption"] then
+                WhseJnlLine."From Bin Code" := "Bin Code"
+              else
+                WhseJnlLine."From Bin Code" := GetWhseJnlLineBinCode("Source Code","Bin Code",Location."Adjustment Bin Code")
+            else
+              WhseJnlLine."From Bin Code" := "Bin Code";
+            if Location."Directed Put-away and Pick" then begin
+              GetBin("Location Code",WhseJnlLine."From Bin Code");
+              WhseJnlLine."From Zone Code" := Bin."Zone Code";
+              WhseJnlLine."From Bin Type Code" := Bin."Bin Type Code";
+            end;
+          end else
+            if "Phys. Inventory" and (Quantity = 0) and ("Invoiced Quantity" = 0) then begin
+              WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Positive Adjmt.";
+              if Location."Directed Put-away and Pick" then
+                WhseJnlLine."To Bin Code" := Location."Adjustment Bin Code"
+              else
+                WhseJnlLine."To Bin Code" := "Bin Code";
+              GetBin("Location Code",WhseJnlLine."To Bin Code");
+              WhseJnlLine."To Zone Code" := Bin."Zone Code";
+            end;
+    END;
+
+    LOCAL PROCEDURE SetZoneAndBinsForOutput@23(ItemJnlLine@1002 : Record "Item Journal Line";VAR WhseJnlLine@1000 : Record "Warehouse Journal Line");
+    BEGIN
+      with ItemJnlLine do
+        if "Output Quantity" >= 0 then begin
+          WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Positive Adjmt.";
+          WhseJnlLine."To Bin Code" := "Bin Code";
+          if Location."Directed Put-away and Pick" then begin
+            GetBin("Location Code",WhseJnlLine."To Bin Code");
+            WhseJnlLine."To Zone Code" := Bin."Zone Code";
+          end;
+        end else begin
+          WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Negative Adjmt.";
+          WhseJnlLine."From Bin Code" := "Bin Code";
+          if Location."Directed Put-away and Pick" then begin
+            GetBin("Location Code",WhseJnlLine."From Bin Code");
+            WhseJnlLine."From Zone Code" := Bin."Zone Code";
+          end;
+        end;
+    END;
+
+    LOCAL PROCEDURE SetZoneAndBinsForConsumption@69(ItemJnlLine@1001 : Record "Item Journal Line";VAR WhseJnlLine@1000 : Record "Warehouse Journal Line");
+    VAR
+      ProdOrderCompLine@1002 : Record "Prod. Order Component";
+    BEGIN
+      with ItemJnlLine do
+        if GetProdOrderCompLine(
+             ProdOrderCompLine,ProdOrderCompLine.Status::Released,"Order No.","Order Line No.","Prod. Order Comp. Line No.")
+        then
+          if Quantity > 0 then begin
+            WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Negative Adjmt.";
+            WhseJnlLine."From Bin Code" := "Bin Code";
+            if Location."Bin Mandatory" and Location."Require Pick" and Location."Require Shipment" then begin
+              if (ProdOrderCompLine."Planning Level Code" = 0) and
+                 ((ProdOrderCompLine."Flushing Method" = ProdOrderCompLine."Flushing Method"::Manual) or
+                  (ProdOrderCompLine."Flushing Method" = ProdOrderCompLine."Flushing Method"::"Pick + Backward") or
+                  ((ProdOrderCompLine."Flushing Method" = ProdOrderCompLine."Flushing Method"::"Pick + Forward") and
+                   (ProdOrderCompLine."Routing Link Code" <> '')))
+              then
+                if ProdOrderCompLine."Qty. Picked (Base)" < "Quantity (Base)" then
+                  ProdOrderCompLine.FIELDERROR("Qty. Picked (Base)");
+              GetBin("Location Code",WhseJnlLine."From Bin Code");
+              WhseJnlLine."From Zone Code" := Bin."Zone Code";
+              WhseJnlLine."From Bin Type Code" := Bin."Bin Type Code";
+            end;
+          end else begin
+            WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Positive Adjmt.";
+            WhseJnlLine."To Bin Code" := "Bin Code";
+            if Location."Directed Put-away and Pick" then begin
+              GetBin("Location Code",WhseJnlLine."To Bin Code");
+              WhseJnlLine."To Zone Code" := Bin."Zone Code";
+            end;
+          end
+        else
+          if Quantity > 0 then begin
+            WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Negative Adjmt.";
+            WhseJnlLine."From Bin Code" := "Bin Code";
+            if Location."Directed Put-away and Pick" then begin
+              GetBin("Location Code",WhseJnlLine."From Bin Code");
+              WhseJnlLine."From Zone Code" := Bin."Zone Code";
+              WhseJnlLine."From Bin Type Code" := Bin."Bin Type Code";
+            end;
+          end else begin
+            WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Positive Adjmt.";
+            WhseJnlLine."To Bin Code" := "Bin Code";
+            if Location."Directed Put-away and Pick" then begin
+              GetBin("Location Code",WhseJnlLine."To Bin Code");
+              WhseJnlLine."To Zone Code" := Bin."Zone Code";
+            end;
+          end;
+    END;
+
+    [External]
+    PROCEDURE SerialNoOnInventory@34(LocationCode@1003 : Code[10];ItemNo@1000 : Code[20];VariantCode@1001 : Code[10];SerialNo@1002 : Code[20]) : Boolean;
+    VAR
+      WhseEntry@1004 : Record "Warehouse Entry";
+    BEGIN
+      with WhseEntry do begin
+        GetLocation(LocationCode);
+        SETCURRENTKEY(
+          "Item No.","Bin Code","Location Code","Variant Code",
+          "Unit of Measure Code","Lot No.","Serial No.");
+        SETRANGE("Item No.",ItemNo);
+        SETFILTER("Bin Code",'<>%1',Location."Adjustment Bin Code");
+        SETRANGE("Location Code",LocationCode);
+        SETRANGE("Variant Code",VariantCode);
+        SETRANGE("Serial No.",SerialNo);
+        CALCSUMS("Qty. (Base)");
+        exit("Qty. (Base)" > 0);
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckSerialNo@33(ItemNo@1002 : Code[20];VariantCode@1001 : Code[10];LocationCode@1005 : Code[10];BinCode@1004 : Code[20];UOMCode@1007 : Code[10];SerialNo@1000 : Code[20];QuantityBase@1003 : Decimal);
+    VAR
+      BinContent@1006 : Record "Bin Content";
+    BEGIN
+      BinContent.GET(LocationCode,BinCode,ItemNo,VariantCode,UOMCode);
+      BinContent.SETRANGE("Serial No. Filter",SerialNo);
+      BinContent.CALCFIELDS("Quantity (Base)");
+      if BinContent."Quantity (Base)" < ABS(QuantityBase) then
+        BinContent.FIELDERROR(
+          "Quantity (Base)",STRSUBSTNO(Text000,ABS(QuantityBase) - 1));
+    END;
+
+    LOCAL PROCEDURE CheckLotNo@32(ItemNo@1006 : Code[20];VariantCode@1005 : Code[10];LocationCode@1004 : Code[10];BinCode@1003 : Code[20];UOMCode@1002 : Code[10];LotNo@1001 : Code[20];QuantityBase@1000 : Decimal);
+    VAR
+      BinContent@1007 : Record "Bin Content";
+    BEGIN
+      BinContent.GET(LocationCode,BinCode,ItemNo,VariantCode,UOMCode);
+      BinContent.SETRANGE("Lot No. Filter",LotNo);
+      BinContent.CALCFIELDS("Quantity (Base)");
+      if BinContent."Quantity (Base)" < ABS(QuantityBase) then
+        BinContent.FIELDERROR(
+          "Quantity (Base)",STRSUBSTNO(Text000,BinContent."Quantity (Base)" - ABS(QuantityBase)));
+    END;
+
+    [External]
+    PROCEDURE BinLookUp@38(LocationCode@1002 : Code[10];ItemNo@1001 : Code[20];VariantCode@1000 : Code[10];ZoneCode@1004 : Code[10]) : Code[20];
+    VAR
+      Bin@1003 : Record Bin;
+    BEGIN
+      Bin.SETRANGE("Location Code",LocationCode);
+      Bin.SETRANGE("Item Filter",ItemNo);
+      Bin.SETRANGE("Variant Filter",VariantCode);
+      if ZoneCode <> '' then
+        Bin.SETRANGE("Zone Code",ZoneCode);
+      if PAGE.RUNMODAL(0,Bin) = ACTION::LookupOK then
+        exit(Bin.Code);
+    END;
+
+    [External]
+    PROCEDURE BinContentLookUp@39(LocationCode@1002 : Code[10];ItemNo@1001 : Code[20];VariantCode@1000 : Code[10];ZoneCode@1004 : Code[10];CurrBinCode@1005 : Code[20]) : Code[20];
+    BEGIN
+      exit(BinContentLookUp2(LocationCode,ItemNo,VariantCode,ZoneCode,'','',CurrBinCode));
+    END;
+
+    [External]
+    PROCEDURE BinContentLookUp2@53(LocationCode@1002 : Code[10];ItemNo@1001 : Code[20];VariantCode@1000 : Code[10];ZoneCode@1004 : Code[10];LotNo@1005 : Code[20];SerialNo@1006 : Code[20];CurrBinCode@1007 : Code[20]) : Code[20];
+    VAR
+      BinContent@1003 : Record "Bin Content";
+    BEGIN
+      GetItem(ItemNo);
+      BinContent.SETCURRENTKEY("Location Code","Item No.","Variant Code");
+      BinContent.SETRANGE("Location Code",LocationCode);
+      BinContent.SETRANGE("Item No.",ItemNo);
+      BinContent.SETRANGE("Variant Code",VariantCode);
+
+      if ItemTrackingCode."SN Warehouse Tracking" then
+        if SerialNo <> '' then
+          BinContent.SETRANGE("Serial No. Filter",SerialNo);
+      if ItemTrackingCode."Lot Warehouse Tracking" then
+        if LotNo <> '' then
+          BinContent.SETRANGE("Lot No. Filter",LotNo);
+
+      if ZoneCode <> '' then
+        BinContent.SETRANGE("Zone Code",ZoneCode);
+
+      BinContent.SETRANGE("Bin Code",CurrBinCode);
+      if BinContent.FINDFIRST then;
+      BinContent.SETRANGE("Bin Code");
+
+      if PAGE.RUNMODAL(0,BinContent) = ACTION::LookupOK then
+        exit(BinContent."Bin Code");
+    END;
+
+    [External]
+    PROCEDURE FindBin@36(LocationCode@1004 : Code[10];BinCode@1005 : Code[20];ZoneCode@1001 : Code[10]);
+    VAR
+      Bin@1000 : Record Bin;
+    BEGIN
+      if ZoneCode <> '' then begin
+        Bin.SETCURRENTKEY("Location Code","Zone Code",Code);
+        Bin.SETRANGE("Location Code",LocationCode);
+        Bin.SETRANGE("Zone Code",ZoneCode);
+        Bin.SETRANGE(Code,BinCode);
+        Bin.FINDFIRST;
+      end else
+        Bin.GET(LocationCode,BinCode);
+    END;
+
+    [External]
+    PROCEDURE FindBinContent@40(LocationCode@1002 : Code[10];BinCode@1004 : Code[20];ItemNo@1001 : Code[20];VariantCode@1000 : Code[10];ZoneCode@1005 : Code[10]);
+    VAR
+      BinContent@1003 : Record "Bin Content";
+    BEGIN
+      BinContent.SETRANGE("Location Code",LocationCode);
+      BinContent.SETRANGE("Bin Code",BinCode);
+      BinContent.SETRANGE("Item No.",ItemNo);
+      BinContent.SETRANGE("Variant Code",VariantCode);
+      if ZoneCode <> '' then
+        BinContent.SETRANGE("Zone Code",ZoneCode);
+      BinContent.FINDFIRST;
+    END;
+
+    [External]
+    PROCEDURE CalcLineReservedQtyNotonInvt@52(SourceType@1000 : Integer;SourceSubType@1004 : Option;SourceNo@1001 : Code[20];SourceLineNo@1002 : Integer;SourceSubLineNo@1003 : Integer) : Decimal;
+    VAR
+      ReservEntry@1005 : Record "Reservation Entry";
+      ReservQtyNotonInvt@1006 : Decimal;
+    BEGIN
+      ReservEntry.SETCURRENTKEY(
+        "Source ID","Source Ref. No.","Source Type","Source Subtype",
+        "Source Batch Name","Source Prod. Order Line","Reservation Status");
+      if SourceType = DATABASE::"Prod. Order Component" then begin
+        ReservEntry.SetSourceFilter(SourceType,SourceSubType,SourceNo,SourceSubLineNo,true);
+        ReservEntry.SetSourceFilter2('',SourceLineNo);
+      end else begin
+        ReservEntry.SetSourceFilter(SourceType,SourceSubType,SourceNo,SourceLineNo,true);
+        ReservEntry.SetSourceFilter2('',0);
+      end;
+      ReservEntry.SETRANGE("Reservation Status",ReservEntry."Reservation Status"::Reservation);
+      ReservEntry.SETFILTER("Expected Receipt Date",'<>%1',0D);
+      ReservEntry.SETFILTER("Shipment Date",'<>%1',0D);
+      if ReservEntry.FIND('-') then
+        repeat
+          ReservQtyNotonInvt := ReservQtyNotonInvt + ABS(ReservEntry."Quantity (Base)");
+        until ReservEntry.NEXT = 0;
+      exit(ReservQtyNotonInvt);
+    END;
+
+    [External]
+    PROCEDURE GetCaption@44(DestType@1004 : '" ",Customer,Vendor,Location,Item,Family,"Sales Order"';SourceDoc@1009 : '" ","Sales Order",,,"Sales Return Order","Purchase Order",,,"Purchase Return Order","Inbound Transfer","Outbound Transfer","Prod. Consumption","Prod. Output"';Selection@1000 : Integer) : Text[50];
+    VAR
+      PurchHeader@1003 : Record "Purchase Header";
+      Vendor@1001 : Record Vendor;
+      Customer@1002 : Record Customer;
+      Location@1005 : Record Location;
+      Item@1006 : Record Item;
+      Family@1007 : Record Family;
+      SalesHeader@1008 : Record "Sales Header";
+      WhseActivHdr@1010 : Record "Warehouse Activity Header";
+    BEGIN
+      case Selection of
+        0:
+          case DestType of
+            DestType::Vendor:
+              exit(Vendor.TABLECAPTION + ' ' + Vendor.FIELDCAPTION("No."));
+            DestType::Customer:
+              exit(Customer.TABLECAPTION + ' ' + Customer.FIELDCAPTION("No."));
+            DestType::Location:
+              exit(Location.TABLECAPTION + ' ' + Location.FIELDCAPTION(Code));
+            DestType::Item:
+              exit(Item.TABLECAPTION + ' ' + Item.FIELDCAPTION("No."));
+            DestType::Family:
+              exit(Family.TABLECAPTION + ' ' + Family.FIELDCAPTION("No."));
+            DestType::"Sales Order":
+              exit(Text009 + ' ' + SalesHeader.FIELDCAPTION("No."));
+            else
+              exit(WhseActivHdr.FIELDCAPTION("Destination No."));
+          end;
+        1:
+          case DestType of
+            DestType::Vendor:
+              exit(Vendor.TABLECAPTION + ' ' + Vendor.FIELDCAPTION(Name));
+            DestType::Customer:
+              exit(Customer.TABLECAPTION + ' ' + Customer.FIELDCAPTION(Name));
+            DestType::Location:
+              exit(Location.TABLECAPTION + ' ' + Location.FIELDCAPTION(Name));
+            DestType::Item:
+              exit(Item.TABLECAPTION + ' ' + Item.FIELDCAPTION(Description));
+            DestType::Family:
+              exit(Family.TABLECAPTION + ' ' + Family.FIELDCAPTION(Description));
+            DestType::"Sales Order":
+              exit(Text009 + ' ' + SalesHeader.FIELDCAPTION("Sell-to Customer Name"));
+            else
+              exit(Text008);
+          end;
+        2:
+          if SourceDoc in [
+                           SourceDoc::"Purchase Order",
+                           SourceDoc::"Purchase Return Order"]
+          then
+            exit(PurchHeader.FIELDCAPTION("Vendor Shipment No."))
+          else
+            exit(WhseActivHdr.FIELDCAPTION("External Document No."));
+        3:
+          case SourceDoc of
+            SourceDoc::"Purchase Order":
+              exit(PurchHeader.FIELDCAPTION("Vendor Invoice No."));
+            SourceDoc::"Purchase Return Order":
+              exit(PurchHeader.FIELDCAPTION("Vendor Cr. Memo No."));
+            else
+              exit(WhseActivHdr.FIELDCAPTION("External Document No.2"));
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetDestinationName@42(DestType@1000 : '" ",Customer,Vendor,Location,Item,Family,"Sales Order"';DestNo@1007 : Code[20]) : Text[50];
+    VAR
+      Vendor@1006 : Record Vendor;
+      Customer@1005 : Record Customer;
+      Location@1004 : Record Location;
+      Item@1003 : Record Item;
+      Family@1002 : Record Family;
+      SalesHeader@1001 : Record "Sales Header";
+    BEGIN
+      case DestType of
+        DestType::Customer:
+          if Customer.GET(DestNo) then
+            exit(Customer.Name);
+        DestType::Vendor:
+          if Vendor.GET(DestNo) then
+            exit(Vendor.Name);
+        DestType::Location:
+          if Location.GET(DestNo) then
+            exit(Location.Name);
+        DestType::Item:
+          if Item.GET(DestNo) then
+            exit(Item.Description);
+        DestType::Family:
+          if Family.GET(DestNo) then
+            exit(Family.Description);
+        DestType::"Sales Order":
+          if SalesHeader.GET(SalesHeader."Document Type"::Order,DestNo) then
+            exit(SalesHeader."Sell-to Customer Name");
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcReservEntryQuantity@50(WhseJnlLine@1001 : Record "Warehouse Journal Line") : Decimal;
+    VAR
+      ReservEntry@1000 : Record "Reservation Entry";
+    BEGIN
+      with WhseJnlLine do begin
+        if "Source Type" = DATABASE::"Prod. Order Component" then begin
+          ReservEntry.SetSourceFilter("Source Type","Source Subtype","Journal Template Name","Source Subline No.",true);
+          ReservEntry.SetSourceFilter2("Journal Batch Name","Source Line No.");
+        end else begin
+          ReservEntry.SetSourceFilter("Source Type","Source Subtype","Journal Template Name","Source Line No.",true);
+          ReservEntry.SetSourceFilter2("Journal Batch Name",0);
+        end;
+        ReservEntry.SetTrackingFilter("Serial No.","Lot No.");
+        if ReservEntry.FINDFIRST then
+          exit(ReservEntry."Quantity (Base)");
+        exit("Qty. (Base)");
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetATOSalesLine@43(SourceType@1003 : Integer;SourceSubtype@1002 : Option;SourceID@1001 : Code[20];SourceRefNo@1000 : Integer;VAR SalesLine@1004 : Record "Sales Line") : Boolean;
+    BEGIN
+      if SourceType <> DATABASE::"Sales Line" then
+        exit(false);
+      if SalesLine.GET(SourceSubtype,SourceID,SourceRefNo) then
+        exit(SalesLine."Qty. to Asm. to Order (Base)" <> 0);
+    END;
+
+    LOCAL PROCEDURE SetFiltersOnATOInvtPick@45(SalesLine@1000 : Record "Sales Line";VAR WhseActivityLine@1001 : Record "Warehouse Activity Line");
+    BEGIN
+      with WhseActivityLine do begin
+        SETRANGE("Activity Type","Activity Type"::"Invt. Pick");
+        SetSourceFilter(DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",0,false);
+        SETRANGE("Assemble to Order",true);
+        if "Serial No." <> '' then
+          SETRANGE("Serial No.","Serial No.");
+        if "Lot No." <> '' then
+          SETRANGE("Lot No.","Lot No.");
+      end;
+    END;
+
+    [External]
+    PROCEDURE ATOInvtPickExists@47(SalesLine@1000 : Record "Sales Line") : Boolean;
+    VAR
+      WhseActivityLine@1001 : Record "Warehouse Activity Line";
+    BEGIN
+      SetFiltersOnATOInvtPick(SalesLine,WhseActivityLine);
+      exit(not WhseActivityLine.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE CalcQtyBaseOnATOInvtPick@48(SalesLine@1000 : Record "Sales Line";SerialNo@1002 : Code[20];LotNo@1001 : Code[20]) QtyBase : Decimal;
+    VAR
+      WhseActivityLine@1004 : Record "Warehouse Activity Line";
+    BEGIN
+      WhseActivityLine."Serial No." := SerialNo;
+      WhseActivityLine."Lot No." := LotNo;
+      SetFiltersOnATOInvtPick(SalesLine,WhseActivityLine);
+      if WhseActivityLine.FINDSET then
+        repeat
+          QtyBase += WhseActivityLine."Qty. Outstanding (Base)";
+        until WhseActivityLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE CheckOutboundBlockedBin@49(LocationCode@1000 : Code[10];BinCode@1001 : Code[20];ItemNo@1002 : Code[20];VariantCode@1003 : Code[10];UnitOfMeasureCode@1004 : Code[10]);
+    BEGIN
+      CheckBlockedBin(LocationCode,BinCode,ItemNo,VariantCode,UnitOfMeasureCode,false);
+    END;
+
+    [External]
+    PROCEDURE CheckInboundBlockedBin@58(LocationCode@1004 : Code[10];BinCode@1003 : Code[20];ItemNo@1002 : Code[20];VariantCode@1001 : Code[10];UnitOfMeasureCode@1000 : Code[10]);
+    BEGIN
+      CheckBlockedBin(LocationCode,BinCode,ItemNo,VariantCode,UnitOfMeasureCode,true);
+    END;
+
+    LOCAL PROCEDURE SetFiltersOnATOWhseShpt@60(SalesLine@1000 : Record "Sales Line";VAR WhseShptLine@1001 : Record "Warehouse Shipment Line");
+    BEGIN
+      with WhseShptLine do begin
+        SetSourceFilter(DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",false);
+        SETRANGE("Assemble to Order",true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE ATOWhseShptExists@51(SalesLine@1000 : Record "Sales Line") : Boolean;
+    VAR
+      WhseShptLine@1001 : Record "Warehouse Shipment Line";
+    BEGIN
+      SetFiltersOnATOWhseShpt(SalesLine,WhseShptLine);
+      exit(not WhseShptLine.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE CheckBlockedBin@59(LocationCode@1004 : Code[10];BinCode@1003 : Code[20];ItemNo@1002 : Code[20];VariantCode@1001 : Code[10];UnitOfMeasureCode@1000 : Code[10];CheckInbound@1005 : Boolean);
+    VAR
+      BinContent@1006 : Record "Bin Content";
+    BEGIN
+      GetLocation(LocationCode);
+      if Location."Directed Put-away and Pick" then
+        if BinContent.GET(LocationCode,BinCode,ItemNo,VariantCode,UnitOfMeasureCode) then begin
+          if (CheckInbound and
+              (BinContent."Block Movement" in [BinContent."Block Movement"::Inbound,BinContent."Block Movement"::All])) or
+             (not CheckInbound and
+              (BinContent."Block Movement" in [BinContent."Block Movement"::Outbound,BinContent."Block Movement"::All]))
+          then
+            BinContent.FIELDERROR("Block Movement");
+        end else
+          if Location."Bin Mandatory" then begin
+            GetBin(LocationCode,BinCode);
+            if (CheckInbound and (Bin."Block Movement" in [Bin."Block Movement"::Inbound,Bin."Block Movement"::All])) or
+               (not CheckInbound and (Bin."Block Movement" in [Bin."Block Movement"::Outbound,Bin."Block Movement"::All]))
+            then
+              Bin.FIELDERROR("Block Movement");
+          end;
+    END;
+
+    LOCAL PROCEDURE GetWhseJnlLineBinCode@28(SourceCode@1000 : Code[10];BinCode@1001 : Code[20];AdjBinCode@1002 : Code[20]) : Code[20];
+    VAR
+      SourceCodeSetup@1003 : Record "Source Code Setup";
+    BEGIN
+      if BinCode = '' then
+        exit(AdjBinCode);
+      SourceCodeSetup.GET;
+      if SourceCode = SourceCodeSetup."Service Management" then
+        exit(BinCode);
+      exit(AdjBinCode);
+    END;
+
+    [External]
+    PROCEDURE GetLastOperationFromBinCode@26(RoutingNo@1000 : Code[20];RoutingVersionCode@1001 : Code[20];LocationCode@1002 : Code[10];UseFlushingMethod@1006 : Boolean;FlushingMethod@1007 : 'Manual,Forward,Backward,"Pick + Forward","Pick + Backward"') : Code[20];
+    VAR
+      RoutingLine@1003 : Record "Routing Line";
+    BEGIN
+      with RoutingLine do begin
+        SETRANGE("Routing No.",RoutingNo);
+        SETRANGE("Version Code",RoutingVersionCode);
+        if FINDLAST then
+          exit(GetProdCenterBinCode(Type,"No.",LocationCode,UseFlushingMethod,FlushingMethod));
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetProdRtngLastOperationFromBinCode@61(ProdOrderStatus@1001 : Option;ProdOrderNo@1006 : Code[20];RoutingRefNo@1007 : Integer;RoutingNo@1000 : Code[20];LocationCode@1002 : Code[10]) : Code[20];
+    VAR
+      ProdOrderRoutingLine@1003 : Record "Prod. Order Routing Line";
+    BEGIN
+      with ProdOrderRoutingLine do begin
+        SETRANGE(Status,ProdOrderStatus);
+        SETRANGE("Prod. Order No.",ProdOrderNo);
+        SETRANGE("Routing Reference No.",RoutingRefNo);
+        SETRANGE("Routing No.",RoutingNo);
+        if FINDLAST then
+          exit(GetProdCenterBinCode(Type,"No.",LocationCode,false,0));
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetPlanningRtngLastOperationFromBinCode@64(WkshTemplateName@1000 : Code[10];WkshBatchName@1003 : Code[10];WkshLineNo@1004 : Integer;LocationCode@1005 : Code[10]) : Code[20];
+    VAR
+      PlanningRoutingLine@1001 : Record "Planning Routing Line";
+    BEGIN
+      with PlanningRoutingLine do begin
+        SETRANGE("Worksheet Template Name",WkshTemplateName);
+        SETRANGE("Worksheet Batch Name",WkshBatchName);
+        SETRANGE("Worksheet Line No.",WkshLineNo);
+        if FINDLAST then
+          exit(GetProdCenterBinCode(Type,"No.",LocationCode,false,0));
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetProdCenterBinCode@66(Type@1004 : '"Work Center","Machine Center"';No@1003 : Code[20];LocationCode@1002 : Code[10];UseFlushingMethod@1001 : Boolean;FlushingMethod@1000 : 'Manual,Forward,Backward,"Pick + Forward","Pick + Backward"') : Code[20];
+    BEGIN
+      case Type of
+        Type::"Work Center":
+          exit(GetWorkCenterBinCode(No,LocationCode,UseFlushingMethod,FlushingMethod));
+        Type::"Machine Center":
+          exit(GetMachineCenterBinCode(No,LocationCode,UseFlushingMethod,FlushingMethod));
+      end;
+    END;
+
+    LOCAL PROCEDURE GetMachineCenterBinCode@63(MachineCenterNo@1000 : Code[20];LocationCode@1002 : Code[10];UseFlushingMethod@1004 : Boolean;FlushingMethod@1003 : 'Manual,Forward,Backward,"Pick + Forward","Pick + Backward"') : Code[20];
+    VAR
+      MachineCenter@1001 : Record "Machine Center";
+    BEGIN
+      if MachineCenter.GET(MachineCenterNo) then begin
+        if (MachineCenter."Location Code" = LocationCode) and
+           (MachineCenter."From-Production Bin Code" <> '')
+        then
+          exit(MachineCenter.GetBinCode(UseFlushingMethod,FlushingMethod));
+
+        exit(GetWorkCenterBinCode(MachineCenter."Work Center No.",LocationCode,UseFlushingMethod,FlushingMethod));
+      end;
+    END;
+
+    LOCAL PROCEDURE GetWorkCenterBinCode@62(WorkCenterNo@1003 : Code[20];LocationCode@1004 : Code[10];UseFlushingMethod@1001 : Boolean;FlushingMethod@1000 : 'Manual,Forward,Backward,"Pick + Forward","Pick + Backward"') : Code[20];
+    VAR
+      WorkCenter@1002 : Record "Work Center";
+    BEGIN
+      if WorkCenter.GET(WorkCenterNo) then
+        if WorkCenter."Location Code" = LocationCode then
+          exit(WorkCenter.GetBinCode(UseFlushingMethod,FlushingMethod));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,283 @@
+OBJECT Codeunit 1380 Batch Processing Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Batch Processing Parameter"=rimd,
+                TableData "Batch Processing Parameter Map"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PostingTemplateMsg@1007 : TextConst '@@@=1 - overall progress;ENU=Processing: @1@@@@@@@';
+      TempErrorMessage@1001 : TEMPORARY Record "Error Message";
+      ProcessingCodeunitID@1008 : Integer;
+      BatchID@1010 : GUID;
+      ProcessingCodeunitNotSetErr@1000 : TextConst 'ENU=A processing codeunit has not been selected.';
+      BatchCompletedMsg@1002 : TextConst 'ENU=All the documents were posted.';
+      BatchCompletedWithErrorsMsg@1003 : TextConst 'ENU=One or more of the documents could not be posted.';
+
+    PROCEDURE BatchProcess@2(VAR RecRef@1000 : RecordRef);
+    VAR
+      Window@1003 : Dialog;
+      CounterTotal@1001 : Integer;
+      CounterToPost@1002 : Integer;
+      CounterPosted@1006 : Integer;
+      BatchConfirm@1005 : '" ",Skip,Update';
+    BEGIN
+      if ProcessingCodeunitID = 0 then
+        ERROR(ProcessingCodeunitNotSetErr);
+
+      with RecRef do begin
+        if ISEMPTY then
+          exit;
+
+        TempErrorMessage.DELETEALL;
+
+        FillBatchProcessingMap(RecRef);
+        COMMIT;
+
+        FINDSET;
+
+        if GUIALLOWED then begin
+          Window.OPEN(PostingTemplateMsg);
+          CounterTotal := COUNT;
+        end;
+
+        repeat
+          if GUIALLOWED then begin
+            CounterToPost += 1;
+            Window.UPDATE(1,ROUND(CounterToPost / CounterTotal * 10000,1));
+          end;
+
+          if CanProcessRecord(RecRef) then
+            if ProcessRecord(RecRef,BatchConfirm) then
+              CounterPosted += 1;
+        until NEXT = 0;
+
+        ResetBatchID;
+
+        if GUIALLOWED then begin
+          Window.CLOSE;
+          if CounterPosted <> CounterTotal then
+            MESSAGE(BatchCompletedWithErrorsMsg)
+          else
+            MESSAGE(BatchCompletedMsg);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CanProcessRecord@8(VAR RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      Result@1001 : Boolean;
+    BEGIN
+      Result := true;
+      OnVerifyRecord(RecRef,Result);
+
+      exit(Result);
+    END;
+
+    LOCAL PROCEDURE FillBatchProcessingMap@12(VAR RecRef@1000 : RecordRef);
+    BEGIN
+      with RecRef do begin
+        FINDSET;
+        repeat
+          InsertBatchParameterMapEntry(RecRef);
+        until NEXT = 0;
+      end;
+    END;
+
+    PROCEDURE GetErrorMessages@10(VAR TempErrorMessageResult@1000 : TEMPORARY Record "Error Message");
+    BEGIN
+      TempErrorMessageResult.COPY(TempErrorMessage,true);
+    END;
+
+    LOCAL PROCEDURE InsertBatchParameterMapEntry@20(RecRef@1000 : RecordRef);
+    VAR
+      BatchProcessingParameterMap@1002 : Record "Batch Processing Parameter Map";
+    BEGIN
+      if ISNULLGUID(BatchID) then
+        exit;
+
+      BatchProcessingParameterMap.INIT;
+      BatchProcessingParameterMap."Record ID" := RecRef.RECORDID;
+      BatchProcessingParameterMap."Batch ID" := BatchID;
+      BatchProcessingParameterMap.INSERT;
+    END;
+
+    LOCAL PROCEDURE InvokeProcessing@28(VAR RecRef@1001 : RecordRef) : Boolean;
+    VAR
+      RecVar@1007 : Variant;
+      Result@1005 : Boolean;
+      Handled@1006 : Boolean;
+    BEGIN
+      OnCustomProcessing(RecRef,Handled);
+      if Handled then
+        exit(true);
+
+      RecVar := RecRef;
+
+      CLEARLASTERROR;
+
+      Result := CODEUNIT.RUN(ProcessingCodeunitID,RecVar);
+
+      LogError(RecVar,Result);
+
+      RecRef.GETTABLE(RecVar);
+
+      exit(Result);
+    END;
+
+    LOCAL PROCEDURE InitBatchID@4();
+    BEGIN
+      if ISNULLGUID(BatchID) then
+        BatchID := CREATEGUID;
+    END;
+
+    LOCAL PROCEDURE LogError@1(RecVar@1000 : Variant;RunResult@1001 : Boolean);
+    BEGIN
+      if not RunResult then
+        TempErrorMessage.LogMessage(RecVar,0,TempErrorMessage."Message Type"::Error,GETLASTERRORTEXT);
+    END;
+
+    LOCAL PROCEDURE ProcessRecord@6(VAR RecRef@1000 : RecordRef;VAR BatchConfirm@1001 : Option) : Boolean;
+    VAR
+      ProcessingResult@1002 : Boolean;
+    BEGIN
+      OnBeforeBatchProcessing(RecRef,BatchConfirm);
+
+      ProcessingResult := InvokeProcessing(RecRef);
+
+      OnAfterBatchProcessing(RecRef,ProcessingResult);
+
+      exit(ProcessingResult);
+    END;
+
+    LOCAL PROCEDURE ResetBatchID@30();
+    VAR
+      BatchProcessingParameter@1000 : Record "Batch Processing Parameter";
+      BatchProcessingParameterMap@1001 : Record "Batch Processing Parameter Map";
+    BEGIN
+      BatchProcessingParameter.SETRANGE("Batch ID",BatchID);
+      BatchProcessingParameter.DELETEALL;
+
+      BatchProcessingParameterMap.SETRANGE("Batch ID",BatchID);
+      BatchProcessingParameterMap.DELETEALL;
+
+      CLEAR(BatchID);
+
+      COMMIT;
+    END;
+
+    PROCEDURE AddParameter@38(ParameterId@1000 : Integer;Value@1003 : Variant);
+    VAR
+      BatchProcessingParameter@1002 : Record "Batch Processing Parameter";
+    BEGIN
+      InitBatchID;
+
+      BatchProcessingParameter.INIT;
+      BatchProcessingParameter."Batch ID" := BatchID;
+      BatchProcessingParameter."Parameter Id" := ParameterId;
+      BatchProcessingParameter."Parameter Value" := FORMAT(Value);
+      BatchProcessingParameter.INSERT;
+    END;
+
+    PROCEDURE GetParameterText@34(RecordID@1000 : RecordID;ParameterId@1001 : Integer;VAR ParameterValue@1003 : Text[250]) : Boolean;
+    VAR
+      BatchProcessingParameter@1002 : Record "Batch Processing Parameter";
+      BatchProcessingParameterMap@1004 : Record "Batch Processing Parameter Map";
+    BEGIN
+      BatchProcessingParameterMap.SETRANGE("Record ID",RecordID);
+      if not BatchProcessingParameterMap.FINDFIRST then
+        exit(false);
+
+      if not BatchProcessingParameter.GET(BatchProcessingParameterMap."Batch ID",ParameterId) then
+        exit(false);
+
+      ParameterValue := BatchProcessingParameter."Parameter Value";
+      exit(true);
+    END;
+
+    PROCEDURE GetParameterBoolean@44(RecordID@1000 : RecordID;ParameterId@1001 : Integer;VAR ParameterValue@1003 : Boolean) : Boolean;
+    VAR
+      Result@1005 : Boolean;
+      Value@1002 : Text[250];
+    BEGIN
+      if not GetParameterText(RecordID,ParameterId,Value) then
+        exit(false);
+
+      if not EVALUATE(Result,Value) then
+        exit(false);
+
+      ParameterValue := Result;
+      exit(true);
+    END;
+
+    PROCEDURE GetParameterInteger@45(RecordID@1000 : RecordID;ParameterId@1005 : Integer;VAR ParameterValue@1003 : Integer) : Boolean;
+    VAR
+      Result@1002 : Integer;
+      Value@1004 : Text[250];
+    BEGIN
+      if not GetParameterText(RecordID,ParameterId,Value) then
+        exit(false);
+
+      if not EVALUATE(Result,Value) then
+        exit(false);
+
+      ParameterValue := Result;
+      exit(true);
+    END;
+
+    PROCEDURE GetParameterDate@46(RecordID@1000 : RecordID;ParameterId@1004 : Integer;VAR ParameterValue@1003 : Date) : Boolean;
+    VAR
+      Result@1005 : Date;
+      Value@1002 : Text[250];
+    BEGIN
+      if not GetParameterText(RecordID,ParameterId,Value) then
+        exit(false);
+
+      if not EVALUATE(Result,Value) then
+        exit(false);
+
+      ParameterValue := Result;
+      exit(true);
+    END;
+
+    PROCEDURE SetProcessingCodeunit@9(NewProcessingCodeunitID@1000 : Integer);
+    BEGIN
+      ProcessingCodeunitID := NewProcessingCodeunitID;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnVerifyRecord@16(VAR RecRef@1000 : RecordRef;VAR Result@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeBatchProcessing@15(VAR RecRef@1000 : RecordRef;VAR BatchConfirm@1001 : Option);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterBatchProcessing@14(VAR RecRef@1000 : RecordRef;PostingResult@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCustomProcessing@17(VAR RecRef@1000 : RecordRef;VAR Handled@1001 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

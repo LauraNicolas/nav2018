@@ -1,0 +1,663 @@
+OBJECT Codeunit 7010 Purch. Price Calc. Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GLSetup@1008 : Record "General Ledger Setup";
+      Item@1000 : Record Item;
+      SKU@1001 : Record "Stockkeeping Unit";
+      Vend@1012 : Record Vendor;
+      ResCost@1009 : Record "Resource Cost";
+      Currency@1007 : Record Currency;
+      TempPurchPrice@1002 : TEMPORARY Record "Purchase Price";
+      TempPurchLineDisc@1004 : TEMPORARY Record "Purchase Line Discount";
+      LineDiscPerCent@1022 : Decimal;
+      Qty@1021 : Decimal;
+      QtyPerUOM@1016 : Decimal;
+      VATPerCent@1019 : Decimal;
+      PricesInclVAT@1017 : Boolean;
+      VATBusPostingGr@1015 : Code[20];
+      PricesInCurrency@1014 : Boolean;
+      PriceInSKU@1003 : Boolean;
+      CurrencyFactor@1013 : Decimal;
+      ExchRateDate@1011 : Date;
+      FoundPurchPrice@1020 : Boolean;
+      DateCaption@1010 : Text[30];
+      Text000@1024 : TextConst 'ENU=%1 is less than %2 in the %3.';
+      Text001@1006 : TextConst 'ENU=The %1 in the %2 must be same as in the %3.';
+
+    [External]
+    PROCEDURE FindPurchLinePrice@2(PurchHeader@1001 : Record "Purchase Header";VAR PurchLine@1000 : Record "Purchase Line";CalledByFieldNo@1002 : Integer);
+    BEGIN
+      with PurchLine do begin
+        SetCurrency(
+          PurchHeader."Currency Code",PurchHeader."Currency Factor",PurchHeaderExchDate(PurchHeader));
+        SetVAT(PurchHeader."Prices Including VAT","VAT %","VAT Bus. Posting Group");
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+        SetLineDisc("Line Discount %");
+
+        TESTFIELD("Qty. per Unit of Measure");
+        if PricesInCurrency then
+          PurchHeader.TESTFIELD("Currency Factor");
+
+        case Type of
+          Type::Item:
+            begin
+              Item.GET("No.");
+              Vend.GET("Pay-to Vendor No.");
+              PriceInSKU := SKU.GET("Location Code","No.","Variant Code");
+
+              PurchLinePriceExists(PurchHeader,PurchLine,false);
+              CalcBestDirectUnitCost(TempPurchPrice);
+
+              if (FoundPurchPrice or
+                  not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                       ((CalledByFieldNo = FIELDNO("Variant Code")) and not PriceInSKU))) and
+                 ("Prepmt. Amt. Inv." = 0)
+              then
+                "Direct Unit Cost" := TempPurchPrice."Direct Unit Cost";
+            end;
+        end;
+        OnAfterFindPurchLinePrice(PurchLine,PurchHeader,TempPurchPrice,CalledByFieldNo);
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindItemJnlLinePrice@3(VAR ItemJnlLine@1000 : Record "Item Journal Line";CalledByFieldNo@1001 : Integer);
+    BEGIN
+      with ItemJnlLine do begin
+        TESTFIELD("Qty. per Unit of Measure");
+        SetCurrency('',0,0D);
+        SetVAT(false,0,'');
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+        Item.GET("Item No.");
+        PriceInSKU := SKU.GET("Location Code","Item No.","Variant Code");
+
+        FindPurchPrice(
+          TempPurchPrice,'',"Item No.","Variant Code",
+          "Unit of Measure Code",'',"Posting Date",false);
+        CalcBestDirectUnitCost(TempPurchPrice);
+
+        if FoundPurchPrice or
+           not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                ((CalledByFieldNo = FIELDNO("Variant Code")) and not PriceInSKU))
+        then
+          "Unit Amount" := TempPurchPrice."Direct Unit Cost";
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindReqLinePrice@9(VAR ReqLine@1000 : Record "Requisition Line";CalledByFieldNo@1001 : Integer);
+    VAR
+      VendorNo@1002 : Code[20];
+    BEGIN
+      with ReqLine do
+        if Type = Type::Item then begin
+          if not Vend.GET("Vendor No.") then
+            Vend.INIT
+          else
+            if Vend."Pay-to Vendor No." <> '' then
+              if not Vend.GET(Vend."Pay-to Vendor No.") then
+                Vend.INIT;
+          if Vend."No." <> '' then
+            VendorNo := Vend."No."
+          else
+            VendorNo := "Vendor No.";
+
+          SetCurrency("Currency Code","Currency Factor","Order Date");
+          SetVAT(Vend."Prices Including VAT",0,'');
+          SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+          TESTFIELD("Qty. per Unit of Measure");
+          if PricesInCurrency then
+            TESTFIELD("Currency Factor");
+
+          Item.GET("No.");
+          PriceInSKU := SKU.GET("Location Code","No.","Variant Code");
+
+          FindPurchPrice(
+            TempPurchPrice,VendorNo,"No.","Variant Code",
+            "Unit of Measure Code","Currency Code","Order Date",false);
+          CalcBestDirectUnitCost(TempPurchPrice);
+
+          if FoundPurchPrice or
+             not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                  ((CalledByFieldNo = FIELDNO("Variant Code")) and not PriceInSKU))
+          then
+            "Direct Unit Cost" := TempPurchPrice."Direct Unit Cost";
+        end;
+    END;
+
+    [External]
+    PROCEDURE FindPurchLineLineDisc@14(PurchHeader@1001 : Record "Purchase Header";VAR PurchLine@1000 : Record "Purchase Line");
+    BEGIN
+      with PurchLine do begin
+        SetCurrency(PurchHeader."Currency Code",0,0D);
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+        TESTFIELD("Qty. per Unit of Measure");
+
+        if Type = Type::Item then begin
+          PurchLineLineDiscExists(PurchHeader,PurchLine,false);
+          CalcBestLineDisc(TempPurchLineDisc);
+
+          "Line Discount %" := TempPurchLineDisc."Line Discount %";
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindStdItemJnlLinePrice@17(VAR StdItemJnlLine@1000 : Record "Standard Item Journal Line";CalledByFieldNo@1001 : Integer);
+    BEGIN
+      with StdItemJnlLine do begin
+        TESTFIELD("Qty. per Unit of Measure");
+        SetCurrency('',0,0D);
+        SetVAT(false,0,'');
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+        Item.GET("Item No.");
+        PriceInSKU := SKU.GET("Location Code","Item No.","Variant Code");
+
+        FindPurchPrice(
+          TempPurchPrice,'',"Item No.","Variant Code",
+          "Unit of Measure Code",'',WORKDATE,false);
+        CalcBestDirectUnitCost(TempPurchPrice);
+
+        if FoundPurchPrice or
+           not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                ((CalledByFieldNo = FIELDNO("Variant Code")) and not PriceInSKU))
+        then
+          "Unit Amount" := TempPurchPrice."Direct Unit Cost";
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindReqLineDisc@4(VAR ReqLine@1000 : Record "Requisition Line");
+    BEGIN
+      with ReqLine do begin
+        SetCurrency("Currency Code",0,0D);
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+        TESTFIELD("Qty. per Unit of Measure");
+
+        if Type = Type::Item then begin
+          FindPurchLineDisc(
+            TempPurchLineDisc,"Vendor No.","No.","Variant Code",
+            "Unit of Measure Code","Currency Code","Order Date",false);
+          CalcBestLineDisc(TempPurchLineDisc);
+
+          "Line Discount %" := TempPurchLineDisc."Line Discount %";
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcBestDirectUnitCost@1(VAR PurchPrice@1000 : Record "Purchase Price");
+    VAR
+      BestPurchPrice@1002 : Record "Purchase Price";
+    BEGIN
+      with PurchPrice do begin
+        FoundPurchPrice := FIND('-');
+        if FoundPurchPrice then
+          repeat
+            if IsInMinQty("Unit of Measure Code","Minimum Quantity") then begin
+              ConvertPriceToVAT(
+                Vend."Prices Including VAT",Item."VAT Prod. Posting Group",
+                Vend."VAT Bus. Posting Group","Direct Unit Cost");
+              ConvertPriceToUoM("Unit of Measure Code","Direct Unit Cost");
+              ConvertPriceLCYToFCY("Currency Code","Direct Unit Cost");
+
+              case true of
+                ((BestPurchPrice."Currency Code" = '') and ("Currency Code" <> '')) or
+                ((BestPurchPrice."Variant Code" = '') and ("Variant Code" <> '')):
+                  BestPurchPrice := PurchPrice;
+                ((BestPurchPrice."Currency Code" = '') or ("Currency Code" <> '')) and
+                ((BestPurchPrice."Variant Code" = '') or ("Variant Code" <> '')):
+                  if (BestPurchPrice."Direct Unit Cost" = 0) or
+                     (CalcLineAmount(BestPurchPrice) > CalcLineAmount(PurchPrice))
+                  then
+                    BestPurchPrice := PurchPrice;
+              end;
+            end;
+          until NEXT = 0;
+      end;
+
+      // No price found in agreement
+      if BestPurchPrice."Direct Unit Cost" = 0 then begin
+        PriceInSKU := PriceInSKU and (SKU."Last Direct Cost" <> 0);
+        if PriceInSKU then
+          BestPurchPrice."Direct Unit Cost" := SKU."Last Direct Cost"
+        else
+          BestPurchPrice."Direct Unit Cost" := Item."Last Direct Cost";
+
+        ConvertPriceToVAT(false,Item."VAT Prod. Posting Group",'',BestPurchPrice."Direct Unit Cost");
+        ConvertPriceToUoM('',BestPurchPrice."Direct Unit Cost");
+        ConvertPriceLCYToFCY('',BestPurchPrice."Direct Unit Cost");
+      end;
+
+      PurchPrice := BestPurchPrice;
+    END;
+
+    LOCAL PROCEDURE CalcBestLineDisc@11(VAR PurchLineDisc@1000 : Record "Purchase Line Discount");
+    VAR
+      BestPurchLineDisc@1002 : Record "Purchase Line Discount";
+    BEGIN
+      with PurchLineDisc do
+        if FIND('-') then
+          repeat
+            if IsInMinQty("Unit of Measure Code","Minimum Quantity") then
+              case true of
+                ((BestPurchLineDisc."Currency Code" = '') and ("Currency Code" <> '')) or
+                ((BestPurchLineDisc."Variant Code" = '') and ("Variant Code" <> '')):
+                  BestPurchLineDisc := PurchLineDisc;
+                ((BestPurchLineDisc."Currency Code" = '') or ("Currency Code" <> '')) and
+                ((BestPurchLineDisc."Variant Code" = '') or ("Variant Code" <> '')):
+                  if BestPurchLineDisc."Line Discount %" < "Line Discount %" then
+                    BestPurchLineDisc := PurchLineDisc;
+              end;
+          until NEXT = 0;
+
+      PurchLineDisc := BestPurchLineDisc;
+    END;
+
+    LOCAL PROCEDURE FindPurchPrice@16(VAR ToPurchPrice@1000 : Record "Purchase Price";VendorNo@1008 : Code[20];ItemNo@1007 : Code[20];VariantCode@1006 : Code[10];UOM@1005 : Code[10];CurrencyCode@1004 : Code[10];StartingDate@1003 : Date;ShowAll@1002 : Boolean);
+    VAR
+      FromPurchPrice@1001 : Record "Purchase Price";
+    BEGIN
+      with FromPurchPrice do begin
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Vendor No.",VendorNo);
+        SETFILTER("Ending Date",'%1|>=%2',0D,StartingDate);
+        SETFILTER("Variant Code",'%1|%2',VariantCode,'');
+        if not ShowAll then begin
+          SETRANGE("Starting Date",0D,StartingDate);
+          SETFILTER("Currency Code",'%1|%2',CurrencyCode,'');
+          SETFILTER("Unit of Measure Code",'%1|%2',UOM,'');
+        end;
+
+        ToPurchPrice.RESET;
+        ToPurchPrice.DELETEALL;
+        if FIND('-') then
+          repeat
+            if "Direct Unit Cost" <> 0 then begin
+              ToPurchPrice := FromPurchPrice;
+              ToPurchPrice.INSERT;
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE FindPurchLineDisc@12(VAR ToPurchLineDisc@1001 : Record "Purchase Line Discount";VendorNo@1008 : Code[20];ItemNo@1007 : Code[20];VariantCode@1006 : Code[10];UOM@1005 : Code[10];CurrencyCode@1004 : Code[10];StartingDate@1003 : Date;ShowAll@1002 : Boolean);
+    VAR
+      FromPurchLineDisc@1000 : Record "Purchase Line Discount";
+    BEGIN
+      with FromPurchLineDisc do begin
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Vendor No.",VendorNo);
+        SETFILTER("Ending Date",'%1|>=%2',0D,StartingDate);
+        SETFILTER("Variant Code",'%1|%2',VariantCode,'');
+        if not ShowAll then begin
+          SETRANGE("Starting Date",0D,StartingDate);
+          SETFILTER("Currency Code",'%1|%2',CurrencyCode,'');
+          SETFILTER("Unit of Measure Code",'%1|%2',UOM,'');
+        end;
+
+        ToPurchLineDisc.RESET;
+        ToPurchLineDisc.DELETEALL;
+
+        if FIND('-') then
+          repeat
+            ToPurchLineDisc := FromPurchLineDisc;
+            ToPurchLineDisc.INSERT;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetCurrency@18(CurrencyCode2@1003 : Code[10];CurrencyFactor2@1001 : Decimal;ExchRateDate2@1002 : Date);
+    BEGIN
+      PricesInCurrency := CurrencyCode2 <> '';
+      if PricesInCurrency then begin
+        Currency.GET(CurrencyCode2);
+        Currency.TESTFIELD("Unit-Amount Rounding Precision");
+        CurrencyFactor := CurrencyFactor2;
+        ExchRateDate := ExchRateDate2;
+      end else
+        GLSetup.GET;
+    END;
+
+    LOCAL PROCEDURE SetVAT@22(PriceInclVAT2@1003 : Boolean;VATPerCent2@1002 : Decimal;VATBusPostingGr2@1000 : Code[20]);
+    BEGIN
+      PricesInclVAT := PriceInclVAT2;
+      VATPerCent := VATPerCent2;
+      VATBusPostingGr := VATBusPostingGr2;
+    END;
+
+    LOCAL PROCEDURE SetUoM@23(Qty2@1000 : Decimal;QtyPerUoM2@1001 : Decimal);
+    BEGIN
+      Qty := Qty2;
+      QtyPerUOM := QtyPerUoM2;
+    END;
+
+    LOCAL PROCEDURE SetLineDisc@29(LineDiscPerCent2@1000 : Decimal);
+    BEGIN
+      LineDiscPerCent := LineDiscPerCent2;
+    END;
+
+    LOCAL PROCEDURE IsInMinQty@7(UnitofMeasureCode@1003 : Code[10];MinQty@1000 : Decimal) : Boolean;
+    BEGIN
+      if UnitofMeasureCode = '' then
+        exit(MinQty <= QtyPerUOM * Qty);
+      exit(MinQty <= Qty);
+    END;
+
+    LOCAL PROCEDURE ConvertPriceToVAT@13(FromPriceInclVAT@1005 : Boolean;FromVATProdPostingGr@1001 : Code[20];FromVATBusPostingGr@1006 : Code[20];VAR UnitPrice@1004 : Decimal);
+    VAR
+      VATPostingSetup@1000 : Record "VAT Posting Setup";
+    BEGIN
+      if FromPriceInclVAT then begin
+        if not VATPostingSetup.GET(FromVATBusPostingGr,FromVATProdPostingGr) then
+          VATPostingSetup.INIT;
+
+        if PricesInclVAT then begin
+          if VATBusPostingGr <> FromVATBusPostingGr then
+            UnitPrice := UnitPrice * (100 + VATPerCent) / (100 + VATPostingSetup."VAT %");
+        end else
+          UnitPrice := UnitPrice / (1 + VATPostingSetup."VAT %" / 100);
+      end else
+        if PricesInclVAT then
+          UnitPrice := UnitPrice * (1 + VATPerCent / 100);
+    END;
+
+    LOCAL PROCEDURE ConvertPriceToUoM@5(UnitOfMeasureCode@1002 : Code[10];VAR UnitPrice@1001 : Decimal);
+    BEGIN
+      if UnitOfMeasureCode = '' then
+        UnitPrice := UnitPrice * QtyPerUOM;
+    END;
+
+    LOCAL PROCEDURE ConvertPriceLCYToFCY@6(CurrencyCode@1005 : Code[10];VAR UnitPrice@1001 : Decimal);
+    VAR
+      CurrExchRate@1000 : Record "Currency Exchange Rate";
+    BEGIN
+      if PricesInCurrency then begin
+        if CurrencyCode = '' then
+          UnitPrice :=
+            CurrExchRate.ExchangeAmtLCYToFCY(ExchRateDate,Currency.Code,UnitPrice,CurrencyFactor);
+        UnitPrice := ROUND(UnitPrice,Currency."Unit-Amount Rounding Precision");
+      end else
+        UnitPrice := ROUND(UnitPrice,GLSetup."Unit-Amount Rounding Precision");
+    END;
+
+    LOCAL PROCEDURE CalcLineAmount@15(PurchPrice@1000 : Record "Purchase Price") : Decimal;
+    BEGIN
+      with PurchPrice do
+        exit("Direct Unit Cost" * (1 - LineDiscPerCent / 100));
+    END;
+
+    LOCAL PROCEDURE PurchLinePriceExists@45(PurchHeader@1001 : Record "Purchase Header";VAR PurchLine@1000 : Record "Purchase Line";ShowAll@1002 : Boolean) : Boolean;
+    BEGIN
+      with PurchLine do
+        if (Type = Type::Item) and Item.GET("No.") then begin
+          FindPurchPrice(
+            TempPurchPrice,"Pay-to Vendor No.","No.","Variant Code","Unit of Measure Code",
+            PurchHeader."Currency Code",PurchHeaderStartDate(PurchHeader,DateCaption),ShowAll);
+          exit(TempPurchPrice.FIND('-'));
+        end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE PurchLineLineDiscExists@44(PurchHeader@1001 : Record "Purchase Header";VAR PurchLine@1000 : Record "Purchase Line";ShowAll@1002 : Boolean) : Boolean;
+    BEGIN
+      with PurchLine do
+        if (Type = Type::Item) and Item.GET("No.") then begin
+          FindPurchLineDisc(
+            TempPurchLineDisc,"Pay-to Vendor No.","No.","Variant Code","Unit of Measure Code",
+            PurchHeader."Currency Code",PurchHeaderStartDate(PurchHeader,DateCaption),ShowAll);
+          exit(TempPurchLineDisc.FIND('-'));
+        end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE PurchHeaderExchDate@25(PurchHeader@1000 : Record "Purchase Header") : Date;
+    BEGIN
+      with PurchHeader do begin
+        if "Posting Date" <> 0D then
+          exit("Posting Date");
+        exit(WORKDATE);
+      end;
+    END;
+
+    LOCAL PROCEDURE PurchHeaderStartDate@31(PurchHeader@1000 : Record "Purchase Header";VAR DateCaption@1001 : Text[30]) : Date;
+    BEGIN
+      with PurchHeader do
+        if "Document Type" in ["Document Type"::Invoice,"Document Type"::"Credit Memo"] then begin
+          DateCaption := FIELDCAPTION("Posting Date");
+          exit("Posting Date")
+        end else begin
+          DateCaption := FIELDCAPTION("Order Date");
+          exit("Order Date");
+        end;
+    END;
+
+    [External]
+    PROCEDURE FindJobPlanningLinePrice@19(VAR JobPlanningLine@1002 : Record "Job Planning Line";CalledByFieldNo@1001 : Integer);
+    VAR
+      JTHeader@1000 : Record Job;
+    BEGIN
+      with JobPlanningLine do begin
+        SetCurrency("Currency Code","Currency Factor","Planning Date");
+        SetVAT(false,0,'');
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+        TESTFIELD("Qty. per Unit of Measure");
+
+        case Type of
+          Type::Item:
+            begin
+              Item.GET("No.");
+              PriceInSKU := SKU.GET('',"No.","Variant Code");
+              JTHeader.GET("Job No.");
+
+              FindPurchPrice(
+                TempPurchPrice,'',"No.","Variant Code","Unit of Measure Code",'',"Planning Date",false);
+              PricesInCurrency := false;
+              GLSetup.GET;
+              CalcBestDirectUnitCost(TempPurchPrice);
+              SetCurrency("Currency Code","Currency Factor","Planning Date");
+
+              if FoundPurchPrice or
+                 not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                      ((CalledByFieldNo = FIELDNO("Variant Code")) and not PriceInSKU))
+              then
+                "Direct Unit Cost (LCY)" := TempPurchPrice."Direct Unit Cost";
+            end;
+          Type::Resource:
+            begin
+              ResCost.INIT;
+              ResCost.Code := "No.";
+              ResCost."Work Type Code" := "Work Type Code";
+              CODEUNIT.RUN(CODEUNIT::"Resource-Find Cost",ResCost);
+
+              ConvertPriceLCYToFCY("Currency Code",ResCost."Unit Cost");
+              "Direct Unit Cost (LCY)" := ROUND(ResCost."Direct Unit Cost" * "Qty. per Unit of Measure",
+                  Currency."Unit-Amount Rounding Precision");
+              VALIDATE("Unit Cost (LCY)",ROUND(ResCost."Unit Cost" * "Qty. per Unit of Measure",
+                  Currency."Unit-Amount Rounding Precision"));
+            end;
+        end;
+        VALIDATE("Direct Unit Cost (LCY)");
+      end;
+    END;
+
+    [External]
+    PROCEDURE FindJobJnlLinePrice@20(VAR JobJnlLine@1002 : Record "Job Journal Line";CalledByFieldNo@1001 : Integer);
+    VAR
+      JTHeader@1000 : Record Job;
+    BEGIN
+      with JobJnlLine do begin
+        SetCurrency("Currency Code","Currency Factor","Posting Date");
+        SetVAT(false,0,'');
+        SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+        TESTFIELD("Qty. per Unit of Measure");
+
+        case Type of
+          Type::Item:
+            begin
+              Item.GET("No.");
+              PriceInSKU := SKU.GET('',"No.","Variant Code");
+              JTHeader.GET("Job No.");
+
+              FindPurchPrice(
+                TempPurchPrice,'',"No.","Variant Code","Unit of Measure Code","Country/Region Code","Posting Date",false);
+              PricesInCurrency := false;
+              GLSetup.GET;
+              CalcBestDirectUnitCost(TempPurchPrice);
+              SetCurrency("Currency Code","Currency Factor","Posting Date");
+
+              if FoundPurchPrice or
+                 not ((CalledByFieldNo = FIELDNO(Quantity)) or
+                      ((CalledByFieldNo = FIELDNO("Variant Code")) and not PriceInSKU))
+              then
+                "Direct Unit Cost (LCY)" := TempPurchPrice."Direct Unit Cost";
+            end;
+          Type::Resource:
+            begin
+              ResCost.INIT;
+              ResCost.Code := "No.";
+              ResCost."Work Type Code" := "Work Type Code";
+              CODEUNIT.RUN(CODEUNIT::"Resource-Find Cost",ResCost);
+
+              ConvertPriceLCYToFCY("Currency Code",ResCost."Unit Cost");
+              "Direct Unit Cost (LCY)" := ROUND(ResCost."Direct Unit Cost" * "Qty. per Unit of Measure",
+                  Currency."Unit-Amount Rounding Precision");
+              VALIDATE("Unit Cost (LCY)",ROUND(ResCost."Unit Cost" * "Qty. per Unit of Measure",
+                  Currency."Unit-Amount Rounding Precision"));
+            end;
+        end;
+        VALIDATE("Direct Unit Cost (LCY)");
+      end;
+    END;
+
+    [External]
+    PROCEDURE NoOfPurchLinePrice@27(PurchHeader@1001 : Record "Purchase Header";VAR PurchLine@1000 : Record "Purchase Line";ShowAll@1002 : Boolean) : Integer;
+    BEGIN
+      if PurchLinePriceExists(PurchHeader,PurchLine,ShowAll) then
+        exit(TempPurchPrice.COUNT);
+    END;
+
+    [External]
+    PROCEDURE NoOfPurchLineLineDisc@26(PurchHeader@1102628002 : Record "Purchase Header";VAR PurchLine@1102628001 : Record "Purchase Line";ShowAll@1102628000 : Boolean) : Integer;
+    BEGIN
+      if PurchLineLineDiscExists(PurchHeader,PurchLine,ShowAll) then
+        exit(TempPurchLineDisc.COUNT);
+    END;
+
+    [External]
+    PROCEDURE GetPurchLinePrice@10(PurchHeader@1000 : Record "Purchase Header";VAR PurchLine@1001 : Record "Purchase Line");
+    BEGIN
+      PurchLinePriceExists(PurchHeader,PurchLine,true);
+
+      with PurchLine do
+        if PAGE.RUNMODAL(PAGE::"Get Purchase Price",TempPurchPrice) = ACTION::LookupOK then begin
+          SetVAT(PurchHeader."Prices Including VAT","VAT %","VAT Bus. Posting Group");
+          SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+          SetCurrency(
+            PurchHeader."Currency Code",PurchHeader."Currency Factor",PurchHeaderExchDate(PurchHeader));
+
+          if not IsInMinQty(TempPurchPrice."Unit of Measure Code",TempPurchPrice."Minimum Quantity") then
+            ERROR(
+              Text000,
+              FIELDCAPTION(Quantity),
+              TempPurchPrice.FIELDCAPTION("Minimum Quantity"),
+              TempPurchPrice.TABLECAPTION);
+          if not (TempPurchPrice."Currency Code" in ["Currency Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Currency Code"),
+              TABLECAPTION,
+              TempPurchPrice.TABLECAPTION);
+          if not (TempPurchPrice."Unit of Measure Code" in ["Unit of Measure Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Unit of Measure Code"),
+              TABLECAPTION,
+              TempPurchPrice.TABLECAPTION);
+          if TempPurchPrice."Starting Date" > PurchHeaderStartDate(PurchHeader,DateCaption) then
+            ERROR(
+              Text000,
+              DateCaption,
+              TempPurchPrice.FIELDCAPTION("Starting Date"),
+              TempPurchPrice.TABLECAPTION);
+
+          ConvertPriceToVAT(
+            PurchHeader."Prices Including VAT",Item."VAT Prod. Posting Group",
+            "VAT Bus. Posting Group",TempPurchPrice."Direct Unit Cost");
+          ConvertPriceToUoM(TempPurchPrice."Unit of Measure Code",TempPurchPrice."Direct Unit Cost");
+          ConvertPriceLCYToFCY(TempPurchPrice."Currency Code",TempPurchPrice."Direct Unit Cost");
+
+          VALIDATE("Direct Unit Cost",TempPurchPrice."Direct Unit Cost");
+        end;
+    END;
+
+    [External]
+    PROCEDURE GetPurchLineLineDisc@21(PurchHeader@1102628001 : Record "Purchase Header";VAR PurchLine@1102628000 : Record "Purchase Line");
+    BEGIN
+      PurchLineLineDiscExists(PurchHeader,PurchLine,true);
+
+      with PurchLine do
+        if PAGE.RUNMODAL(PAGE::"Get Purchase Line Disc.",TempPurchLineDisc) = ACTION::LookupOK then
+          begin
+          SetCurrency(PurchHeader."Currency Code",0,0D);
+          SetUoM(ABS(Quantity),"Qty. per Unit of Measure");
+
+          if not IsInMinQty(TempPurchLineDisc."Unit of Measure Code",TempPurchLineDisc."Minimum Quantity")
+          then
+            ERROR(
+              Text000,FIELDCAPTION(Quantity),
+              TempPurchLineDisc.FIELDCAPTION("Minimum Quantity"),
+              TempPurchLineDisc.TABLECAPTION);
+          if not (TempPurchLineDisc."Currency Code" in ["Currency Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Currency Code"),
+              TABLECAPTION,
+              TempPurchLineDisc.TABLECAPTION);
+          if not (TempPurchLineDisc."Unit of Measure Code" in ["Unit of Measure Code",'']) then
+            ERROR(
+              Text001,
+              FIELDCAPTION("Unit of Measure Code"),
+              TABLECAPTION,
+              TempPurchLineDisc.TABLECAPTION);
+          if TempPurchLineDisc."Starting Date" > PurchHeaderStartDate(PurchHeader,DateCaption) then
+            ERROR(
+              Text000,
+              DateCaption,
+              TempPurchLineDisc.FIELDCAPTION("Starting Date"),
+              TempPurchLineDisc.TABLECAPTION);
+
+          VALIDATE("Line Discount %",TempPurchLineDisc."Line Discount %");
+        end;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterFindPurchLinePrice@8(VAR PurchaseLine@1001 : Record "Purchase Line";PurchaseHeader@1002 : Record "Purchase Header";PurchasePrice@1003 : Record "Purchase Price";CalledByFieldNo@1000 : Integer);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

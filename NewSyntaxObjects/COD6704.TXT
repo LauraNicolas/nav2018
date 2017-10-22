@@ -1,0 +1,220 @@
+OBJECT Codeunit 6704 Booking Customer Sync.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            LocalBookingSync@1001 : Record "Booking Sync";
+            MarketingSetup@1000 : Record "Marketing Setup";
+          BEGIN
+            // Do not sync with Bookings if Graph sync is enabled
+            if MarketingSetup.GET and MarketingSetup."Sync with Microsoft Graph" then
+              exit;
+
+            LocalBookingSync.SETRANGE("Sync Customers",true);
+            LocalBookingSync.SETRANGE(Enabled,true);
+            if LocalBookingSync.FINDFIRST then
+              O365SyncManagement.SyncBookingCustomers(LocalBookingSync);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempContact@1002 : TEMPORARY Record Contact;
+      O365SyncManagement@1001 : Codeunit "O365 Sync. Management";
+      O365ContactSyncHelper@1000 : Codeunit "O365 Contact Sync. Helper";
+      ProcessExchangeContactsMsg@1005 : TextConst 'ENU=Processing contacts from Exchange.';
+      ProcessNavContactsMsg@1004 : TextConst 'ENU=Processing contacts in your company.';
+
+    [External]
+    PROCEDURE GetRequestParameters@2(VAR BookingSync@1000 : Record "Booking Sync") : Text;
+    VAR
+      LocalCustomer@1004 : Record Customer;
+      FilterPage@1002 : FilterPageBuilder;
+      FilterText@1001 : Text;
+      CustomerTxt@1003 : Text;
+    BEGIN
+      FilterText := BookingSync.GetCustomerFilter;
+
+      CustomerTxt := LocalCustomer.TABLECAPTION;
+      FilterPage.PAGECAPTION := CustomerTxt;
+      FilterPage.ADDTABLE(CustomerTxt,DATABASE::Customer);
+
+      if FilterText <> '' then
+        FilterPage.SETVIEW(CustomerTxt,FilterText);
+
+      FilterPage.ADDFIELD(CustomerTxt,LocalCustomer.City);
+      FilterPage.ADDFIELD(CustomerTxt,LocalCustomer.County);
+      FilterPage.ADDFIELD(CustomerTxt,LocalCustomer."Post Code");
+      FilterPage.ADDFIELD(CustomerTxt,LocalCustomer."Country/Region Code");
+      FilterPage.ADDFIELD(CustomerTxt,LocalCustomer."Salesperson Code");
+      FilterPage.ADDFIELD(CustomerTxt,LocalCustomer."Currency Code");
+
+      if FilterPage.RUNMODAL then
+        FilterText := FilterPage.GETVIEW(CustomerTxt);
+
+      if FilterText <> '' then begin
+        BookingSync.SaveCustomerFilter(FilterText);
+        BookingSync.MODIFY(true);
+      end;
+
+      exit(FilterText);
+    END;
+
+    [Internal]
+    PROCEDURE SyncRecords@1(VAR BookingSync@1000 : Record "Booking Sync");
+    VAR
+      ExchangeSync@1003 : Record "Exchange Sync";
+    BEGIN
+      ExchangeSync.GET(USERID);
+      O365ContactSyncHelper.GetO365Contacts(ExchangeSync,TempContact);
+
+      O365SyncManagement.ShowProgress(ProcessNavContactsMsg);
+      ProcessNavContacts(BookingSync);
+
+      O365SyncManagement.ShowProgress(ProcessExchangeContactsMsg);
+      ProcessExchangeContacts(BookingSync);
+
+      O365SyncManagement.CloseProgress;
+      BookingSync."Last Customer Sync" := CREATEDATETIME(TODAY,TIME);
+      BookingSync.MODIFY(true);
+    END;
+
+    LOCAL PROCEDURE ProcessExchangeContacts@22(VAR BookingSync@1002 : Record "Booking Sync");
+    BEGIN
+      TempContact.RESET;
+      TempContact.SetLastDateTimeFilter(BookingSync."Last Customer Sync");
+
+      ProcessExchangeContactRecordSet(TempContact,BookingSync);
+    END;
+
+    LOCAL PROCEDURE ProcessExchangeContactRecordSet@21(VAR LocalContact@1000 : Record Contact;BookingSync@1003 : Record "Booking Sync");
+    VAR
+      ContactBusinessRelation@1008 : Record "Contact Business Relation";
+      ExchangeSync@1006 : Record "Exchange Sync";
+      Contact@1005 : Record Contact;
+      CompanyContact@1007 : Record Contact;
+      CompanyFound@1001 : Boolean;
+      ContactNo@1002 : Text;
+    BEGIN
+      ExchangeSync.GET(USERID);
+
+      if LocalContact.FINDSET then begin
+        repeat
+          CompanyFound := false;
+          ContactNo := '';
+          Contact.RESET;
+          CLEAR(Contact);
+          Contact.SETRANGE("Search E-Mail",UPPERCASE(LocalContact."E-Mail"));
+          if Contact.FINDFIRST then begin
+            ContactNo := Contact."No.";
+            if Contact.Type = Contact.Type::Company then
+              CompanyFound := true;
+          end;
+
+          O365ContactSyncHelper.TransferBookingContactToNavContact(LocalContact,Contact);
+          if not CompanyFound and (ContactNo <> '') then begin
+            Contact."No." := COPYSTR(ContactNo,1,20);
+            Contact.MODIFY(true);
+            if Contact."Company No." = '' then begin
+              Contact.VALIDATE(Type,Contact.Type::Company);
+              Contact.TypeChange;
+              Contact.MODIFY;
+              Contact.SetHideValidationDialog(true);
+              Contact.CreateCustomer(BookingSync."Customer Template Code");
+            end else begin
+              CompanyContact.SETRANGE("No.",Contact."Company No.");
+              if CompanyContact.FINDFIRST then begin
+                ContactBusinessRelation.SETRANGE("Contact No.",CompanyContact."Company No.");
+                if not ContactBusinessRelation.FINDFIRST then begin
+                  CompanyContact.SetHideValidationDialog(true);
+                  CompanyContact.CreateCustomer(BookingSync."Customer Template Code");
+                  CompanyContact.MODIFY(true);
+                end;
+              end;
+            end;
+          end else
+            if CompanyFound then begin
+              Contact."No." := COPYSTR(ContactNo,1,20);
+              Contact.MODIFY(true);
+              ContactBusinessRelation.SETRANGE("Contact No.",Contact."Company No.");
+              if not ContactBusinessRelation.FINDFIRST then begin
+                Contact.SetHideValidationDialog(true);
+                Contact.CreateCustomer(BookingSync."Customer Template Code");
+                Contact.MODIFY(true);
+              end;
+            end else begin
+              Contact."No." := '';
+              Contact.VALIDATE(Type,Contact.Type::Company);
+              Contact.INSERT(true);
+              Contact.SetHideValidationDialog(true);
+              Contact.CreateCustomer(BookingSync."Customer Template Code");
+            end;
+
+        until (LocalContact.NEXT = 0)
+      end;
+    END;
+
+    LOCAL PROCEDURE ProcessNavContacts@10(BookingSync@1000 : Record "Booking Sync");
+    VAR
+      Contact@1002 : Record Contact;
+    BEGIN
+      BuildNavContactFilter(Contact,BookingSync);
+
+      if Contact.HASFILTER then begin
+        Contact.SetLastDateTimeFilter(BookingSync."Last Customer Sync");
+        ProcessNavContactRecordSet(Contact);
+      end;
+    END;
+
+    LOCAL PROCEDURE ProcessNavContactRecordSet@24(VAR Contact@1000 : Record Contact);
+    VAR
+      ExchangeSync@1002 : Record "Exchange Sync";
+      O365ContactSyncHelper@1005 : Codeunit "O365 Contact Sync. Helper";
+    BEGIN
+      ExchangeSync.GET(USERID);
+      O365ContactSyncHelper.ProcessNavContactRecordSet(Contact,TempContact,ExchangeSync);
+    END;
+
+    LOCAL PROCEDURE BuildNavContactFilter@16(VAR Contact@1000 : Record Contact;VAR BookingSync@1001 : Record "Booking Sync");
+    VAR
+      Customer@1002 : Record Customer;
+      ContactBusinessRelation@1003 : Record "Contact Business Relation";
+      CompanyFilter@1004 : Text;
+      CustomerFilter@1005 : Text;
+    BEGIN
+      Customer.SETVIEW(BookingSync.GetCustomerFilter);
+
+      if Customer.FINDSET then
+        repeat
+          CustomerFilter += Customer."No." + '|';
+        until Customer.NEXT = 0;
+      CustomerFilter := DELCHR(CustomerFilter,'>','|');
+
+      if CustomerFilter <> '' then begin
+        ContactBusinessRelation.SETRANGE("Link to Table",ContactBusinessRelation."Link to Table"::Customer);
+        ContactBusinessRelation.SETFILTER("No.",CustomerFilter);
+        if ContactBusinessRelation.FINDSET then
+          repeat
+            CompanyFilter += ContactBusinessRelation."Contact No." + '|';
+          until ContactBusinessRelation.NEXT = 0;
+
+        CompanyFilter := DELCHR(CompanyFilter,'>','|');
+
+        Contact.SETFILTER("Company No.",CompanyFilter);
+        Contact.SETFILTER("E-Mail",'<>%1','');
+        Contact.SETRANGE(Type,Contact.Type::Company);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,117 @@
+OBJECT Codeunit 6722 Booking Manager Handler
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    SingleInstance=true;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      BookingSync@1001 : Record "Booking Sync";
+      O365SyncManagement@1000 : Codeunit "O365 Sync. Management";
+      TaskId@1002 : GUID;
+      DocumentNo@1003 : Code[20];
+
+    LOCAL PROCEDURE CanHandle@2() : Boolean;
+    VAR
+      BookingMgrSetup@1000 : Record "Booking Mgr. Setup";
+    BEGIN
+      if BookingMgrSetup.GET then
+        exit(BookingSync.IsSetup and (BookingMgrSetup."Booking Mgr. Codeunit" = CODEUNIT::"Booking Manager Handler"));
+
+      exit(true);
+    END;
+
+    [EventSubscriber(Codeunit,6721,OnGetBookingMailboxes)]
+    LOCAL PROCEDURE OnGetBookingMailboxes@3(VAR TempBookingMailbox@1000 : TEMPORARY Record "Booking Mailbox");
+    BEGIN
+      if not CanHandle then
+        exit;
+
+      O365SyncManagement.GetBookingMailboxes(BookingSync,TempBookingMailbox,'');
+    END;
+
+    [EventSubscriber(Codeunit,6721,OnRegisterAppointmentConnection)]
+    LOCAL PROCEDURE OnRegisterAppointmentConnection@9();
+    VAR
+      BookingSync@1006 : Record "Booking Sync";
+      AzureADMgt@1002 : Codeunit "Azure AD Mgt.";
+      BookingManager@1007 : Codeunit "Booking Manager";
+      EntityEndpoint@1005 : Text;
+      Resource@1004 : Text;
+      ConnectionName@1000 : Text;
+      ConnectionString@1003 : Text;
+      Token@1001 : Text;
+    BEGIN
+      if not CanHandle then
+        exit;
+
+      ConnectionName := BookingManager.GetAppointmentConnectionName;
+
+      if HASTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph,ConnectionName) then begin
+        if GETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph) <> ConnectionName then
+          SETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph,ConnectionName);
+        exit;
+      end;
+
+      Resource := 'https://bookings.office.net/';
+      Token := AzureADMgt.GetAccessToken(Resource,'Bookings',false);
+
+      BookingSync.GET;
+      EntityEndpoint := 'https://bookings.office.net/api/v1.0/bookingBusinesses(''%1'')/appointments';
+      ConnectionString := STRSUBSTNO('{ENTITYLISTENDPOINT}=%1;{ENTITYENDPOINT}=%1;{EXORESOURCEURI}=%2;{PASSWORD}=%3;',
+          EntityEndpoint,Resource,Token);
+      ConnectionString := STRSUBSTNO(ConnectionString,BookingSync."Booking Mailbox Address");
+
+      REGISTERTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph,ConnectionName,ConnectionString);
+      SETDEFAULTTABLECONNECTION(TABLECONNECTIONTYPE::MicrosoftGraph,ConnectionName);
+    END;
+
+    [EventSubscriber(Codeunit,6721,OnSetBookingItemInvoiced)]
+    LOCAL PROCEDURE OnSetBookingItemInvoiced@4(VAR InvoicedBookingItem@1000 : Record "Invoiced Booking Item");
+    BEGIN
+      if CanHandle then begin
+        if not ISNULLGUID(TaskId) and TASKSCHEDULER.TASKEXISTS(TaskId) and (DocumentNo = InvoicedBookingItem."Document No.") then
+          TASKSCHEDULER.CANCELTASK(TaskId);
+
+        DocumentNo := InvoicedBookingItem."Document No.";
+        TaskId := TASKSCHEDULER.CREATETASK(CODEUNIT::"Booking Appointment - Modify",0,true,COMPANYNAME,
+            CURRENTDATETIME + 10000,InvoicedBookingItem.RECORDID); // Add 10s to avoid locking issues and allow batching
+      end;
+    END;
+
+    [EventSubscriber(Codeunit,6721,OnSynchronize)]
+    LOCAL PROCEDURE OnSynchronize@5(VAR BookingItem@1000 : Record "Booking Item");
+    VAR
+      BookingSync@1002 : Record "Booking Sync";
+      Customer@1003 : Record Customer;
+      Item@1004 : Record Item;
+      O365SyncManagement@1001 : Codeunit "O365 Sync. Management";
+    BEGIN
+      if not CanHandle then
+        exit;
+
+      BookingSync.GET;
+      if BookingSync."Sync Customers" then
+        if not Customer.FindByEmail(Customer,BookingItem."Customer Email") then
+          O365SyncManagement.SyncBookingCustomers(BookingSync);
+
+      Item.SETRANGE(Description,BookingItem."Service Name");
+      if not Item.FINDFIRST then
+        O365SyncManagement.SyncBookingServices(BookingSync);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

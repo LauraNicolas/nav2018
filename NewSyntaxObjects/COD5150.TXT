@@ -1,0 +1,650 @@
+OBJECT Codeunit 5150 Integration Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Sales Invoice Header"=rm,
+                TableData "Sales Invoice Line"=rm,
+                TableData "Marketing Setup"=r;
+    SingleInstance=true;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      IntegrationIsActivated@1003 : Boolean;
+      PageServiceNameTok@1004 : TextConst 'ENU=Integration %1';
+      IntegrationServicesEnabledMsg@1006 : TextConst '@@@=%1 - product name;ENU=Integration services have been enabled.\The %1 service should be restarted.';
+      IntegrationServicesDisabledMsg@1005 : TextConst '@@@=%1 - product name;ENU=Integration services have been disabled.\The %1 service should be restarted.';
+      HideMessages@1000 : Boolean;
+
+    [External]
+    PROCEDURE GetDatabaseTableTriggerSetup@1(TableID@1000 : Integer;VAR Insert@1001 : Boolean;VAR Modify@1002 : Boolean;VAR Delete@1003 : Boolean;VAR Rename@1004 : Boolean);
+    BEGIN
+      if COMPANYNAME = '' then
+        exit;
+
+      if not GetIntegrationActivated then
+        exit;
+
+      if IsIntegrationRecord(TableID) or IsIntegrationRecordChild(TableID) then begin
+        Insert := true;
+        Modify := true;
+        Delete := true;
+        Rename := true;
+      end;
+    END;
+
+    [External]
+    PROCEDURE OnDatabaseInsert@2(RecRef@1000 : RecordRef);
+    VAR
+      TimeStamp@1001 : DateTime;
+    BEGIN
+      if not GetIntegrationActivated then
+        exit;
+
+      TimeStamp := CURRENTDATETIME;
+      UpdateParentIntegrationRecord(RecRef,TimeStamp);
+      InsertUpdateIntegrationRecord(RecRef,TimeStamp);
+    END;
+
+    [External]
+    PROCEDURE OnDatabaseModify@3(RecRef@1000 : RecordRef);
+    VAR
+      TimeStamp@1001 : DateTime;
+    BEGIN
+      if not GetIntegrationActivated then
+        exit;
+
+      TimeStamp := CURRENTDATETIME;
+      UpdateParentIntegrationRecord(RecRef,TimeStamp);
+      InsertUpdateIntegrationRecord(RecRef,TimeStamp);
+    END;
+
+    [External]
+    PROCEDURE OnDatabaseDelete@4(RecRef@1000 : RecordRef);
+    VAR
+      SalesHeader@1002 : Record "Sales Header";
+      IntegrationRecord@1001 : Record "Integration Record";
+      IntegrationRecordArchive@1005 : Record "Integration Record Archive";
+      SkipDeletion@1004 : Boolean;
+      TimeStamp@1003 : DateTime;
+    BEGIN
+      if not GetIntegrationActivated then
+        exit;
+
+      TimeStamp := CURRENTDATETIME;
+      UpdateParentIntegrationRecord(RecRef,TimeStamp);
+      if IsIntegrationRecord(RecRef.NUMBER) then begin
+        IntegrationRecord.SETRANGE("Record ID",RecRef.RECORDID);
+        if IntegrationRecord.FINDFIRST then begin
+          // Handle exceptions where "Deleted On" should not be set.
+          if RecRef.NUMBER = DATABASE::"Sales Header" then begin
+            RecRef.SETTABLE(SalesHeader);
+            SkipDeletion := SalesHeader.Invoice;
+          end;
+
+          // Archive
+          IntegrationRecordArchive.TRANSFERFIELDS(IntegrationRecord);
+          if IntegrationRecordArchive.INSERT then;
+
+          if not SkipDeletion then
+            IntegrationRecord."Deleted On" := TimeStamp;
+
+          CLEAR(IntegrationRecord."Record ID");
+          IntegrationRecord."Modified On" := TimeStamp;
+          IntegrationRecord.MODIFY;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE OnDatabaseRename@5(RecRef@1000 : RecordRef;XRecRef@1001 : RecordRef);
+    VAR
+      IntegrationRecord@1003 : Record "Integration Record";
+      TimeStamp@1002 : DateTime;
+    BEGIN
+      if not GetIntegrationActivated then
+        exit;
+
+      TimeStamp := CURRENTDATETIME;
+      UpdateParentIntegrationRecord(RecRef,TimeStamp);
+      if IsIntegrationRecord(RecRef.NUMBER) then begin
+        IntegrationRecord.SETRANGE("Record ID",XRecRef.RECORDID);
+        if IntegrationRecord.FINDFIRST then begin
+          IntegrationRecord."Record ID" := RecRef.RECORDID;
+          IntegrationRecord.MODIFY;
+        end;
+      end;
+      InsertUpdateIntegrationRecord(RecRef,TimeStamp);
+    END;
+
+    LOCAL PROCEDURE UpdateParentIntegrationRecord@17(RecRef@1000 : RecordRef;TimeStamp@1008 : DateTime);
+    VAR
+      Currency@1012 : Record Currency;
+      SalesHeader@1001 : Record "Sales Header";
+      SalesLine@1007 : Record "Sales Line";
+      SalesInvoiceHeader@1002 : Record "Sales Invoice Header";
+      SalesInvoiceLine@1009 : Record "Sales Invoice Line";
+      SalesCrMemoHeader@1020 : Record "Sales Cr.Memo Header";
+      SalesCrMemoLine@1019 : Record "Sales Cr.Memo Line";
+      Customer@1003 : Record Customer;
+      ShipToAddress@1010 : Record "Ship-to Address";
+      CurrencyExchangeRate@1011 : Record "Currency Exchange Rate";
+      SalesPrice@1004 : Record "Sales Price";
+      CustomerPriceGroup@1005 : Record "Customer Price Group";
+      ContactProfileAnswer@1016 : Record "Contact Profile Answer";
+      ContactAltAddress@1014 : Record "Contact Alt. Address";
+      RlshpMgtCommentLine@1013 : Record "Rlshp. Mgt. Comment Line";
+      Contact@1015 : Record Contact;
+      Vendor@1018 : Record Vendor;
+      VendorBankAccount@1017 : Record "Vendor Bank Account";
+      PurchaseHeader@1022 : Record "Purchase Header";
+      PurchaseLine@1021 : Record "Purchase Line";
+      ParentRecRef@1006 : RecordRef;
+    BEGIN
+      // Handle cases where entities change should update the parent record
+      // Function must not fail even if the parent record cannot be found
+      case RecRef.NUMBER of
+        DATABASE::"Sales Line":
+          begin
+            RecRef.SETTABLE(SalesLine);
+            if SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.") then begin
+              ParentRecRef.GETTABLE(SalesHeader);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+        DATABASE::"Sales Invoice Line":
+          begin
+            RecRef.SETTABLE(SalesInvoiceLine);
+            if SalesInvoiceHeader.GET(SalesInvoiceLine."Document No.") then begin
+              ParentRecRef.GETTABLE(SalesInvoiceHeader);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+        DATABASE::"Sales Cr.Memo Line":
+          begin
+            RecRef.SETTABLE(SalesCrMemoLine);
+            if SalesCrMemoHeader.GET(SalesCrMemoLine."Document No.") then begin
+              ParentRecRef.GETTABLE(SalesCrMemoHeader);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+        DATABASE::"Sales Price":
+          begin
+            RecRef.SETTABLE(SalesPrice);
+            if SalesPrice."Sales Type" <> SalesPrice."Sales Type"::"Customer Price Group" then
+              exit;
+
+            if CustomerPriceGroup.GET(SalesPrice."Sales Code") then begin
+              ParentRecRef.GETTABLE(CustomerPriceGroup);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+        DATABASE::"Ship-to Address":
+          begin
+            RecRef.SETTABLE(ShipToAddress);
+            if Customer.GET(ShipToAddress."Customer No.") then begin
+              ParentRecRef.GETTABLE(Customer);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+        DATABASE::"Currency Exchange Rate":
+          begin
+            RecRef.SETTABLE(CurrencyExchangeRate);
+            if Currency.GET(CurrencyExchangeRate."Currency Code") then begin
+              ParentRecRef.GETTABLE(Currency);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+        DATABASE::"Contact Alt. Address":
+          begin
+            RecRef.SETTABLE(ContactAltAddress);
+            if Contact.GET(ContactAltAddress."Contact No.") then begin
+              ParentRecRef.GETTABLE(Contact);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+        DATABASE::"Contact Profile Answer":
+          begin
+            RecRef.SETTABLE(ContactProfileAnswer);
+            if Contact.GET(ContactProfileAnswer."Contact No.") then begin
+              ParentRecRef.GETTABLE(Contact);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+        DATABASE::"Rlshp. Mgt. Comment Line":
+          begin
+            RecRef.SETTABLE(RlshpMgtCommentLine);
+            if RlshpMgtCommentLine."Table Name" = RlshpMgtCommentLine."Table Name"::Contact then
+              if Contact.GET(RlshpMgtCommentLine."No.") then begin
+                ParentRecRef.GETTABLE(Contact);
+                InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+              end;
+          end;
+        DATABASE::"Vendor Bank Account":
+          begin
+            RecRef.SETTABLE(VendorBankAccount);
+            if Vendor.GET(VendorBankAccount."Vendor No.") then begin
+              ParentRecRef.GETTABLE(Vendor);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+        DATABASE::"Purchase Line":
+          begin
+            RecRef.SETTABLE(PurchaseLine);
+            if PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.") then begin
+              ParentRecRef.GETTABLE(PurchaseHeader);
+              InsertUpdateIntegrationRecord(ParentRecRef,TimeStamp);
+            end;
+          end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetupIntegrationTables@8();
+    VAR
+      TempNameValueBuffer@1000 : TEMPORARY Record "Name/Value Buffer";
+      TableId@1001 : Integer;
+    BEGIN
+      CreateIntegrationPageList(TempNameValueBuffer);
+      TempNameValueBuffer.FINDFIRST;
+      repeat
+        EVALUATE(TableId,TempNameValueBuffer.Value);
+        InitializeIntegrationRecords(TableId);
+      until TempNameValueBuffer.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE CreateIntegrationPageList@23(VAR TempNameValueBuffer@1000 : TEMPORARY Record "Name/Value Buffer");
+    VAR
+      NextId@1001 : Integer;
+    BEGIN
+      with TempNameValueBuffer do begin
+        DELETEALL;
+        NextId := 1;
+
+        AddToIntegrationPageList(PAGE::"Resource List",DATABASE::Resource,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Payment Terms",DATABASE::"Payment Terms",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Shipment Methods",DATABASE::"Shipment Method",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Shipping Agents",DATABASE::"Shipping Agent",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::Currencies,DATABASE::Currency,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Salespersons/Purchasers",DATABASE::"Salesperson/Purchaser",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Customer Card",DATABASE::Customer,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Vendor Card",DATABASE::Vendor,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Company Information",DATABASE::"Company Information",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Item Card",DATABASE::Item,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"G/L Account Card",DATABASE::"G/L Account",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Sales Order",DATABASE::"Sales Header",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Sales Invoice",DATABASE::"Sales Header",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Sales Credit Memo",DATABASE::"Sales Header",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"General Journal Batches",DATABASE::"Gen. Journal Batch",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"General Journal",DATABASE::"Gen. Journal Line",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(
+          PAGE::"VAT Business Posting Groups",DATABASE::"VAT Business Posting Group",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"VAT Product Posting Groups",DATABASE::"VAT Product Posting Group",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"VAT Clauses",DATABASE::"VAT Clause",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Tax Groups",DATABASE::"Tax Group",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Tax Area List",DATABASE::"Tax Area",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Posted Sales Invoice",DATABASE::"Sales Invoice Header",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Posted Sales Credit Memos",DATABASE::"Sales Cr.Memo Header",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Units of Measure",DATABASE::"Unit of Measure",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Ship-to Address",DATABASE::"Ship-to Address",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Contact Card",DATABASE::Contact,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Countries/Regions",DATABASE::"Country/Region",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Payment Terms",DATABASE::"Payment Terms",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Shipment Methods",DATABASE::"Shipment Method",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Opportunity List",DATABASE::Opportunity,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Units of Measure Entity",DATABASE::"Unit of Measure",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::Dimensions,DATABASE::Dimension,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Item Categories Entity",DATABASE::"Item Category",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Currencies Entity",DATABASE::Currency,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Country/Regions Entity",DATABASE::"Country/Region",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Payment Methods Entity",DATABASE::"Payment Method",TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Employee Entity",DATABASE::Employee,TempNameValueBuffer,NextId);
+        AddToIntegrationPageList(PAGE::"Unlinked Attachments",DATABASE::"Unlinked Attachment",TempNameValueBuffer,NextId);
+      end;
+    END;
+
+    [External]
+    PROCEDURE IsIntegrationServicesEnabled@24() : Boolean;
+    VAR
+      WebService@1000 : Record "Web Service";
+    BEGIN
+      exit(WebService.GET(WebService."Object Type"::Codeunit,'Integration Service'));
+    END;
+
+    [External]
+    PROCEDURE IsIntegrationActivated@21() : Boolean;
+    BEGIN
+      exit(IntegrationIsActivated);
+    END;
+
+    [Internal]
+    PROCEDURE EnableIntegrationServices@25();
+    BEGIN
+      if IsIntegrationServicesEnabled then
+        exit;
+
+      SetupIntegrationService;
+      SetupIntegrationServices;
+      if not HideMessages then
+        MESSAGE(IntegrationServicesEnabledMsg,PRODUCTNAME.FULL);
+    END;
+
+    [External]
+    PROCEDURE DisableIntegrationServices@26();
+    BEGIN
+      if not IsIntegrationServicesEnabled then
+        exit;
+
+      DeleteIntegrationService;
+      DeleteIntegrationServices;
+
+      MESSAGE(IntegrationServicesDisabledMsg,PRODUCTNAME.FULL);
+    END;
+
+    [External]
+    PROCEDURE SetConnectorIsEnabledForSession@27(IsEnabled@1000 : Boolean);
+    BEGIN
+      IntegrationIsActivated := IsEnabled;
+    END;
+
+    [External]
+    PROCEDURE IsIntegrationRecord@6(TableID@1000 : Integer) : Boolean;
+    VAR
+      isIntegrationRecord@1001 : Boolean;
+    BEGIN
+      OnIsIntegrationRecord(TableID,isIntegrationRecord);
+      if isIntegrationRecord then
+        exit(true);
+      exit(TableID in
+        [DATABASE::Resource,
+         DATABASE::"Shipping Agent",
+         DATABASE::"Salesperson/Purchaser",
+         DATABASE::Customer,
+         DATABASE::Vendor,
+         DATABASE::Dimension,
+         DATABASE::"Dimension Value",
+         DATABASE::"Company Information",
+         DATABASE::Item,
+         DATABASE::"G/L Account",
+         DATABASE::"Sales Header",
+         DATABASE::"Sales Invoice Header",
+         DATABASE::"Gen. Journal Batch",
+         DATABASE::"Sales Cr.Memo Header",
+         DATABASE::"Gen. Journal Line",
+         DATABASE::"VAT Business Posting Group",
+         DATABASE::"VAT Product Posting Group",
+         DATABASE::"VAT Clause",
+         DATABASE::"Tax Group",
+         DATABASE::"Tax Area",
+         DATABASE::"Unit of Measure",
+         DATABASE::"Ship-to Address",
+         DATABASE::Contact,
+         DATABASE::"Country/Region",
+         DATABASE::"Customer Price Group",
+         DATABASE::"Sales Price",
+         DATABASE::"Payment Terms",
+         DATABASE::"Shipment Method",
+         DATABASE::Opportunity,
+         DATABASE::"Item Category",
+         DATABASE::"Country/Region",
+         DATABASE::"Payment Method",
+         DATABASE::Currency,
+         DATABASE::Employee,
+         DATABASE::"Incoming Document Attachment",
+         DATABASE::"Unlinked Attachment",
+         DATABASE::"Purchase Header",
+         DATABASE::"Purch. Inv. Header",
+         DATABASE::"G/L Entry"]);
+    END;
+
+    [Integration]
+    [External]
+    PROCEDURE OnIsIntegrationRecord@29(TableID@1000 : Integer;VAR isIntegrationRecord@1001 : Boolean);
+    BEGIN
+    END;
+
+    [External]
+    PROCEDURE IsIntegrationRecordChild@18(TableID@1000 : Integer) : Boolean;
+    VAR
+      isIntegrationRecordChild@1001 : Boolean;
+    BEGIN
+      OnIsIntegrationRecordChild(TableID,isIntegrationRecordChild);
+      if isIntegrationRecordChild then
+        exit(true);
+
+      exit(TableID in
+        [DATABASE::"Sales Line",
+         DATABASE::"Currency Exchange Rate",
+         DATABASE::"Sales Invoice Line",
+         DATABASE::"Sales Cr.Memo Line",
+         DATABASE::"Contact Alt. Address",
+         DATABASE::"Contact Profile Answer",
+         DATABASE::"Dimension Value",
+         DATABASE::"Rlshp. Mgt. Comment Line",
+         DATABASE::"Vendor Bank Account"]);
+    END;
+
+    [Integration]
+    [External]
+    PROCEDURE OnIsIntegrationRecordChild@30(TableID@1000 : Integer;VAR isIntegrationRecordChild@1001 : Boolean);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE GetIntegrationActivated@20() : Boolean;
+    VAR
+      GraphSyncRunner@1000 : Codeunit "Graph Sync. Runner";
+      IsSyncEnabled@1001 : Boolean;
+    BEGIN
+      if not IntegrationIsActivated then begin
+        OnGetIntegrationActivated(IsSyncEnabled);
+        if IsSyncEnabled then
+          IntegrationIsActivated := true
+        else
+          IntegrationIsActivated := IsCRMConnectionEnabled or GraphSyncRunner.IsGraphSyncEnabled;
+      end;
+
+      exit(IntegrationIsActivated);
+    END;
+
+    [Integration]
+    [External]
+    PROCEDURE OnGetIntegrationActivated@11(VAR IsSyncEnabled@1000 : Boolean);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE IsCRMConnectionEnabled@15() : Boolean;
+    VAR
+      CRMConnectionSetup@1000 : Record "CRM Connection Setup";
+    BEGIN
+      if not CRMConnectionSetup.GET then
+        exit(false);
+
+      exit(CRMConnectionSetup."Is Enabled");
+    END;
+
+    LOCAL PROCEDURE SetupIntegrationService@12();
+    VAR
+      WebService@1000 : Record "Web Service";
+      WebServiceManagement@1001 : Codeunit "Web Service Management";
+    BEGIN
+      WebServiceManagement.CreateWebService(
+        WebService."Object Type"::Codeunit,CODEUNIT::"Integration Service",'Integration Service',true);
+    END;
+
+    LOCAL PROCEDURE DeleteIntegrationService@14();
+    VAR
+      WebService@1000 : Record "Web Service";
+    BEGIN
+      if WebService.GET(WebService."Object Type"::Codeunit,'Integration Service') then
+        WebService.DELETE;
+    END;
+
+    LOCAL PROCEDURE SetupIntegrationServices@28();
+    VAR
+      TempNameValueBuffer@1000 : TEMPORARY Record "Name/Value Buffer";
+      WebService@1003 : Record "Web Service";
+      Objects@1002 : Record AllObj;
+      WebServiceManagement@1004 : Codeunit "Web Service Management";
+      PageId@1001 : Integer;
+    BEGIN
+      CreateIntegrationPageList(TempNameValueBuffer);
+      TempNameValueBuffer.FINDFIRST;
+
+      repeat
+        EVALUATE(PageId,TempNameValueBuffer.Name);
+
+        Objects.SETRANGE("Object Type",Objects."Object Type"::Page);
+        Objects.SETRANGE("Object ID",PageId);
+        if Objects.FINDFIRST then
+          WebServiceManagement.CreateWebService(WebService."Object Type"::Page,Objects."Object ID",
+            STRSUBSTNO(PageServiceNameTok,Objects."Object Name"),true);
+      until TempNameValueBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DeleteIntegrationServices@38();
+    VAR
+      TempNameValueBuffer@1003 : TEMPORARY Record "Name/Value Buffer";
+      WebService@1002 : Record "Web Service";
+      Objects@1001 : Record AllObj;
+      PageId@1000 : Integer;
+    BEGIN
+      CreateIntegrationPageList(TempNameValueBuffer);
+      TempNameValueBuffer.FINDFIRST;
+
+      WebService.SETRANGE("Object Type",WebService."Object Type"::Page);
+      repeat
+        EVALUATE(PageId,TempNameValueBuffer.Name);
+        WebService.SETRANGE("Object ID",PageId);
+
+        Objects.SETRANGE("Object Type",WebService."Object Type"::Page);
+        Objects.SETRANGE("Object ID",PageId);
+        if Objects.FINDFIRST then begin
+          WebService.SETRANGE("Service Name",STRSUBSTNO(PageServiceNameTok,Objects."Object Name"));
+          if WebService.FINDFIRST then
+            WebService.DELETE;
+        end;
+      until TempNameValueBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InitializeIntegrationRecords@9(TableID@1000 : Integer);
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      with RecRef do begin
+        OPEN(TableID,false);
+        if FINDSET(false) then
+          repeat
+            InsertUpdateIntegrationRecord(RecRef,CURRENTDATETIME);
+          until NEXT = 0;
+        CLOSE;
+      end;
+    END;
+
+    [External]
+    PROCEDURE InsertUpdateIntegrationRecord@16(RecRef@1000 : RecordRef;IntegrationLastModified@1001 : DateTime) IntegrationID : GUID;
+    VAR
+      IntegrationRecord@1002 : Record "Integration Record";
+      Handled@1003 : Boolean;
+    BEGIN
+      if IsIntegrationRecord(RecRef.NUMBER) then
+        with IntegrationRecord do begin
+          SETRANGE("Record ID",RecRef.RECORDID);
+          if FINDFIRST then begin
+            "Modified On" := IntegrationLastModified;
+            MODIFY;
+          end else begin
+            RESET;
+            INIT;
+            OnGetPredefinedIdValue("Integration ID",RecRef,Handled);
+            if not Handled then
+              "Integration ID" := CREATEGUID;
+            "Record ID" := RecRef.RECORDID;
+            "Table ID" := RecRef.NUMBER;
+            "Modified On" := IntegrationLastModified;
+            INSERT;
+            if not Handled then
+              OnUpdateReferencedIdField(RecRef,"Integration ID",Handled);
+          end;
+          IntegrationID := "Integration ID";
+          ReactivateJobForTable(RecRef.NUMBER);
+        end;
+    END;
+
+    LOCAL PROCEDURE ReactivateJobForTable@7(TableNo@1000 : Integer);
+    VAR
+      JobQueueEntry@1001 : Record "Job Queue Entry";
+    BEGIN
+      JobQueueEntry.FilterInactiveOnHoldEntries;
+      if JobQueueEntry.ISEMPTY then
+        exit;
+      JobQueueEntry.FINDSET;
+      repeat
+        if IsJobActsOnTable(JobQueueEntry,TableNo) then
+          JobQueueEntry.Restart;
+      until JobQueueEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE IsJobActsOnTable@32(JobQueueEntry@1001 : Record "Job Queue Entry";TableNo@1000 : Integer) : Boolean;
+    VAR
+      IntegrationTableMapping@1004 : Record "Integration Table Mapping";
+      RecRef@1002 : RecordRef;
+    BEGIN
+      if RecRef.GET(JobQueueEntry."Record ID to Process") and
+         (RecRef.NUMBER = DATABASE::"Integration Table Mapping")
+      then begin
+        RecRef.SETTABLE(IntegrationTableMapping);
+        exit(IntegrationTableMapping."Table ID" = TableNo);
+      end;
+    END;
+
+    LOCAL PROCEDURE AddToIntegrationPageList@22(PageId@1002 : Integer;TableId@1003 : Integer;VAR TempNameValueBuffer@1000 : TEMPORARY Record "Name/Value Buffer";VAR NextId@1001 : Integer);
+    BEGIN
+      with TempNameValueBuffer do begin
+        INIT;
+        ID := NextId;
+        NextId := NextId + 1;
+        Name := FORMAT(PageId);
+        Value := FORMAT(TableId);
+        INSERT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetHideMessages@10(HideMessagesNew@1000 : Boolean);
+    BEGIN
+      HideMessages := HideMessagesNew;
+    END;
+
+    [External]
+    PROCEDURE GetIdWithoutBrackets@31(Id@1000 : GUID) : Text;
+    BEGIN
+      exit(COPYSTR(FORMAT(Id),2,STRLEN(FORMAT(Id)) - 2));
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnUpdateReferencedIdField@13(VAR RecRef@1000 : RecordRef;NewId@1001 : GUID;VAR Handled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnGetPredefinedIdValue@19(VAR Id@1000 : GUID;VAR RecRef@1002 : RecordRef;VAR Handled@1001 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

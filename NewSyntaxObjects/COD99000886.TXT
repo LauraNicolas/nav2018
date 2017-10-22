@@ -1,0 +1,371 @@
+OBJECT Codeunit 99000886 Capable to Promise
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Calculation with date #1######';
+      OrderPromisingSetup@1001 : Record "Order Promising Setup";
+      CompanyInfo@1012 : Record "Company Information";
+      OrderPromisingID@1002 : Code[20];
+      LastEarlyDate@1003 : Date;
+      LastLateDate@1004 : Date;
+      OrderPromisingEnd@1005 : Date;
+      OrderPromisingStart@1006 : Date;
+      GrossRequirement@1007 : Decimal;
+      ScheduledReceipt@1008 : Decimal;
+      OrderPromisingLineNo@1009 : Integer;
+      OrderPromisingLineToSave@1010 : Integer;
+      SourceLineNo@1011 : Integer;
+
+    LOCAL PROCEDURE ValidateCapableToPromise@4(ItemNo@1000 : Code[20];VariantCode@1001 : Code[10];LocationCode@1002 : Code[10];NeededDate@1003 : Date;NeededQty@1004 : Decimal;UnitOfMeasure@1005 : Code[10];PeriodType@1007 : 'Day,Week,Month,Quarter,Year';VAR DueDateOfReqLine@1011 : Date) : Boolean;
+    VAR
+      ReqLine@1008 : Record "Requisition Line";
+      CumulativeATP@1009 : Decimal;
+      ReqQty@1010 : Decimal;
+      Ok@1012 : Boolean;
+    BEGIN
+      CumulativeATP :=
+        GetCumulativeATP(ItemNo,VariantCode,LocationCode,NeededDate,UnitOfMeasure,PeriodType);
+
+      if CumulativeATP < 0 then begin
+        if CumulativeATP + NeededQty <= 0 then
+          ReqQty := NeededQty
+        else
+          ReqQty := -CumulativeATP;
+        CreateReqLine(ItemNo,VariantCode,LocationCode,ReqQty,UnitOfMeasure,NeededDate,1,ReqLine);
+        OrderPromisingLineNo := OrderPromisingLineNo + 1;
+        if ReqLine."Starting Date" < OrderPromisingStart then
+          exit(false);
+      end;
+      Ok := CheckDerivedDemandCTP(ReqLine,PeriodType);
+      if ReqLine."No." <> '' then begin
+        if Ok then
+          DueDateOfReqLine := ReqLine."Due Date"
+      end else
+        DueDateOfReqLine := NeededDate;
+      exit(Ok);
+    END;
+
+    [Internal]
+    PROCEDURE CalcCapableToPromise@14(ItemNo@1000 : Code[20];VariantCode@1001 : Code[10];LocationCode@1002 : Code[10];NeededDate@1003 : Date;NeededQty@1004 : Decimal;UnitOfMeasure@1005 : Code[10];VAR LocOrderPromisingID@1006 : Code[20];LocSourceLineNo@1007 : Integer;VAR LastValidLine@1008 : Integer;PeriodType@1009 : 'Day,Week,Month,Quarter,Year';PeriodLengthFormula@1010 : DateFormula) : Date;
+    VAR
+      CalculationDialog@1015 : Dialog;
+      CalculationStartDate@1011 : Date;
+      CapableToPromiseDate@1012 : Date;
+      IsValid@1013 : Boolean;
+      StopCalculation@1014 : Boolean;
+      DueDateOfReqLine@1016 : Date;
+    BEGIN
+      if NeededQty = 0 then
+        exit(NeededDate);
+      RemoveReqLines(LocOrderPromisingID,LocSourceLineNo,LastValidLine,false);
+      SetOrderPromisingParameters(LocOrderPromisingID,LocSourceLineNo,PeriodLengthFormula);
+
+      CapableToPromiseDate := 0D;
+      CalculationStartDate := NeededDate;
+      if CalculationStartDate = 0D then
+        CalculationStartDate := OrderPromisingStart;
+      OrderPromisingLineToSave := OrderPromisingLineNo;
+      if not
+         ValidateCapableToPromise(
+           ItemNo,VariantCode,LocationCode,CalculationStartDate,
+           NeededQty,UnitOfMeasure,PeriodType,DueDateOfReqLine)
+      then begin
+        StopCalculation := false;
+        LastEarlyDate := CalculationStartDate;
+        LastLateDate := OrderPromisingEnd;
+        CalculationStartDate := OrderPromisingEnd;
+        CalculationDialog.OPEN(Text000);
+        repeat
+          CalculationDialog.UPDATE(1,FORMAT(CalculationStartDate));
+          RemoveReqLines(LocOrderPromisingID,LocSourceLineNo,OrderPromisingLineToSave,false);
+          IsValid :=
+            ValidateCapableToPromise(ItemNo,VariantCode,LocationCode,CalculationStartDate,
+              NeededQty,UnitOfMeasure,PeriodType,DueDateOfReqLine);
+          if IsValid then begin
+            CapableToPromiseDate := CalculationStartDate;
+            StopCalculation := GetNextCalcStartDate(CalculationStartDate,0);
+          end else
+            StopCalculation := GetNextCalcStartDate(CalculationStartDate,1);
+        until StopCalculation;
+        if not IsValid and (CapableToPromiseDate > 0D) then begin
+          RemoveReqLines(LocOrderPromisingID,LocSourceLineNo,OrderPromisingLineToSave,false);
+          ValidateCapableToPromise(ItemNo,VariantCode,LocationCode,CapableToPromiseDate,
+            NeededQty,UnitOfMeasure,PeriodType,DueDateOfReqLine);
+        end;
+        CalculationDialog.CLOSE;
+      end else
+        CapableToPromiseDate := CalculationStartDate;
+
+      if CapableToPromiseDate <> DueDateOfReqLine then
+        CapableToPromiseDate := DueDateOfReqLine;
+
+      LastValidLine := GetNextOrderPromisingLineNo;
+      if CapableToPromiseDate = 0D then
+        RemoveReqLines(LocOrderPromisingID,LocSourceLineNo,OrderPromisingLineNo,false);
+      exit(CapableToPromiseDate);
+    END;
+
+    LOCAL PROCEDURE GetNextCalcStartDate@17(VAR CalculationStartDate@1000 : Date;Direction@1001 : 'Backwards,Forwards') : Boolean;
+    VAR
+      BestResult@1002 : Boolean;
+    BEGIN
+      BestResult := false;
+      if Direction = Direction::Backwards then begin
+        LastLateDate := CalculationStartDate;
+        if LastLateDate - LastEarlyDate > 1 then
+          CalculationStartDate := CalculationStartDate - ROUND((LastLateDate - LastEarlyDate) / 2,1,'>')
+        else
+          BestResult := true;
+      end else begin
+        LastEarlyDate := CalculationStartDate;
+        if LastLateDate - LastEarlyDate > 1 then
+          CalculationStartDate := CalculationStartDate + ROUND((LastLateDate - LastEarlyDate) / 2,1,'>')
+        else
+          BestResult := true;
+      end;
+      exit(BestResult);
+    END;
+
+    LOCAL PROCEDURE CreateReqLine@1(ItemNo@1000 : Code[20];VariantCode@1001 : Code[10];LocationCode@1002 : Code[10];Quantity@1003 : Decimal;Unit@1004 : Code[10];DueDate@1005 : Date;Direction@1006 : 'Forward,Backward';VAR ReqLine@1007 : Record "Requisition Line");
+    VAR
+      SalesLine@1010 : Record "Sales Line";
+      LeadTimeMgt@1008 : Codeunit "Lead-Time Management";
+      PlngLnMgt@1009 : Codeunit "Planning Line Management";
+    BEGIN
+      ReqLine.INIT;
+      ReqLine."Order Promising ID" := OrderPromisingID;
+      ReqLine."Order Promising Line ID" := SourceLineNo;
+      ReqLine."Order Promising Line No." := OrderPromisingLineNo;
+      ReqLine."Worksheet Template Name" := OrderPromisingSetup."Order Promising Template";
+      ReqLine."Journal Batch Name" := OrderPromisingSetup."Order Promising Worksheet";
+      GetNextReqLineNo(ReqLine);
+      ReqLine.Type := ReqLine.Type::Item;
+      ReqLine."Location Code" := LocationCode;
+      ReqLine.VALIDATE("No.",ItemNo);
+      ReqLine.VALIDATE("Variant Code",VariantCode);
+      ReqLine."Action Message" := ReqLine."Action Message"::New;
+      ReqLine."Accept Action Message" := false;
+      ReqLine.VALIDATE("Ending Date",
+        LeadTimeMgt.PlannedEndingDate(ItemNo,LocationCode,VariantCode,DueDate,ReqLine."Vendor No.",ReqLine."Ref. Order Type"));
+      ReqLine."Ending Time" := 235959T;
+      ReqLine.VALIDATE(Quantity,Quantity);
+      ReqLine.VALIDATE("Unit of Measure Code",Unit);
+      if ReqLine."Starting Date" = 0D then
+        ReqLine."Starting Date" := WORKDATE;
+      ReqLine.INSERT(true);
+      PlngLnMgt.Calculate(ReqLine,Direction,true,true,0);
+      if SalesLine.GET(SalesLine."Document Type"::Order,ReqLine."Order Promising ID",ReqLine."Order Promising Line ID") then
+        if SalesLine."Drop Shipment" then begin
+          ReqLine."Sales Order No." := SalesLine."Document No.";
+          ReqLine."Sales Order Line No." := SalesLine."Line No.";
+          ReqLine."Sell-to Customer No." := SalesLine."Sell-to Customer No.";
+          ReqLine."Purchasing Code" := SalesLine."Purchasing Code";
+        end;
+      ReqLine.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CheckDerivedDemandCTP@5(ReqLine@1001 : Record "Requisition Line";PeriodType@1000 : 'Day,Week,Month,Quarter,Year') : Boolean;
+    BEGIN
+      if ReqLine."Replenishment System" = ReqLine."Replenishment System"::Transfer then
+        exit(CheckTransferShptCTP(ReqLine,PeriodType));
+
+      exit(CheckCompsCapableToPromise(ReqLine,PeriodType));
+    END;
+
+    LOCAL PROCEDURE CheckCompsCapableToPromise@10(ReqLine@1000 : Record "Requisition Line";PeriodType@1001 : 'Day,Week,Month,Quarter,Year') : Boolean;
+    VAR
+      PlanningComponent@1003 : Record "Planning Component";
+      ReqLine2@1004 : Record "Requisition Line";
+      IsValidDate@1005 : Boolean;
+      DueDateOfReqLine@1002 : Date;
+    BEGIN
+      with PlanningComponent do begin
+        SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+        SETRANGE("Worksheet Batch Name",ReqLine."Journal Batch Name");
+        SETRANGE("Worksheet Line No.",ReqLine."Line No.");
+        if FINDSET then
+          repeat
+            if ("Supplied-by Line No." = 0) and Critical then begin
+              if not
+                 ValidateCapableToPromise(
+                   "Item No.","Variant Code","Location Code","Due Date",
+                   "Expected Quantity","Unit of Measure Code",PeriodType,DueDateOfReqLine)
+              then begin
+                OrderPromisingLineNo := OrderPromisingLineNo - 1;
+                exit(false);
+              end;
+            end else
+              if "Supplied-by Line No." > 0 then
+                if ReqLine2.GET(ReqLine."Worksheet Template Name",ReqLine."Journal Batch Name","Supplied-by Line No.") then begin
+                  IsValidDate := CheckDerivedDemandCTP(ReqLine2,PeriodType);
+                  if not IsValidDate or (ReqLine2."Starting Date" < OrderPromisingStart) then
+                    exit(false);
+                end;
+          until NEXT = 0
+      end;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CheckTransferShptCTP@2(ReqLine@1000 : Record "Requisition Line";PeriodType@1001 : 'Day,Week,Month,Quarter,Year') : Boolean;
+    VAR
+      Item@1002 : Record Item;
+      DueDateOfReqLine@1003 : Date;
+    BEGIN
+      with ReqLine do begin
+        TESTFIELD("Replenishment System","Replenishment System"::Transfer);
+        Item.GET("No.");
+        if Item.Critical then
+          if not
+             ValidateCapableToPromise(
+               "No.","Variant Code","Transfer-from Code","Transfer Shipment Date",
+               Quantity,"Unit of Measure Code",PeriodType,DueDateOfReqLine)
+          then begin
+            OrderPromisingLineNo := OrderPromisingLineNo - 1;
+            exit(false);
+          end;
+      end;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE GetNextReqLineNo@3(VAR ReqLine@1000 : Record "Requisition Line");
+    VAR
+      ReqLine2@1001 : Record "Requisition Line";
+    BEGIN
+      ReqLine2.SETRANGE("Worksheet Template Name",ReqLine."Worksheet Template Name");
+      ReqLine2.SETRANGE("Journal Batch Name",ReqLine."Journal Batch Name");
+      if ReqLine2.FINDLAST then
+        ReqLine."Line No." := ReqLine2."Line No." + 10000
+      else
+        ReqLine."Line No." := 10000;
+    END;
+
+    LOCAL PROCEDURE SetOrderPromisingParameters@9(VAR LocOrderPromisingID@1000 : Code[20];LocSourceLineNo@1001 : Integer;PeriodLengthFormula@1002 : DateFormula);
+    VAR
+      NoSeriesMgt@1003 : Codeunit NoSeriesManagement;
+    BEGIN
+      CompanyInfo.GET;
+      OrderPromisingSetup.GET;
+      OrderPromisingSetup.TESTFIELD("Order Promising Template");
+      OrderPromisingSetup.TESTFIELD("Order Promising Worksheet");
+      if LocOrderPromisingID = '' then begin
+        LocOrderPromisingID := NoSeriesMgt.GetNextNo(OrderPromisingSetup."Order Promising Nos.",WORKDATE,true);
+        OrderPromisingLineNo := 1;
+      end else
+        OrderPromisingLineNo := GetNextOrderPromisingLineNo;
+      OrderPromisingID := LocOrderPromisingID;
+      SourceLineNo := LocSourceLineNo;
+      OrderPromisingStart := CALCDATE(OrderPromisingSetup."Offset (Time)",WORKDATE);
+      OrderPromisingEnd := CALCDATE(PeriodLengthFormula,OrderPromisingStart);
+    END;
+
+    [External]
+    PROCEDURE RemoveReqLines@6(OrderPromisingID@1000 : Code[20];SourceLineNo@1001 : Integer;LastGoodLineNo@1002 : Integer;FilterOnNonAccepted@1003 : Boolean);
+    VAR
+      ReqLine@1004 : Record "Requisition Line";
+    BEGIN
+      with ReqLine do begin
+        SETCURRENTKEY("Order Promising ID","Order Promising Line ID","Order Promising Line No.");
+        SETRANGE("Order Promising ID",OrderPromisingID);
+        if SourceLineNo <> 0 then
+          SETRANGE("Order Promising Line ID",SourceLineNo);
+        if LastGoodLineNo <> 0 then
+          SETFILTER("Order Promising Line No.",'>=%1',LastGoodLineNo);
+        if FilterOnNonAccepted then
+          SETRANGE("Accept Action Message",false);
+        if FIND('-') then
+          repeat
+            DeleteMultiLevel;
+            DELETE(true);
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetCumulativeATP@8(ItemNo@1000 : Code[20];VariantCode@1001 : Code[10];LocationCode@1002 : Code[10];DueDate@1003 : Date;UnitOfMeasureCode@1004 : Code[10];PeriodType@1005 : 'Day,Week,Month,Quarter,Year') : Decimal;
+    VAR
+      Item@1006 : Record Item;
+      ItemUnitOfMeasure@1007 : Record "Item Unit of Measure";
+      AvailToPromise@1009 : Codeunit "Available to Promise";
+      CumulativeATP@1008 : Decimal;
+    BEGIN
+      Item.GET(ItemNo);
+      Item.SETRANGE("Variant Filter",VariantCode);
+      Item.SETRANGE("Location Filter",LocationCode);
+      Item.SETRANGE("Date Filter",0D,DueDate);
+
+      CumulativeATP :=
+        AvailToPromise.QtyAvailabletoPromise(
+          Item,GrossRequirement,ScheduledReceipt,DueDate,
+          PeriodType,CompanyInfo."Check-Avail. Period Calc.");
+
+      if UnitOfMeasureCode = Item."Base Unit of Measure" then
+        exit(CumulativeATP);
+
+      ItemUnitOfMeasure.GET(ItemNo,UnitOfMeasureCode);
+      exit(ROUND(CumulativeATP / ItemUnitOfMeasure."Qty. per Unit of Measure",0.00001));
+    END;
+
+    LOCAL PROCEDURE GetNextOrderPromisingLineNo@15() : Integer;
+    VAR
+      ReqLine@1000 : Record "Requisition Line";
+    BEGIN
+      ReqLine.SETCURRENTKEY("Order Promising ID");
+      ReqLine.SETRANGE("Order Promising ID",OrderPromisingID);
+      if ReqLine.FINDLAST then
+        exit(ReqLine."Order Promising Line No." + 1);
+
+      exit(1);
+    END;
+
+    PROCEDURE ReassignRefOrderNos@7(OrderPromisingID@1002 : Code[20]);
+    VAR
+      MfgSetup@1005 : Record "Manufacturing Setup";
+      RequisitionLine@1004 : Record "Requisition Line";
+      NoSeriesMgt@1007 : Codeunit NoSeriesManagement;
+      NewRefOrderNo@1006 : Code[20];
+      LastRefOrderNo@1000 : Code[20];
+    BEGIN
+      with RequisitionLine do begin
+        SETCURRENTKEY("Ref. Order Type","Ref. Order Status","Ref. Order No.","Ref. Line No.");
+        SETRANGE("Order Promising ID",OrderPromisingID);
+        SETRANGE("Ref. Order Type","Ref. Order Type"::"Prod. Order");
+        SETRANGE("Ref. Order Status","Ref. Order Status"::Planned);
+        SETFILTER("Ref. Order No.",'<>%1','');
+        if not FINDLAST then
+          exit;
+        LastRefOrderNo := "Ref. Order No.";
+
+        MfgSetup.GET;
+        MfgSetup.TESTFIELD("Planned Order Nos.");
+
+        SETFILTER("Ref. Order No.",'<>%1&<=%2','',LastRefOrderNo);
+        FIND('-');
+        repeat
+          SETRANGE("Ref. Order No.","Ref. Order No.");
+          FINDLAST;
+          NewRefOrderNo := '';
+          NoSeriesMgt.InitSeries(
+            MfgSetup."Planned Order Nos.","No. Series","Due Date",NewRefOrderNo,"No. Series");
+          MODIFYALL("Ref. Order No.",NewRefOrderNo);
+          SETFILTER("Ref. Order No.",'<>%1&<=%2','',LastRefOrderNo);
+        until NEXT = 0;
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

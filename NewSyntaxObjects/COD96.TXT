@@ -1,0 +1,161 @@
+OBJECT Codeunit 96 Purch.-Quote to Order
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Purchase Header";
+    OnRun=VAR
+            Vend@1002 : Record Vendor;
+            PurchCommentLine@1006 : Record "Purch. Comment Line";
+            PurchCalcDiscByType@1007 : Codeunit "Purch - Calc Disc. By Type";
+            ApprovalsMgmt@1000 : Codeunit "Approvals Mgmt.";
+            ArchiveManagement@1001 : Codeunit ArchiveManagement;
+            RecordLinkManagement@1004 : Codeunit "Record Link Management";
+            PurchLineReserve@1005 : Codeunit "Purch. Line-Reserve";
+            ShouldRedistributeInvoiceAmount@1003 : Boolean;
+          BEGIN
+            TESTFIELD("Document Type","Document Type"::Quote);
+            ShouldRedistributeInvoiceAmount := PurchCalcDiscByType.ShouldRedistributeInvoiceDiscountAmount(Rec);
+
+            OnCheckPurchasePostRestrictions;
+
+            Vend.GET("Buy-from Vendor No.");
+            Vend.CheckBlockedVendOnDocs(Vend,false);
+
+            CreatePurchHeader(Rec,Vend."Prepayment %");
+
+            PurchQuoteLine.SETRANGE("Document Type","Document Type");
+            PurchQuoteLine.SETRANGE("Document No.","No.");
+            if PurchQuoteLine.FINDSET then
+              repeat
+                PurchOrderLine := PurchQuoteLine;
+                PurchOrderLine."Document Type" := PurchOrderHeader."Document Type";
+                PurchOrderLine."Document No." := PurchOrderHeader."No.";
+                PurchLineReserve.TransferPurchLineToPurchLine(
+                  PurchQuoteLine,PurchOrderLine,PurchQuoteLine."Outstanding Qty. (Base)");
+                PurchOrderLine."Shortcut Dimension 1 Code" := PurchQuoteLine."Shortcut Dimension 1 Code";
+                PurchOrderLine."Shortcut Dimension 2 Code" := PurchQuoteLine."Shortcut Dimension 2 Code";
+                PurchOrderLine."Dimension Set ID" := PurchQuoteLine."Dimension Set ID";
+                if Vend."Prepayment %" <> 0 then
+                  PurchOrderLine."Prepayment %" := Vend."Prepayment %";
+                PrepmtMgt.SetPurchPrepaymentPct(PurchOrderLine,PurchOrderHeader."Posting Date");
+                PurchOrderLine.VALIDATE("Prepayment %");
+                PurchOrderLine.DefaultDeferralCode;
+                OnBeforeInsertPurchOrderLine(PurchOrderLine,PurchOrderHeader,PurchQuoteLine,Rec);
+                PurchOrderLine.INSERT;
+
+                PurchLineReserve.VerifyQuantity(PurchOrderLine,PurchQuoteLine);
+              until PurchQuoteLine.NEXT = 0;
+
+            PurchSetup.GET;
+            if PurchSetup."Archive Quotes and Orders" then
+              ArchiveManagement.ArchPurchDocumentNoConfirm(Rec);
+
+            if PurchSetup."Default Posting Date" = PurchSetup."Default Posting Date"::"No Date" then begin
+              PurchOrderHeader."Posting Date" := 0D;
+              PurchOrderHeader.MODIFY;
+            end;
+
+            PurchCommentLine.CopyComments("Document Type",PurchOrderHeader."Document Type","No.",PurchOrderHeader."No.");
+            RecordLinkManagement.CopyLinks(Rec,PurchOrderHeader);
+
+            AssignItemCharges("Document Type","No.",PurchOrderHeader."Document Type",PurchOrderHeader."No.");
+
+            ApprovalsMgmt.CopyApprovalEntryQuoteToOrder(RECORDID,PurchOrderHeader."No.",PurchOrderHeader.RECORDID);
+            ApprovalsMgmt.DeleteApprovalEntries(RECORDID);
+
+            DELETELINKS;
+            DELETE;
+
+            PurchQuoteLine.DELETEALL;
+
+            if not ShouldRedistributeInvoiceAmount then
+              PurchCalcDiscByType.ResetRecalculateInvoiceDisc(PurchOrderHeader);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PurchQuoteLine@1000 : Record "Purchase Line";
+      PurchOrderHeader@1001 : Record "Purchase Header";
+      PurchOrderLine@1002 : Record "Purchase Line";
+      PurchSetup@1008 : Record "Purchases & Payables Setup";
+      PrepmtMgt@1007 : Codeunit "Prepayment Mgt.";
+
+    LOCAL PROCEDURE CreatePurchHeader@2(PurchHeader@1000 : Record "Purchase Header";PrepmtPercent@1001 : Decimal);
+    BEGIN
+      with PurchHeader do begin
+        PurchOrderHeader := PurchHeader;
+        PurchOrderHeader."Document Type" := PurchOrderHeader."Document Type"::Order;
+        PurchOrderHeader."No. Printed" := 0;
+        PurchOrderHeader.Status := PurchOrderHeader.Status::Open;
+        PurchOrderHeader."No." := '';
+        PurchOrderHeader."Quote No." := "No.";
+
+        PurchOrderLine.LOCKTABLE;
+        PurchOrderHeader.INSERT(true);
+
+        PurchOrderHeader."Order Date" := "Order Date";
+        if "Posting Date" <> 0D then
+          PurchOrderHeader."Posting Date" := "Posting Date";
+
+        PurchOrderHeader.InitFromPurchHeader(PurchHeader);
+        PurchOrderHeader."Inbound Whse. Handling Time" := "Inbound Whse. Handling Time";
+
+        PurchOrderHeader."Prepayment %" := PrepmtPercent;
+        if PurchOrderHeader."Posting Date" = 0D then
+          PurchOrderHeader."Posting Date" := WORKDATE;
+        OnBeforeInsertPurchOrderHeader(PurchOrderHeader,PurchHeader);
+        PurchOrderHeader.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE AssignItemCharges@3(FromDocType@1001 : Option;FromDocNo@1002 : Code[20];ToDocType@1004 : Option;ToDocNo@1003 : Code[20]);
+    VAR
+      ItemChargeAssgntPurch@1000 : Record "Item Charge Assignment (Purch)";
+    BEGIN
+      ItemChargeAssgntPurch.RESET;
+      ItemChargeAssgntPurch.SETRANGE("Document Type",FromDocType);
+      ItemChargeAssgntPurch.SETRANGE("Document No.",FromDocNo);
+      while ItemChargeAssgntPurch.FINDFIRST do begin
+        ItemChargeAssgntPurch.DELETE;
+        ItemChargeAssgntPurch."Document Type" := PurchOrderHeader."Document Type";
+        ItemChargeAssgntPurch."Document No." := PurchOrderHeader."No.";
+        if not (ItemChargeAssgntPurch."Applies-to Doc. Type" in
+                [ItemChargeAssgntPurch."Applies-to Doc. Type"::Receipt,
+                 ItemChargeAssgntPurch."Applies-to Doc. Type"::"Return Shipment"])
+        then begin
+          ItemChargeAssgntPurch."Applies-to Doc. Type" := ToDocType;
+          ItemChargeAssgntPurch."Applies-to Doc. No." := ToDocNo;
+        end;
+        ItemChargeAssgntPurch.INSERT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetPurchOrderHeader@1(VAR PurchHeader@1000 : Record "Purchase Header");
+    BEGIN
+      PurchHeader := PurchOrderHeader;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeInsertPurchOrderHeader@7(VAR PurchOrderHeader@1000 : Record "Purchase Header";PurchQuoteHeader@1001 : Record "Purchase Header");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeInsertPurchOrderLine@8(VAR PurchOrderLine@1004 : Record "Purchase Line";PurchOrderHeader@1003 : Record "Purchase Header";PurchQuoteLine@1002 : Record "Purchase Line";PurchQuoteHeader@1001 : Record "Purchase Header");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

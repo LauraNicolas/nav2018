@@ -1,0 +1,715 @@
+OBJECT Codeunit 1501 Workflow Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData Workflow=r,
+                TableData "Workflow Step"=r,
+                TableData "Workflow Step Instance"=rimd,
+                TableData "Workflow Table Relation Value"=rimd,
+                TableData "Workflow Event Queue"=rimd,
+                TableData "Workflow Step Argument"=d,
+                TableData "Workflow - Record Change"=rimd,
+                TableData "Workflow Record Change Archive"=rimd,
+                TableData "Workflow Step Instance Archive"=rimd,
+                TableData "Workflow Step Argument Archive"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      WorkflowRecordManagement@1000 : Codeunit "Workflow Record Management";
+      AlwaysTxt@1001 : TextConst 'ENU=<Always>';
+      CombinedConditionTxt@1002 : TextConst '@@@={Locked};ENU="%1; %2"';
+
+    [External]
+    PROCEDURE TrackWorkflow@2(Variant@1000 : Variant;VAR WorkflowStepInstance@1001 : Record "Workflow Step Instance");
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      WorkflowStepInstance.MoveForward(Variant);
+      RecRef.GETTABLE(Variant);
+      UpdateRelatedTableValues(RecRef);
+
+      if IsWorkflowCompleted(WorkflowStepInstance) then
+        ArchiveWorkflowInstance(WorkflowStepInstance);
+    END;
+
+    [Internal]
+    PROCEDURE FindWorkflowStepInstance@1(Variant@1000 : Variant;xVariant@1002 : Variant;VAR WorkflowStepInstance@1001 : Record "Workflow Step Instance";FunctionName@1007 : Code[128]) : Boolean;
+    BEGIN
+      exit(FindWorkflowStepInstanceWithOptionalWorkflowStart(Variant,xVariant,WorkflowStepInstance,FunctionName,true));
+    END;
+
+    [External]
+    PROCEDURE CanExecuteWorkflow@28(Variant@1002 : Variant;FunctionName@1000 : Code[128]) : Boolean;
+    VAR
+      WorkflowStepInstance@1001 : Record "Workflow Step Instance";
+    BEGIN
+      exit(FindWorkflowStepInstanceWithOptionalWorkflowStart(Variant,Variant,WorkflowStepInstance,FunctionName,false));
+    END;
+
+    LOCAL PROCEDURE FindWorkflowStepInstanceWithOptionalWorkflowStart@30(Variant@1000 : Variant;xVariant@1009 : Variant;VAR WorkflowStepInstance@1001 : Record "Workflow Step Instance";FunctionName@1007 : Code[128];StartWorkflow@1008 : Boolean) : Boolean;
+    VAR
+      Workflow@1002 : Record Workflow;
+      WorkflowRule@1011 : Record "Workflow Rule";
+      WorkflowInstance@1006 : Query "Workflow Instance";
+      WorkflowInstance2@1004 : Query "Workflow Instance";
+      RecRef@1005 : RecordRef;
+      xRecRef@1010 : RecordRef;
+      ActiveStepInstanceFound@1003 : Boolean;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+      xRecRef.GETTABLE(xVariant);
+
+      WorkflowInstance.SETRANGE(Table_ID,RecRef.NUMBER);
+      WorkflowInstance.SETRANGE(Type,WorkflowInstance.Type::"Event");
+      WorkflowInstance.SETRANGE(Status,WorkflowInstance.Status::Active);
+      WorkflowInstance.SETRANGE(Function_Name,FunctionName);
+      WorkflowInstance.OPEN;
+
+      while WorkflowInstance.READ do begin
+        WorkflowInstance2.SETRANGE(Step_ID,WorkflowInstance.Previous_Workflow_Step_ID);
+        WorkflowInstance2.SETRANGE(Instance_ID,WorkflowInstance.Instance_ID);
+        WorkflowInstance2.SETRANGE(Record_ID,RecRef.RECORDID);
+        WorkflowInstance2.SETRANGE(Code,WorkflowInstance.Code);
+        WorkflowInstance2.SETFILTER(Status,'%1|%2',WorkflowInstance.Status::Completed,WorkflowInstance.Status::Processing);
+        WorkflowInstance2.OPEN;
+
+        if WorkflowInstance2.READ then begin
+          ActiveStepInstanceFound := true;
+          if WorkflowStepInstance.GET(WorkflowInstance.Instance_ID,WorkflowInstance.Code,WorkflowInstance.Step_ID) then begin
+            WorkflowStepInstance.FindWorkflowRules(WorkflowRule);
+            if EvaluateCondition(RecRef,xRecRef,WorkflowStepInstance.Argument,WorkflowRule) then
+              exit(true);
+          end;
+        end;
+      end;
+
+      // If the execution reaches inside this IF, it means that
+      // active steps were found but the condition were not met.
+      if ActiveStepInstanceFound then
+        exit(false);
+
+      WorkflowStepInstance.RESET;
+      if FindMatchingWorkflowStepInstance(RecRef,xRecRef,WorkflowStepInstance,FunctionName) then
+        exit(true);
+
+      WorkflowStepInstance.RESET;
+      if FindWorkflow(RecRef,xRecRef,FunctionName,Workflow) then begin
+        if StartWorkflow then
+          InstantiateWorkflow(Workflow,FunctionName,WorkflowStepInstance);
+        exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE MarkChildrenStatus@14(WorkflowStepInstance@1002 : Record "Workflow Step Instance";NewStatus@1000 : Option);
+    VAR
+      ChildWorkflowStepInstance@1001 : Record "Workflow Step Instance";
+    BEGIN
+      ChildWorkflowStepInstance.SETRANGE("Workflow Code",WorkflowStepInstance."Workflow Code");
+      ChildWorkflowStepInstance.SETRANGE("Previous Workflow Step ID",WorkflowStepInstance."Workflow Step ID");
+      ChildWorkflowStepInstance.SETRANGE(ID,WorkflowStepInstance.ID);
+      ChildWorkflowStepInstance.SETFILTER(Status,'<>%1',WorkflowStepInstance.Status::Processing);
+      ChildWorkflowStepInstance.MODIFYALL(Status,NewStatus,true);
+    END;
+
+    [External]
+    PROCEDURE MarkSiblingStatus@13(WorkflowStepInstance@1002 : Record "Workflow Step Instance";NewStatus@1000 : Option);
+    VAR
+      SiblingWorkflowStepInstance@1001 : Record "Workflow Step Instance";
+    BEGIN
+      SiblingWorkflowStepInstance.SETRANGE("Workflow Code",WorkflowStepInstance."Workflow Code");
+      SiblingWorkflowStepInstance.SETRANGE(ID,WorkflowStepInstance.ID);
+      SiblingWorkflowStepInstance.SETRANGE("Previous Workflow Step ID",WorkflowStepInstance."Previous Workflow Step ID");
+      SiblingWorkflowStepInstance.SETFILTER("Workflow Step ID",'<>%1',WorkflowStepInstance."Workflow Step ID");
+      SiblingWorkflowStepInstance.MODIFYALL(Status,NewStatus,true);
+    END;
+
+    [External]
+    PROCEDURE UpdateStatus@15(VAR WorkflowStepInstance@1000 : Record "Workflow Step Instance";NewStatus@1001 : Option;ChildrenStatus@1002 : Option;SiblingsStatus@1003 : Option);
+    BEGIN
+      WorkflowStepInstance.Status := NewStatus;
+      WorkflowStepInstance.MODIFY(true);
+
+      MarkChildrenStatus(WorkflowStepInstance,ChildrenStatus);
+
+      MarkSiblingStatus(WorkflowStepInstance,SiblingsStatus);
+    END;
+
+    [External]
+    PROCEDURE FindWorkflow@3(RecRef@1000 : RecordRef;xRecRef@1001 : RecordRef;FunctionName@1006 : Code[128];VAR Workflow@1002 : Record Workflow) : Boolean;
+    VAR
+      WorkflowStep@1003 : Record "Workflow Step";
+      WorkflowRule@1004 : Record "Workflow Rule";
+      WorkflowDefinition@1005 : Query "Workflow Definition";
+    BEGIN
+      WorkflowDefinition.SETRANGE(Table_ID,RecRef.NUMBER);
+      WorkflowDefinition.SETRANGE(Entry_Point,true);
+      WorkflowDefinition.SETRANGE(Enabled,true);
+      WorkflowDefinition.SETRANGE(Type,WorkflowDefinition.Type::"Event");
+      WorkflowDefinition.SETRANGE(Function_Name,FunctionName);
+      WorkflowDefinition.OPEN;
+      while WorkflowDefinition.READ do begin
+        WorkflowStep.GET(WorkflowDefinition.Code,WorkflowDefinition.ID);
+        WorkflowStep.FindWorkflowRules(WorkflowRule);
+        if EvaluateCondition(RecRef,xRecRef,WorkflowDefinition.Argument,WorkflowRule) then begin
+          Workflow.GET(WorkflowDefinition.Code);
+          exit(true);
+        end;
+      end;
+
+      exit(false);
+    END;
+
+    [Internal]
+    PROCEDURE WorkflowExists@19(Variant@1000 : Variant;xVariant@1002 : Variant;FunctionName@1006 : Code[128]) : Boolean;
+    VAR
+      Workflow@1001 : Record Workflow;
+      RecordRef@1005 : RecordRef;
+      xRecordRef@1003 : RecordRef;
+    BEGIN
+      RecordRef.GETTABLE(Variant);
+      xRecordRef.GETTABLE(xVariant);
+      exit(FindWorkflow(RecordRef,xRecordRef,FunctionName,Workflow));
+    END;
+
+    LOCAL PROCEDURE InstantiateWorkflow@16(Workflow@1000 : Record Workflow;FunctionName@1001 : Text;VAR WorkflowStepInstance@1003 : Record "Workflow Step Instance");
+    BEGIN
+      Workflow.CreateInstance(WorkflowStepInstance);
+      WorkflowStepInstance.SETRANGE("Function Name",FunctionName);
+      WorkflowStepInstance.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdateRelatedTableValues@5(RecRef@1000 : RecordRef);
+    VAR
+      WorkflowTableRelationValue@1001 : Record "Workflow Table Relation Value";
+    BEGIN
+      WorkflowTableRelationValue.SETRANGE("Record ID",RecRef.RECORDID);
+      if WorkflowTableRelationValue.FINDSET(true) then
+        repeat
+          WorkflowTableRelationValue.UpdateRelationValue(RecRef);
+        until WorkflowTableRelationValue.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindMatchingWorkflowStepInstance@9(RecRef@1000 : RecordRef;xRecRef@1003 : RecordRef;VAR WorkflowStepInstance@1001 : Record "Workflow Step Instance";FunctionName@1007 : Code[128]) : Boolean;
+    VAR
+      WorkflowRule@1004 : Record "Workflow Rule";
+      WorkflowInstance@1002 : Query "Workflow Instance";
+    BEGIN
+      WorkflowInstance.SETRANGE(Table_ID,RecRef.NUMBER);
+      WorkflowInstance.SETFILTER(Status,'%1|%2',WorkflowInstance.Status::Active,WorkflowInstance.Status::Processing);
+      WorkflowInstance.SETRANGE(Type,WorkflowInstance.Type::"Event");
+      WorkflowInstance.SETRANGE(Function_Name,FunctionName);
+      WorkflowInstance.OPEN;
+      while WorkflowInstance.READ do begin
+        WorkflowStepInstance.GET(WorkflowInstance.Instance_ID,WorkflowInstance.Code,WorkflowInstance.Step_ID);
+        WorkflowStepInstance.FindWorkflowRules(WorkflowRule);
+        if WorkflowStepInstance.MatchesRecordValues(RecRef) then
+          if EvaluateCondition(RecRef,xRecRef,WorkflowStepInstance.Argument,WorkflowRule) then
+            exit(true);
+      end;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE EvaluateCondition@4(RecRef@1000 : RecordRef;xRecRef@1002 : RecordRef;ArgumentID@1001 : GUID;VAR WorkflowRule@1004 : Record "Workflow Rule") : Boolean;
+    VAR
+      WorkflowStepArgument@1007 : Record "Workflow Step Argument";
+      TempBlob@1009 : Record TempBlob;
+      Result@1003 : Boolean;
+    BEGIN
+      if WorkflowStepArgument.GET(ArgumentID) and WorkflowStepArgument."Event Conditions".HASVALUE then begin
+        WorkflowStepArgument.CALCFIELDS("Event Conditions");
+        TempBlob.INIT;
+        TempBlob.Blob := WorkflowStepArgument."Event Conditions";
+
+        Result := EvaluateConditionOnTable(RecRef.RECORDID,RecRef.NUMBER,TempBlob) and
+          EvaluateConditionsOnRelatedTables(RecRef,TempBlob);
+      end else
+        Result := true;
+
+      Result := Result and EvaluateRules(RecRef,xRecRef,WorkflowRule);
+
+      exit(Result);
+    END;
+
+    LOCAL PROCEDURE EvaluateConditionOnTable@6(SourceRecordId@1002 : RecordID;TableId@1000 : Integer;TempBlob@1001 : Record TempBlob) : Boolean;
+    VAR
+      RequestPageParametersHelper@1004 : Codeunit "Request Page Parameters Helper";
+      RecRef@1003 : RecordRef;
+      LookupRecRef@1005 : RecordRef;
+    BEGIN
+      RecRef.OPEN(TableId);
+
+      if not RequestPageParametersHelper.ConvertParametersToFilters(RecRef,TempBlob) then
+        exit(true);
+
+      if not LookupRecRef.GET(SourceRecordId) then
+        exit(false);
+
+      LookupRecRef.SETVIEW(RecRef.GETVIEW);
+
+      exit(LookupRecRef.FIND);
+    END;
+
+    LOCAL PROCEDURE EvaluateRules@23(RecRef@1000 : RecordRef;xRecRef@1001 : RecordRef;VAR WorkflowRule@1002 : Record "Workflow Rule") Result : Boolean;
+    BEGIN
+      if RecRef.NUMBER <> xRecRef.NUMBER then
+        exit(false);
+
+      Result := true;
+      if WorkflowRule.FINDSET then
+        repeat
+          Result := Result and WorkflowRule.EvaluateRule(RecRef,xRecRef);
+        until (WorkflowRule.NEXT = 0) or (not Result);
+
+      exit(Result);
+    END;
+
+    LOCAL PROCEDURE IsWorkflowCompleted@11(WorkflowStepInstance@1000 : Record "Workflow Step Instance") : Boolean;
+    VAR
+      CompletedWorkflowStepInstance@1001 : Record "Workflow Step Instance";
+    BEGIN
+      CompletedWorkflowStepInstance.SETRANGE("Workflow Code",WorkflowStepInstance."Workflow Code");
+      CompletedWorkflowStepInstance.SETRANGE(ID,WorkflowStepInstance.ID);
+      CompletedWorkflowStepInstance.SETRANGE(Status,WorkflowStepInstance.Status::Active);
+      exit(CompletedWorkflowStepInstance.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE ArchiveWorkflowInstance@12(WorkflowStepInstance@1001 : Record "Workflow Step Instance");
+    VAR
+      ToArchiveWorkflowStepInstance@1000 : Record "Workflow Step Instance";
+      WorkflowStepInstanceArchive@1002 : Record "Workflow Step Instance Archive";
+      ToArchiveWorkflowRecordChange@1003 : Record "Workflow - Record Change";
+      WorkflowRecordChangeArchive@1004 : Record "Workflow Record Change Archive";
+      ToArchiveWorkflowStepArgument@1006 : Record "Workflow Step Argument";
+    BEGIN
+      ToArchiveWorkflowStepInstance.SETRANGE("Workflow Code",WorkflowStepInstance."Workflow Code");
+      ToArchiveWorkflowStepInstance.SETRANGE(ID,WorkflowStepInstance.ID);
+
+      if ToArchiveWorkflowStepInstance.FINDSET then begin
+        repeat
+          WorkflowStepInstanceArchive.INIT;
+          WorkflowStepInstanceArchive.TRANSFERFIELDS(ToArchiveWorkflowStepInstance);
+          if ToArchiveWorkflowStepArgument.GET(ToArchiveWorkflowStepInstance.Argument) then begin
+            WorkflowStepInstanceArchive.Argument := CreateWorkflowStepArgumentArchive(ToArchiveWorkflowStepArgument);
+            ToArchiveWorkflowStepArgument.DELETE(true);
+          end;
+          WorkflowStepInstanceArchive.INSERT;
+        until ToArchiveWorkflowStepInstance.NEXT = 0;
+
+        ToArchiveWorkflowStepInstance.DELETEALL(true);
+      end;
+
+      ToArchiveWorkflowRecordChange.SETRANGE("Workflow Step Instance ID",WorkflowStepInstance.ID);
+
+      if ToArchiveWorkflowRecordChange.FINDSET then begin
+        repeat
+          WorkflowRecordChangeArchive.INIT;
+          WorkflowRecordChangeArchive.TRANSFERFIELDS(ToArchiveWorkflowRecordChange);
+          WorkflowRecordChangeArchive.INSERT;
+        until ToArchiveWorkflowRecordChange.NEXT = 0;
+
+        ToArchiveWorkflowRecordChange.DELETEALL(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE EvaluateConditionsOnRelatedTables@7(RecRef@1000 : RecordRef;TempBlob@1001 : Record TempBlob) : Boolean;
+    VAR
+      WorkflowTableRelation@1002 : Record "Workflow - Table Relation";
+      RequestPageParametersHelper@1003 : Codeunit "Request Page Parameters Helper";
+      RecRefRelated@1004 : RecordRef;
+      List@1008 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.ArrayList";
+    BEGIN
+      WorkflowTableRelation.SETRANGE("Table ID",RecRef.NUMBER);
+
+      if WorkflowTableRelation.FINDSET then begin
+        List := List.ArrayList;
+        repeat
+          if not List.Contains(WorkflowTableRelation."Related Table ID") then begin
+            List.Add(WorkflowTableRelation."Related Table ID");
+            RecRefRelated.OPEN(WorkflowTableRelation."Related Table ID");
+            if RequestPageParametersHelper.ConvertParametersToFilters(RecRefRelated,TempBlob) then begin
+              ApplyRelationshipFilters(RecRef,RecRefRelated);
+              if RecRefRelated.ISEMPTY then
+                exit(false);
+            end;
+            RecRefRelated.CLOSE;
+          end;
+        until WorkflowTableRelation.NEXT = 0;
+      end;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE ApplyRelationshipFilters@10(RecRef@1000 : RecordRef;RecRefRelated@1007 : RecordRef);
+    VAR
+      WorkflowTableRelation@1002 : Record "Workflow - Table Relation";
+      FieldRefSrc@1005 : FieldRef;
+      FieldRefRelated@1006 : FieldRef;
+    BEGIN
+      WorkflowTableRelation.SETRANGE("Table ID",RecRef.NUMBER);
+      WorkflowTableRelation.SETRANGE("Related Table ID",RecRefRelated.NUMBER);
+      if WorkflowTableRelation.FINDSET then
+        repeat
+          FieldRefRelated := RecRefRelated.FIELD(WorkflowTableRelation."Related Field ID");
+          FieldRefSrc := RecRef.FIELD(WorkflowTableRelation."Field ID");
+          FieldRefRelated.SETRANGE(FieldRefSrc.VALUE);
+        until WorkflowTableRelation.NEXT = 0
+    END;
+
+    [External]
+    PROCEDURE FindResponse@8(VAR ResponseWorkflowStepInstance@1000 : Record "Workflow Step Instance";PreviousWorkflowStepInstance@1001 : Record "Workflow Step Instance") : Boolean;
+    BEGIN
+      ResponseWorkflowStepInstance.SETRANGE("Workflow Code",PreviousWorkflowStepInstance."Workflow Code");
+      ResponseWorkflowStepInstance.SETRANGE(ID,PreviousWorkflowStepInstance.ID);
+      ResponseWorkflowStepInstance.SETRANGE(Type,ResponseWorkflowStepInstance.Type::Response);
+      ResponseWorkflowStepInstance.SETRANGE("Previous Workflow Step ID",PreviousWorkflowStepInstance."Workflow Step ID");
+      exit(ResponseWorkflowStepInstance.FINDFIRST);
+    END;
+
+    [Internal]
+    PROCEDURE FindEventWorkflowStepInstance@18(VAR WorkflowStepInstance@1000 : Record "Workflow Step Instance";FunctionName@1001 : Code[128];Variant@1002 : Variant;xVariant@1005 : Variant) : Boolean;
+    VAR
+      Workflow@1004 : Record Workflow;
+      WorkflowEvent@1003 : Record "Workflow Event";
+    BEGIN
+      Workflow.SETRANGE(Enabled,true);
+      if WorkflowStepInstance.ISEMPTY and Workflow.ISEMPTY then
+        exit(false);
+
+      WorkflowEvent.GET(FunctionName);
+
+      exit(FindWorkflowStepInstance(Variant,xVariant,WorkflowStepInstance,WorkflowEvent."Function Name"));
+    END;
+
+    [External]
+    PROCEDURE HandleEvent@20(FunctionName@1001 : Code[128];Variant@1000 : Variant);
+    BEGIN
+      HandleEventWithxRec(FunctionName,Variant,Variant)
+    END;
+
+    [External]
+    PROCEDURE HandleEventWithxRec@25(FunctionName@1001 : Code[128];Variant@1000 : Variant;xVariant@1003 : Variant);
+    VAR
+      ActionableWorkflowStepInstance@1002 : Record "Workflow Step Instance";
+      RecRef@1004 : RecordRef;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+      if RecRef.ISTEMPORARY then
+        exit;
+      if FindEventWorkflowStepInstance(ActionableWorkflowStepInstance,FunctionName,Variant,xVariant) then
+        ExecuteResponses(Variant,xVariant,ActionableWorkflowStepInstance);
+    END;
+
+    [External]
+    PROCEDURE HandleEventOnKnownWorkflowInstance@26(FunctionName@1001 : Code[128];Variant@1000 : Variant;WorkflowStepInstanceID@1003 : GUID);
+    BEGIN
+      HandleEventWithxRecOnKnownWorkflowInstance(FunctionName,Variant,Variant,WorkflowStepInstanceID)
+    END;
+
+    [External]
+    PROCEDURE HandleEventWithxRecOnKnownWorkflowInstance@31(FunctionName@1001 : Code[128];Variant@1000 : Variant;xVariant@1005 : Variant;WorkflowStepInstanceID@1003 : GUID);
+    VAR
+      WorkflowStepInstance@1006 : Record "Workflow Step Instance";
+      ActionableWorkflowStepInstance@1002 : Record "Workflow Step Instance";
+      WorkflowRule@1007 : Record "Workflow Rule";
+      RecRef@1004 : RecordRef;
+      xRecRef@1009 : RecordRef;
+      ActionableStepFound@1008 : Boolean;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+      xRecRef.GETTABLE(xVariant);
+
+      WorkflowStepInstance.SETRANGE(ID,WorkflowStepInstanceID);
+      WorkflowStepInstance.SETRANGE(Status,ActionableWorkflowStepInstance.Status::Active);
+      WorkflowStepInstance.SETRANGE("Function Name",FunctionName);
+      if WorkflowStepInstance.FINDSET then
+        repeat
+          WorkflowStepInstance.FindWorkflowRules(WorkflowRule);
+          if EvaluateCondition(RecRef,xRecRef,WorkflowStepInstance.Argument,WorkflowRule) then begin
+            ActionableWorkflowStepInstance := WorkflowStepInstance;
+            ActionableStepFound := true;
+          end;
+        until (WorkflowStepInstance.NEXT = 0) or ActionableStepFound;
+
+      if ActionableStepFound then
+        ExecuteResponses(Variant,xVariant,ActionableWorkflowStepInstance);
+    END;
+
+    [Internal]
+    PROCEDURE ExecuteResponses@22(Variant@1000 : Variant;xVariant@1005 : Variant;ActionableWorkflowStepInstance@1001 : Record "Workflow Step Instance");
+    VAR
+      ResponseWorkflowStepInstance@1002 : Record "Workflow Step Instance";
+      WorkflowResponseHandling@1003 : Codeunit "Workflow Response Handling";
+      RecRef@1008 : RecordRef;
+      Variant1@1004 : Variant;
+    BEGIN
+      if not CanExecuteEvent(ActionableWorkflowStepInstance) then begin
+        StoreEventForLaterProcessing(Variant,xVariant,ActionableWorkflowStepInstance);
+
+        if ActionableWorkflowStepInstance.Status <> ActionableWorkflowStepInstance.Status::Completed then begin
+          ActionableWorkflowStepInstance.Status := ActionableWorkflowStepInstance.Status::Processing;
+          ActionableWorkflowStepInstance.MODIFY(true);
+        end;
+
+        exit;
+      end;
+
+      RecRef.GETTABLE(Variant);
+
+      UpdateStatus(ActionableWorkflowStepInstance,ActionableWorkflowStepInstance.Status::Completed,
+        ActionableWorkflowStepInstance.Status::Active,ActionableWorkflowStepInstance.Status::Ignored);
+
+      UpdateStepAndRelatedTableData(ActionableWorkflowStepInstance,RecRef);
+
+      ChangeStatusForResponsesAndEvents(ActionableWorkflowStepInstance);
+
+      Variant1 := Variant;
+
+      while FindResponse(ResponseWorkflowStepInstance,ActionableWorkflowStepInstance) do begin
+        UpdateStepAndRelatedTableData(ResponseWorkflowStepInstance,RecRef);
+
+        WorkflowResponseHandling.ExecuteResponse(Variant1,ResponseWorkflowStepInstance,xVariant);
+
+        UpdateStatusForResponse(ResponseWorkflowStepInstance);
+
+        ActionableWorkflowStepInstance := ResponseWorkflowStepInstance;
+        CLEAR(ResponseWorkflowStepInstance);
+      end;
+
+      ExecuteQueuedEvents;
+
+      if IsWorkflowCompleted(ActionableWorkflowStepInstance) then
+        ArchiveWorkflowInstance(ActionableWorkflowStepInstance);
+    END;
+
+    LOCAL PROCEDURE CanExecuteEvent@24(WorkflowStepInstance@1000 : Record "Workflow Step Instance") : Boolean;
+    VAR
+      ProcessingWorkflowStepInstance@1001 : Record "Workflow Step Instance";
+    BEGIN
+      ProcessingWorkflowStepInstance.SETRANGE(ID,WorkflowStepInstance.ID);
+      ProcessingWorkflowStepInstance.SETRANGE(Status,WorkflowStepInstance.Status::Processing);
+      ProcessingWorkflowStepInstance.SETFILTER("Workflow Step ID",'<>%1',WorkflowStepInstance."Workflow Step ID");
+      exit(ProcessingWorkflowStepInstance.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE StoreEventForLaterProcessing@32(Variant@1000 : Variant;xVariant@1004 : Variant;WorkflowStepInstance@1001 : Record "Workflow Step Instance");
+    VAR
+      WorkflowEventQueue@1003 : Record "Workflow Event Queue";
+      RecRef@1002 : RecordRef;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+
+      WorkflowEventQueue.INIT;
+      WorkflowEventQueue."Session ID" := SESSIONID;
+      WorkflowEventQueue."Step Record ID" := WorkflowStepInstance.RECORDID;
+      WorkflowEventQueue."Record ID" := RecRef.RECORDID;
+      WorkflowEventQueue."Record Index" := WorkflowRecordManagement.BackupRecord(Variant);
+      WorkflowEventQueue."xRecord Index" := WorkflowRecordManagement.BackupRecord(xVariant);
+      WorkflowEventQueue.INSERT(true);
+    END;
+
+    LOCAL PROCEDURE ExecuteQueuedEvents@21();
+    VAR
+      WorkflowEventQueue@1001 : Record "Workflow Event Queue";
+      WorkflowStepInstance@1003 : Record "Workflow Step Instance";
+      WorkflowRule@1006 : Record "Workflow Rule";
+      RecRef@1000 : RecordRef;
+      xRecRef@1002 : RecordRef;
+      Variant@1004 : Variant;
+      xVariant@1005 : Variant;
+    BEGIN
+      WorkflowEventQueue.SETRANGE("Session ID",SESSIONID);
+      if WorkflowEventQueue.FINDSET then
+        repeat
+          WorkflowStepInstance.GET(WorkflowEventQueue."Step Record ID");
+          if WorkflowStepInstance.Status = WorkflowStepInstance.Status::Processing then begin
+            WorkflowRecordManagement.RestoreRecord(WorkflowEventQueue."Record Index",Variant);
+            WorkflowRecordManagement.RestoreRecord(WorkflowEventQueue."xRecord Index",xVariant);
+            RecRef.GETTABLE(Variant);
+            xRecRef.GETTABLE(xVariant);
+            WorkflowStepInstance.FindWorkflowRules(WorkflowRule);
+            if EvaluateCondition(RecRef,xRecRef,WorkflowStepInstance.Argument,WorkflowRule) then begin
+              ExecuteResponses(RecRef,xRecRef,WorkflowStepInstance);
+              WorkflowEventQueue.DELETE;
+            end;
+          end;
+        until WorkflowEventQueue.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE ChangeStatusForResponsesAndEvents@17(WorkflowStepInstance@1000 : Record "Workflow Step Instance");
+    VAR
+      MarkWorkflowStepInstance@1001 : Record "Workflow Step Instance";
+    BEGIN
+      MarkWorkflowStepInstance.SETRANGE(ID,WorkflowStepInstance.ID);
+      MarkWorkflowStepInstance.SETRANGE("Workflow Code",WorkflowStepInstance."Workflow Code");
+      MarkWorkflowStepInstance.SETRANGE("Previous Workflow Step ID",WorkflowStepInstance."Workflow Step ID");
+      if MarkWorkflowStepInstance.FINDSET then
+        repeat
+          if MarkWorkflowStepInstance.Type = MarkWorkflowStepInstance.Type::Response then begin
+            MarkWorkflowStepInstance.Status := MarkWorkflowStepInstance.Status::Processing;
+            MarkWorkflowStepInstance.MODIFY(true);
+            ChangeStatusForResponsesAndEvents(MarkWorkflowStepInstance);
+          end else begin
+            MarkWorkflowStepInstance.Status := MarkWorkflowStepInstance.Status::Active;
+            MarkWorkflowStepInstance.MODIFY(true);
+          end;
+        until MarkWorkflowStepInstance.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateStepAndRelatedTableData@27(VAR WorkflowStepInstance@1001 : Record "Workflow Step Instance";RecRef@1000 : RecordRef);
+    BEGIN
+      WorkflowStepInstance."Record ID" := RecRef.RECORDID;
+      WorkflowStepInstance.MODIFY(true);
+
+      UpdateRelatedTableValues(RecRef);
+
+      if not WorkflowStepInstance.TableRelationValuesExist(RecRef) then
+        WorkflowStepInstance.SetTableRelationValues(RecRef);
+    END;
+
+    LOCAL PROCEDURE UpdateStatusForResponse@61(VAR WorkflowStepInstance@1000 : Record "Workflow Step Instance");
+    VAR
+      NextWorkflowStepInstance@1001 : Record "Workflow Step Instance";
+    BEGIN
+      if WorkflowStepInstance."Next Workflow Step ID" <> 0 then begin
+        NextWorkflowStepInstance.GET(WorkflowStepInstance.ID,
+          WorkflowStepInstance."Workflow Code",WorkflowStepInstance."Next Workflow Step ID");
+
+        case NextWorkflowStepInstance.Type of
+          NextWorkflowStepInstance.Type::"Event":
+            UpdateStatus(NextWorkflowStepInstance,NextWorkflowStepInstance.Status::Active,
+              NextWorkflowStepInstance.Status::Inactive,NextWorkflowStepInstance.Status::Ignored);
+          NextWorkflowStepInstance.Type::Response:
+            UpdateStatus(NextWorkflowStepInstance,NextWorkflowStepInstance.Status::Completed,
+              NextWorkflowStepInstance.Status::Active,NextWorkflowStepInstance.Status::Ignored);
+        end;
+      end;
+      UpdateStatus(WorkflowStepInstance,WorkflowStepInstance.Status::Completed,
+        WorkflowStepInstance.Status::Active,WorkflowStepInstance.Status::Ignored);
+    END;
+
+    [External]
+    PROCEDURE EnabledWorkflowExist@29(TableNo@1002 : Integer;EventFilter@1003 : Text) : Boolean;
+    VAR
+      WorkflowDefinition@1000 : Query "Workflow Definition";
+    BEGIN
+      WorkflowDefinition.SETRANGE(Table_ID,TableNo);
+      WorkflowDefinition.SETRANGE(Entry_Point,true);
+      WorkflowDefinition.SETRANGE(Enabled,true);
+      WorkflowDefinition.SETRANGE(Template,false);
+      WorkflowDefinition.SETRANGE(Type,WorkflowDefinition.Type::"Event");
+      WorkflowDefinition.SETFILTER(Function_Name,EventFilter);
+      WorkflowDefinition.OPEN;
+      exit(WorkflowDefinition.READ);
+    END;
+
+    [External]
+    PROCEDURE NavigateToWorkflows@33(TableNo@1008 : Integer;EventFilter@1009 : Text);
+    VAR
+      Workflow@1006 : Record Workflow;
+      TempWorkflowBuffer@1007 : TEMPORARY Record "Workflow Buffer";
+      Workflows@1005 : Page Workflows;
+      WorkflowDefinition@1003 : Query "Workflow Definition";
+      Count@1002 : Integer;
+      WorkflowFilter@1001 : Text;
+      CategoryFilter@1000 : Text;
+    BEGIN
+      WorkflowDefinition.SETRANGE(Table_ID,TableNo);
+      WorkflowDefinition.SETRANGE(Entry_Point,true);
+      WorkflowDefinition.SETRANGE(Enabled,true);
+      WorkflowDefinition.SETRANGE(Template,false);
+      WorkflowDefinition.SETRANGE(Type,WorkflowDefinition.Type::"Event");
+      WorkflowDefinition.SETFILTER(Function_Name,EventFilter);
+      WorkflowDefinition.OPEN;
+
+      while WorkflowDefinition.READ do begin
+        Workflow.GET(WorkflowDefinition.Code);
+        BuildFilter(WorkflowFilter,Workflow.Code);
+        BuildFilter(CategoryFilter,Workflow.Category);
+        Count += 1;
+      end;
+
+      if Count = 1 then begin
+        Workflow.GET(WorkflowFilter);
+        PAGE.RUNMODAL(PAGE::Workflow,Workflow);
+      end else begin
+        TempWorkflowBuffer.InitBufferForWorkflows(TempWorkflowBuffer);
+        TempWorkflowBuffer.SETFILTER("Workflow Code",WorkflowFilter);
+        TempWorkflowBuffer.SETFILTER("Category Code",CategoryFilter);
+        Workflows.SetWorkflowBufferRec(TempWorkflowBuffer);
+        Workflows.RUNMODAL;
+      end;
+    END;
+
+    LOCAL PROCEDURE BuildFilter@36(VAR InitialFilter@1000 : Text;NewValue@1001 : Text);
+    BEGIN
+      if STRPOS(InitialFilter,NewValue) = 0 then begin
+        if STRLEN(InitialFilter) > 0 then
+          InitialFilter += '|';
+        InitialFilter += NewValue;
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateWorkflowStepArgumentArchive@34(ToArchiveWorkflowStepArgument@1001 : Record "Workflow Step Argument") : GUID;
+    VAR
+      WorkflowStepArgumentArchive@1000 : Record "Workflow Step Argument Archive";
+    BEGIN
+      WorkflowStepArgumentArchive.INIT;
+      WorkflowStepArgumentArchive.TRANSFERFIELDS(ToArchiveWorkflowStepArgument);
+      WorkflowStepArgumentArchive."Original Record ID" := ToArchiveWorkflowStepArgument.RECORDID;
+      WorkflowStepArgumentArchive.INSERT(true);
+
+      exit(WorkflowStepArgumentArchive.ID);
+    END;
+
+    [External]
+    PROCEDURE BuildConditionDisplay@35(WorkflowStep@1002 : Record "Workflow Step") Condition : Text[100];
+    VAR
+      RuleAsText@1001 : Text;
+    BEGIN
+      Condition := COPYSTR(WorkflowStep.GetConditionAsDisplayText,1,MAXSTRLEN(Condition));
+      RuleAsText := WorkflowStep.GetRuleAsDisplayText;
+      if RuleAsText <> '' then
+        if Condition = '' then
+          Condition := COPYSTR(RuleAsText,1,MAXSTRLEN(Condition))
+        else
+          Condition := COPYSTR(STRSUBSTNO(CombinedConditionTxt,Condition,RuleAsText),1,MAXSTRLEN(Condition));
+
+      if Condition = '' then
+        Condition := AlwaysTxt;
+    END;
+
+    [External]
+    PROCEDURE GetWebhookClientLink@37(ClientId@1000 : GUID;ClientType@1001 : Text) : Text;
+    VAR
+      FlowServiceMgt@1002 : Codeunit "Flow Service Management";
+    BEGIN
+      if not ISNULLGUID(ClientId) then
+        case ClientType of
+          'Flow':
+            exit(FlowServiceMgt.GetFlowDetailsUrl(ClientId));
+        end;
+
+      exit('');
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -2,9 +2,9 @@ OBJECT Codeunit 1543 Workflow Webhook Management
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -55,17 +55,54 @@ OBJECT Codeunit 1543 Workflow Webhook Management
     END;
 
     [External]
-    PROCEDURE GetCanRequestAndCanCancel@16(SalesHeader@1000 : Record 36;VAR CanRequestApprovalForFlow@1001 : Boolean;VAR CanCancelApprovalForFlow@1002 : Boolean);
+    PROCEDURE CanRequestApproval@23(RecordId@1000 : RecordID) : Boolean;
+    VAR
+      WorkflowWebhookEntry@1001 : Record 467;
+    BEGIN
+      // Checks if the given record can have an approval request made, based on whether or not there's already a pending approval for it.
+      EXIT(NOT FindWorkflowWebhookEntryByRecordIdAndResponse(WorkflowWebhookEntry,RecordId,WorkflowWebhookEntry.Response::Pending));
+    END;
+
+    [External]
+    PROCEDURE GetCanRequestAndCanCancel@16(RecordId@1000 : RecordID;VAR CanRequestApprovalForFlow@1001 : Boolean;VAR CanCancelApprovalForFlow@1002 : Boolean);
     VAR
       WorkflowWebhookEntry@1003 : Record 467;
     BEGIN
-      IF FindWorkflowWebhookEntryByRecordIdAndResponse(WorkflowWebhookEntry,SalesHeader.RECORDID,WorkflowWebhookEntry.Response::Pending) THEN BEGIN
+      IF FindWorkflowWebhookEntryByRecordIdAndResponse(WorkflowWebhookEntry,RecordId,WorkflowWebhookEntry.Response::Pending) THEN BEGIN
         CanCancelApprovalForFlow := CanCancel(WorkflowWebhookEntry);
         CanRequestApprovalForFlow := FALSE;
       END ELSE BEGIN
         CanCancelApprovalForFlow := FALSE;
         CanRequestApprovalForFlow := TRUE;
       END;
+    END;
+
+    [External]
+    PROCEDURE GetCanRequestAndCanCancelJournalBatch@22(GenJournalBatch@1000 : Record 232;VAR CanRequestBatchApproval@1001 : Boolean;VAR CanCancelBatchApproval@1002 : Boolean;VAR CanRequestLineApprovals@1003 : Boolean);
+    VAR
+      GenJournalLine@1004 : Record 81;
+    BEGIN
+      // Helper method to check the General Journal Batch and all its lines for ability to request/cancel approval.
+      // Journal pages' ribbon buttons only let users request approval for the batch or its individual lines, but not both.
+
+      GetCanRequestAndCanCancel(GenJournalBatch.RECORDID,CanRequestBatchApproval,CanCancelBatchApproval);
+
+      GenJournalLine.SETRANGE("Journal Template Name",GenJournalBatch."Journal Template Name");
+      GenJournalLine.SETRANGE("Journal Batch Name",GenJournalBatch.Name);
+      IF GenJournalLine.ISEMPTY THEN BEGIN
+        CanRequestLineApprovals := TRUE;
+        EXIT;
+      END;
+
+      GenJournalLine.FINDSET;
+      REPEAT
+        IF NOT CanRequestApproval(GenJournalLine.RECORDID) THEN BEGIN
+          CanRequestLineApprovals := FALSE;
+          EXIT;
+        END;
+      UNTIL GenJournalLine.NEXT = 0;
+
+      CanRequestLineApprovals := TRUE;
     END;
 
     [External]
@@ -215,8 +252,13 @@ OBJECT Codeunit 1543 Workflow Webhook Management
 
     LOCAL PROCEDURE CreateWorkflowWebhookEntry@9(RecRef@1000 : RecordRef;WorkflowStepInstance@1001 : Record 1504;VAR WorkflowWebhookEntry@1002 : Record 467);
     VAR
+      Customer@1008 : Record 18;
+      GenJournalBatch@1006 : Record 232;
+      GenJournalLine@1007 : Record 81;
+      Item@1009 : Record 27;
       PurchaseHeader@1003 : Record 38;
       SalesHeader@1004 : Record 36;
+      Vendor@1010 : Record 23;
       WorkflowStepArgument@1005 : Record 1523;
     BEGIN
       IF ISNULLGUID(WorkflowStepInstance.Argument) OR NOT WorkflowStepArgument.GET(WorkflowStepInstance.Argument) THEN
@@ -233,6 +275,26 @@ OBJECT Codeunit 1543 Workflow Webhook Management
       WorkflowWebhookEntry."Record ID" := RecRef.RECORDID;
 
       CASE RecRef.NUMBER OF
+        DATABASE::Customer:
+          BEGIN
+            RecRef.SETTABLE(Customer);
+            WorkflowWebhookEntry."Data ID" := Customer.Id;
+          END;
+        DATABASE::"Gen. Journal Batch":
+          BEGIN
+            RecRef.SETTABLE(GenJournalBatch);
+            WorkflowWebhookEntry."Data ID" := GenJournalBatch.Id;
+          END;
+        DATABASE::"Gen. Journal Line":
+          BEGIN
+            RecRef.SETTABLE(GenJournalLine);
+            WorkflowWebhookEntry."Data ID" := GenJournalLine.Id;
+          END;
+        DATABASE::Item:
+          BEGIN
+            RecRef.SETTABLE(Item);
+            WorkflowWebhookEntry."Data ID" := Item.Id;
+          END;
         DATABASE::"Purchase Header":
           BEGIN
             RecRef.SETTABLE(PurchaseHeader);
@@ -242,6 +304,11 @@ OBJECT Codeunit 1543 Workflow Webhook Management
           BEGIN
             RecRef.SETTABLE(SalesHeader);
             WorkflowWebhookEntry."Data ID" := SalesHeader.Id;
+          END;
+        DATABASE::Vendor:
+          BEGIN
+            RecRef.SETTABLE(Vendor);
+            WorkflowWebhookEntry."Data ID" := Vendor.Id;
           END;
         ELSE
           ERROR(UnsupportedRecordTypeErr,RecRef.CAPTION);
@@ -288,10 +355,31 @@ OBJECT Codeunit 1543 Workflow Webhook Management
 
     PROCEDURE FindWorkflowWebhookEntryByRecordIdAndResponse@15(VAR WorkflowWebhookEntry@1002 : Record 467;RecordId@1000 : RecordID;ResponseStatus@1001 : Option) : Boolean;
     BEGIN
-      WorkflowWebhookEntry.SETFILTER("Record ID",FORMAT(RecordId));
+      WorkflowWebhookEntry.SETRANGE("Record ID",RecordId);
       WorkflowWebhookEntry.SETRANGE(Response,ResponseStatus);
 
       EXIT(WorkflowWebhookEntry.FINDFIRST);
+    END;
+
+    PROCEDURE FindAndCancel@18(RecordId@1000 : RecordID);
+    VAR
+      WorkflowWebhookEntry@1002 : Record 467;
+    BEGIN
+      // Searches for and then cancels the webhook entry with the given ID, if possible.
+      // (Used by the various Cancel ribbon buttons.)
+      IF FindWorkflowWebhookEntryByRecordIdAndResponse(WorkflowWebhookEntry,RecordId,WorkflowWebhookEntry.Response::Pending) AND
+         CanCancel(WorkflowWebhookEntry)
+      THEN
+        Cancel(WorkflowWebhookEntry);
+    END;
+
+    PROCEDURE RenameRecord@19(OldRecordId@1000 : RecordID;NewRecordId@1001 : RecordID);
+    VAR
+      WorkflowWebhookEntry@1002 : Record 467;
+    BEGIN
+      WorkflowWebhookEntry.SETRANGE("Record ID",OldRecordId);
+      IF WorkflowWebhookEntry.FINDFIRST THEN
+        WorkflowWebhookEntry.MODIFYALL("Record ID",NewRecordId,TRUE);
     END;
 
     LOCAL PROCEDURE VerifyResponseExpected@12(WorkflowWebhookEntry@1000 : Record 467);

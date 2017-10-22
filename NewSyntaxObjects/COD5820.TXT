@@ -1,0 +1,184 @@
+OBJECT Codeunit 5820 Close Inventory Period
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Inventory Period";
+    Permissions=TableData "Inventory Period"=imd,
+                TableData "Inventory Period Entry"=imd;
+    OnRun=BEGIN
+            if not HideDialog then
+              if not ReOpen then begin
+                if not CONFIRM(
+                     Text002,
+                     false,
+                     "Ending Date")
+                then
+                  exit
+              end else
+                if not CONFIRM(Text006,false,TABLECAPTION,"Ending Date") then
+                  exit;
+
+            TESTFIELD(Closed,ReOpen);
+            if not ReOpen then begin
+              TESTFIELD("Ending Date");
+              CheckCostIsAdjusted("Ending Date");
+              CheckOpenOutboundEntryExist("Ending Date");
+            end else
+              if not HideDialog and AccPeriodIsClosed("Ending Date") then
+                if not CONFIRM(Text008,false,TABLECAPTION,"Ending Date") then
+                  exit;
+
+            UpdateInvtPeriod(Rec);
+            CreateInvtPeriodEntry(Rec);
+
+            if not HideDialog then
+              if not ReOpen then begin
+                MESSAGE(Text005,TABLECAPTION,"Ending Date")
+              end else
+                MESSAGE(Text007,"Ending Date");
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=The Inventory Period cannot be closed because there is at least one item with unadjusted entries in the current period.\\Run the Close Inventory Period - Test report to identify item ledger entries for the affected items.';
+      Text001@1001 : TextConst 'ENU=The Inventory Period cannot be closed because there is negative inventory for one or more items.\\Run the Close Inventory Period - Test report to identify item ledger entries for the affected items.';
+      Text002@1007 : TextConst 'ENU=This function closes the inventory up to %1. Once it is closed, you cannot post in the period until it is re-opened.\\Make sure that all your inventory is posted to G/L.\\Do you want to close the inventory period?';
+      Text005@1004 : TextConst 'ENU=The %1 has been closed on %2.';
+      Text006@1005 : TextConst 'ENU=Do you want to reopen the %1 that ends %2?';
+      Text007@1006 : TextConst 'ENU=All inventory periods from %1 have been reopened.';
+      ReOpen@1002 : Boolean;
+      HideDialog@1008 : Boolean;
+      Text008@1010 : TextConst 'ENU=The accounting period is already closed. Are you sure you want to reopen the %1 that ends %2?';
+      Text010@1009 : TextConst 'ENU=The Inventory Period cannot be closed because there is at least one %1 Order in the current period that has not been adjusted.\\Run the Close Inventory Period - Test report to identify the affected orders.';
+
+    LOCAL PROCEDURE CheckCostIsAdjusted@4(EndingDate@1003 : Date);
+    VAR
+      AvgCostAdjmtEntryPoint@1004 : Record "Avg. Cost Adjmt. Entry Point";
+      InvtAdjmtEntryOrder@1000 : Record "Inventory Adjmt. Entry (Order)";
+      ValueEntry@1005 : Record "Value Entry";
+    BEGIN
+      AvgCostAdjmtEntryPoint.RESET;
+      AvgCostAdjmtEntryPoint.SETCURRENTKEY("Item No.","Cost Is Adjusted","Valuation Date");
+      AvgCostAdjmtEntryPoint.SETRANGE("Cost Is Adjusted",false);
+      AvgCostAdjmtEntryPoint.SETRANGE("Valuation Date",0D,EndingDate);
+      if not AvgCostAdjmtEntryPoint.ISEMPTY then
+        ERROR(Text000);
+
+      InvtAdjmtEntryOrder.SETCURRENTKEY("Cost is Adjusted");
+      InvtAdjmtEntryOrder.SETRANGE("Cost is Adjusted",false);
+      InvtAdjmtEntryOrder.SETRANGE("Is Finished",true);
+      if InvtAdjmtEntryOrder.FINDSET then
+        repeat
+          ValueEntry.SETCURRENTKEY("Order Type","Order No.","Order Line No.");
+          ValueEntry.SETRANGE("Order Type",InvtAdjmtEntryOrder."Order Type");
+          ValueEntry.SETRANGE("Order No.",InvtAdjmtEntryOrder."Order No.");
+          ValueEntry.SETRANGE("Order Line No.",InvtAdjmtEntryOrder."Order Line No.");
+          ValueEntry.SETFILTER("Item Ledger Entry Type",'%1|%2',
+            ValueEntry."Item Ledger Entry Type"::Output,ValueEntry."Item Ledger Entry Type"::"Assembly Output");
+          ValueEntry.SETRANGE("Valuation Date",0D,EndingDate);
+          if not ValueEntry.ISEMPTY then
+            ERROR(Text010,InvtAdjmtEntryOrder."Order Type");
+        until InvtAdjmtEntryOrder.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckOpenOutboundEntryExist@5(EndingDate@1001 : Date);
+    VAR
+      ItemLedgEntry@1000 : Record "Item Ledger Entry";
+    BEGIN
+      ItemLedgEntry.SETCURRENTKEY("Item No.",Open,"Variant Code",Positive,"Location Code","Posting Date");
+      ItemLedgEntry.SETRANGE(Open,true);
+      ItemLedgEntry.SETRANGE(Positive,false);
+      ItemLedgEntry.SETRANGE("Posting Date",0D,EndingDate);
+      if not ItemLedgEntry.ISEMPTY then
+        ERROR(Text001);
+    END;
+
+    LOCAL PROCEDURE AccPeriodIsClosed@2(StartDate@1001 : Date) : Boolean;
+    VAR
+      AccPeriod@1000 : Record "Accounting Period";
+    BEGIN
+      AccPeriod.SETCURRENTKEY(Closed);
+      AccPeriod.SETRANGE(Closed,true);
+      AccPeriod.SETFILTER("Starting Date",'>=%1',StartDate);
+      exit(not AccPeriod.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE UpdateInvtPeriod@3(VAR TheInvtPeriod@1002 : Record "Inventory Period");
+    VAR
+      InvtPeriod2@1000 : Record "Inventory Period";
+      InvtPeriod3@1001 : Record "Inventory Period";
+    BEGIN
+      with TheInvtPeriod do begin
+        InvtPeriod2.SETRANGE(Closed,ReOpen);
+        if ReOpen then
+          InvtPeriod2.SETFILTER("Ending Date",'>%1',"Ending Date")
+        else
+          InvtPeriod2.SETFILTER("Ending Date",'<%1',"Ending Date");
+        if InvtPeriod2.FINDSET(true,true) then
+          repeat
+            InvtPeriod3 := InvtPeriod2;
+            InvtPeriod3.Closed := not ReOpen;
+            InvtPeriod3.MODIFY;
+            CreateInvtPeriodEntry(InvtPeriod3);
+          until InvtPeriod2.NEXT = 0;
+
+        Closed := not ReOpen;
+        MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateInvtPeriodEntry@11(InvtPeriod@1000 : Record "Inventory Period");
+    VAR
+      InvtPeriodEntry@1001 : Record "Inventory Period Entry";
+      ItemRegister@1003 : Record "Item Register";
+      EntryNo@1002 : Integer;
+    BEGIN
+      with InvtPeriod do begin
+        InvtPeriodEntry.SETRANGE("Ending Date","Ending Date");
+        if InvtPeriodEntry.FINDLAST then
+          EntryNo := InvtPeriodEntry."Entry No." + 1
+        else
+          EntryNo := 1;
+
+        InvtPeriodEntry.INIT;
+        InvtPeriodEntry."Entry No." := EntryNo;
+        InvtPeriodEntry."Ending Date" := "Ending Date";
+        InvtPeriodEntry."User ID" := USERID;
+        InvtPeriodEntry."Creation Date" := WORKDATE;
+        InvtPeriodEntry."Creation Time" := TIME;
+        if Closed then begin
+          InvtPeriodEntry."Entry Type" := InvtPeriodEntry."Entry Type"::Close;
+          if ItemRegister.FINDLAST then
+            InvtPeriodEntry."Closing Item Register No." := ItemRegister."No.";
+        end else
+          InvtPeriodEntry."Entry Type" := InvtPeriodEntry."Entry Type"::"Re-open";
+
+        InvtPeriodEntry.INSERT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE SetReOpen@13(NewReOpen@1000 : Boolean);
+    BEGIN
+      ReOpen := NewReOpen;
+    END;
+
+    [External]
+    PROCEDURE SetHideDialog@6(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

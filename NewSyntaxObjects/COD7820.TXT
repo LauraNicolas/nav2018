@@ -1,0 +1,695 @@
+OBJECT Codeunit 7820 MS-QBO Table Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      WebhooksAdapterMgt@1024 : Codeunit "Webhooks Adapter Mgt.";
+      Consumer@1000 : DotNet "'Microsoft.Dynamics.Nav.OAuth, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.OAuthHelper.Consumer";
+      Token@1001 : DotNet "'Microsoft.Dynamics.Nav.OAuth, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.OAuthHelper.Token";
+      OAuthAuthorization@1002 : DotNet "'Microsoft.Dynamics.Nav.OAuth, Version=11.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.OAuthHelper.OAuthAuthorization";
+      HttpMessageHandler@1007 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpMessageHandler";
+      RealmId@1003 : Text;
+      BaseUrlTxt@1004 : TextConst '@@@={Locked};ENU=https://quickbooks.api.intuit.com';
+      ReconnectUrlTxt@1021 : TextConst '@@@={Locked};ENU=https://appcenter.intuit.com';
+      NotInitializedErr@1006 : TextConst '@@@=%1 is the codeunit number. This is a message for developers.;ENU=The codeunit %1 has not been initialized.';
+      HttpRequestMethodNotSupportedErr@1010 : TextConst 'ENU=The HTTP request method provided is not supported.';
+      ErrorsTxt@1008 : TextConst 'ENU=We found one or more errors.';
+      FieldtErr@1005 : TextConst '@@@="%1=Field Name";ENU=The problem is in the %1 field.';
+      FaultTypeTxt@1011 : TextConst '@@@="%1=Type of error";ENU=Error Type: %1';
+      ConsumerKey@1013 : Text;
+      ConsumerSecret@1012 : Text;
+      MessageTxt@1014 : TextConst '@@@="%1=Message error";ENU=Message: %1';
+      DetailTxt@1015 : TextConst '@@@="%1=Details about the error";ENU=Detail: %1';
+      Initialized@1016 : Boolean;
+      StartPositionTxt@1018 : TextConst '@@@={Locked};ENU=" STARTPOSITION %1"';
+      QueryCountTxt@1009 : TextConst '@@@={Locked};ENU=" MAXRESULTS %1"';
+      CannotCompareDiffTablesErr@1017 : TextConst '@@@="%1=the first record id;%2=the second record id";ENU=Cannot compare %1 with %2.';
+      ExpectedAnArrayErr@1019 : TextConst 'ENU=An array was expected in the QuickBooks Online response.';
+      PageSize@1020 : Integer;
+      KeyvaultAccessFailedTxt@1023 : TextConst 'ENU=Could not access the keyvault to retrieve data.';
+      JsonMediaTypeTxt@1022 : TextConst '@@@={Locked};ENU=application/json';
+      ReconnectTxt@1025 : TextConst '@@@={Locked};ENU=/api/v1/connection/reconnect';
+
+    PROCEDURE Initialize@3();
+    VAR
+      MSQBOSetup@1005 : Record "MS-QBO Setup";
+      AzureKeyVaultManagement@1006 : Codeunit "Azure Key Vault Management";
+    BEGIN
+      MSQBOSetup.GET;
+      if ConsumerKey = '' then begin
+        if MSQBOSetup."Target Application" = MSQBOSetup."Target Application"::BusinessCenter then
+          AzureKeyVaultManagement.GetAzureKeyVaultSecret(ConsumerKey,'qbo-businesscenter-consumerkey')
+        else
+          AzureKeyVaultManagement.GetAzureKeyVaultSecret(ConsumerKey,'qbo-consumerkey');
+      end;
+      if ConsumerSecret = '' then begin
+        if MSQBOSetup."Target Application" = MSQBOSetup."Target Application"::BusinessCenter then
+          AzureKeyVaultManagement.GetAzureKeyVaultSecret(ConsumerSecret,'qbo-businesscenter-consumersecret')
+        else
+          AzureKeyVaultManagement.GetAzureKeyVaultSecret(ConsumerSecret,'qbo-consumersecret');
+      end;
+      Consumer := Consumer.Consumer(ConsumerKey,ConsumerSecret);
+      Token := Token.Token(MSQBOSetup."Token Key",MSQBOSetup."Token Secret");
+      OAuthAuthorization := OAuthAuthorization.OAuthAuthorization(Consumer,Token);
+      RealmId := MSQBOSetup."Realm Id";
+      PageSize := 100;
+      Initialized := true;
+    END;
+
+    PROCEDURE SetConsumerKeySecret@13(NewConsumerKey@1001 : Text;NewConsumerSecret@1000 : Text);
+    BEGIN
+      ConsumerKey := NewConsumerKey;
+      ConsumerSecret := NewConsumerSecret;
+    END;
+
+    PROCEDURE GetEntity@27(ID@1002 : Text[250];EntityName@1001 : Text;VAR JToken@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken");
+    VAR
+      JObject@1004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      Request@1003 : Text;
+    BEGIN
+      Request := STRSUBSTNO('/v3/company/%1/%2/%3?minorversion=4',RealmId,LOWERCASE(EntityName),ID);
+      InvokeQuickBooksRESTRequest('GET',Request,EntityName,JObject,JToken,true);
+    END;
+
+    PROCEDURE GetEntities@36(Query@1001 : Text;EntityName@1012 : Text;VAR JToken@1003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken");
+    VAR
+      ResultJSONManagement@1008 : Codeunit "JSON Management";
+      CurrentJSONManagement@1006 : Codeunit "JSON Management";
+      HttpUtility@1013 : DotNet "'System.Web, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Web.HttpUtility";
+      CurrentJtokenArray@1007 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+      JObject@1004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JsonArray@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      Request@1002 : Text;
+      QueryEncoded@1005 : Text;
+      NbChildren@1009 : Integer;
+      StartPosition@1010 : Integer;
+    BEGIN
+      StartPosition := 1;
+      JsonArray := JsonArray.JArray;
+      ResultJSONManagement.InitializeEmptyCollection;
+      repeat
+        QueryEncoded :=
+          HttpUtility.UrlEncode(Query + STRSUBSTNO(StartPositionTxt,StartPosition) + STRSUBSTNO(QueryCountTxt,PageSize));
+        Request := STRSUBSTNO('/v3/company/%1/query?query=%2&minorversion=4',RealmId,QueryEncoded);
+        if not InvokeQuickBooksRESTRequest('GET',Request,EntityName,JObject,CurrentJtokenArray,true) then
+          exit;
+
+        if not (FORMAT(CurrentJtokenArray.GetType) = FORMAT(JsonArray.GetType)) then
+          ERROR(ExpectedAnArrayErr);
+
+        CurrentJSONManagement.InitializeCollectionFromJArray(CurrentJtokenArray);
+        NbChildren := CurrentJSONManagement.GetCollectionCount;
+        if NbChildren > 0 then
+          ResultJSONManagement.AddJArrayContentToCollection(CurrentJtokenArray);
+        if NbChildren = PageSize then
+          StartPosition := StartPosition + PageSize;
+      until NbChildren < PageSize;
+      ResultJSONManagement.GetJsonArray(JToken);
+    END;
+
+    PROCEDURE CreateEntity@37(EntityName@1000 : Text;JObject@1002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";VAR JToken@1003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken") : Boolean;
+    VAR
+      Request@1001 : Text;
+    BEGIN
+      Request := STRSUBSTNO('/v3/company/%1/%2?minorversion=4',RealmId,LOWERCASE(EntityName));
+      exit(InvokeQuickBooksRESTRequest('POST',Request,EntityName,JObject,JToken,true));
+    END;
+
+    PROCEDURE UpdateEntity@38(EntityName@1002 : Text;JObject@1005 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";VAR JToken@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken") : Boolean;
+    VAR
+      Request@1004 : Text;
+    BEGIN
+      Request := STRSUBSTNO('/v3/company/%1/%2?minorversion=4',RealmId,LOWERCASE(EntityName));
+      exit(InvokeQuickBooksRESTRequest('POST',Request,EntityName,JObject,JToken,true));
+    END;
+
+    PROCEDURE DeleteEntity@39(EntityName@1003 : Text;JObject@1004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";VAR JToken@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken");
+    VAR
+      Request@1000 : Text;
+    BEGIN
+      Request := STRSUBSTNO('/v3/company/%1/%2?operation=delete&minorversion=4',RealmId,LOWERCASE(EntityName));
+      InvokeQuickBooksRESTRequest('POST',Request,EntityName,JObject,JToken,true);
+    END;
+
+    PROCEDURE InvokeService@15(EntityName@1003 : Text;JObject@1002 : DotNet "'Newtonsoft.Json, Version=9.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JObject";VAR JToken@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken");
+    VAR
+      Request@1000 : Text;
+    BEGIN
+      Request := STRSUBSTNO('/v3/company/%1/taxservice/taxcode?minorversion=4',RealmId);
+      InvokeQuickBooksRESTRequest('POST',Request,EntityName,JObject,JToken,false);
+    END;
+
+    PROCEDURE RegisterWebhookListener@21(RealmId@1004 : Text[250];JObject@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";AccessToken@1003 : Text) : Boolean;
+    VAR
+      StringContent@1002 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.StringContent";
+      Response@1008 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      Encoding@1006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+      Request@1001 : Text;
+      AuthorizationHeader@1005 : Text;
+      WasRequestSuccessful@1007 : Boolean;
+    BEGIN
+      Request := STRSUBSTNO('/api/v1.0/qboforward/%1',RealmId);
+      AuthorizationHeader := STRSUBSTNO('Bearer %1',AccessToken);
+
+      StringContent := StringContent.StringContent(JObject.ToString,Encoding.UTF8,JsonMediaTypeTxt);
+      InvokeRestRequest('PUT',WebhooksAdapterMgt.GetWebhooksAdapterUri(false),AuthorizationHeader,Request,
+        StringContent,WasRequestSuccessful,Response,JsonMediaTypeTxt);
+      exit(WasRequestSuccessful);
+    END;
+
+    PROCEDURE GetTextFromJToken@7(JToken@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";Path@1001 : Text) : Text;
+    VAR
+      SelectedJToken@1002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+    BEGIN
+      SelectedJToken := JToken.SelectToken(Path);
+
+      if not ISNULL(SelectedJToken) then
+        exit(FORMAT(SelectedJToken));
+    END;
+
+    PROCEDURE GetBooleanFromJToken@35(JToken@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";Path@1001 : Text) : Boolean;
+    VAR
+      SelectedJToken@1002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+      Result@1003 : Boolean;
+    BEGIN
+      SelectedJToken := JToken.SelectToken(Path);
+
+      if not ISNULL(SelectedJToken) then
+        EVALUATE(Result,FORMAT(SelectedJToken));
+
+      exit(Result);
+    END;
+
+    PROCEDURE GetIntegerFromJToken@23(JToken@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";Path@1000 : Text) : Integer;
+    VAR
+      SelectedJToken@1003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+      Result@1002 : Integer;
+    BEGIN
+      SelectedJToken := JToken.SelectToken(Path);
+
+      if not ISNULL(SelectedJToken) then
+        EVALUATE(Result,FORMAT(SelectedJToken));
+
+      exit(Result);
+    END;
+
+    PROCEDURE GetDecimalFromJToken@24(JToken@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";Path@1000 : Text) : Decimal;
+    VAR
+      SelectedJToken@1003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+      Result@1002 : Decimal;
+    BEGIN
+      SelectedJToken := JToken.SelectToken(Path);
+
+      if not ISNULL(SelectedJToken) then
+        EVALUATE(Result,FORMAT(SelectedJToken));
+
+      exit(Result);
+    END;
+
+    PROCEDURE GetDateFromJToken@25(JToken@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";Path@1000 : Text) : Date;
+    VAR
+      SelectedJToken@1003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+      Result@1002 : Date;
+    BEGIN
+      SelectedJToken := JToken.SelectToken(Path);
+
+      if not ISNULL(SelectedJToken) then
+        EVALUATE(Result,FORMAT(SelectedJToken,0,9),9);
+
+      exit(Result);
+    END;
+
+    PROCEDURE GetDateTimeFromJToken@4(JToken@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";Path@1000 : Text) : DateTime;
+    VAR
+      SelectedJToken@1003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+      Result@1002 : DateTime;
+    BEGIN
+      SelectedJToken := JToken.SelectToken(Path);
+
+      if not ISNULL(SelectedJToken) then
+        EVALUATE(Result,FORMAT(SelectedJToken));
+
+      exit(Result);
+    END;
+
+    PROCEDURE GetNestedValue@14(RecordRef@1004 : RecordRef;FieldNo@1005 : Integer;Path@1001 : Text) : Text;
+    VAR
+      JSONManagement@1003 : Codeunit "JSON Management";
+      Value@1006 : Variant;
+      JObject@1002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JsonText@1000 : Text;
+    BEGIN
+      JsonText := GetTextValueFromField(RecordRef.FIELD(FieldNo));
+
+      TryParseJObjectFromString(JObject,JsonText);
+      JSONManagement.GetPropertyValueFromJObjectByPath(JObject,Path,Value);
+      exit(FORMAT(Value));
+    END;
+
+    PROCEDURE SetNestedValue@8(VAR RecordRef@1003 : RecordRef;FieldNo@1004 : Integer;Path@1006 : Text;NewValue@1005 : Text) : Boolean;
+    VAR
+      JSONManagement@1002 : Codeunit "JSON Management";
+      FieldRef@1001 : FieldRef;
+      JObject@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+    BEGIN
+      FieldRef := RecordRef.FIELD(FieldNo);
+      GetJsonObjectFromField(FieldRef,JObject);
+
+      JSONManagement.ReplaceOrAddDescendantJPropertyInJObject(JObject,Path,NewValue);
+
+      exit(AssignValueFromText(FORMAT(JObject),FieldRef));
+    END;
+
+    PROCEDURE SetNestedValues@9(VAR FieldRef@1001 : FieldRef;Paths@1006 : ARRAY [10] OF Text;NewValues@1005 : ARRAY [10] OF Text;maxCounter@1004 : Integer) ValueChanged : Boolean;
+    VAR
+      JSONManagement@1002 : Codeunit "JSON Management";
+      JObject@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      counter@1003 : Integer;
+    BEGIN
+      GetJsonObjectFromField(FieldRef,JObject);
+
+      for counter := 1 to maxCounter do begin
+        ValueChanged := ValueChanged or
+          JSONManagement.ReplaceOrAddDescendantJPropertyInJObject(JObject,Paths[counter],NewValues[counter]);
+        WriteTextToField(FieldRef,FORMAT(JObject));
+      end;
+    END;
+
+    LOCAL PROCEDURE GetJsonObjectFromField@10(FieldRef@1000 : FieldRef;VAR JObject@1002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      JSONManagement@1004 : Codeunit "JSON Management";
+    BEGIN
+      JSONManagement.InitializeObject(GetTextValueFromField(FieldRef));
+      JSONManagement.GetJSONObject(JObject);
+    END;
+
+    PROCEDURE GetMessageHandler@17(MessageHandler@1000 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpMessageHandler");
+    BEGIN
+      MessageHandler := HttpMessageHandler;
+    END;
+
+    PROCEDURE SetMessageHandler@19(MessageHandler@1000 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpMessageHandler");
+    BEGIN
+      HttpMessageHandler := MessageHandler;
+    END;
+
+    PROCEDURE AssignValueFromField@5(SourceFieldRef@1004 : FieldRef;VAR DestinationFieldRef@1001 : FieldRef) : Boolean;
+    VAR
+      SourceValueAsText@1006 : Text;
+    BEGIN
+      SourceValueAsText := GetTextValueFromField(SourceFieldRef);
+      exit(AssignValueFromText(SourceValueAsText,DestinationFieldRef));
+    END;
+
+    PROCEDURE AssignValueFromText@6(NewTextValue@1001 : Text;VAR DestinationFieldRef@1000 : FieldRef) ValueChanged : Boolean;
+    VAR
+      DestinationValueAsText@1003 : Text;
+    BEGIN
+      DestinationValueAsText := GetTextValueFromField(DestinationFieldRef);
+
+      if NewTextValue = DestinationValueAsText then
+        ValueChanged := false
+      else begin
+        WriteTextToField(DestinationFieldRef,NewTextValue);
+        ValueChanged := true;
+      end;
+    END;
+
+    PROCEDURE GetTextValueFromField@2(FieldRef@1000 : FieldRef) Result : Text;
+    VAR
+      TypeHelper@1001 : Codeunit "Type Helper";
+    BEGIN
+      case FORMAT(FieldRef.TYPE) of
+        'Text',
+        'Code',
+        'DateTime',
+        'Integer',
+        'Decimal',
+        'Date',
+        'Boolean',
+        'Option':
+          EVALUATE(Result,FORMAT(FieldRef.VALUE,0,9));
+        'BLOB':
+          Result := TypeHelper.ReadBlob(FieldRef);
+      end;
+    END;
+
+    PROCEDURE WriteTextToField@1(VAR DestinationFieldRef@1001 : FieldRef;TextToWrite@1000 : Text);
+    VAR
+      TypeHelper@1010 : Codeunit "Type Helper";
+      Variant@1009 : Variant;
+      BooleanVar@1002 : Boolean;
+      DateTimeVar@1003 : DateTime;
+      IntegerVar@1006 : Integer;
+      DecimalVar@1008 : Decimal;
+      DummyDateVar@1007 : Date;
+    BEGIN
+      case FORMAT(DestinationFieldRef.TYPE) of
+        'Text',
+        'Code':
+          DestinationFieldRef.VALUE := COPYSTR(TextToWrite,1,DestinationFieldRef.LENGTH);
+        'Boolean':
+          begin
+            EVALUATE(BooleanVar,TextToWrite);
+            DestinationFieldRef.VALUE := BooleanVar;
+          end;
+        'DateTime':
+          begin
+            EVALUATE(DateTimeVar,TextToWrite);
+            DestinationFieldRef.VALUE := DateTimeVar;
+          end;
+        'Integer':
+          begin
+            EVALUATE(IntegerVar,TextToWrite);
+            DestinationFieldRef.VALUE := IntegerVar;
+          end;
+        'Decimal':
+          begin
+            EVALUATE(DecimalVar,TextToWrite);
+            DestinationFieldRef.VALUE := DecimalVar;
+          end;
+        'Date':
+          begin
+            Variant := DummyDateVar;
+            TypeHelper.Evaluate(Variant,TextToWrite,'yyyy-MM-dd','en-US');
+            DestinationFieldRef.VALUE := Variant;
+          end;
+        'Option':
+          DestinationFieldRef.VALUE := TypeHelper.GetOptionNo(TextToWrite,DestinationFieldRef.OPTIONSTRING);
+        'BLOB':
+          TypeHelper.WriteBlob(DestinationFieldRef,TextToWrite);
+      end;
+    END;
+
+    PROCEDURE InvokeQuickBooksRESTRequest@18(RequestMethod@1006 : Text;Request@1004 : Text;EntityName@1003 : Text;JObject@1002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";VAR JToken@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";ReturnArray@1000 : Boolean) JsonParsed : Boolean;
+    VAR
+      StringContent@1010 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.StringContent";
+      Response@1008 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      Encoding@1007 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+      AuthorizationHeader@1005 : Text;
+      WasRequestSuccessful@1009 : Boolean;
+      RequestBody@1011 : Text;
+      ResponseText@1012 : Text;
+    BEGIN
+      if ISNULL(OAuthAuthorization) then begin
+        ConnectionErrorOccured(STRSUBSTNO(NotInitializedErr,CODEUNIT::"MS-QBO Table Mgt."));
+        exit;
+      end;
+
+      AuthorizationHeader := OAuthAuthorization.GetAuthorizationHeader(BaseUrlTxt + Request,UPPERCASE(RequestMethod));
+
+      if not ISNULL(JObject) then begin
+        StringContent := StringContent.StringContent(JObject.ToString,Encoding.UTF8,JsonMediaTypeTxt);
+        RequestBody := JObject.ToString;
+      end;
+      InvokeRestRequest(RequestMethod,BaseUrlTxt,AuthorizationHeader,Request,StringContent,WasRequestSuccessful,
+        Response,JsonMediaTypeTxt);
+      JsonParsed := ParseResponseAsJson(Request,Response,EntityName,ReturnArray,WasRequestSuccessful,JToken);
+      ResponseText := Response;
+      if (not WasRequestSuccessful) or (not JsonParsed) then
+        OnBadQuickBooksResponse(RequestMethod,BaseUrlTxt + Request,RequestBody,ResponseText);
+    END;
+
+    PROCEDURE InvokeReconnectRequest@20(VAR ResultXmlDocument@1003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument") : Boolean;
+    VAR
+      XMLDOMManagement@1007 : Codeunit "XML DOM Management";
+      StringContent@1005 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.StringContent";
+      Response@1002 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      RequestMethod@1000 : Text;
+      AuthorizationHeader@1001 : Text;
+      WasRequestSuccessful@1004 : Boolean;
+      ResponseText@1006 : Text;
+    BEGIN
+      if ISNULL(OAuthAuthorization) then begin
+        ConnectionErrorOccured(STRSUBSTNO(NotInitializedErr,CODEUNIT::"MS-QBO Table Mgt."));
+        exit;
+      end;
+
+      RequestMethod := 'GET';
+
+      AuthorizationHeader := OAuthAuthorization.GetAuthorizationHeader(ReconnectUrlTxt + ReconnectTxt,RequestMethod);
+
+      InvokeRestRequest(RequestMethod,ReconnectUrlTxt,AuthorizationHeader,ReconnectTxt,StringContent,
+        WasRequestSuccessful,Response,'application/xml');
+      ResponseText := Response;
+      if WasRequestSuccessful then begin
+        XMLDOMManagement.LoadXMLDocumentFromText(Response,ResultXmlDocument);
+        exit(true);
+      end;
+      OnBadQuickBooksResponse(RequestMethod,ReconnectUrlTxt + ReconnectTxt,'',ResponseText);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBadQuickBooksResponse@11(RequestMethod@1000 : Text;Request@1001 : Text;RequestBody@1002 : Text;ResponseTxt@1003 : Text);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE InvokeRestRequest@40(RequestMethod@1018 : Text;Url@1021 : Text;AuthorizationHeader@1002 : Text;Request@1016 : Text;StringContent@1000 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.StringContent";VAR WasRequestSuccessful@1003 : Boolean;VAR Response@1001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";ExpectedEncoding@1004 : Text);
+    VAR
+      HttpClient@1013 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpClient";
+      HttpRequestHeaders@1011 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.Headers.HttpRequestHeaders";
+      HttpHeaderValueCollection@1010 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.Headers.HttpHeaderValueCollection`1";
+      HttpResponseMessage@1009 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpResponseMessage";
+      HttpContent@1008 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpContent";
+      MediaTypeWithQualityHeaderValue@1007 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.Headers.MediaTypeWithQualityHeaderValue";
+      Uri@1006 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Uri";
+      Task@1005 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Threading.Tasks.Task`1";
+    BEGIN
+      if ISNULL(HttpMessageHandler) then
+        HttpClient := HttpClient.HttpClient
+      else
+        HttpClient := HttpClient.HttpClient(HttpMessageHandler);
+
+      HttpClient.BaseAddress := Uri.Uri(Url);
+      HttpRequestHeaders := HttpClient.DefaultRequestHeaders;
+      HttpRequestHeaders.TryAddWithoutValidation('Authorization',AuthorizationHeader);
+      HttpHeaderValueCollection := HttpRequestHeaders.Accept;
+      MediaTypeWithQualityHeaderValue :=
+        MediaTypeWithQualityHeaderValue.MediaTypeWithQualityHeaderValue(ExpectedEncoding);
+      HttpHeaderValueCollection.Add(MediaTypeWithQualityHeaderValue);
+
+      case UPPERCASE(RequestMethod) of
+        'GET':
+          Task := HttpClient.GetAsync(Request);
+        'PUT':
+          Task := HttpClient.PutAsync(Request,StringContent);
+        'POST':
+          Task := HttpClient.PostAsync(Request,StringContent);
+        else begin
+          ConnectionErrorOccured(HttpRequestMethodNotSupportedErr);
+          exit;
+        end;
+      end;
+
+      HttpResponseMessage := Task.Result;
+      HttpContent := HttpResponseMessage.Content;
+      Task := HttpContent.ReadAsStringAsync;
+
+      HttpClient.Dispose;
+
+      WasRequestSuccessful := HttpResponseMessage.IsSuccessStatusCode;
+      Response := Task.Result;
+    END;
+
+    LOCAL PROCEDURE ParseResponseAsJson@30(Request@1006 : Text;Response@1000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";EntityName@1008 : Text;ReturnArray@1002 : Boolean;WasRequestSuccessful@1001 : Boolean;VAR JToken@1003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken") : Boolean;
+    VAR
+      JObject2@1004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      ErrorMessage@1005 : DotNet "'mscorlib'.System.Text.StringBuilder";
+      JsonArray@1009 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      TokenName@1007 : Text;
+    BEGIN
+      if not TryParseJObjectFromString(JObject2,Response) then begin
+        ConnectionErrorOccured(FORMAT(Response));
+        exit;
+      end;
+
+      if not WasRequestSuccessful then begin
+        GetErrors(JObject2,ErrorMessage);
+        ValidationFaultOccured(ErrorMessage.ToString);
+        exit;
+      end;
+
+      // Check if response contains multiple entities
+      if STRPOS(LOWERCASE(Request),'query') <> 0 then
+        TokenName := 'QueryResponse.';
+      JToken := JObject2.SelectToken(TokenName + EntityName,false);
+      if ISNULL(JToken) then
+        if ReturnArray then
+          JToken := JsonArray.JArray
+        else
+          JToken := JObject2;
+
+      exit(true);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryParseJObjectFromString@28(VAR JObject@1000 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";StringToParse@1001 : Variant);
+    BEGIN
+      JObject := JObject.Parse(FORMAT(StringToParse));
+    END;
+
+    LOCAL PROCEDURE GetErrors@76(JObjectError@1005 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";VAR ErrorMessage@1007 : DotNet "'mscorlib'.System.Text.StringBuilder");
+    VAR
+      JToken@1006 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+      ChildJToken@1003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+      Element@1008 : Text;
+      Message@1009 : Text;
+      Detail@1010 : Text;
+    BEGIN
+      ErrorMessage := ErrorMessage.StringBuilder;
+      ErrorMessage.AppendLine(ErrorsTxt);
+      ErrorMessage.AppendLine;
+      ErrorMessage.AppendLine(STRSUBSTNO(FaultTypeTxt,GetTextFromJToken(JObjectError,'Fault.type')));
+
+      // Parse Errors
+      JToken := JObjectError.SelectToken('Fault.Error',true);
+      ChildJToken := JToken.First;
+
+      while not ISNULL(ChildJToken) do begin
+        Element := GetTextFromJToken(ChildJToken,'element');
+        // Element exists
+        if Element <> '' then
+          ErrorMessage.AppendLine(STRSUBSTNO(FieldtErr,Element));
+
+        Message := GetTextFromJToken(ChildJToken,'Message');
+        // Message exists
+        if Message <> '' then
+          ErrorMessage.AppendLine(STRSUBSTNO(MessageTxt,Message));
+
+        Detail := GetTextFromJToken(ChildJToken,'Detail');
+        // Detail exists
+        if Detail <> '' then
+          ErrorMessage.AppendLine(STRSUBSTNO(DetailTxt,Detail));
+
+        ErrorMessage.AppendLine;
+        ChildJToken := ChildJToken.Next;
+      end;
+    END;
+
+    PROCEDURE IsInitialized@12() : Boolean;
+    BEGIN
+      exit(Initialized);
+    END;
+
+    PROCEDURE GetKeyvaultAccessFailedTxt@29() : Text[1024];
+    BEGIN
+      exit(KeyvaultAccessFailedTxt);
+    END;
+
+    PROCEDURE AreRecordsDifferent@16(VAR MSQBOModifiedFieldList@1007 : Record "MS-QBO Modified Field List";NewRecordRef@1000 : RecordRef;OldRecordRef@1001 : RecordRef) RecordsAreDifferent : Boolean;
+    VAR
+      MSQBOTableMgt@1006 : Codeunit "MS-QBO Table Mgt.";
+      FirstFieldRef@1005 : FieldRef;
+      SecondFieldRef@1004 : FieldRef;
+      FieldCount@1002 : Integer;
+      Index@1003 : Integer;
+    BEGIN
+      if NewRecordRef.NUMBER <> OldRecordRef.NUMBER then
+        ERROR(STRSUBSTNO(CannotCompareDiffTablesErr,NewRecordRef.RECORDID,OldRecordRef.RECORDID));
+
+      CLEAR(MSQBOModifiedFieldList);
+      MSQBOModifiedFieldList.DELETEALL;
+
+      FieldCount := NewRecordRef.FIELDCOUNT;
+      for Index := 1 to FieldCount do begin
+        FirstFieldRef := NewRecordRef.FIELDINDEX(Index);
+        SecondFieldRef := OldRecordRef.FIELDINDEX(Index);
+        if FieldShouldBeUsedToCompareValues(FirstFieldRef) then
+          if MSQBOTableMgt.GetTextValueFromField(FirstFieldRef) <> MSQBOTableMgt.GetTextValueFromField(SecondFieldRef) then begin
+            MSQBOModifiedFieldList.ExtractValueFromRecord(FirstFieldRef);
+            RecordsAreDifferent := true;
+          end;
+      end;
+    END;
+
+    PROCEDURE PopulateModifiedFieldListFromRecordId@32(VAR MSQBOModifiedFieldList@1001 : Record "MS-QBO Modified Field List";RecordID@1000 : RecordID);
+    VAR
+      RecordRef@1002 : RecordRef;
+      FieldRef@1003 : FieldRef;
+      FieldCount@1004 : Integer;
+      Index@1005 : Integer;
+    BEGIN
+      RecordRef.GET(RecordID);
+      FieldCount := RecordRef.FIELDCOUNT;
+      for Index := 1 to FieldCount do begin
+        FieldRef := RecordRef.FIELDINDEX(Index);
+        if FieldShouldBeUsedToCompareValues(FieldRef) then
+          MSQBOModifiedFieldList.ExtractValueFromRecord(FieldRef);
+      end;
+    END;
+
+    LOCAL PROCEDURE FieldShouldBeUsedToCompareValues@26(FieldRef@1000 : FieldRef) : Boolean;
+    VAR
+      Item@1001 : Record Item;
+      Customer@1002 : Record Customer;
+    BEGIN
+      if FieldRef.NUMBER = 0 then // time stamp values
+        exit(false);
+
+      case FieldRef.RECORD.NUMBER of
+        DATABASE::Item:
+          exit(FieldRef.CAPTION in [Item.FIELDCAPTION("Unit Price"),
+                                    Item.FIELDCAPTION("Unit Cost"),
+                                    Item.FIELDCAPTION(Description)]);
+        DATABASE::Customer:
+          exit(FieldRef.CAPTION in [Customer.FIELDCAPTION(Name),
+                                    Customer.FIELDCAPTION("Tax Liable"),
+                                    Customer.FIELDCAPTION("Phone No."),
+                                    Customer.FIELDCAPTION(Address),
+                                    Customer.FIELDCAPTION("Country/Region Code"),
+                                    Customer.FIELDCAPTION("Post Code"),
+                                    Customer.FIELDCAPTION(City),
+                                    Customer.FIELDCAPTION("E-Mail")]);
+      end;
+      exit(true);
+    END;
+
+    PROCEDURE GetLastUpdatedTimeAsUtc@22(QBOTableNum@1000 : Integer) : DateTime;
+    VAR
+      MSQBOCustomer@1001 : Record "MS-QBO Customer";
+      MSQBOItem@1002 : Record "MS-QBO Item";
+      DateFilterCalc@1003 : Codeunit "DateFilter-Calc";
+    BEGIN
+      case QBOTableNum of
+        DATABASE::"MS-QBO Customer":
+          begin
+            MSQBOCustomer.SETCURRENTKEY("MetaData LastUpdatedTime");
+            if MSQBOCustomer.FINDLAST then
+              exit(DateFilterCalc.ConvertToUtcDateTime(MSQBOCustomer."MetaData LastUpdatedTime"));
+          end;
+        DATABASE::"MS-QBO Item":
+          begin
+            MSQBOItem.SETCURRENTKEY("MetaData LastUpdatedTime");
+            if MSQBOItem.FINDLAST then
+              exit(DateFilterCalc.ConvertToUtcDateTime(MSQBOItem."MetaData LastUpdatedTime"));
+          end;
+      end;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE ConnectionErrorOccured@33(ErrorMessage@1000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE ValidationFaultOccured@34(ErrorMessage@1000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

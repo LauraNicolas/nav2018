@@ -1,0 +1,212 @@
+OBJECT Codeunit 415 Release Purchase Document
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Purchase Header";
+    OnRun=BEGIN
+            PurchaseHeader.COPY(Rec);
+            Code;
+            Rec := PurchaseHeader;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1010 : TextConst 'ENU=There is nothing to release for the document of type %1 with the number %2.';
+      PurchSetup@1002 : Record "Purchases & Payables Setup";
+      InvtSetup@1000 : Record "Inventory Setup";
+      PurchaseHeader@1007 : Record "Purchase Header";
+      WhsePurchRelease@1004 : Codeunit "Whse.-Purch. Release";
+      Text002@1005 : TextConst 'ENU=This document can only be released when the approval process is complete.';
+      Text003@1006 : TextConst 'ENU=The approval process must be cancelled or completed to reopen this document.';
+      Text005@1001 : TextConst 'ENU=There are unpaid prepayment invoices that are related to the document of type %1 with the number %2.';
+      UnpostedPrepaymentAmountsErr@1003 : TextConst '@@@="%1 - Document Type; %2 - Document No.";ENU=There are unposted prepayment amounts on the document of type %1 with the number %2.';
+      PreviewMode@1008 : Boolean;
+
+    LOCAL PROCEDURE Code@11() LinesWereModified : Boolean;
+    VAR
+      PurchLine@1006 : Record "Purchase Line";
+      PrepaymentMgt@1003 : Codeunit "Prepayment Mgt.";
+      NotOnlyDropShipment@1002 : Boolean;
+      PostingDate@1001 : Date;
+      PrintPostedDocuments@1000 : Boolean;
+    BEGIN
+      with PurchaseHeader do begin
+        if Status = Status::Released then
+          exit;
+
+        OnBeforeReleasePurchaseDoc(PurchaseHeader,PreviewMode);
+        if not PreviewMode then
+          OnCheckPurchaseReleaseRestrictions;
+
+        TESTFIELD("Buy-from Vendor No.");
+
+        PurchLine.SETRANGE("Document Type","Document Type");
+        PurchLine.SETRANGE("Document No.","No.");
+        PurchLine.SETFILTER(Type,'>0');
+        PurchLine.SETFILTER(Quantity,'<>0');
+        if not PurchLine.FIND('-') then
+          ERROR(Text001,"Document Type","No.");
+        InvtSetup.GET;
+        if InvtSetup."Location Mandatory" then begin
+          PurchLine.SETRANGE(Type,PurchLine.Type::Item);
+          if PurchLine.FIND('-') then
+            repeat
+              if not PurchLine.IsServiceItem then
+                PurchLine.TESTFIELD("Location Code");
+            until PurchLine.NEXT = 0;
+          PurchLine.SETFILTER(Type,'>0');
+        end;
+        PurchLine.SETRANGE("Drop Shipment",false);
+        NotOnlyDropShipment := PurchLine.FIND('-');
+        PurchLine.RESET;
+
+        PurchSetup.GET;
+        if PurchSetup."Calc. Inv. Discount" then begin
+          PostingDate := "Posting Date";
+          PrintPostedDocuments := "Print Posted Documents";
+          CODEUNIT.RUN(CODEUNIT::"Purch.-Calc.Discount",PurchLine);
+          LinesWereModified := true;
+          GET("Document Type","No.");
+          "Print Posted Documents" := PrintPostedDocuments;
+          if PostingDate <> "Posting Date" then
+            VALIDATE("Posting Date",PostingDate);
+        end;
+
+        if PrepaymentMgt.TestPurchasePrepayment(PurchaseHeader) and ("Document Type" = "Document Type"::Order) then begin
+          Status := Status::"Pending Prepayment";
+          MODIFY(true);
+          exit;
+        end;
+        Status := Status::Released;
+
+        LinesWereModified := LinesWereModified or CalcAndUpdateVATOnLines(PurchaseHeader,PurchLine);
+
+        MODIFY(true);
+
+        if NotOnlyDropShipment then
+          if "Document Type" in ["Document Type"::Order,"Document Type"::"Return Order"] then
+            WhsePurchRelease.Release(PurchaseHeader);
+
+        OnAfterReleasePurchaseDoc(PurchaseHeader,PreviewMode);
+      end;
+    END;
+
+    [External]
+    PROCEDURE Reopen@1(VAR PurchHeader@1000 : Record "Purchase Header");
+    BEGIN
+      OnBeforeReopenPurchaseDoc(PurchHeader);
+
+      with PurchHeader do begin
+        if Status = Status::Open then
+          exit;
+        if "Document Type" in ["Document Type"::Order,"Document Type"::"Return Order"] then
+          WhsePurchRelease.Reopen(PurchHeader);
+        Status := Status::Open;
+
+        MODIFY(true);
+      end;
+
+      OnAfterReopenPurchaseDoc(PurchHeader);
+    END;
+
+    [External]
+    PROCEDURE PerformManualRelease@2(VAR PurchHeader@1002 : Record "Purchase Header");
+    VAR
+      PrepaymentMgt@1001 : Codeunit "Prepayment Mgt.";
+    BEGIN
+      if PrepaymentMgt.TestPurchasePrepayment(PurchHeader) then
+        ERROR(UnpostedPrepaymentAmountsErr,PurchHeader."Document Type",PurchHeader."No.");
+
+      PerformManualCheckAndRelease(PurchHeader);
+    END;
+
+    [External]
+    PROCEDURE PerformManualCheckAndRelease@13(VAR PurchHeader@1002 : Record "Purchase Header");
+    VAR
+      PrepaymentMgt@1001 : Codeunit "Prepayment Mgt.";
+      ApprovalsMgmt@1000 : Codeunit "Approvals Mgmt.";
+    BEGIN
+      with PurchHeader do
+        if ("Document Type" = "Document Type"::Order) and PrepaymentMgt.TestPurchasePayment(PurchHeader) then begin
+          if Status <> Status::"Pending Prepayment" then begin
+            Status := Status::"Pending Prepayment";
+            MODIFY;
+            COMMIT;
+          end;
+          ERROR(STRSUBSTNO(Text005,"Document Type","No."));
+        end;
+
+      if ApprovalsMgmt.IsPurchaseApprovalsWorkflowEnabled(PurchHeader) and (PurchHeader.Status = PurchHeader.Status::Open) then
+        ERROR(Text002);
+
+      CODEUNIT.RUN(CODEUNIT::"Release Purchase Document",PurchHeader);
+    END;
+
+    [External]
+    PROCEDURE PerformManualReopen@3(VAR PurchHeader@1002 : Record "Purchase Header");
+    BEGIN
+      if PurchHeader.Status = PurchHeader.Status::"Pending Approval" then
+        ERROR(Text003);
+
+      Reopen(PurchHeader);
+    END;
+
+    [External]
+    PROCEDURE ReleasePurchaseHeader@8(VAR PurchHdr@1000 : Record "Purchase Header";Preview@1001 : Boolean) LinesWereModified : Boolean;
+    BEGIN
+      PreviewMode := Preview;
+      PurchaseHeader.COPY(PurchHdr);
+      LinesWereModified := Code;
+      PurchHdr := PurchaseHeader;
+    END;
+
+    PROCEDURE CalcAndUpdateVATOnLines@9(VAR PurchaseHeader@1003 : Record "Purchase Header";VAR PurchLine@1002 : Record "Purchase Line") LinesWereModified : Boolean;
+    VAR
+      TempVATAmountLine0@1001 : TEMPORARY Record "VAT Amount Line";
+      TempVATAmountLine1@1000 : TEMPORARY Record "VAT Amount Line";
+    BEGIN
+      PurchLine.SetPurchHeader(PurchaseHeader);
+      PurchLine.CalcVATAmountLines(0,PurchaseHeader,PurchLine,TempVATAmountLine0);
+      PurchLine.CalcVATAmountLines(1,PurchaseHeader,PurchLine,TempVATAmountLine1);
+      LinesWereModified :=
+        PurchLine.UpdateVATOnLines(0,PurchaseHeader,PurchLine,TempVATAmountLine0) or
+        PurchLine.UpdateVATOnLines(1,PurchaseHeader,PurchLine,TempVATAmountLine1);
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnBeforeReleasePurchaseDoc@5(VAR PurchaseHeader@1000 : Record "Purchase Header";PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterReleasePurchaseDoc@4(VAR PurchaseHeader@1000 : Record "Purchase Header";PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnBeforeReopenPurchaseDoc@6(VAR PurchaseHeader@1000 : Record "Purchase Header");
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    LOCAL PROCEDURE OnAfterReopenPurchaseDoc@7(VAR PurchaseHeader@1000 : Record "Purchase Header");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

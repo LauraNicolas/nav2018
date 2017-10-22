@@ -1,0 +1,231 @@
+OBJECT Codeunit 904 Whse.-Assembly Release
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      WhseRqst@1000 : Record "Warehouse Request";
+      WhsePickRqst@1001 : Record "Whse. Pick Request";
+
+    [External]
+    PROCEDURE Release@1(AssemblyHeader@1000 : Record "Assembly Header");
+    VAR
+      AssemblyLine@1004 : Record "Assembly Line";
+      OldLocationCode@1006 : Code[10];
+      First@1005 : Boolean;
+    BEGIN
+      with AssemblyHeader do begin
+        FilterAssemblyLine(AssemblyLine,"Document Type","No.");
+        if AssemblyLine.FIND('-') then begin
+          First := true;
+          repeat
+            if First or (AssemblyLine."Location Code" <> OldLocationCode) then
+              CreateWhseRqst(AssemblyHeader,AssemblyLine);
+
+            First := false;
+            OldLocationCode := AssemblyLine."Location Code";
+          until AssemblyLine.NEXT = 0;
+        end;
+
+        WhseRqst.RESET;
+        WhseRqst.SETCURRENTKEY("Source Type","Source Subtype","Source No.");
+        WhseRqst.SETRANGE(Type,WhseRqst.Type);
+        WhseRqst.SETRANGE("Source Type",DATABASE::"Assembly Line");
+        WhseRqst.SETRANGE("Source Subtype","Document Type");
+        WhseRqst.SETRANGE("Source No.","No.");
+        WhseRqst.SETRANGE("Document Status",Status::Open);
+        WhseRqst.DELETEALL(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE Reopen@2(AssemblyHeader@1000 : Record "Assembly Header");
+    BEGIN
+      with AssemblyHeader do begin
+        if "Document Type" = "Document Type"::Order then
+          WhseRqst.Type := WhseRqst.Type::Outbound;
+
+        WhseRqst.RESET;
+        WhseRqst.SETCURRENTKEY("Source Type","Source Subtype","Source No.");
+        WhseRqst.SETRANGE(Type,WhseRqst.Type);
+        WhseRqst.SETRANGE("Source Type",DATABASE::"Assembly Line");
+        WhseRqst.SETRANGE("Source Subtype","Document Type");
+        WhseRqst.SETRANGE("Source No.","No.");
+        WhseRqst.SETRANGE("Document Status",Status::Released);
+        WhseRqst.LOCKTABLE;
+        if not WhseRqst.ISEMPTY then
+          WhseRqst.MODIFYALL("Document Status",WhseRqst."Document Status"::Open);
+
+        WhsePickRqst.SETRANGE("Document Type",WhsePickRqst."Document Type"::Assembly);
+        WhsePickRqst.SETRANGE("Document No.","No.");
+        WhsePickRqst.SETRANGE(Status,Status::Released);
+        if not WhsePickRqst.ISEMPTY then
+          WhsePickRqst.MODIFYALL(Status,WhsePickRqst.Status::Open);
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateWhseRqst@3(VAR AssemblyHeader@1000 : Record "Assembly Header";VAR AssemblyLine@1004 : Record "Assembly Line");
+    VAR
+      AssemblyLine2@1001 : Record "Assembly Line";
+      Location@1003 : Record Location;
+    BEGIN
+      GetLocation(Location,AssemblyLine."Location Code");
+      if not Location."Require Pick" then
+        exit;
+
+      AssemblyLine2.COPY(AssemblyLine);
+      AssemblyLine2.SETRANGE("Location Code",AssemblyLine."Location Code");
+      AssemblyLine2.SETRANGE("Unit of Measure Code",'');
+      if AssemblyLine2.FINDFIRST then
+        AssemblyLine2.TESTFIELD("Unit of Measure Code");
+
+      if Location."Require Shipment" then begin
+        WhsePickRqst.INIT;
+        WhsePickRqst."Document Type" := WhsePickRqst."Document Type"::Assembly;
+        WhsePickRqst."Document Subtype" := AssemblyLine."Document Type";
+        WhsePickRqst."Document No." := AssemblyLine."Document No.";
+        WhsePickRqst.Status := WhsePickRqst.Status::Released;
+        WhsePickRqst."Location Code" := AssemblyLine."Location Code";
+        WhsePickRqst."Completely Picked" := AssemblyHeader.CompletelyPicked;
+        if WhsePickRqst."Completely Picked" and (not AssemblyLine.CompletelyPicked) then
+          WhsePickRqst."Completely Picked" := false;
+        if not WhsePickRqst.INSERT then
+          WhsePickRqst.MODIFY;
+      end else begin
+        WhseRqst.INIT;
+        case AssemblyHeader."Document Type" of
+          AssemblyHeader."Document Type"::Order:
+            WhseRqst.Type := WhseRqst.Type::Outbound;
+        end;
+        WhseRqst."Source Document" := WhseRqst."Source Document"::"Assembly Consumption";
+        WhseRqst."Source Type" := DATABASE::"Assembly Line";
+        WhseRqst."Source Subtype" := AssemblyLine."Document Type";
+        WhseRqst."Source No." := AssemblyLine."Document No.";
+        WhseRqst."Document Status" := WhseRqst."Document Status"::Released;
+        WhseRqst."Location Code" := AssemblyLine."Location Code";
+        WhseRqst."Destination Type" := WhseRqst."Destination Type"::Item;
+        WhseRqst."Destination No." := AssemblyHeader."Item No.";
+        WhseRqst."Completely Handled" := AssemblyCompletelyHandled(AssemblyHeader,AssemblyLine."Location Code");
+        if not WhseRqst.INSERT then
+          WhseRqst.MODIFY;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetLocation@7(VAR Location@1000 : Record Location;LocationCode@1001 : Code[10]);
+    BEGIN
+      if LocationCode <> Location.Code then begin
+        if LocationCode = '' then begin
+          Location.GetLocationSetup(LocationCode,Location);
+          Location.Code := '';
+        end else
+          Location.GET(LocationCode);
+      end;
+    END;
+
+    LOCAL PROCEDURE FilterAssemblyLine@4(VAR AssemblyLine@1000 : Record "Assembly Line";DocumentType@1001 : Option;DocumentNo@1002 : Code[20]);
+    BEGIN
+      AssemblyLine.SETCURRENTKEY("Document Type","Document No.",Type,"Location Code");
+      AssemblyLine.SETRANGE("Document Type",DocumentType);
+      AssemblyLine.SETRANGE("Document No.",DocumentNo);
+      AssemblyLine.SETRANGE(Type,AssemblyLine.Type::Item);
+    END;
+
+    LOCAL PROCEDURE AssemblyCompletelyHandled@9(AssemblyHeader@1000 : Record "Assembly Header";LocationCode@1001 : Code[10]) : Boolean;
+    VAR
+      AssemblyLine@1002 : Record "Assembly Line";
+    BEGIN
+      FilterAssemblyLine(AssemblyLine,AssemblyHeader."Document Type",AssemblyHeader."No.");
+      AssemblyLine.SETRANGE("Location Code",LocationCode);
+      AssemblyLine.SETFILTER("Remaining Quantity",'<>0');
+      exit(not AssemblyLine.FIND('-'));
+    END;
+
+    [External]
+    PROCEDURE DeleteLine@5(AssemblyLine@1000 : Record "Assembly Line");
+    VAR
+      AssemblyLine2@1001 : Record "Assembly Line";
+      Location@1003 : Record Location;
+      KeepWhseRqst@1002 : Boolean;
+    BEGIN
+      with AssemblyLine do begin
+        if Type <> Type::Item then
+          exit;
+        KeepWhseRqst := false;
+        if Location.GET("Location Code") then;
+        FilterAssemblyLine(AssemblyLine2,"Document Type","Document No.");
+        AssemblyLine2.SETFILTER("Line No.",'<>%1',"Line No.");
+        AssemblyLine2.SETRANGE("Location Code","Location Code");
+        AssemblyLine2.SETFILTER("Remaining Quantity",'<>0');
+        if AssemblyLine2.FIND('-') then
+          // Other lines for same location exist in the order.
+          repeat
+            if (not AssemblyLine2.CompletelyPicked) or
+               (not (Location."Require Pick" and Location."Require Shipment"))
+            then
+              KeepWhseRqst := true; // if lines are incompletely picked.
+          until (AssemblyLine2.NEXT = 0) or KeepWhseRqst;
+
+        if not KeepWhseRqst then begin
+          if Location."Require Shipment" then
+            DeleteWhsePickRqst(AssemblyLine,false)
+          else
+            DeleteWhseRqst(AssemblyLine,false);
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE DeleteWhsePickRqst@6(AssemblyLine@1000 : Record "Assembly Line";DeleteAllWhsePickRqst@1003 : Boolean);
+    BEGIN
+      with AssemblyLine do begin
+        WhsePickRqst.SETRANGE("Document Type",WhsePickRqst."Document Type"::Assembly);
+        WhsePickRqst.SETRANGE("Document No.","Document No.");
+        if not DeleteAllWhsePickRqst then begin
+          WhsePickRqst.SETRANGE("Document Subtype","Document Type");
+          WhsePickRqst.SETRANGE("Location Code","Location Code");
+        end;
+        if not WhsePickRqst.ISEMPTY then
+          WhsePickRqst.DELETEALL(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE DeleteWhseRqst@10(AssemblyLine@1000 : Record "Assembly Line";DeleteAllWhseRqst@1003 : Boolean);
+    VAR
+      WhseRqst@1005 : Record "Warehouse Request";
+    BEGIN
+      with AssemblyLine do begin
+        if not DeleteAllWhseRqst then
+          case true of
+            "Remaining Quantity" > 0:
+              WhseRqst.SETRANGE(Type,WhseRqst.Type::Outbound);
+            "Remaining Quantity" < 0:
+              WhseRqst.SETRANGE(Type,WhseRqst.Type::Inbound);
+            "Remaining Quantity" = 0:
+              exit;
+          end;
+        WhseRqst.SETRANGE("Source Type",DATABASE::"Assembly Line");
+        WhseRqst.SETRANGE("Source No.","Document No.");
+        if not DeleteAllWhseRqst then begin
+          WhseRqst.SETRANGE("Source Subtype","Document Type");
+          WhseRqst.SETRANGE("Location Code","Location Code");
+        end;
+        if not WhseRqst.ISEMPTY then
+          WhseRqst.DELETEALL(true);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

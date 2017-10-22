@@ -1,0 +1,563 @@
+OBJECT Codeunit 850 Cash Flow Forecast Handler
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Cortana Intelligence"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CashFlowSetup@1002 : Record "Cash Flow Setup";
+      ErrorMessage@1009 : Record "Error Message";
+      TempErrorMessage@1008 : TEMPORARY Record "Error Message";
+      CashFlowManagement@1000 : Codeunit "Cash Flow Management";
+      TimeSeriesManagement@1001 : Codeunit "Time Series Management";
+      NumberOfPeriodsWithHistory@1004 : Integer;
+      PeriodType@1005 : Integer;
+      ForecastStartDate@1006 : Date;
+      XPAYABLESTxt@1012 : TextConst '@@@={locked};ENU=PAYABLES';
+      XRECEIVABLESTxt@1018 : TextConst '@@@={locked};ENU=RECEIVABLES';
+      XPAYABLESCORRECTIONTxt@1011 : TextConst 'ENU=Payables Correction';
+      XRECEIVABLESCORRECTIONTxt@1010 : TextConst 'ENU=Receivables Correction';
+      XSALESORDERSTxt@1007 : TextConst 'ENU=Sales Orders';
+      XPURCHORDERSTxt@1003 : TextConst 'ENU=Purchase Orders';
+      CortanaIntelligenceMustBeEnabledErr@1013 : TextConst '@@@="%1 =Cortana Intelligence Enabled field, %2-Cash Flow Setup";ENU=%1 in %2 must be set to true.';
+      CortanaIntelligenceAPIURLEmptyErr@1014 : TextConst '@@@="%1 =API URL field,%2 =API Key field, %3-Cash Flow Setup";ENU=You must specify an %1 and an %2 for the %3.';
+      AzureMachineLearningLimitReachedErr@1015 : TextConst 'ENU=The Microsoft Azure Machine Learning limit has been reached. Please contact your system administrator.';
+      TimeSeriesManagementInitFailedErr@1016 : TextConst 'ENU=Cannot initialize Microsoft Azure Machine Learning. Try again later. If the problem continues, contact your system administrator.';
+      MinimumHistoricalDataErr@1017 : TextConst 'ENU=There is not enough historical data for Cortana Intelligence to create a forecast.';
+      PredictionHasHighVarianceErr@1019 : TextConst '@@@="%1 =PAYABLES or RECEIVABLES,%2 =Date";ENU=The calculated forecast for %1 for the period from %2 shows a degree of variance that is higher than the setup allows.';
+      SetupScheduledForecastingMsg@1023 : TextConst 'ENU=You can include Cortana Intelligence capabilities in the cash flow forecast.';
+      EnableCortanaIntelligenceTxt@1022 : TextConst 'ENU=Enable Cortana Intelligence';
+      DontAskAgainTxt@1021 : TextConst 'ENU=Don''t ask again';
+      ScheduledForecastingEnabledMsg@1020 : TextConst '@@@="%1 = weekday (e.g. Monday)";ENU=The Cortana Intelligence forecast has been enabled.';
+
+    [Internal]
+    PROCEDURE CalculateForecast@1() : Boolean;
+    VAR
+      TempTimeSeriesForecast@1000 : TEMPORARY Record "Time Series Forecast";
+      TempTimeSeriesBuffer@1001 : TEMPORARY Record "Time Series Buffer";
+    BEGIN
+      TempErrorMessage.ClearLog;
+
+      if not Initialize then begin
+        ErrorMessage.CopyFromTemp(TempErrorMessage);
+        COMMIT;
+        exit(false);
+      end;
+      // Get forecast using time series
+      if not PrepareForecast(TempTimeSeriesBuffer) then begin
+        ErrorMessage.CopyFromTemp(TempErrorMessage);
+        COMMIT;
+        exit(false);
+      end;
+      TimeSeriesManagement.Forecast(CashFlowSetup.Horizon,80,TimeSeriesManagement.GetTimeSeriesModelOption('ARIMA'));
+      TimeSeriesManagement.GetForecast(TempTimeSeriesForecast);
+
+      // Insert forecasted data
+      CortanaIntelligenceClear;
+      CortanaIntelligenceFill(TempTimeSeriesBuffer,TempTimeSeriesForecast);
+      ErrorMessage.CopyFromTemp(TempErrorMessage);
+      COMMIT;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CalculatePostedSalesDocsSumAmountInPeriod@10(StartingDate@1000 : Date;PeriodType@1002 : Option) : Decimal;
+    VAR
+      CustLedgerEntry@1001 : Record "Cust. Ledger Entry";
+      Total@1003 : Decimal;
+    BEGIN
+      Total := 0;
+
+      with CustLedgerEntry do begin
+        RESET;
+        SETCURRENTKEY("Due Date");
+        SETRANGE("Due Date",StartingDate,GetPeriodEndingDate(StartingDate,PeriodType));
+
+        if FINDSET then
+          repeat
+            CALCFIELDS("Amount (LCY)" );
+            Total := Total + "Amount (LCY)";
+          until NEXT = 0;
+        exit(ROUND(Total,0.01));
+      end
+    END;
+
+    LOCAL PROCEDURE CalculatePostedPurchDocsSumAmountInPeriod@7(StartingDate@1000 : Date;PeriodType@1002 : Option) : Decimal;
+    VAR
+      VendorLedgerEntry@1001 : Record "Vendor Ledger Entry";
+      Total@1003 : Decimal;
+    BEGIN
+      Total := 0;
+
+      with VendorLedgerEntry do begin
+        RESET;
+        SETCURRENTKEY("Due Date");
+        SETRANGE("Due Date",StartingDate,GetPeriodEndingDate(StartingDate,PeriodType));
+
+        if FINDSET then
+          repeat
+            CALCFIELDS("Amount (LCY)" );
+            Total := Total + "Amount (LCY)";
+          until NEXT = 0;
+        exit(ROUND(Total,0.01));
+      end
+    END;
+
+    LOCAL PROCEDURE CalculateNotPostedSalesOrderSumAmountInPeriod@11(StartingDate@1002 : Date;PeriodType@1001 : Option) : Decimal;
+    VAR
+      SalesHeader@1000 : Record "Sales Header";
+      Total@1003 : Decimal;
+      AmountValue@1004 : Decimal;
+    BEGIN
+      Total := 0;
+      with SalesHeader do begin
+        RESET;
+        SETCURRENTKEY("Due Date");
+        SETRANGE("Due Date",StartingDate,GetPeriodEndingDate(StartingDate,PeriodType));
+        SETRANGE("Document Type","Document Type"::Order);
+
+        if FINDSET then
+          repeat
+            AmountValue := -CashFlowManagement.GetTotalAmountFromSalesOrder(SalesHeader);
+            Total := Total + AmountValue;
+          until NEXT = 0;
+        exit(ROUND(Total,0.01));
+      end
+    END;
+
+    LOCAL PROCEDURE CalculateNotPostedPurchOrderSumAmountInPeriod@20(StartingDate@1002 : Date;PeriodType@1001 : Option) : Decimal;
+    VAR
+      PurchaseHeader@1000 : Record "Purchase Header";
+      Total@1003 : Decimal;
+      AmountValue@1004 : Decimal;
+    BEGIN
+      Total := 0;
+      with PurchaseHeader do begin
+        RESET;
+        SETCURRENTKEY("Due Date");
+        SETRANGE("Due Date",StartingDate,GetPeriodEndingDate(StartingDate,PeriodType));
+        SETRANGE("Document Type","Document Type"::Order);
+
+        if FINDSET then
+          repeat
+            AmountValue := CashFlowManagement.GetTotalAmountFromPurchaseOrder(PurchaseHeader);
+            Total := Total + AmountValue;
+          until NEXT = 0;
+        exit(ROUND(Total,0.01));
+      end
+    END;
+
+    [External]
+    PROCEDURE PrepareForecast@2(VAR TimeSeriesBuffer@1007 : Record "Time Series Buffer") : Boolean;
+    VAR
+      CustLedgerEntry@1001 : Record "Cust. Ledger Entry";
+      VendorLedgerEntry@1000 : Record "Vendor Ledger Entry";
+      TempCustTimeSeriesBuffer@1002 : TEMPORARY Record "Time Series Buffer";
+      TempVendTimeSeriesBuffer@1008 : TEMPORARY Record "Time Series Buffer";
+    BEGIN
+      SetFiltersOnRecords(CustLedgerEntry,VendorLedgerEntry);
+
+      // check if there is a minimum history needed for forecast
+      if not TimeSeriesManagement.HasMinimumHistoricalData(
+           NumberOfPeriodsWithHistory,
+           CustLedgerEntry,
+           CustLedgerEntry.FIELDNO("Due Date"),
+           CashFlowSetup."Period Type",
+           ForecastStartDate)
+      then begin
+        TempErrorMessage.LogSimpleMessage(ErrorMessage."Message Type"::Error,MinimumHistoricalDataErr);
+        exit(false);
+      end;
+
+      // Prepare Sales History
+      PrepareData(
+        TempCustTimeSeriesBuffer,
+        CustLedgerEntry,
+        CustLedgerEntry.FIELDNO("Document Type"),
+        CustLedgerEntry.FIELDNO("Due Date"),
+        CustLedgerEntry.FIELDNO("Amount (LCY)"),
+        FORMAT(CustLedgerEntry."Document Type"::Invoice),
+        FORMAT(CustLedgerEntry."Document Type"::"Credit Memo")
+        );
+
+      AppendRecords(TimeSeriesBuffer,TempCustTimeSeriesBuffer,'Receivables');
+
+      // Prepare Purchase History
+      PrepareData(
+        TempVendTimeSeriesBuffer,
+        VendorLedgerEntry,
+        VendorLedgerEntry.FIELDNO("Document Type"),
+        VendorLedgerEntry.FIELDNO("Due Date"),
+        VendorLedgerEntry.FIELDNO("Amount (LCY)"),
+        FORMAT(VendorLedgerEntry."Document Type"::Invoice),
+        FORMAT(VendorLedgerEntry."Document Type"::"Credit Memo")
+        );
+
+      AppendRecords(TimeSeriesBuffer,TempVendTimeSeriesBuffer,'Payables');
+      TimeSeriesManagement.SetPreparedData(TimeSeriesBuffer,PeriodType,ForecastStartDate,NumberOfPeriodsWithHistory);
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE CortanaIntelligenceFill@28(VAR TimeSeriesBuffer@1000 : Record "Time Series Buffer";VAR TimeSeriesForecast@1001 : Record "Time Series Forecast");
+    VAR
+      CortanaIntelligence@1003 : Record "Cortana Intelligence";
+      ForecastedRemainingAmount@1002 : Decimal;
+    BEGIN
+      // History Records
+      if TimeSeriesBuffer.FINDSET then
+        repeat
+          NewCortanaIntelligenceRecord(TimeSeriesBuffer."Group ID",
+            TimeSeriesBuffer.Value,
+            1,
+            0,
+            CortanaIntelligence.Type::History,
+            TimeSeriesBuffer."Period Start Date",
+            PeriodType,
+            TimeSeriesBuffer."Period No."
+            );
+        until TimeSeriesBuffer.NEXT = 0;
+
+      // Forecast
+      if TimeSeriesForecast.FINDSET then
+        repeat
+          // if Variance % is big, do not insert it
+          if TimeSeriesForecast."Delta %" >= CashFlowSetup."Variance %" then
+            TempErrorMessage.LogSimpleMessage(ErrorMessage."Message Type"::Warning,
+              STRSUBSTNO(PredictionHasHighVarianceErr,TimeSeriesForecast."Group ID",TimeSeriesForecast."Period Start Date"))
+          else
+            if IsAmountValid(TimeSeriesForecast) then begin
+              // Cortana Intelligence Forecast
+              ForecastedRemainingAmount := ABS(TimeSeriesForecast.Value);
+              NewCortanaIntelligenceRecord(TimeSeriesForecast."Group ID",
+                TimeSeriesForecast.Value,
+                TimeSeriesForecast."Delta %",
+                TimeSeriesForecast.Delta,
+                CortanaIntelligence.Type::Forecast,
+                TimeSeriesForecast."Period Start Date",
+                PeriodType,
+                TimeSeriesForecast."Period No."
+                );
+
+              // Corrections: Payables Corrections, Receivables Corrections, Sales Orders, Purchase Orders
+              if TimeSeriesForecast."Group ID" = XPAYABLESTxt then begin
+                NewCorrectionRecord(ForecastedRemainingAmount,TimeSeriesForecast,XPAYABLESCORRECTIONTxt,PeriodType);
+                NewCorrectionRecord(ForecastedRemainingAmount,TimeSeriesForecast,XPURCHORDERSTxt,PeriodType);
+              end else begin
+                NewCorrectionRecord(ForecastedRemainingAmount,TimeSeriesForecast,XRECEIVABLESCORRECTIONTxt,PeriodType);
+                NewCorrectionRecord(ForecastedRemainingAmount,TimeSeriesForecast,XSALESORDERSTxt,PeriodType);
+              end;
+            end;
+        until TimeSeriesForecast.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CortanaIntelligenceClear@37();
+    VAR
+      CortanaIntelligence@1000 : Record "Cortana Intelligence";
+    BEGIN
+      CortanaIntelligence.RESET;
+      CortanaIntelligence.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE SetFiltersOnRecords@15(VAR CustLedgerEntry@1000 : Record "Cust. Ledger Entry";VAR VendorLedgerEntry@1001 : Record "Vendor Ledger Entry");
+    BEGIN
+      CustLedgerEntry.SETCURRENTKEY("Due Date");
+      CustLedgerEntry.SETFILTER("Document Type",
+        '%1|%2',
+        CustLedgerEntry."Document Type"::Invoice,
+        CustLedgerEntry."Document Type"::"Credit Memo");
+
+      VendorLedgerEntry.SETCURRENTKEY("Due Date");
+      VendorLedgerEntry.SETFILTER("Document Type",
+        '%1|%2',
+        VendorLedgerEntry."Document Type"::Invoice,
+        VendorLedgerEntry."Document Type"::"Credit Memo");
+    END;
+
+    LOCAL PROCEDURE PrepareData@4(VAR TempTimeSeriesBuffer@1000 : TEMPORARY Record "Time Series Buffer";RecordVariant@1002 : Variant;GroupIdFieldNo@1003 : Integer;DateFieldNo@1004 : Integer;ValueFieldNo@1005 : Integer;InvoiceOption@1008 : Text;CreditMemoOption@1009 : Text);
+    VAR
+      TempCreditMemoTimeSeriesBuffer@1001 : TEMPORARY Record "Time Series Buffer";
+    BEGIN
+      TimeSeriesManagement.PrepareData(
+        RecordVariant,
+        GroupIdFieldNo,
+        DateFieldNo,
+        ValueFieldNo,
+        PeriodType,
+        ForecastStartDate,
+        NumberOfPeriodsWithHistory);
+
+      TimeSeriesManagement.GetPreparedData(TempTimeSeriesBuffer);
+      TempCreditMemoTimeSeriesBuffer.COPY(TempTimeSeriesBuffer,true);
+      TempCreditMemoTimeSeriesBuffer.SETRANGE("Group ID",FORMAT(CreditMemoOption));
+
+      TempTimeSeriesBuffer.SETRANGE("Group ID",FORMAT(InvoiceOption));
+
+      if TempTimeSeriesBuffer.FINDSET and TempCreditMemoTimeSeriesBuffer.FINDSET then
+        repeat
+          TempTimeSeriesBuffer.Value := TempTimeSeriesBuffer.Value + TempCreditMemoTimeSeriesBuffer.Value;
+          TempTimeSeriesBuffer.MODIFY;
+        until (TempTimeSeriesBuffer.NEXT = 0) and (TempCreditMemoTimeSeriesBuffer.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE AppendRecords@12(VAR TargetTimeSeriesBuffer@1002 : Record "Time Series Buffer";VAR SourceTimeSeriesBuffer@1000 : Record "Time Series Buffer";Label@1001 : Text[50]);
+    BEGIN
+      if SourceTimeSeriesBuffer.FINDSET then
+        repeat
+          TargetTimeSeriesBuffer.VALIDATE(Value,SourceTimeSeriesBuffer.Value);
+          TargetTimeSeriesBuffer.VALIDATE("Period Start Date",SourceTimeSeriesBuffer."Period Start Date");
+          TargetTimeSeriesBuffer.VALIDATE("Period No.",SourceTimeSeriesBuffer."Period No.");
+          TargetTimeSeriesBuffer.VALIDATE("Group ID",Label);
+          TargetTimeSeriesBuffer.INSERT;
+        until SourceTimeSeriesBuffer.NEXT = 0;
+    END;
+
+    [Internal]
+    PROCEDURE Initialize@3() : Boolean;
+    VAR
+      AzureMachineLearningUsage@1003 : Record "Azure Machine Learning Usage";
+      APIURL@1002 : Text[250];
+      APIKey@1001 : Text[200];
+      LimitValue@1000 : Decimal;
+      IsInitialized@1004 : Boolean;
+      TimeSeriesLibState@1005 : 'Uninitialized,Initialized,"Data Prepared",Done';
+    BEGIN
+      if not CashFlowSetup.GET then
+        exit(false);
+
+      IsInitialized := true;
+
+      // check if Cortana is enabled
+      TempErrorMessage.SetContext(CashFlowSetup);
+      if not CashFlowSetup."Cortana Intelligence Enabled" then begin
+        TempErrorMessage.LogMessage(
+          CashFlowSetup,CashFlowSetup.FIELDNO("Cortana Intelligence Enabled"),ErrorMessage."Message Type"::Error,
+          STRSUBSTNO(CortanaIntelligenceMustBeEnabledErr,CashFlowSetup.FIELDCAPTION("Cortana Intelligence Enabled"),
+            CashFlowSetup.TABLECAPTION));
+        IsInitialized := false;
+      end;
+
+      // check Azure ML settings
+      if not CashFlowSetup.GetMLCredentials(APIURL,APIKey,LimitValue) then begin
+        TempErrorMessage.LogMessage(
+          CashFlowSetup,CashFlowSetup.FIELDNO("API URL"),ErrorMessage."Message Type"::Error,
+          STRSUBSTNO(CortanaIntelligenceAPIURLEmptyErr,CashFlowSetup.FIELDCAPTION("API URL"),
+            CashFlowSetup.FIELDCAPTION("API Key"),CashFlowSetup.TABLECAPTION));
+        IsInitialized := false;
+      end;
+      if IsInitialized = false then
+        exit(false);
+
+      // check - it will be fixed with Time Series Lib
+      if not CashFlowSetup.IsAPIUserDefined then
+        if AzureMachineLearningUsage.IsAzureMLLimitReached(LimitValue) then begin
+          TempErrorMessage.LogSimpleMessage(ErrorMessage."Message Type"::Error,AzureMachineLearningLimitReachedErr);
+          exit(false);
+        end;
+
+      // Time series Lib
+      TimeSeriesManagement.Initialize(APIURL,APIKey,CashFlowSetup.TimeOut);
+      TimeSeriesManagement.SetMaximumHistoricalPeriods(CashFlowSetup."Historical Periods");
+      TimeSeriesManagement.GetState(TimeSeriesLibState);
+      if not (TimeSeriesLibState = TimeSeriesLibState::Initialized) then begin
+        TempErrorMessage.LogSimpleMessage(ErrorMessage."Message Type"::Error,TimeSeriesManagementInitFailedErr);
+        exit(false);
+      end;
+      // set defaults
+      PeriodType := CashFlowSetup."Period Type";
+      ForecastStartDate := GetForecastStartDate(PeriodType);
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE GetPeriodEndingDate@9(StartingDate@1001 : Date;PeriodType@1002 : 'Day,Week,Month,Quarter,Year') : Date;
+    BEGIN
+      case PeriodType of
+        PeriodType::Day:
+          exit(StartingDate);
+        PeriodType::Week:
+          exit(CALCDATE('<+1W-1D>',StartingDate));
+        PeriodType::Month:
+          exit(CALCDATE('<+1M-1D>',StartingDate));
+        PeriodType::Quarter:
+          exit(CALCDATE('<+1Q-1D>',StartingDate));
+        PeriodType::Year:
+          exit(CALCDATE('<+1Y-1D>',StartingDate));
+      end;
+    END;
+
+    LOCAL PROCEDURE NewCortanaIntelligenceRecord@16(GroupIdValue@1001 : Text[50];AmountValue@1002 : Decimal;DeltaPercentValue@1003 : Decimal;DeltaValue@1004 : Decimal;TypeValue@1005 : Option;PeriodStartValue@1006 : Date;PeriodTypeValue@1007 : Option;PeriodNoValue@1008 : Integer);
+    VAR
+      CortanaIntelligence@1000 : Record "Cortana Intelligence";
+    BEGIN
+      with CortanaIntelligence do begin
+        INIT;
+        VALIDATE("Group Id",GroupIdValue);
+        VALIDATE(Amount,AmountValue);
+        VALIDATE("Delta %",DeltaPercentValue);
+        VALIDATE(Delta,DeltaValue);
+        VALIDATE(Type,TypeValue);
+        VALIDATE("Period Start",PeriodStartValue);
+        VALIDATE("Period Type",PeriodTypeValue);
+        VALIDATE("Period No.",PeriodNoValue);
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE NewCorrectionRecord@24(VAR ForecastedRemainingAmount@1002 : Decimal;TimeSeriesForecast@1009 : Record "Time Series Forecast";GroupIDValue@1003 : Text[100];PeriodTypeValue@1001 : Option);
+    VAR
+      CortanaIntelligence@1000 : Record "Cortana Intelligence";
+      CorrectionAmount@1004 : Decimal;
+    BEGIN
+      if ForecastedRemainingAmount = 0 then
+        exit;
+      // correction must not be bigger than forecasted amount
+      CorrectionAmount := GetCorrectionAmount(TimeSeriesForecast,GroupIDValue,PeriodTypeValue);
+
+      // if correction amount smaller than forecasted, keep correction and reduce forecasted remaining amount
+      if ABS(ForecastedRemainingAmount) < ABS(CorrectionAmount) then begin
+        CorrectionAmount := ForecastedRemainingAmount;
+        ForecastedRemainingAmount := 0;
+        if TimeSeriesForecast."Group ID" = XRECEIVABLESTxt then
+          CorrectionAmount := -CorrectionAmount;
+      end else
+        ForecastedRemainingAmount -= ABS(CorrectionAmount);
+
+      // insert correction
+      with CortanaIntelligence do begin
+        INIT;
+        VALIDATE("Group Id",GroupIDValue);
+        VALIDATE(Amount,CorrectionAmount);
+        VALIDATE(Type,Type::Correction);
+        VALIDATE("Period Start",TimeSeriesForecast."Period Start Date");
+        VALIDATE("Period Type",PeriodTypeValue);
+        VALIDATE("Period No.",TimeSeriesForecast."Period No.");
+        INSERT;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetCorrectionAmount@17(TimeSeriesForecast@1002 : Record "Time Series Forecast";GroupIDValue@1000 : Text[100];PeriodType@1001 : Option) : Decimal;
+    BEGIN
+      case GroupIDValue of
+        XPAYABLESCORRECTIONTxt:
+          exit(-CalculatePostedPurchDocsSumAmountInPeriod(TimeSeriesForecast."Period Start Date",PeriodType));
+        XPURCHORDERSTxt:
+          exit(CalculateNotPostedPurchOrderSumAmountInPeriod(TimeSeriesForecast."Period Start Date",PeriodType));
+        XRECEIVABLESCORRECTIONTxt:
+          exit(-CalculatePostedSalesDocsSumAmountInPeriod(TimeSeriesForecast."Period Start Date",PeriodType));
+        XSALESORDERSTxt:
+          exit(CalculateNotPostedSalesOrderSumAmountInPeriod(TimeSeriesForecast."Period Start Date",PeriodType));
+      end;
+    END;
+
+    LOCAL PROCEDURE IsAmountValid@6(TimeSeriesForecast@1000 : Record "Time Series Forecast") : Boolean;
+    BEGIN
+      with TimeSeriesForecast do begin
+        if ("Group ID" = XPAYABLESTxt) and (Value < 0) then
+          exit(true);
+        if ("Group ID" = XRECEIVABLESTxt) and (Value > 0) then
+          exit(true);
+        exit(false);
+      end
+    END;
+
+    LOCAL PROCEDURE GetForecastStartDate@5(PeriodType@1000 : 'Day,Week,Month,Quarter,Year') : Date;
+    BEGIN
+      case PeriodType of
+        PeriodType::Day:
+          exit(WORKDATE);
+        PeriodType::Week:
+          exit(CALCDATE('<CW+1D-1W>',WORKDATE));
+        PeriodType::Month:
+          exit(CALCDATE('<CM+1D-1M>',WORKDATE));
+        PeriodType::Quarter:
+          exit(CALCDATE('<CQ+1D-1Q>',WORKDATE));
+        PeriodType::Year:
+          exit(CALCDATE('<CY+1D-1Y>',WORKDATE));
+      end;
+    END;
+
+    LOCAL PROCEDURE CreateSetupNotification@8();
+    VAR
+      SetupNotification@1001 : Notification;
+    BEGIN
+      if not ShowNotification then
+        exit;
+
+      SetupNotification.MESSAGE := SetupScheduledForecastingMsg;
+      SetupNotification.SCOPE := NOTIFICATIONSCOPE::LocalScope;
+      SetupNotification.ADDACTION(EnableCortanaIntelligenceTxt,CODEUNIT::"Cash Flow Forecast Handler",'SetupCortanaIntelligence');
+      SetupNotification.ADDACTION(DontAskAgainTxt,CODEUNIT::"Cash Flow Forecast Handler",'DeactivateNotification');
+      SetupNotification.SEND;
+    END;
+
+    LOCAL PROCEDURE ShowNotification@13() : Boolean;
+    VAR
+      CashFlowSetup@1001 : Record "Cash Flow Setup";
+      O365GettingStarted@1000 : Record "O365 Getting Started";
+    BEGIN
+      if O365GettingStarted.GET(USERID,CURRENTCLIENTTYPE) then
+        if O365GettingStarted."Tour in Progress" then
+          exit(false);
+
+      if not CashFlowSetup.GET then
+        exit(false);
+
+      if CashFlowSetup."Cortana Intelligence Enabled" then
+        exit(false);
+
+      if not CashFlowSetup."Show Cortana Notification" then
+        exit(false);
+
+      if CashFlowSetup."CF No. on Chart in Role Center" = '' then
+        exit(false);
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE DeactivateNotification@18(SetupNotification@1000 : Notification);
+    VAR
+      CashFlowSetup@1004 : Record "Cash Flow Setup";
+    BEGIN
+      if not CashFlowSetup.GET then
+        exit;
+      CashFlowSetup."Show Cortana Notification" := false;
+      CashFlowSetup.MODIFY(true);
+    END;
+
+    [External]
+    PROCEDURE SetupCortanaIntelligence@29(SetupNotification@1000 : Notification);
+    VAR
+      PermissionManager@1001 : Codeunit "Permission Manager";
+    BEGIN
+      if CashFlowSetup.GET then
+        PAGE.RUNMODAL(PAGE::"Cash Flow Setup",CashFlowSetup);
+      if CashFlowSetup.GET then begin
+        if PermissionManager.SoftwareAsAService and CashFlowSetup."Cortana Intelligence Enabled" then
+          MESSAGE(ScheduledForecastingEnabledMsg);
+        CashFlowSetup."Show Cortana Notification" := false;
+        CashFlowSetup.MODIFY(true);
+      end;
+    END;
+
+    [EventSubscriber(Page,869,OnOpenPageEvent)]
+    LOCAL PROCEDURE OnOpenCashFlowForecastChart@19(VAR Rec@1000 : Record "Business Chart Buffer");
+    BEGIN
+      CreateSetupNotification;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

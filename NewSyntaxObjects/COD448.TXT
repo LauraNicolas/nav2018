@@ -1,0 +1,171 @@
+OBJECT Codeunit 448 Job Queue Dispatcher
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Job Queue Entry";
+    Permissions=TableData "Job Queue Entry"=rimd;
+    OnRun=BEGIN
+            RefreshLocked;
+            if Status in [Status::Ready,Status::"In Process"] then
+              if IsExpired(CURRENTDATETIME) then
+                DeleteTask
+              else
+                if WaitForOthersWithSameCategory(Rec) then
+                  Reschedule(Rec)
+                else
+                  HandleRequest(Rec);
+            COMMIT;
+          END;
+
+  }
+  CODE
+  {
+
+    LOCAL PROCEDURE HandleRequest@6(VAR JobQueueEntry@1000 : Record "Job Queue Entry");
+    VAR
+      JobQueueLogEntry@1003 : Record "Job Queue Log Entry";
+      WasSuccess@1002 : Boolean;
+      WasInactive@1001 : Boolean;
+    BEGIN
+      with JobQueueEntry do begin
+        if Status = Status::Ready then begin
+          Status := Status::"In Process";
+          "User Session Started" := CURRENTDATETIME;
+          MODIFY;
+        end;
+        InsertLogEntry(JobQueueLogEntry);
+
+        // Codeunit.Run is limited during write transactions because one or more tables will be locked.
+        // To avoid NavCSideException we have either to add the COMMIT before the call or do not use a returned value.
+        COMMIT;
+        WasSuccess := CODEUNIT.RUN(CODEUNIT::"Job Queue Start Codeunit",JobQueueEntry);
+        WasInactive := "On Hold Due to Inactivity";
+
+        // user may have deleted it in the meantime
+        if DoesExistLocked then
+          SetResult(WasSuccess,WasInactive)
+        else
+          SetResultDeletedEntry;
+        COMMIT;
+        FinalizeLogEntry(JobQueueLogEntry);
+
+        if DoesExistLocked then
+          FinalizeRun;
+      end;
+    END;
+
+    LOCAL PROCEDURE WaitForOthersWithSameCategory@9(VAR CurrJobQueueEntry@1000 : Record "Job Queue Entry") : Boolean;
+    VAR
+      JobQueueEntry@1001 : Record "Job Queue Entry";
+    BEGIN
+      if CurrJobQueueEntry."Job Queue Category Code" = '' then
+        exit(false);
+
+      with JobQueueEntry do begin
+        SETFILTER(ID,'<>%1',CurrJobQueueEntry.ID);
+        SETRANGE("Job Queue Category Code",CurrJobQueueEntry."Job Queue Category Code");
+        SETRANGE(Status,Status::"In Process");
+        exit(not ISEMPTY);
+      end;
+    END;
+
+    LOCAL PROCEDURE Reschedule@15(VAR JobQueueEntry@1000 : Record "Job Queue Entry");
+    BEGIN
+      with JobQueueEntry do begin
+        RANDOMIZE;
+        "Earliest Start Date/Time" := CURRENTDATETIME + 1000 + RANDOM(3000);
+        CODEUNIT.RUN(CODEUNIT::"Job Queue - Enqueue",JobQueueEntry);
+      end;
+    END;
+
+    [External]
+    PROCEDURE CalcNextRunTimeForRecurringJob@1(VAR JobQueueEntry@1000 : Record "Job Queue Entry";StartingDateTime@1008 : DateTime) : DateTime;
+    VAR
+      NewRunDateTime@1002 : DateTime;
+    BEGIN
+      if JobQueueEntry."No. of Minutes between Runs" = 0 then begin
+        if JobQueueEntry."Earliest Start Date/Time" <> 0DT then
+          StartingDateTime := JobQueueEntry."Earliest Start Date/Time";
+        NewRunDateTime := CREATEDATETIME(DT2DATE(StartingDateTime) + 1,000000T);
+      end else
+        NewRunDateTime := StartingDateTime + 60000 * JobQueueEntry."No. of Minutes between Runs";
+
+      exit(CalcRunTimeForRecurringJob(JobQueueEntry,NewRunDateTime));
+    END;
+
+    [External]
+    PROCEDURE CalcInitialRunTime@4(VAR JobQueueEntry@1000 : Record "Job Queue Entry";StartingDateTime@1008 : DateTime) : DateTime;
+    VAR
+      EarliestPossibleRunTime@1001 : DateTime;
+    BEGIN
+      if (JobQueueEntry."Earliest Start Date/Time" <> 0DT) and (JobQueueEntry."Earliest Start Date/Time" > StartingDateTime) then
+        EarliestPossibleRunTime := JobQueueEntry."Earliest Start Date/Time"
+      else
+        EarliestPossibleRunTime := StartingDateTime;
+
+      if JobQueueEntry."Recurring Job" then
+        exit(CalcRunTimeForRecurringJob(JobQueueEntry,EarliestPossibleRunTime));
+
+      exit(EarliestPossibleRunTime);
+    END;
+
+    LOCAL PROCEDURE CalcRunTimeForRecurringJob@11(VAR JobQueueEntry@1000 : Record "Job Queue Entry";StartingDateTime@1008 : DateTime) : DateTime;
+    VAR
+      NewRunDateTime@1001 : DateTime;
+      RunOnDate@1003 : ARRAY [7] OF Boolean;
+      StartingWeekDay@1005 : Integer;
+      NoOfExtraDays@1004 : Integer;
+      NoOfDays@1007 : Integer;
+      Found@1006 : Boolean;
+    BEGIN
+      with JobQueueEntry do begin
+        TESTFIELD("Recurring Job");
+        RunOnDate[1] := "Run on Mondays";
+        RunOnDate[2] := "Run on Tuesdays";
+        RunOnDate[3] := "Run on Wednesdays";
+        RunOnDate[4] := "Run on Thursdays";
+        RunOnDate[5] := "Run on Fridays";
+        RunOnDate[6] := "Run on Saturdays";
+        RunOnDate[7] := "Run on Sundays";
+
+        NewRunDateTime := StartingDateTime;
+        NoOfDays := 0;
+        if ("Ending Time" <> 000000T) and (NewRunDateTime > GetEndingDateTime(NewRunDateTime)) then begin
+          NewRunDateTime := GetStartingDateTime(NewRunDateTime);
+          NoOfDays := NoOfDays + 1;
+        end;
+
+        StartingWeekDay := DATE2DWY(DT2DATE(StartingDateTime),1);
+        Found := RunOnDate[(StartingWeekDay - 1 + NoOfDays) mod 7 + 1];
+        while not Found and (NoOfExtraDays < 7) do begin
+          NoOfExtraDays := NoOfExtraDays + 1;
+          NoOfDays := NoOfDays + 1;
+          Found := RunOnDate[(StartingWeekDay - 1 + NoOfDays) mod 7 + 1];
+        end;
+
+        if ("Starting Time" <> 000000T) and (NewRunDateTime < GetStartingDateTime(NewRunDateTime)) then
+          NewRunDateTime := GetStartingDateTime(NewRunDateTime);
+
+        if (NoOfDays > 0) and (NewRunDateTime > GetStartingDateTime(NewRunDateTime)) then
+          NewRunDateTime := GetStartingDateTime(NewRunDateTime);
+
+        if ("Starting Time" = 000000T) and (NoOfExtraDays > 0) and ("No. of Minutes between Runs" <> 0) then
+          NewRunDateTime := CREATEDATETIME(DT2DATE(NewRunDateTime),000000T);
+
+        if Found then
+          NewRunDateTime := CREATEDATETIME(DT2DATE(NewRunDateTime) + NoOfDays,DT2TIME(NewRunDateTime));
+      end;
+      exit(NewRunDateTime);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

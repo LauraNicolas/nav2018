@@ -1,0 +1,165 @@
+OBJECT Codeunit 7705 Miniform Logon
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20161025D;
+    Time=120000T;
+    Version List=NAVW110.0;
+  }
+  PROPERTIES
+  {
+    TableNo="Miniform Header";
+    OnRun=VAR
+            MiniformMgmt@1000 : Codeunit "Miniform Management";
+          BEGIN
+            MiniformMgmt.Initialize(
+              MiniformHeader,Rec,DOMxmlin,ReturnedNode,
+              RootNode,XMLDOMMgt,ADCSCommunication,ADCSUserId,
+              CurrentCode,StackCode,WhseEmpId,LocationFilter);
+
+            if ADCSCommunication.GetNodeAttribute(ReturnedNode,'RunReturn') = '0' then begin
+              if Code <> CurrentCode then
+                PrepareData
+              else
+                ProcessInput;
+            end else
+              PrepareData;
+
+            CLEAR(DOMxmlin);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      MiniformHeader@1015 : Record "Miniform Header";
+      MiniformHeader2@1006 : Record "Miniform Header";
+      ADCSUser@1009 : Record "ADCS User";
+      XMLDOMMgt@1007 : Codeunit "XML DOM Management";
+      ADCSCommunication@1003 : Codeunit "ADCS Communication";
+      ADCSMgt@1024 : Codeunit "ADCS Management";
+      RecRef@1005 : RecordRef;
+      DOMxmlin@1011 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      ReturnedNode@1012 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      RootNode@1010 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      ADCSUserId@1004 : Text[250];
+      WhseEmpId@1018 : Text[250];
+      LocationFilter@1000 : Text[250];
+      Text001@1016 : TextConst 'ENU=Invalid User ID.';
+      Text002@1013 : TextConst 'ENU=Invalid Password.';
+      Text003@1001 : TextConst 'ENU=No input Node found.';
+      Text004@1014 : TextConst 'ENU=Record not found.';
+      CurrentCode@1008 : Text[250];
+      StackCode@1017 : Text[250];
+      ActiveInputField@1026 : Integer;
+
+    LOCAL PROCEDURE ProcessInput@10();
+    VAR
+      FuncGroup@1001 : Record "Miniform Function Group";
+      RecId@1004 : RecordID;
+      TableNo@1002 : Integer;
+      FldNo@1000 : Integer;
+      TextValue@1007 : Text[250];
+    BEGIN
+      if XMLDOMMgt.FindNode(RootNode,'Header/Input',ReturnedNode) then
+        TextValue := ReturnedNode.InnerText
+      else
+        ERROR(Text003);
+
+      if EVALUATE(TableNo,ADCSCommunication.GetNodeAttribute(ReturnedNode,'TableNo')) then begin
+        RecRef.OPEN(TableNo);
+        EVALUATE(RecId,ADCSCommunication.GetNodeAttribute(ReturnedNode,'RecordID'));
+        if RecRef.GET(RecId) then begin
+          RecRef.SETTABLE(ADCSUser);
+          ADCSCommunication.SetRecRef(RecRef);
+        end else
+          ERROR(Text004);
+      end;
+
+      FuncGroup.KeyDef := ADCSCommunication.GetFunctionKey(MiniformHeader.Code,TextValue);
+
+      case FuncGroup.KeyDef of
+        FuncGroup.KeyDef::Esc:
+          PrepareData;
+        FuncGroup.KeyDef::Input:
+          begin
+            EVALUATE(FldNo,ADCSCommunication.GetNodeAttribute(ReturnedNode,'FieldID'));
+            case FldNo of
+              ADCSUser.FIELDNO(Name):
+                if not GetUser(UPPERCASE(TextValue)) then
+                  exit;
+              ADCSUser.FIELDNO(Password):
+                if not CheckPassword(TextValue) then
+                  exit;
+              else begin
+                ADCSCommunication.FieldSetvalue(RecRef,FldNo,TextValue);
+                RecRef.SETTABLE(ADCSUser);
+              end;
+            end;
+
+            ActiveInputField := ADCSCommunication.GetActiveInputNo(CurrentCode,FldNo);
+            if ADCSCommunication.LastEntryField(CurrentCode,FldNo) then begin
+              ADCSCommunication.GetNextMiniForm(MiniformHeader,MiniformHeader2);
+              MiniformHeader2.SaveXMLin(DOMxmlin);
+              CODEUNIT.RUN(MiniformHeader2."Handling Codeunit",MiniformHeader2);
+            end else
+              ActiveInputField += 1;
+
+            RecRef.GETTABLE(ADCSUser);
+            ADCSCommunication.SetRecRef(RecRef);
+          end;
+      end;
+
+      if not (FuncGroup.KeyDef in [FuncGroup.KeyDef::Esc]) and
+         not ADCSCommunication.LastEntryField(CurrentCode,FldNo)
+      then
+        SendForm(ActiveInputField);
+    END;
+
+    LOCAL PROCEDURE GetUser@21(TextValue@1000 : Text[250]) ReturnValue : Boolean;
+    BEGIN
+      if ADCSUser.GET(TextValue) then begin
+        ADCSUserId := ADCSUser.Name;
+        ADCSUser.Password := '';
+        if not ADCSCommunication.GetWhseEmployee(ADCSUserId,WhseEmpId,LocationFilter) then begin
+          ADCSMgt.SendError(Text001);
+          ReturnValue := false;
+          exit;
+        end;
+      end else begin
+        ADCSMgt.SendError(Text001);
+        ReturnValue := false;
+        exit;
+      end;
+      ReturnValue := true;
+    END;
+
+    LOCAL PROCEDURE CheckPassword@23(TextValue@1000 : Text[250]) ReturnValue : Boolean;
+    BEGIN
+      ADCSUser.GET(ADCSUserId);
+      if ADCSUser.Password <> ADCSUser.CalculatePassword(COPYSTR(TextValue,1,30)) then begin
+        ADCSMgt.SendError(Text002);
+        ReturnValue := false;
+        exit;
+      end;
+      ReturnValue := true;
+    END;
+
+    LOCAL PROCEDURE PrepareData@1();
+    BEGIN
+      ActiveInputField := 1;
+      SendForm(ActiveInputField);
+    END;
+
+    LOCAL PROCEDURE SendForm@3(InputField@1000 : Integer);
+    BEGIN
+      ADCSCommunication.EncodeMiniForm(MiniformHeader,StackCode,DOMxmlin,InputField,'',ADCSUserId);
+      ADCSCommunication.GetReturnXML(DOMxmlin);
+      ADCSMgt.SendXMLReply(DOMxmlin);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

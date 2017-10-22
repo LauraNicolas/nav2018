@@ -1,0 +1,430 @@
+OBJECT Table 1060 Payment Service Setup
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Sales Invoice Header"=rimd;
+    OnDelete=BEGIN
+               DeletePaymentServiceSetup(true);
+             END;
+
+    CaptionML=ENU=Payment Service Setup;
+  }
+  FIELDS
+  {
+    { 1   ;   ;No.                 ;Text250       ;CaptionML=ENU=No. }
+    { 2   ;   ;Name                ;Text250       ;CaptionML=ENU=Name;
+                                                   NotBlank=true }
+    { 3   ;   ;Description         ;Text250       ;CaptionML=ENU=Description;
+                                                   NotBlank=true }
+    { 4   ;   ;Enabled             ;Boolean       ;CaptionML=ENU=Enabled }
+    { 5   ;   ;Always Include on Documents;Boolean;OnValidate=VAR
+                                                                SalesHeader@1000 : Record "Sales Header";
+                                                              BEGIN
+                                                                if CONFIRM(UpdateExistingInvoicesQst) then begin
+                                                                  SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Invoice);
+                                                                  if  SalesHeader.FINDSET(true,false) then
+                                                                    repeat
+                                                                      SalesHeader.SetDefaultPaymentServices;
+                                                                      SalesHeader.MODIFY
+                                                                    until SalesHeader.NEXT = 0;
+                                                                end;
+                                                              END;
+
+                                                   CaptionML=ENU=Always Include on Documents }
+    { 6   ;   ;Setup Record ID     ;RecordID      ;CaptionML=ENU=Setup Record ID }
+    { 7   ;   ;Setup Page ID       ;Integer       ;CaptionML=ENU=Setup Page ID }
+    { 8   ;   ;Terms of Service    ;Text250       ;ExtendedDatatype=URL;
+                                                   CaptionML=ENU=Terms of Service;
+                                                   Editable=false }
+    { 100 ;   ;Available           ;Boolean       ;CaptionML=ENU=Available }
+    { 101 ;   ;Management Codeunit ID;Integer     ;CaptionML=ENU=Management Codeunit ID }
+  }
+  KEYS
+  {
+    {    ;"No."                                   ;Clustered=true }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      NoPaymentMethodsSelectedTxt@1003 : TextConst 'ENU=No payment service is made available.';
+      SetupPaymentServicesQst@1000 : TextConst 'ENU=No payment services have been set up.\\Do you want to set up a payment service?';
+      SetupExistingServicesOrCreateNewQst@1001 : TextConst 'ENU=One or more payment services are set up, but none are enabled.\\Do you want to:';
+      CreateOrUpdateOptionQst@1002 : TextConst 'ENU=Set Up a Payment Service,Create a New Payment Service';
+      UpdateExistingInvoicesQst@1004 : TextConst 'ENU=Do you want to update the ongoing Sales Invoices with this Payment Service information?';
+      ReminderToSendAgainMsg@1005 : TextConst 'ENU=The payment service was successfully changed.\\The invoice recipient will see the change when you send, or resend, the invoice.';
+
+    [External]
+    PROCEDURE OpenSetupCard@14();
+    VAR
+      DataTypeManagement@1001 : Codeunit "Data Type Management";
+      SetupRecordRef@1000 : RecordRef;
+      SetupRecordVariant@1002 : Variant;
+    BEGIN
+      if not DataTypeManagement.GetRecordRef("Setup Record ID",SetupRecordRef) then
+        exit;
+
+      SetupRecordVariant := SetupRecordRef;
+      PAGE.RUNMODAL("Setup Page ID",SetupRecordVariant);
+    END;
+
+    [External]
+    PROCEDURE CreateReportingArgs@11(VAR PaymentReportingArgument@1000 : Record "Payment Reporting Argument";DocumentRecordVariant@1001 : Variant);
+    VAR
+      DummySalesHeader@1006 : Record "Sales Header";
+      TempPaymentServiceSetup@1007 : TEMPORARY Record "Payment Service Setup";
+      DataTypeMgt@1003 : Codeunit "Data Type Management";
+      DocumentRecordRef@1004 : RecordRef;
+      PaymentServiceFieldRef@1005 : FieldRef;
+      SetID@1008 : Integer;
+      LastKey@1010 : Integer;
+    BEGIN
+      PaymentReportingArgument.RESET;
+      PaymentReportingArgument.DELETEALL;
+
+      DataTypeMgt.GetRecordRef(DocumentRecordVariant,DocumentRecordRef);
+      DataTypeMgt.FindFieldByName(DocumentRecordRef,PaymentServiceFieldRef,DummySalesHeader.FIELDNAME("Payment Service Set ID"));
+
+      SetID := PaymentServiceFieldRef.VALUE;
+
+      GetEnabledPaymentServices(TempPaymentServiceSetup);
+      LoadSet(TempPaymentServiceSetup,SetID);
+      TempPaymentServiceSetup.SETRANGE(Available,true);
+
+      if not TempPaymentServiceSetup.FINDFIRST then
+        exit;
+
+      repeat
+        LastKey := PaymentReportingArgument.Key;
+        CLEAR(PaymentReportingArgument);
+        PaymentReportingArgument.Key := LastKey + 1;
+        PaymentReportingArgument.VALIDATE("Document Record ID",DocumentRecordRef.RECORDID);
+        PaymentReportingArgument.VALIDATE("Setup Record ID",TempPaymentServiceSetup."Setup Record ID");
+        PaymentReportingArgument.INSERT(true);
+        CODEUNIT.RUN(TempPaymentServiceSetup."Management Codeunit ID",PaymentReportingArgument);
+      until TempPaymentServiceSetup.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE GetDefaultPaymentServices@15(VAR SetID@1001 : Integer) : Boolean;
+    VAR
+      TempPaymentServiceSetup@1000 : TEMPORARY Record "Payment Service Setup";
+      TempRecordSetBuffer@1002 : TEMPORARY Record "Record Set Buffer";
+      RecordSetManagement@1003 : Codeunit "Record Set Management";
+    BEGIN
+      OnRegisterPaymentServices(TempPaymentServiceSetup);
+      TempPaymentServiceSetup.SETRANGE("Always Include on Documents",true);
+      TempPaymentServiceSetup.SETRANGE(Enabled,true);
+
+      if not TempPaymentServiceSetup.FINDFIRST then
+        exit(false);
+
+      TransferToRecordSetBuffer(TempPaymentServiceSetup,TempRecordSetBuffer);
+      RecordSetManagement.GetSet(TempRecordSetBuffer,SetID);
+      if SetID = 0 then
+        SetID := RecordSetManagement.SaveSet(TempRecordSetBuffer);
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE SelectPaymentService@13(VAR SetID@1004 : Integer) : Boolean;
+    VAR
+      TempPaymentServiceSetup@1003 : TEMPORARY Record "Payment Service Setup";
+    BEGIN
+      if not GetEnabledPaymentServices(TempPaymentServiceSetup) then begin
+        if not AskUserToSetupNewPaymentService(TempPaymentServiceSetup) then
+          exit(false);
+
+        // If user has setup the service then just select that one
+        if TempPaymentServiceSetup.COUNT = 1 then begin
+          TempPaymentServiceSetup.FINDFIRST;
+          SetID := SaveSet(TempPaymentServiceSetup);
+          exit(true);
+        end;
+      end;
+
+      if SetID <> 0 then
+        LoadSet(TempPaymentServiceSetup,SetID);
+
+      TempPaymentServiceSetup.RESET;
+      TempPaymentServiceSetup.SETRANGE(Enabled,true);
+
+      if not (PAGE.RUNMODAL(PAGE::"Select Payment Service",TempPaymentServiceSetup) = ACTION::LookupOK) then
+        exit(false);
+
+      TempPaymentServiceSetup.SETRANGE(Available,true);
+      if TempPaymentServiceSetup.FINDFIRST then
+        SetID := SaveSet(TempPaymentServiceSetup)
+      else
+        CLEAR(SetID);
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE GetEnabledPaymentServices@16(VAR TempPaymentServiceSetup@1000 : TEMPORARY Record "Payment Service Setup") : Boolean;
+    BEGIN
+      TempPaymentServiceSetup.RESET;
+      TempPaymentServiceSetup.DELETEALL;
+      OnRegisterPaymentServices(TempPaymentServiceSetup);
+      TempPaymentServiceSetup.SETRANGE(Enabled,true);
+      exit(TempPaymentServiceSetup.FINDSET);
+    END;
+
+    LOCAL PROCEDURE TransferToRecordSetBuffer@18(VAR TempPaymentServiceSetup@1000 : TEMPORARY Record "Payment Service Setup";VAR TempRecordSetBuffer@1002 : TEMPORARY Record "Record Set Buffer");
+    VAR
+      CurrentKey@1003 : Integer;
+    BEGIN
+      TempPaymentServiceSetup.FINDFIRST;
+
+      repeat
+        CurrentKey := TempRecordSetBuffer.No;
+        CLEAR(TempRecordSetBuffer);
+        TempRecordSetBuffer.No := CurrentKey + 1;
+        TempRecordSetBuffer."Value RecordID" := TempPaymentServiceSetup."Setup Record ID";
+        TempRecordSetBuffer.INSERT;
+      until TempPaymentServiceSetup.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SaveSet@21(VAR TempPaymentServiceSetup@1000 : TEMPORARY Record "Payment Service Setup") : Integer;
+    VAR
+      TempRecordSetBuffer@1002 : TEMPORARY Record "Record Set Buffer";
+      RecordSetManagement@1003 : Codeunit "Record Set Management";
+    BEGIN
+      TransferToRecordSetBuffer(TempPaymentServiceSetup,TempRecordSetBuffer);
+      exit(RecordSetManagement.SaveSet(TempRecordSetBuffer));
+    END;
+
+    LOCAL PROCEDURE LoadSet@20(VAR TempPaymentServiceSetup@1001 : TEMPORARY Record "Payment Service Setup";SetID@1000 : Integer);
+    VAR
+      TempRecordSetBuffer@1004 : TEMPORARY Record "Record Set Buffer";
+      RecordSetManagement@1003 : Codeunit "Record Set Management";
+    BEGIN
+      if not TempPaymentServiceSetup.FINDFIRST then
+        exit;
+
+      RecordSetManagement.GetSet(TempRecordSetBuffer,SetID);
+
+      if not TempRecordSetBuffer.FINDFIRST then begin
+        TempPaymentServiceSetup.MODIFYALL(Available,false);
+        exit;
+      end;
+
+      repeat
+        TempRecordSetBuffer.SETRANGE("Value RecordID",TempPaymentServiceSetup."Setup Record ID");
+        if TempRecordSetBuffer.FINDFIRST then begin
+          TempPaymentServiceSetup.Available := true;
+          TempPaymentServiceSetup.MODIFY;
+        end;
+      until TempPaymentServiceSetup.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE GetSelectedPaymentsText@4(SetID@1000 : Integer) SelectedPaymentServices : Text;
+    VAR
+      TempPaymentServiceSetup@1001 : TEMPORARY Record "Payment Service Setup";
+    BEGIN
+      SelectedPaymentServices := NoPaymentMethodsSelectedTxt;
+
+      if SetID = 0 then
+        exit;
+
+      OnRegisterPaymentServices(TempPaymentServiceSetup);
+      LoadSet(TempPaymentServiceSetup,SetID);
+
+      TempPaymentServiceSetup.SETRANGE(Available,true);
+      if not TempPaymentServiceSetup.FINDSET then
+        exit;
+
+      CLEAR(SelectedPaymentServices);
+      repeat
+        SelectedPaymentServices += STRSUBSTNO(',%1',TempPaymentServiceSetup.Name);
+      until TempPaymentServiceSetup.NEXT = 0;
+
+      SelectedPaymentServices := COPYSTR(SelectedPaymentServices,2);
+    END;
+
+    [External]
+    PROCEDURE CanChangePaymentService@6(DocumentVariant@1000 : Variant) : Boolean;
+    VAR
+      SalesInvoiceHeader@1003 : Record "Sales Invoice Header";
+      DataTypeManagement@1001 : Codeunit "Data Type Management";
+      DocumentRecordRef@1002 : RecordRef;
+      PaymentMethodCodeFieldRef@1004 : FieldRef;
+    BEGIN
+      DataTypeManagement.GetRecordRef(DocumentVariant,DocumentRecordRef);
+      case DocumentRecordRef.NUMBER of
+        DATABASE::"Sales Invoice Header":
+          begin
+            SalesInvoiceHeader.COPY(DocumentVariant);
+            SalesInvoiceHeader.CALCFIELDS(Closed,"Remaining Amount");
+            if SalesInvoiceHeader.Closed or (SalesInvoiceHeader."Remaining Amount" = 0) then
+              exit(false);
+          end
+        else begin
+          if DataTypeManagement.FindFieldByName(
+               DocumentRecordRef,PaymentMethodCodeFieldRef,SalesInvoiceHeader.FIELDNAME("Payment Method Code"))
+          then
+            if not CanUsePaymentMethod(FORMAT(PaymentMethodCodeFieldRef.VALUE)) then
+              exit(false);
+        end
+      end;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CanUsePaymentMethod@10(PaymentMethodCode@1000 : Code[10]) : Boolean;
+    VAR
+      PaymentMethod@1001 : Record "Payment Method";
+    BEGIN
+      if not PaymentMethod.GET(PaymentMethodCode) then
+        exit(true);
+
+      exit(PaymentMethod."Bal. Account No." = '');
+    END;
+
+    [External]
+    PROCEDURE ChangePaymentServicePostedInvoice@19(VAR SalesInvoiceHeader@1000 : Record "Sales Invoice Header");
+    VAR
+      PaymentServiceSetup@1002 : Record "Payment Service Setup";
+      SetID@1001 : Integer;
+    BEGIN
+      SetID := SalesInvoiceHeader."Payment Service Set ID";
+      if PaymentServiceSetup.SelectPaymentService(SetID) then begin
+        SalesInvoiceHeader.VALIDATE("Payment Service Set ID",SetID);
+        SalesInvoiceHeader.MODIFY(true);
+        if GUIALLOWED and (FORMAT(SalesInvoiceHeader."Payment Service Set ID") <> '') then
+          MESSAGE(ReminderToSendAgainMsg);
+      end;
+    END;
+
+    LOCAL PROCEDURE AskUserToSetupNewPaymentService@12(VAR TempPaymentServiceSetup@1000 : TEMPORARY Record "Payment Service Setup") : Boolean;
+    VAR
+      TempNotEnabledPaymentServiceSetupProviders@1006 : TEMPORARY Record "Payment Service Setup";
+      TempPaymentServiceSetupProviders@1002 : TEMPORARY Record "Payment Service Setup";
+      SetupOrCreatePaymentService@1004 : ',"Setup Payment Services","Create New"';
+      SelectedOption@1003 : Integer;
+      DefinedPaymentServiceExist@1001 : Boolean;
+    BEGIN
+      if not GUIALLOWED then
+        exit(false);
+
+      OnRegisterPaymentServiceProviders(TempPaymentServiceSetupProviders);
+      if not TempPaymentServiceSetupProviders.FINDFIRST then
+        exit(false);
+
+      // Check if there are payment services that are not enabled
+      OnRegisterPaymentServices(TempNotEnabledPaymentServiceSetupProviders);
+      DefinedPaymentServiceExist := TempNotEnabledPaymentServiceSetupProviders.FINDFIRST;
+
+      if DefinedPaymentServiceExist then begin
+        SelectedOption := STRMENU(CreateOrUpdateOptionQst,1,SetupExistingServicesOrCreateNewQst);
+        case SelectedOption of
+          SetupOrCreatePaymentService::"Setup Payment Services":
+            PAGE.RUNMODAL(PAGE::"Payment Services");
+          SetupOrCreatePaymentService::"Create New":
+            NewPaymentService;
+          else
+            exit(false);
+        end;
+        exit(GetEnabledPaymentServices(TempPaymentServiceSetup));
+      end;
+
+      // Ask to create a new service
+      if CONFIRM(SetupPaymentServicesQst) then begin
+        NewPaymentService;
+        exit(GetEnabledPaymentServices(TempPaymentServiceSetup));
+      end;
+
+      exit(false);
+    END;
+
+    [External]
+    PROCEDURE IsPaymentServiceVisible@7() : Boolean;
+    VAR
+      TempPaymentServiceSetup@1000 : TEMPORARY Record "Payment Service Setup";
+    BEGIN
+      OnRegisterPaymentServiceProviders(TempPaymentServiceSetup);
+      exit(not TempPaymentServiceSetup.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE NewPaymentService@1() : Boolean;
+    VAR
+      TempPaymentServiceSetup@1000 : TEMPORARY Record "Payment Service Setup";
+      TempPaymentServiceSetupProviders@1001 : TEMPORARY Record "Payment Service Setup";
+    BEGIN
+      OnRegisterPaymentServiceProviders(TempPaymentServiceSetupProviders);
+      case TempPaymentServiceSetupProviders.COUNT of
+        0:
+          exit(false);
+        1:
+          begin
+            TempPaymentServiceSetupProviders.FINDFIRST;
+            OnCreatePaymentService(TempPaymentServiceSetupProviders);
+            exit(true);
+          end;
+        else begin
+          if PAGE.RUNMODAL(PAGE::"Select Payment Service Type",TempPaymentServiceSetup) = ACTION::LookupOK then begin
+            OnCreatePaymentService(TempPaymentServiceSetup);
+            exit(true);
+          end;
+          exit(false);
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE AssignPrimaryKey@9(VAR PaymentServiceSetup@1000 : Record "Payment Service Setup");
+    BEGIN
+      PaymentServiceSetup."No." := FORMAT(PaymentServiceSetup."Setup Record ID");
+    END;
+
+    [External]
+    PROCEDURE DeletePaymentServiceSetup@5(RunTrigger@1000 : Boolean);
+    VAR
+      DataTypeManagement@1001 : Codeunit "Data Type Management";
+      SetupRecordRef@1002 : RecordRef;
+    BEGIN
+      DataTypeManagement.GetRecordRef("Setup Record ID",SetupRecordRef);
+      SetupRecordRef.DELETE(RunTrigger);
+    END;
+
+    [External]
+    PROCEDURE TermsOfServiceDrillDown@17();
+    BEGIN
+      if "Terms of Service" <> '' then
+        HYPERLINK("Terms of Service");
+    END;
+
+    [Integration]
+    [External]
+    PROCEDURE OnRegisterPaymentServices@8(VAR PaymentServiceSetup@1000 : Record "Payment Service Setup");
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    PROCEDURE OnRegisterPaymentServiceProviders@2(VAR PaymentServiceSetup@1000 : Record "Payment Service Setup");
+    BEGIN
+    END;
+
+    [Integration]
+    [External]
+    PROCEDURE OnCreatePaymentService@3(VAR PaymentServiceSetup@1000 : Record "Payment Service Setup");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

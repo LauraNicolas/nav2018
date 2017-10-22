@@ -1,0 +1,456 @@
+OBJECT Codeunit 5510 Production Journal Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      MfgSetup@1014 : Record "Manufacturing Setup";
+      ItemJnlLine@1000 : Record "Item Journal Line";
+      ItemJnlTemplate@1013 : Record "Item Journal Template";
+      ItemJnlBatch@1012 : Record "Item Journal Batch";
+      PostingDate@1002 : Date;
+      CalcBasedOn@1003 : '"Actual Output","Expected Output"';
+      PresetOutputQuantity@1015 : '"Expected Quantity","Zero on All Operations","Zero on Last Operation"';
+      ToTemplateName@1006 : Code[10];
+      ToBatchName@1005 : Code[10];
+      NextLineNo@1001 : Integer;
+      Text000@1010 : TextConst 'ENU=%1 journal';
+      Text001@1007 : TextConst 'ENU=Do you want to leave the Production Journal?';
+      Text002@1008 : TextConst 'ENU=Item %1 is blocked and therefore, no journal line is created for this item.';
+      Text003@1009 : TextConst 'ENU=DEFAULT';
+      Text004@1011 : TextConst 'ENU=Production Journal';
+      Text005@1016 : TextConst 'ENU=%1 %2 for operation %3 is blocked and therefore, no journal line is created for this operation.';
+
+    [External]
+    PROCEDURE Handling@7(ProdOrder@1001 : Record "Production Order";ActualLineNo@1003 : Integer);
+    VAR
+      ProductionJnl@1002 : Page "Production Journal";
+      LeaveForm@1004 : Boolean;
+    BEGIN
+      MfgSetup.GET;
+
+      SetTemplateAndBatchName;
+
+      InitSetupValues;
+
+      DeleteJnlLines(ToTemplateName,ToBatchName,ProdOrder."No.",ActualLineNo);
+
+      CreateJnlLines(ProdOrder,ActualLineNo);
+      repeat
+        LeaveForm := true;
+        CLEAR(ProductionJnl);
+        ProductionJnl.Setup(ToTemplateName,ToBatchName,ProdOrder,ActualLineNo,PostingDate);
+        ProductionJnl.RUNMODAL;
+        if DataHasChanged(ToTemplateName,ToBatchName,ProdOrder."No.",ActualLineNo) then
+          LeaveForm := CONFIRM(Text001,true);
+      until LeaveForm;
+
+      DeleteJnlLines(ToTemplateName,ToBatchName,ProdOrder."No.",ActualLineNo);
+    END;
+
+    [External]
+    PROCEDURE CreateJnlLines@1(ProdOrder@1005 : Record "Production Order";ProdOrderLineNo@1006 : Integer);
+    VAR
+      ItemJnlLine@1003 : Record "Item Journal Line";
+      ProdOrderLine@1002 : Record "Prod. Order Line";
+      ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";
+      ProdOrderComp@1000 : Record "Prod. Order Component";
+    BEGIN
+      ItemJnlLine.LOCKTABLE;
+      ItemJnlLine.RESET;
+      ItemJnlLine.SETRANGE("Journal Template Name",ToTemplateName);
+      ItemJnlLine.SETRANGE("Journal Batch Name",ToBatchName);
+      if ItemJnlLine.FINDLAST then
+        NextLineNo := ItemJnlLine."Line No." + 10000
+      else
+        NextLineNo := 10000;
+
+      ProdOrderLine.RESET;
+      ProdOrderLine.SETRANGE(Status,ProdOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrder."No.");
+      if ProdOrderLineNo <> 0 then
+        ProdOrderLine.SETRANGE("Line No.",ProdOrderLineNo);
+      if ProdOrderLine.FIND('-') then
+        repeat
+          ProdOrderRtngLine.RESET;
+          ProdOrderRtngLine.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+          ProdOrderRtngLine.SETRANGE("Routing No.",ProdOrderLine."Routing No.");
+          ProdOrderRtngLine.SETRANGE(Status,ProdOrderLine.Status);
+          ProdOrderRtngLine.SETRANGE("Routing Reference No.",ProdOrderLine."Routing Reference No.");
+          if ProdOrderRtngLine.FIND('-') then begin
+            InsertComponents(ProdOrderLine,true,0); // With no Routing Link or illegal Routing Link
+
+            repeat
+              InsertOutputJnlLine(ProdOrderRtngLine,ProdOrderLine);
+
+              // Components connected by Routing Link
+              if ProdOrderRtngLine."Routing Link Code" <> '' then begin
+                ProdOrderComp.RESET;
+                ProdOrderComp.SETCURRENTKEY(Status,"Prod. Order No.","Routing Link Code");
+                ProdOrderComp.SETRANGE(Status,ProdOrder.Status);
+                ProdOrderComp.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+                ProdOrderComp.SETRANGE("Routing Link Code",ProdOrderRtngLine."Routing Link Code");
+                ProdOrderComp.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+                ProdOrderComp.SETFILTER("Item No.",'<>%1','');
+                if ProdOrderComp.FIND('-') then
+                  repeat
+                    // Create Consumption Item Journal-line
+                    InsertConsumptionJnlLine(ProdOrderComp,ProdOrderLine,1);
+                  until ProdOrderComp.NEXT = 0;
+              end;
+            until ProdOrderRtngLine.NEXT = 0;
+          end else begin
+            // Insert All Components - No Routing Link Check
+            InsertComponents(ProdOrderLine,false,0);
+
+            // Create line for Output Qty
+            CLEAR(ProdOrderRtngLine);
+            InsertOutputJnlLine(ProdOrderRtngLine,ProdOrderLine);
+          end;
+        until ProdOrderLine.NEXT = 0;
+
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE InsertComponents@10(ProdOrderLine@1001 : Record "Prod. Order Line";CheckRoutingLink@1002 : Boolean;Level@1003 : Integer);
+    VAR
+      ProdOrderComp@1000 : Record "Prod. Order Component";
+    BEGIN
+      // Components with no Routing Link or illegal Routing Link
+      ProdOrderComp.RESET;
+      ProdOrderComp.SETRANGE(Status,ProdOrderLine.Status);
+      ProdOrderComp.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+      ProdOrderComp.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+      ProdOrderComp.SETFILTER("Item No.",'<>%1','');
+      if ProdOrderComp.FIND('-') then
+        repeat
+          if not CheckRoutingLink then
+            InsertConsumptionJnlLine(ProdOrderComp,ProdOrderLine,Level)
+          else
+            if not RoutingLinkValid(ProdOrderComp,ProdOrderLine) then
+              InsertConsumptionJnlLine(ProdOrderComp,ProdOrderLine,Level);
+        until ProdOrderComp.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE RoutingLinkValid@6(ProdOrderComp@1000 : Record "Prod. Order Component";ProdOrderLine@1002 : Record "Prod. Order Line") : Boolean;
+    VAR
+      ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";
+    BEGIN
+      if ProdOrderComp."Routing Link Code" = '' then
+        exit(false);
+
+      with ProdOrderRtngLine do begin
+        RESET;
+        SETRANGE(Status,ProdOrderLine.Status);
+        SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+        SETRANGE("Routing Reference No.",ProdOrderLine."Routing Reference No.");
+        SETRANGE("Routing No.",ProdOrderLine."Routing No.");
+        SETRANGE("Routing Link Code",ProdOrderComp."Routing Link Code");
+        exit(FINDFIRST);
+      end;
+    END;
+
+    LOCAL PROCEDURE InsertConsumptionJnlLine@4(ProdOrderComp@1004 : Record "Prod. Order Component";ProdOrderLine@1005 : Record "Prod. Order Line";Level@1000 : Integer);
+    VAR
+      Item@1014 : Record Item;
+      Location@1001 : Record Location;
+      ItemTrackingMgt@1003 : Codeunit "Item Tracking Management";
+      NeededQty@1002 : Decimal;
+    BEGIN
+      with ProdOrderComp do begin
+        Item.GET("Item No.");
+        if Item.Blocked then begin
+          MESSAGE(Text002,"Item No.");
+          exit;
+        end;
+
+        if "Flushing Method" <> "Flushing Method"::Manual then
+          NeededQty := 0
+        else begin
+          NeededQty := GetNeededQty(CalcBasedOn,true);
+          if "Location Code" <> Location.Code then
+            if not Location.GET("Location Code") then
+              CLEAR(Location);
+          if Location."Require Shipment" and Location."Require Pick" then
+            AdjustQtyToQtyPicked(NeededQty);
+        end;
+
+        ItemJnlLine.INIT;
+        ItemJnlLine."Journal Template Name" := ToTemplateName;
+        ItemJnlLine."Journal Batch Name" := ToBatchName;
+        ItemJnlLine."Line No." := NextLineNo;
+        ItemJnlLine.VALIDATE("Posting Date",PostingDate);
+        ItemJnlLine.VALIDATE("Entry Type",ItemJnlLine."Entry Type"::Consumption);
+        ItemJnlLine.VALIDATE("Order Type",ItemJnlLine."Order Type"::Production);
+        ItemJnlLine.VALIDATE("Order No.","Prod. Order No.");
+        ItemJnlLine.VALIDATE("Source No.",ProdOrderLine."Item No.");
+        ItemJnlLine.VALIDATE("Item No.","Item No.");
+        ItemJnlLine.VALIDATE("Unit of Measure Code","Unit of Measure Code");
+        ItemJnlLine.Description := Description;
+        if NeededQty <> 0 then
+          if Item."Rounding Precision" > 0 then
+            ItemJnlLine.VALIDATE(Quantity,ROUND(NeededQty,Item."Rounding Precision",'>'))
+          else
+            ItemJnlLine.VALIDATE(Quantity,ROUND(NeededQty,0.00001));
+
+        ItemJnlLine.VALIDATE("Location Code","Location Code");
+        if "Bin Code" <> '' then
+          ItemJnlLine."Bin Code" := "Bin Code";
+
+        ItemJnlLine."Variant Code" := "Variant Code";
+        ItemJnlLine.VALIDATE("Order Line No.","Prod. Order Line No.");
+        ItemJnlLine.VALIDATE("Prod. Order Comp. Line No.","Line No.");
+
+        ItemJnlLine.Level := Level;
+        ItemJnlLine."Flushing Method" := "Flushing Method";
+        ItemJnlLine."Source Code" := ItemJnlTemplate."Source Code";
+        ItemJnlLine."Reason Code" := ItemJnlBatch."Reason Code";
+        ItemJnlLine."Posting No. Series" := ItemJnlBatch."Posting No. Series";
+
+        ItemJnlLine.INSERT;
+
+        if Item."Item Tracking Code" <> '' then
+          ItemTrackingMgt.CopyItemTracking(RowID1,ItemJnlLine.RowID1,false);
+      end;
+
+      NextLineNo += 10000;
+    END;
+
+    LOCAL PROCEDURE InsertOutputJnlLine@11(ProdOrderRtngLine@1001 : Record "Prod. Order Routing Line";ProdOrderLine@1000 : Record "Prod. Order Line");
+    VAR
+      WorkCenter@1005 : Record "Work Center";
+      MachineCenter@1006 : Record "Machine Center";
+      ItemTrackingMgt@1004 : Codeunit "Item Tracking Management";
+      CostCalcMgt@1003 : Codeunit "Cost Calculation Management";
+      QtyToPost@1002 : Decimal;
+    BEGIN
+      with ProdOrderLine do begin
+        if ProdOrderRtngLine."Prod. Order No." <> '' then // Operation exist
+          case ProdOrderRtngLine.Type of
+            ProdOrderRtngLine.Type::"Work Center":
+              begin
+                WorkCenter.GET(ProdOrderRtngLine."No.");
+                if WorkCenter.Blocked then begin
+                  MESSAGE(Text005,WorkCenter.TABLECAPTION,WorkCenter."No.",ProdOrderRtngLine."Operation No.");
+                  exit;
+                end;
+              end;
+            ProdOrderRtngLine.Type::"Machine Center":
+              begin
+                MachineCenter.GET(ProdOrderRtngLine."No.");
+                if MachineCenter.Blocked then begin
+                  MESSAGE(Text005,MachineCenter.TABLECAPTION,MachineCenter."No.",ProdOrderRtngLine."Operation No.");
+                  exit;
+                end;
+
+                WorkCenter.GET(ProdOrderRtngLine."Work Center No.");
+                if WorkCenter.Blocked then begin
+                  MESSAGE(Text005,WorkCenter.TABLECAPTION,WorkCenter."No.",ProdOrderRtngLine."Operation No.");
+                  exit;
+                end;
+              end;
+          end;
+
+        if (ProdOrderRtngLine."Flushing Method" <> ProdOrderRtngLine."Flushing Method"::Manual) or
+           (PresetOutputQuantity = PresetOutputQuantity::"Zero on All Operations") or
+           ((PresetOutputQuantity = PresetOutputQuantity::"Zero on Last Operation") and
+            (ProdOrderRtngLine."Next Operation No." = '')) or
+           ((ProdOrderRtngLine."Prod. Order No." = '') and
+            (PresetOutputQuantity <> PresetOutputQuantity::"Expected Quantity")) or
+           (ProdOrderRtngLine."Routing Status" = ProdOrderRtngLine."Routing Status"::Finished)
+        then
+          QtyToPost := 0
+        else
+          if ProdOrderRtngLine."Prod. Order No." <> '' then begin
+            QtyToPost :=
+              CostCalcMgt.CalcQtyAdjdForRoutingScrap(
+                "Quantity (Base)",
+                ProdOrderRtngLine."Scrap Factor % (Accumulated)",
+                ProdOrderRtngLine."Fixed Scrap Qty. (Accum.)") -
+              CostCalcMgt.CalcActOutputQtyBase(ProdOrderLine,ProdOrderRtngLine);
+            QtyToPost := QtyToPost / "Qty. per Unit of Measure";
+          end else // No Routing Line
+            QtyToPost := "Remaining Quantity";
+
+        if QtyToPost < 0 then
+          QtyToPost := 0;
+
+        ItemJnlLine.INIT;
+        ItemJnlLine."Journal Template Name" := ToTemplateName;
+        ItemJnlLine."Journal Batch Name" := ToBatchName;
+        ItemJnlLine."Line No." := NextLineNo;
+        ItemJnlLine.VALIDATE("Posting Date",PostingDate);
+        ItemJnlLine.VALIDATE("Entry Type",ItemJnlLine."Entry Type"::Output);
+        ItemJnlLine.VALIDATE("Order Type",ItemJnlLine."Order Type"::Production);
+        ItemJnlLine.VALIDATE("Order No.","Prod. Order No.");
+        ItemJnlLine.VALIDATE("Order Line No.","Line No.");
+        ItemJnlLine.VALIDATE("Item No.","Item No.");
+        ItemJnlLine.VALIDATE("Variant Code","Variant Code");
+        ItemJnlLine.VALIDATE("Location Code","Location Code");
+        if "Bin Code" <> '' then
+          ItemJnlLine.VALIDATE("Bin Code","Bin Code");
+        ItemJnlLine.VALIDATE("Routing No.","Routing No.");
+        ItemJnlLine.VALIDATE("Routing Reference No.","Routing Reference No.");
+        if ProdOrderRtngLine."Prod. Order No." <> '' then
+          ItemJnlLine.VALIDATE("Operation No.",ProdOrderRtngLine."Operation No.");
+        ItemJnlLine.VALIDATE("Unit of Measure Code","Unit of Measure Code");
+        ItemJnlLine.VALIDATE("Setup Time",0);
+        ItemJnlLine.VALIDATE("Run Time",0);
+        if ("Location Code" <> '') and (ProdOrderRtngLine."Next Operation No." = '') then
+          ItemJnlLine.CheckWhse("Location Code",QtyToPost);
+        if ItemJnlLine.SubcontractingWorkCenterUsed then
+          ItemJnlLine.VALIDATE("Output Quantity",0)
+        else
+          ItemJnlLine.VALIDATE("Output Quantity",QtyToPost);
+
+        if ProdOrderRtngLine."Routing Status" = ProdOrderRtngLine."Routing Status"::Finished then
+          ItemJnlLine.Finished := true;
+        ItemJnlLine."Flushing Method" := ProdOrderRtngLine."Flushing Method";
+        ItemJnlLine."Source Code" := ItemJnlTemplate."Source Code";
+        ItemJnlLine."Reason Code" := ItemJnlBatch."Reason Code";
+        ItemJnlLine."Posting No. Series" := ItemJnlBatch."Posting No. Series";
+        ItemJnlLine.INSERT;
+
+        if ProdOrderRtngLine."Next Operation No." = '' then // Last or no Routing Line
+          ItemTrackingMgt.CopyItemTracking(RowID1,ItemJnlLine.RowID1,false);
+      end;
+
+      NextLineNo += 10000;
+    END;
+
+    [External]
+    PROCEDURE InitSetupValues@17();
+    BEGIN
+      PostingDate := WORKDATE;
+      CalcBasedOn := CalcBasedOn::"Expected Output";
+      PresetOutputQuantity := MfgSetup."Preset Output Quantity";
+    END;
+
+    [External]
+    PROCEDURE SetTemplateAndBatchName@2();
+    VAR
+      PageTemplate@1001 : 'Item,Transfer,"Phys. Inventory",Revaluation,Consumption,Output,Capacity,"Prod. Order"';
+      User@1000 : Text[65];
+    BEGIN
+      ItemJnlTemplate.RESET;
+      ItemJnlTemplate.SETRANGE("Page ID",PAGE::"Production Journal");
+      ItemJnlTemplate.SETRANGE(Recurring,false);
+      ItemJnlTemplate.SETRANGE(Type,PageTemplate::"Prod. Order");
+      if not ItemJnlTemplate.FINDFIRST then begin
+        ItemJnlTemplate.INIT;
+        ItemJnlTemplate.Recurring := false;
+        ItemJnlTemplate.VALIDATE(Type,PageTemplate::"Prod. Order");
+        ItemJnlTemplate.VALIDATE("Page ID");
+
+        ItemJnlTemplate.Name := FORMAT(ItemJnlTemplate.Type,MAXSTRLEN(ItemJnlTemplate.Name));
+        ItemJnlTemplate.Description := STRSUBSTNO(Text000,ItemJnlTemplate.Type);
+        ItemJnlTemplate.INSERT;
+      end;
+
+      ToTemplateName := ItemJnlTemplate.Name;
+
+      ToBatchName := '';
+      User := UPPERCASE(USERID); // Uppercase in case of Windows Login
+      if User <> '' then
+        if (STRLEN(User) < MAXSTRLEN(ItemJnlLine."Journal Batch Name")) and (ItemJnlLine."Journal Batch Name" <> '') then
+          ToBatchName := COPYSTR(ItemJnlLine."Journal Batch Name",1,MAXSTRLEN(ItemJnlLine."Journal Batch Name") - 1) + 'A'
+        else
+          ToBatchName := DELCHR(COPYSTR(User,1,MAXSTRLEN(ItemJnlLine."Journal Batch Name")),'>','0123456789');
+
+      if ToBatchName = '' then
+        ToBatchName := Text003;
+
+      if not ItemJnlBatch.GET(ToTemplateName,ToBatchName) then begin
+        ItemJnlBatch.INIT;
+        ItemJnlBatch."Journal Template Name" := ItemJnlTemplate.Name;
+        ItemJnlBatch.SetupNewBatch;
+        ItemJnlBatch.Name := ToBatchName;
+        ItemJnlBatch.Description := Text004;
+        ItemJnlBatch.INSERT(true);
+      end;
+
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE DeleteJnlLines@5(TemplateName@1003 : Code[10];BatchName@1002 : Code[10];ProdOrderNo@1001 : Code[20];ProdOrderLineNo@1000 : Integer);
+    VAR
+      ItemJnlLine2@1005 : Record "Item Journal Line";
+      ReservEntry@1004 : Record "Reservation Entry";
+    BEGIN
+      ItemJnlLine2.RESET;
+      ItemJnlLine2.SETRANGE("Journal Template Name",TemplateName);
+      ItemJnlLine2.SETRANGE("Journal Batch Name",BatchName);
+      ItemJnlLine2.SETRANGE("Order Type",ItemJnlLine2."Order Type"::Production);
+      ItemJnlLine2.SETRANGE("Order No.",ProdOrderNo);
+      if ProdOrderLineNo <> 0 then
+        ItemJnlLine2.SETRANGE("Order Line No.",ProdOrderLineNo);
+      if ItemJnlLine2.FIND('-') then begin
+        repeat
+          if ReservEntryExist(ItemJnlLine2,ReservEntry) then
+            ReservEntry.DELETEALL(true);
+        until ItemJnlLine2.NEXT = 0;
+
+        ItemJnlLine2.DELETEALL(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE DataHasChanged@8(TemplateName@1003 : Code[10];BatchName@1002 : Code[10];ProdOrderNo@1001 : Code[20];ProdOrderLineNo@1000 : Integer) : Boolean;
+    VAR
+      ItemJnlLine2@1004 : Record "Item Journal Line";
+      ReservEntry@1005 : Record "Reservation Entry";
+    BEGIN
+      ItemJnlLine2.RESET;
+      ItemJnlLine2.SETRANGE("Journal Template Name",TemplateName);
+      ItemJnlLine2.SETRANGE("Journal Batch Name",BatchName);
+      ItemJnlLine2.SETRANGE("Order Type",ItemJnlLine2."Order Type"::Production);
+      ItemJnlLine2.SETRANGE("Order No.",ProdOrderNo);
+      if ProdOrderLineNo <> 0 then
+        ItemJnlLine2.SETRANGE("Order Line No.",ProdOrderLineNo);
+      if ItemJnlLine2.FIND('-') then
+        repeat
+          if ItemJnlLine2."Changed by User" then
+            exit(true);
+
+          if ReservEntryExist(ItemJnlLine2,ReservEntry) then
+            exit(true);
+        until ItemJnlLine2.NEXT = 0;
+
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE ReservEntryExist@3(ItemJnlLine2@1001 : Record "Item Journal Line";VAR ReservEntry@1002 : Record "Reservation Entry") : Boolean;
+    BEGIN
+      with ItemJnlLine2 do begin
+        ReservEntry.RESET;
+        ReservEntry.SETCURRENTKEY(
+          "Source ID","Source Ref. No.","Source Type","Source Subtype","Source Batch Name","Source Prod. Order Line");
+        ReservEntry.SETRANGE("Source ID","Journal Template Name");
+        ReservEntry.SETRANGE("Source Ref. No.","Line No.");
+        ReservEntry.SETRANGE("Source Type",DATABASE::"Item Journal Line");
+        ReservEntry.SETRANGE("Source Subtype","Entry Type");
+        ReservEntry.SETRANGE("Source Batch Name","Journal Batch Name");
+        ReservEntry.SETRANGE("Source Prod. Order Line",0);
+        if not ReservEntry.ISEMPTY then
+          exit(true);
+
+        exit(false);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

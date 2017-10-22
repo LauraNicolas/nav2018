@@ -1,0 +1,852 @@
+OBJECT Codeunit 5508 Graph Mgt - Sal. Cr. Memo Buf.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Sales Cr.Memo Header"=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      DocumentIDNotSpecifiedErr@1000 : TextConst 'ENU=You must specify a document id to get the lines.';
+      DocumentDoesNotExistErr@1001 : TextConst 'ENU=No document with the specified ID exists.';
+      MultipleDocumentsFoundForIdErr@1006 : TextConst 'ENU=Multiple documents have been found for the specified criteria.';
+      CannotModifyPostedCrMemoErr@1002 : TextConst 'ENU=The credit memo has been posted and can no longer be modified.';
+      CannotInsertALineThatAlreadyExistsErr@1003 : TextConst 'ENU=You cannot insert a line because a line already exists.';
+      CannotModifyALineThatDoesntExistErr@1004 : TextConst 'ENU=You cannot modify a line that does not exist.';
+      CannotInsertPostedCrMemoErr@1005 : TextConst 'ENU=Credit memos created through the API must be in Draft state.';
+      GraphMgtGeneralTools@1007 : Codeunit "Graph Mgt - General Tools";
+
+    [EventSubscriber(Table,36,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnAfterInsertSalesHeader@2(VAR Rec@1000 : Record "Sales Header";RunTrigger@1001 : Boolean);
+    BEGIN
+      if not CheckValidRecord(Rec) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesHeader(Rec);
+    END;
+
+    [EventSubscriber(Table,36,OnAfterModifyEvent)]
+    LOCAL PROCEDURE OnAfterModifySalesHeader@3(VAR Rec@1000 : Record "Sales Header";VAR xRec@1001 : Record "Sales Header";RunTrigger@1002 : Boolean);
+    BEGIN
+      if not CheckValidRecord(Rec) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesHeader(Rec);
+    END;
+
+    [EventSubscriber(Table,36,OnAfterDeleteEvent)]
+    LOCAL PROCEDURE OnAfterDeleteSalesHeader@5(VAR Rec@1000 : Record "Sales Header";RunTrigger@1001 : Boolean);
+    VAR
+      SalesCrMemoEntityBuffer@1002 : Record "Sales Cr. Memo Entity Buffer";
+    BEGIN
+      if not CheckValidRecord(Rec) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      TransferIntegrationRecordID(Rec);
+
+      if not SalesCrMemoEntityBuffer.GET(Rec."No.") then
+        exit;
+      SalesCrMemoEntityBuffer.DELETE;
+    END;
+
+    [EventSubscriber(Codeunit,56,OnAfterResetRecalculateInvoiceDisc)]
+    LOCAL PROCEDURE OnAfterResetRecalculateCreditMemoDisc@41(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+      if not CheckValidRecord(SalesHeader) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesHeader(SalesHeader);
+    END;
+
+    [EventSubscriber(Table,37,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnAfterInsertSalesLine@71(VAR Rec@1000 : Record "Sales Line";RunTrigger@1001 : Boolean);
+    BEGIN
+      if not CheckValidLineRecord(Rec) then
+        exit;
+
+      UpdateCompletelyShipped(Rec);
+      ModifyTotalsSalesLine(Rec);
+    END;
+
+    [EventSubscriber(Table,37,OnAfterModifyEvent)]
+    LOCAL PROCEDURE OnAfterModifySalesLine@72(VAR Rec@1000 : Record "Sales Line";VAR xRec@1001 : Record "Sales Line";RunTrigger@1002 : Boolean);
+    BEGIN
+      if not CheckValidLineRecord(Rec) then
+        exit;
+
+      UpdateCompletelyShipped(Rec);
+      ModifyTotalsSalesLine(Rec);
+    END;
+
+    [EventSubscriber(Table,37,OnAfterDeleteEvent)]
+    LOCAL PROCEDURE OnAfterDeleteSalesLine@73(VAR Rec@1000 : Record "Sales Line";RunTrigger@1001 : Boolean);
+    VAR
+      SalesLine@1003 : Record "Sales Line";
+    BEGIN
+      if not CheckValidLineRecord(Rec) then
+        exit;
+
+      UpdateCompletelyShipped(Rec);
+
+      SalesLine.SETRANGE("Document No.",Rec."Document No.");
+      SalesLine.SETRANGE("Document Type",Rec."Document Type");
+      SalesLine.SETRANGE("Recalculate Invoice Disc.",true);
+
+      if SalesLine.FINDFIRST then begin
+        ModifyTotalsSalesLine(SalesLine);
+        exit;
+      end;
+
+      SalesLine.SETRANGE("Recalculate Invoice Disc.");
+
+      if not SalesLine.FINDFIRST then
+        BlankTotals(Rec."Document No.",false);
+    END;
+
+    [EventSubscriber(Table,114,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnAfterInsertSalesCreditMemoHeader@20(VAR Rec@1000 : Record "Sales Cr.Memo Header";RunTrigger@1001 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesCreditMemoHeader(Rec);
+    END;
+
+    [EventSubscriber(Table,114,OnAfterModifyEvent)]
+    LOCAL PROCEDURE OnAfterModifySalesCreditMemoHeader@21(VAR Rec@1000 : Record "Sales Cr.Memo Header";VAR xRec@1001 : Record "Sales Cr.Memo Header";RunTrigger@1002 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesCreditMemoHeader(Rec);
+    END;
+
+    [EventSubscriber(Table,114,OnAfterRenameEvent)]
+    LOCAL PROCEDURE OnAfterRenameSalesCreditMemoHeader@22(VAR Rec@1000 : Record "Sales Cr.Memo Header";VAR xRec@1001 : Record "Sales Cr.Memo Header";RunTrigger@1002 : Boolean);
+    VAR
+      SalesCrMemoEntityBuffer@1003 : Record "Sales Cr. Memo Entity Buffer";
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      if not SalesCrMemoEntityBuffer.GET(xRec."No.",true) then
+        exit;
+
+      SalesCrMemoEntityBuffer.SetIsRenameAllowed(true);
+      SalesCrMemoEntityBuffer.RENAME(Rec."No.",true);
+    END;
+
+    [EventSubscriber(Table,114,OnAfterDeleteEvent)]
+    LOCAL PROCEDURE OnAfterDeleteSalesCreditMemoHeader@23(VAR Rec@1000 : Record "Sales Cr.Memo Header";RunTrigger@1001 : Boolean);
+    VAR
+      SalesCrMemoEntityBuffer@1002 : Record "Sales Cr. Memo Entity Buffer";
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      if not SalesCrMemoEntityBuffer.GET(Rec."No.",true) then
+        exit;
+
+      SalesCrMemoEntityBuffer.DELETE;
+    END;
+
+    [EventSubscriber(Codeunit,60,OnAfterCalcSalesDiscount)]
+    LOCAL PROCEDURE OnAfterCalculateSalesDiscountOnSalesHeader@36(VAR SalesHeader@1000 : Record "Sales Header");
+    BEGIN
+      if not CheckValidRecord(SalesHeader) or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      InsertOrModifyFromSalesHeader(SalesHeader);
+    END;
+
+    [EventSubscriber(Table,21,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnAfterInsertCustomerLedgerEntry@11(VAR Rec@1000 : Record "Cust. Ledger Entry";RunTrigger@1001 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      SetStatusOptionFromCustLedgerEntry(Rec);
+    END;
+
+    [EventSubscriber(Table,21,OnAfterModifyEvent)]
+    LOCAL PROCEDURE OnAfterModifyCustomerLedgerEntry@13(VAR Rec@1000 : Record "Cust. Ledger Entry";VAR xRec@1001 : Record "Cust. Ledger Entry";RunTrigger@1002 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      SetStatusOptionFromCustLedgerEntry(Rec);
+    END;
+
+    [EventSubscriber(Table,21,OnAfterRenameEvent)]
+    LOCAL PROCEDURE OnAfterRenameCustomerLedgerEntry@14(VAR Rec@1000 : Record "Cust. Ledger Entry";VAR xRec@1001 : Record "Cust. Ledger Entry";RunTrigger@1002 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      SetStatusOptionFromCustLedgerEntry(Rec);
+    END;
+
+    [EventSubscriber(Table,21,OnAfterDeleteEvent)]
+    LOCAL PROCEDURE OnAfterDeleteCustomerLedgerEntry@18(VAR Rec@1000 : Record "Cust. Ledger Entry";RunTrigger@1001 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      SetStatusOptionFromCustLedgerEntry(Rec);
+    END;
+
+    [EventSubscriber(Table,1900,OnAfterInsertEvent)]
+    LOCAL PROCEDURE OnAfterInsertCancelledDocument@29(VAR Rec@1000 : Record "Cancelled Document";RunTrigger@1001 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      SetStatusOptionFromCancelledDocument(Rec);
+    END;
+
+    [EventSubscriber(Table,1900,OnAfterModifyEvent)]
+    LOCAL PROCEDURE OnAfterModifyCancelledDocument@28(VAR Rec@1000 : Record "Cancelled Document";VAR xRec@1001 : Record "Cancelled Document";RunTrigger@1002 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      SetStatusOptionFromCancelledDocument(Rec);
+    END;
+
+    [EventSubscriber(Table,1900,OnAfterRenameEvent)]
+    LOCAL PROCEDURE OnAfterRenameCancelledDocument@27(VAR Rec@1000 : Record "Cancelled Document";VAR xRec@1001 : Record "Cancelled Document";RunTrigger@1002 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      SetStatusOptionFromCancelledDocument(xRec);
+      SetStatusOptionFromCancelledDocument(Rec);
+    END;
+
+    [EventSubscriber(Table,1900,OnAfterDeleteEvent)]
+    LOCAL PROCEDURE OnAfterDeleteCancelledDocument@26(VAR Rec@1000 : Record "Cancelled Document";RunTrigger@1001 : Boolean);
+    BEGIN
+      if Rec.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      SetStatusOptionFromCancelledDocument(Rec);
+    END;
+
+    PROCEDURE PropagateOnInsert@15(VAR SalesCrMemoEntityBuffer@1000 : Record "Sales Cr. Memo Entity Buffer";VAR TempFieldBuffer@1003 : TEMPORARY Record "Field Buffer");
+    VAR
+      SalesHeader@1001 : Record "Sales Header";
+      TypeHelper@1002 : Codeunit "Type Helper";
+      TargetRecordRef@1004 : RecordRef;
+      DocTypeFieldRef@1006 : FieldRef;
+      NoFieldRef@1007 : FieldRef;
+    BEGIN
+      if SalesCrMemoEntityBuffer.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      if SalesCrMemoEntityBuffer.Posted then
+        ERROR(CannotInsertPostedCrMemoErr);
+
+      TargetRecordRef.OPEN(DATABASE::"Sales Header");
+
+      DocTypeFieldRef := TargetRecordRef.FIELD(SalesHeader.FIELDNO("Document Type"));
+      DocTypeFieldRef.VALUE(SalesHeader."Document Type"::"Credit Memo");
+
+      NoFieldRef := TargetRecordRef.FIELD(SalesHeader.FIELDNO("No."));
+
+      TypeHelper.TransferFieldsWithValidate(TempFieldBuffer,SalesCrMemoEntityBuffer,TargetRecordRef);
+
+      TargetRecordRef.INSERT(true);
+
+      SalesCrMemoEntityBuffer."No." := NoFieldRef.VALUE;
+      SalesCrMemoEntityBuffer.FIND;
+    END;
+
+    PROCEDURE PropagateOnModify@16(VAR SalesCrMemoEntityBuffer@1000 : Record "Sales Cr. Memo Entity Buffer";VAR TempFieldBuffer@1004 : TEMPORARY Record "Field Buffer");
+    VAR
+      SalesHeader@1001 : Record "Sales Header";
+      TypeHelper@1002 : Codeunit "Type Helper";
+      TargetRecordRef@1005 : RecordRef;
+      Exists@1003 : Boolean;
+    BEGIN
+      if SalesCrMemoEntityBuffer.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      if SalesCrMemoEntityBuffer.Posted then
+        ERROR(CannotModifyPostedCrMemoErr);
+
+      Exists := SalesHeader.GET(SalesHeader."Document Type"::"Credit Memo",SalesCrMemoEntityBuffer."No.");
+      if Exists then
+        TargetRecordRef.GETTABLE(SalesHeader)
+      else
+        TargetRecordRef.OPEN(DATABASE::"Sales Header");
+
+      TypeHelper.TransferFieldsWithValidate(TempFieldBuffer,SalesCrMemoEntityBuffer,TargetRecordRef);
+
+      if Exists then
+        TargetRecordRef.MODIFY(true)
+      else
+        TargetRecordRef.INSERT(true);
+    END;
+
+    PROCEDURE PropagateOnDelete@17(VAR SalesCrMemoEntityBuffer@1000 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SalesCrMemoHeader@1001 : Record "Sales Cr.Memo Header";
+      SalesHeader@1002 : Record "Sales Header";
+    BEGIN
+      if SalesCrMemoEntityBuffer.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      if SalesCrMemoEntityBuffer.Posted then begin
+        SalesCrMemoHeader.GET(SalesCrMemoEntityBuffer."No.");
+        if SalesCrMemoHeader."No. Printed" = 0 then
+          SalesCrMemoHeader."No. Printed" := 1;
+        SalesCrMemoHeader.DELETE(true);
+      end else begin
+        SalesHeader.GET(SalesHeader."Document Type"::"Credit Memo",SalesCrMemoEntityBuffer."No.");
+        SalesHeader.DELETE(true);
+      end;
+    END;
+
+    PROCEDURE UpdateBufferTableRecords@35();
+    VAR
+      SalesHeader@1000 : Record "Sales Header";
+      SalesCrMemoHeader@1001 : Record "Sales Cr.Memo Header";
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::"Credit Memo");
+      if SalesHeader.FINDSET then
+        repeat
+          InsertOrModifyFromSalesHeader(SalesHeader);
+        until SalesHeader.NEXT = 0;
+
+      if SalesCrMemoHeader.FINDSET then
+        repeat
+          InsertOrModifyFromSalesCreditMemoHeader(SalesCrMemoHeader);
+        until SalesCrMemoHeader.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertOrModifyFromSalesHeader@39(VAR SalesHeader@1000 : Record "Sales Header");
+    VAR
+      SalesCrMemoEntityBuffer@1002 : Record "Sales Cr. Memo Entity Buffer";
+      RecordExists@1001 : Boolean;
+    BEGIN
+      SalesCrMemoEntityBuffer.LOCKTABLE;
+      RecordExists := SalesCrMemoEntityBuffer.GET(SalesHeader."No.",false);
+
+      SalesCrMemoEntityBuffer.TRANSFERFIELDS(SalesHeader,true);
+      SalesCrMemoEntityBuffer.Posted := false;
+      SetStatusOptionFromSalesHeader(SalesHeader,SalesCrMemoEntityBuffer);
+      AssignTotalsFromSalesHeader(SalesHeader,SalesCrMemoEntityBuffer);
+      SalesCrMemoEntityBuffer.UpdateReferencedRecordIds;
+
+      if RecordExists then
+        SalesCrMemoEntityBuffer.MODIFY(true)
+      else
+        SalesCrMemoEntityBuffer.INSERT(true);
+    END;
+
+    LOCAL PROCEDURE InsertOrModifyFromSalesCreditMemoHeader@42(VAR SalesCrMemoHeader@1000 : Record "Sales Cr.Memo Header");
+    VAR
+      SalesCrMemoEntityBuffer@1002 : Record "Sales Cr. Memo Entity Buffer";
+      RecordExists@1001 : Boolean;
+    BEGIN
+      SalesCrMemoEntityBuffer.LOCKTABLE;
+      RecordExists := SalesCrMemoEntityBuffer.GET(SalesCrMemoHeader."No.",true);
+      SalesCrMemoEntityBuffer.TRANSFERFIELDS(SalesCrMemoHeader,true);
+      SalesCrMemoEntityBuffer.Posted := true;
+      SetStatusOptionFromSalesCreditMemoHeader(SalesCrMemoHeader,SalesCrMemoEntityBuffer);
+      AssignTotalsFromSalesCreditMemoHeader(SalesCrMemoHeader,SalesCrMemoEntityBuffer);
+      SalesCrMemoEntityBuffer.UpdateReferencedRecordIds;
+
+      if RecordExists then
+        SalesCrMemoEntityBuffer.MODIFY(true)
+      else
+        SalesCrMemoEntityBuffer.INSERT(true);
+    END;
+
+    LOCAL PROCEDURE SetStatusOptionFromSalesCreditMemoHeader@9(VAR SalesCrMemoHeader@1000 : Record "Sales Cr.Memo Header";VAR SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer");
+    BEGIN
+      if not GraphMgtGeneralTools.IsApiEnabled then
+        exit;
+
+      SalesCrMemoHeader.CALCFIELDS(Cancelled,Corrective,Paid);
+      if SalesCrMemoHeader.Cancelled then begin
+        SalesCrMemoEntityBuffer.Status := SalesCrMemoEntityBuffer.Status::Canceled;
+        exit;
+      end;
+
+      if SalesCrMemoHeader.Corrective then begin
+        SalesCrMemoEntityBuffer.Status := SalesCrMemoEntityBuffer.Status::Corrective;
+        exit;
+      end;
+
+      if SalesCrMemoHeader.Paid then begin
+        SalesCrMemoEntityBuffer.Status := SalesCrMemoEntityBuffer.Status::Paid;
+        exit;
+      end;
+
+      SalesCrMemoEntityBuffer.Status := SalesCrMemoEntityBuffer.Status::Open;
+    END;
+
+    LOCAL PROCEDURE SetStatusOptionFromSalesHeader@47(VAR SalesHeader@1000 : Record "Sales Header";VAR SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer");
+    BEGIN
+      if (not GraphMgtGeneralTools.IsApiEnabled) and (not SalesHeader.ISTEMPORARY) then
+        exit;
+
+      if SalesHeader.Status = SalesHeader.Status::"Pending Approval" then begin
+        SalesCrMemoEntityBuffer.Status := SalesCrMemoEntityBuffer.Status::"In Review";
+        exit;
+      end;
+
+      if (SalesHeader.Status = SalesHeader.Status::Released) or
+         (SalesHeader.Status = SalesHeader.Status::"Pending Prepayment")
+      then begin
+        SalesCrMemoEntityBuffer.Status := SalesCrMemoEntityBuffer.Status::Open;
+        exit;
+      end;
+
+      SalesCrMemoEntityBuffer.Status := SalesCrMemoEntityBuffer.Status::Draft;
+    END;
+
+    LOCAL PROCEDURE SetStatusOptionFromCustLedgerEntry@19(VAR CustLedgerEntry@1000 : Record "Cust. Ledger Entry");
+    VAR
+      SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer";
+    BEGIN
+      if not GraphMgtGeneralTools.IsApiEnabled then
+        exit;
+
+      SalesCrMemoEntityBuffer.SETRANGE("Cust. Ledger Entry No.",CustLedgerEntry."Entry No.");
+      SalesCrMemoEntityBuffer.SETRANGE(Posted,true);
+
+      if not SalesCrMemoEntityBuffer.FINDSET(true) then
+        exit;
+
+      repeat
+        UpdateStatusIfChanged(SalesCrMemoEntityBuffer);
+      until SalesCrMemoEntityBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SetStatusOptionFromCancelledDocument@30(VAR CancelledDocument@1000 : Record "Cancelled Document");
+    VAR
+      SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer";
+    BEGIN
+      if not GraphMgtGeneralTools.IsApiEnabled then
+        exit;
+
+      case CancelledDocument."Source ID" of
+        DATABASE::"Sales Cr.Memo Header":
+          if not SalesCrMemoEntityBuffer.GET(CancelledDocument."Cancelled Doc. No.",true) then
+            exit;
+        DATABASE::"Sales Invoice Header":
+          if not SalesCrMemoEntityBuffer.GET(CancelledDocument."Cancelled By Doc. No.",true) then
+            exit;
+        else
+          exit;
+      end;
+
+      UpdateStatusIfChanged(SalesCrMemoEntityBuffer);
+    END;
+
+    LOCAL PROCEDURE UpdateStatusIfChanged@33(VAR SalesCrMemoEntityBuffer@1000 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SalesCrMemoHeader@1001 : Record "Sales Cr.Memo Header";
+      CurrentStatus@1002 : Option;
+    BEGIN
+      SalesCrMemoHeader.GET(SalesCrMemoEntityBuffer."No.");
+      CurrentStatus := SalesCrMemoEntityBuffer.Status;
+
+      SetStatusOptionFromSalesCreditMemoHeader(SalesCrMemoHeader,SalesCrMemoEntityBuffer);
+      if CurrentStatus <> SalesCrMemoEntityBuffer.Status then
+        SalesCrMemoEntityBuffer.MODIFY(true);
+    END;
+
+    LOCAL PROCEDURE AssignTotalsFromSalesHeader@58(VAR SalesHeader@1000 : Record "Sales Header";VAR SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SalesLine@1006 : Record "Sales Line";
+    BEGIN
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+
+      if not SalesLine.FINDFIRST then begin
+        BlankTotals(SalesLine."Document No.",false);
+        exit;
+      end;
+
+      AssignTotalsFromSalesLine(SalesLine,SalesCrMemoEntityBuffer,SalesHeader);
+    END;
+
+    LOCAL PROCEDURE AssignTotalsFromSalesCreditMemoHeader@69(VAR SalesCrMemoHeader@1000 : Record "Sales Cr.Memo Header";VAR SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SalesCrMemoLine@1006 : Record "Sales Cr.Memo Line";
+    BEGIN
+      SalesCrMemoLine.SETRANGE("Document No.",SalesCrMemoHeader."No.");
+
+      if not SalesCrMemoLine.FINDFIRST then begin
+        BlankTotals(SalesCrMemoLine."Document No.",true);
+        exit;
+      end;
+
+      AssignTotalsFromSalesCreditMemoLine(SalesCrMemoLine,SalesCrMemoEntityBuffer);
+    END;
+
+    LOCAL PROCEDURE AssignTotalsFromSalesLine@76(VAR SalesLine@1000 : Record "Sales Line";VAR SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer";VAR SalesHeader@1002 : Record "Sales Header");
+    VAR
+      TotalSalesLine@1003 : Record "Sales Line";
+      DocumentTotals@1004 : Codeunit "Document Totals";
+      VATAmount@1005 : Decimal;
+    BEGIN
+      if SalesLine."VAT Calculation Type" = SalesLine."VAT Calculation Type"::"Sales Tax" then begin
+        SalesCrMemoEntityBuffer."Discount Applied Before Tax" := true;
+        SalesCrMemoEntityBuffer."Prices Including VAT" := false;
+      end else
+        SalesCrMemoEntityBuffer."Discount Applied Before Tax" := not SalesHeader."Prices Including VAT";
+
+      DocumentTotals.CalculateSalesTotals(TotalSalesLine,VATAmount,SalesLine);
+
+      SalesCrMemoEntityBuffer."Invoice Discount Amount" := TotalSalesLine."Inv. Discount Amount";
+      SalesCrMemoEntityBuffer.Amount := TotalSalesLine.Amount;
+      SalesCrMemoEntityBuffer."Total Tax Amount" := VATAmount;
+      SalesCrMemoEntityBuffer."Amount Including VAT" := TotalSalesLine."Amount Including VAT";
+    END;
+
+    LOCAL PROCEDURE AssignTotalsFromSalesCreditMemoLine@75(VAR SalesCrMemoLine@1000 : Record "Sales Cr.Memo Line";VAR SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SalesCrMemoHeader@1003 : Record "Sales Cr.Memo Header";
+      TotalSalesCrMemoHeader@1006 : Record "Sales Cr.Memo Header";
+      DocumentTotals@1004 : Codeunit "Document Totals";
+      VATAmount@1002 : Decimal;
+    BEGIN
+      if SalesCrMemoLine."VAT Calculation Type" = SalesCrMemoLine."VAT Calculation Type"::"Sales Tax" then
+        SalesCrMemoEntityBuffer."Discount Applied Before Tax" := true
+      else begin
+        SalesCrMemoHeader.GET(SalesCrMemoLine."Document No.");
+        SalesCrMemoEntityBuffer."Discount Applied Before Tax" := not SalesCrMemoHeader."Prices Including VAT";
+      end;
+
+      DocumentTotals.CalculatePostedSalesCreditMemoTotals(TotalSalesCrMemoHeader,VATAmount,SalesCrMemoLine);
+
+      SalesCrMemoEntityBuffer."Invoice Discount Amount" := TotalSalesCrMemoHeader."Invoice Discount Amount";
+      SalesCrMemoEntityBuffer.Amount := TotalSalesCrMemoHeader.Amount;
+      SalesCrMemoEntityBuffer."Total Tax Amount" := VATAmount;
+      SalesCrMemoEntityBuffer."Amount Including VAT" := TotalSalesCrMemoHeader."Amount Including VAT";
+    END;
+
+    LOCAL PROCEDURE BlankTotals@25(DocumentNo@1000 : Code[20];Posted@1001 : Boolean);
+    VAR
+      SalesCrMemoEntityBuffer@1002 : Record "Sales Cr. Memo Entity Buffer";
+    BEGIN
+      if not SalesCrMemoEntityBuffer.GET(DocumentNo,Posted) then
+        exit;
+
+      SalesCrMemoEntityBuffer."Invoice Discount Amount" := 0;
+      SalesCrMemoEntityBuffer."Total Tax Amount" := 0;
+
+      SalesCrMemoEntityBuffer.Amount := 0;
+      SalesCrMemoEntityBuffer."Amount Including VAT" := 0;
+      SalesCrMemoEntityBuffer.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CheckValidRecord@8(VAR SalesHeader@1000 : Record "Sales Header") : Boolean;
+    BEGIN
+      if SalesHeader.ISTEMPORARY then
+        exit(false);
+
+      if SalesHeader."Document Type" <> SalesHeader."Document Type"::"Credit Memo" then
+        exit(false);
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE CheckValidLineRecord@62(VAR SalesLine@1000 : Record "Sales Line") : Boolean;
+    BEGIN
+      if SalesLine.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit(false);
+
+      if SalesLine."Document Type" <> SalesLine."Document Type"::"Credit Memo" then
+        exit(false);
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE ModifyTotalsSalesLine@12(VAR SalesLine@1000 : Record "Sales Line");
+    VAR
+      SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer";
+      SalesHeader@1003 : Record "Sales Header";
+    BEGIN
+      if SalesLine.ISTEMPORARY or (not GraphMgtGeneralTools.IsApiEnabled) then
+        exit;
+
+      if SalesLine."Document Type" <> SalesLine."Document Type"::"Credit Memo" then
+        exit;
+
+      if not SalesCrMemoEntityBuffer.GET(SalesLine."Document No.",false) then
+        exit;
+
+      if not SalesLine."Recalculate Invoice Disc." then
+        exit;
+
+      SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+      AssignTotalsFromSalesLine(SalesLine,SalesCrMemoEntityBuffer,SalesHeader);
+      SalesCrMemoEntityBuffer.MODIFY(true);
+    END;
+
+    LOCAL PROCEDURE TransferSalesCreditMemoLineAggregateToSalesLine@37(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";VAR SalesLine@1001 : Record "Sales Line";VAR TempFieldBuffer@1002 : TEMPORARY Record "Field Buffer");
+    VAR
+      TypeHelper@1004 : Codeunit "Type Helper";
+      SalesLineRecordRef@1003 : RecordRef;
+    BEGIN
+      SalesLine."Document Type" := SalesLine."Document Type"::"Credit Memo";
+      SalesLineRecordRef.GETTABLE(SalesLine);
+
+      TypeHelper.TransferFieldsWithValidate(TempFieldBuffer,SalesInvoiceLineAggregate,SalesLineRecordRef);
+
+      SalesLineRecordRef.SETTABLE(SalesLine);
+    END;
+
+    LOCAL PROCEDURE TransferIntegrationRecordID@10(VAR SalesHeader@1000 : Record "Sales Header");
+    VAR
+      SalesCrMemoHeader@1001 : Record "Sales Cr.Memo Header";
+      NewIntegrationRecord@1002 : Record "Integration Record";
+      OldIntegrationRecord@1003 : Record "Integration Record";
+      IntegrationManagement@1004 : Codeunit "Integration Management";
+      SalesCrMemoHeaderRecordRef@1005 : RecordRef;
+    BEGIN
+      if ISNULLGUID(SalesHeader.Id) then
+        exit;
+
+      SalesCrMemoHeader.SETRANGE("Pre-Assigned No.",SalesHeader."No.");
+      if not SalesCrMemoHeader.FINDFIRST then
+        exit;
+
+      if SalesCrMemoHeader.Id = SalesHeader.Id then
+        exit;
+
+      if OldIntegrationRecord.GET(SalesHeader.Id) then
+        OldIntegrationRecord.DELETE;
+
+      if NewIntegrationRecord.GET(SalesCrMemoHeader.Id) then
+        NewIntegrationRecord.DELETE;
+
+      SalesCrMemoHeader.Id := SalesHeader.Id;
+      SalesCrMemoHeader.MODIFY(true);
+      SalesCrMemoHeaderRecordRef.GETTABLE(SalesCrMemoHeader);
+
+      IntegrationManagement.InsertUpdateIntegrationRecord(SalesCrMemoHeaderRecordRef,CURRENTDATETIME);
+    END;
+
+    PROCEDURE RedistributeCreditMemoDiscounts@31(VAR SalesCrMemoEntityBuffer@1002 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SalesLine@1001 : Record "Sales Line";
+    BEGIN
+      if SalesCrMemoEntityBuffer.Posted then
+        exit;
+
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::"Credit Memo");
+      SalesLine.SETRANGE("Document No.",SalesCrMemoEntityBuffer."No.");
+      SalesLine.SETRANGE("Recalculate Invoice Disc.",true);
+      if SalesLine.FINDFIRST then
+        CODEUNIT.RUN(CODEUNIT::"Sales - Calc Discount By Type",SalesLine);
+
+      SalesCrMemoEntityBuffer.FIND;
+    END;
+
+    PROCEDURE LoadLines@1(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";DocumentIdFilter@1007 : Text);
+    VAR
+      SalesCrMemoEntityBuffer@1004 : Record "Sales Cr. Memo Entity Buffer";
+    BEGIN
+      if DocumentIdFilter = '' then
+        ERROR(DocumentIDNotSpecifiedErr);
+
+      SalesCrMemoEntityBuffer.SETFILTER(Id,DocumentIdFilter);
+      if not SalesCrMemoEntityBuffer.FINDFIRST then
+        exit;
+
+      if SalesCrMemoEntityBuffer.Posted then
+        LoadSalesCreditMemoLines(SalesInvoiceLineAggregate,SalesCrMemoEntityBuffer)
+      else
+        LoadSalesLines(SalesInvoiceLineAggregate,SalesCrMemoEntityBuffer);
+    END;
+
+    LOCAL PROCEDURE LoadSalesCreditMemoLines@4(VAR SalesInvoiceLineAggregate@1001 : Record "Sales Invoice Line Aggregate";VAR SalesCrMemoEntityBuffer@1000 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SalesCrMemoLine@1002 : Record "Sales Cr.Memo Line";
+      SalesInvoiceAggregator@1003 : Codeunit "Sales Invoice Aggregator";
+    BEGIN
+      SalesCrMemoLine.SETRANGE("Document No.",SalesCrMemoEntityBuffer."No.");
+
+      if SalesCrMemoLine.FINDSET(false,false) then
+        repeat
+          CLEAR(SalesInvoiceLineAggregate);
+          SalesInvoiceLineAggregate.TRANSFERFIELDS(SalesCrMemoLine,true);
+          SalesInvoiceLineAggregate."Document Id" := SalesCrMemoEntityBuffer.Id;
+          SalesInvoiceAggregator.SetTaxGroupIdAndCode(
+            SalesInvoiceLineAggregate,
+            SalesCrMemoLine."Tax Group Code",
+            SalesCrMemoLine."VAT Prod. Posting Group",
+            SalesCrMemoLine."VAT Identifier");
+          SalesInvoiceLineAggregate."VAT %" := SalesCrMemoLine."VAT %";
+          SalesInvoiceLineAggregate."Tax Amount" := SalesCrMemoLine."Amount Including VAT" - SalesCrMemoLine."VAT Base Amount";
+          SalesInvoiceLineAggregate."Currency Code" := SalesCrMemoLine.GetCurrencyCode;
+          SalesInvoiceLineAggregate."Prices Including Tax" := SalesCrMemoEntityBuffer."Prices Including VAT";
+          SalesInvoiceLineAggregate.UpdateReferencedRecordIds;
+          UpdateLineAmountsFromSalesInvoiceLine(SalesInvoiceLineAggregate,SalesCrMemoLine);
+          SalesInvoiceLineAggregate.INSERT(true);
+        until SalesCrMemoLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE LoadSalesLines@38(VAR SalesInvoiceLineAggregate@1002 : Record "Sales Invoice Line Aggregate";VAR SalesCrMemoEntityBuffer@1000 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SalesLine@1001 : Record "Sales Line";
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::"Credit Memo");
+      SalesLine.SETRANGE("Document No.",SalesCrMemoEntityBuffer."No.");
+
+      if SalesLine.FINDSET(false,false) then
+        repeat
+          TransferFromSalesLine(SalesInvoiceLineAggregate,SalesLine,SalesCrMemoEntityBuffer);
+          SalesInvoiceLineAggregate.INSERT(true);
+        until SalesLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE TransferFromSalesLine@40(VAR SalesInvoiceLineAggregate@1002 : Record "Sales Invoice Line Aggregate";VAR SalesLine@1001 : Record "Sales Line";VAR SalesCrMemoEntityBuffer@1000 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SalesInvoiceAggregator@1003 : Codeunit "Sales Invoice Aggregator";
+    BEGIN
+      SalesInvoiceAggregator.TransferFromSalesLineToAggregateLine(
+        SalesInvoiceLineAggregate,SalesLine,SalesCrMemoEntityBuffer.Id,SalesCrMemoEntityBuffer."Prices Including VAT");
+    END;
+
+    PROCEDURE PropagateInsertLine@7(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";VAR TempFieldBuffer@1005 : TEMPORARY Record "Field Buffer");
+    VAR
+      SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer";
+      SalesLine@1002 : Record "Sales Line";
+      LastUsedSalesLine@1004 : Record "Sales Line";
+    BEGIN
+      VerifyCRUDIsPossibleForLine(SalesInvoiceLineAggregate,SalesCrMemoEntityBuffer);
+
+      SalesLine."Document Type" := SalesLine."Document Type"::"Credit Memo";
+      SalesLine."Document No." := SalesCrMemoEntityBuffer."No.";
+
+      if SalesInvoiceLineAggregate."Line No." = 0 then begin
+        LastUsedSalesLine.SETRANGE("Document Type",SalesLine."Document Type"::"Credit Memo");
+        LastUsedSalesLine.SETRANGE("Document No.",SalesCrMemoEntityBuffer."No.");
+        if LastUsedSalesLine.FINDLAST then
+          SalesInvoiceLineAggregate."Line No." := LastUsedSalesLine."Line No." + 10000
+        else
+          SalesInvoiceLineAggregate."Line No." := 10000;
+
+        SalesLine."Line No." := SalesInvoiceLineAggregate."Line No.";
+      end else
+        if SalesLine.GET(SalesLine."Document Type"::"Credit Memo",SalesCrMemoEntityBuffer."No.",SalesInvoiceLineAggregate."Line No.") then
+          ERROR(CannotInsertALineThatAlreadyExistsErr);
+
+      TransferSalesCreditMemoLineAggregateToSalesLine(SalesInvoiceLineAggregate,SalesLine,TempFieldBuffer);
+      SalesLine.INSERT(true);
+
+      RedistributeCreditMemoDiscounts(SalesCrMemoEntityBuffer);
+
+      SalesLine.FIND;
+      TransferFromSalesLine(SalesInvoiceLineAggregate,SalesLine,SalesCrMemoEntityBuffer);
+    END;
+
+    PROCEDURE PropagateModifyLine@24(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";VAR TempFieldBuffer@1004 : TEMPORARY Record "Field Buffer");
+    VAR
+      SalesCrMemoEntityBuffer@1001 : Record "Sales Cr. Memo Entity Buffer";
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      VerifyCRUDIsPossibleForLine(SalesInvoiceLineAggregate,SalesCrMemoEntityBuffer);
+
+      if not SalesLine.GET(SalesLine."Document Type"::"Credit Memo",SalesCrMemoEntityBuffer."No.",SalesInvoiceLineAggregate."Line No.") then
+        ERROR(CannotModifyALineThatDoesntExistErr);
+
+      TransferSalesCreditMemoLineAggregateToSalesLine(SalesInvoiceLineAggregate,SalesLine,TempFieldBuffer);
+
+      SalesLine.MODIFY(true);
+
+      RedistributeCreditMemoDiscounts(SalesCrMemoEntityBuffer);
+
+      SalesLine.FIND;
+      TransferFromSalesLine(SalesInvoiceLineAggregate,SalesLine,SalesCrMemoEntityBuffer);
+    END;
+
+    PROCEDURE PropagateDeleteLine@6(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate");
+    VAR
+      SalesCrMemoEntityBuffer@1003 : Record "Sales Cr. Memo Entity Buffer";
+      SalesLine@1002 : Record "Sales Line";
+    BEGIN
+      VerifyCRUDIsPossibleForLine(SalesInvoiceLineAggregate,SalesCrMemoEntityBuffer);
+
+      if SalesLine.GET(SalesLine."Document Type"::"Credit Memo",SalesCrMemoEntityBuffer."No.",SalesInvoiceLineAggregate."Line No.") then begin
+        SalesLine.DELETE(true);
+        RedistributeCreditMemoDiscounts(SalesCrMemoEntityBuffer);
+      end;
+    END;
+
+    LOCAL PROCEDURE VerifyCRUDIsPossibleForLine@60(VAR SalesInvoiceLineAggregate@1001 : Record "Sales Invoice Line Aggregate";VAR SalesCrMemoEntityBuffer@1000 : Record "Sales Cr. Memo Entity Buffer");
+    VAR
+      SearchSalesCrMemoEntityBuffer@1002 : Record "Sales Cr. Memo Entity Buffer";
+      DocumentIDFilter@1003 : Text;
+    BEGIN
+      if ISNULLGUID(SalesInvoiceLineAggregate."Document Id") then begin
+        DocumentIDFilter := SalesInvoiceLineAggregate.GETFILTER("Document Id");
+        if DocumentIDFilter = '' then
+          ERROR(DocumentIDNotSpecifiedErr);
+        SalesCrMemoEntityBuffer.SETFILTER(Id,DocumentIDFilter);
+      end else
+        SalesCrMemoEntityBuffer.SETRANGE(Id,SalesInvoiceLineAggregate."Document Id");
+
+      if not SalesCrMemoEntityBuffer.FINDFIRST then
+        ERROR(DocumentDoesNotExistErr);
+
+      SearchSalesCrMemoEntityBuffer.COPY(SalesCrMemoEntityBuffer);
+      if SearchSalesCrMemoEntityBuffer.NEXT <> 0 then
+        ERROR(MultipleDocumentsFoundForIdErr);
+    END;
+
+    LOCAL PROCEDURE UpdateCompletelyShipped@61(VAR SalesLine@1000 : Record "Sales Line");
+    VAR
+      SearchSalesLine@1001 : Record "Sales Line";
+      SalesCrMemoEntityBuffer@1003 : Record "Sales Cr. Memo Entity Buffer";
+      CompletelyShipped@1002 : Boolean;
+    BEGIN
+      SearchSalesLine.COPY(SalesLine);
+      SearchSalesLine.SETRANGE("Document Type",SalesLine."Document Type"::"Credit Memo");
+      SearchSalesLine.SETRANGE("Document No.",SalesLine."Document No.");
+      SearchSalesLine.SETFILTER(Type,'<>%1',SalesLine.Type::" ");
+      SearchSalesLine.SETRANGE("Location Code",SalesLine."Location Code");
+      SearchSalesLine.SETRANGE("Completely Shipped",false);
+
+      CompletelyShipped := not SearchSalesLine.FINDFIRST;
+
+      if not SalesCrMemoEntityBuffer.GET(SalesLine."Document No.") then
+        exit;
+      if SalesCrMemoEntityBuffer."Completely Shipped" <> CompletelyShipped then begin
+        SalesCrMemoEntityBuffer."Completely Shipped" := CompletelyShipped;
+        SalesCrMemoEntityBuffer.MODIFY(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE UpdateLineAmountsFromSalesInvoiceLine@49(VAR SalesInvoiceLineAggregate@1000 : Record "Sales Invoice Line Aggregate";VAR SalesCrMemoLine@1001 : Record "Sales Cr.Memo Line");
+    VAR
+      SalesInvoiceAggregator@1002 : Codeunit "Sales Invoice Aggregator";
+    BEGIN
+      SalesInvoiceLineAggregate."Line Amount Excluding Tax" := SalesCrMemoLine.GetLineAmountExclVAT;
+      SalesInvoiceLineAggregate."Line Amount Including Tax" := SalesCrMemoLine.GetLineAmountInclVAT;
+      SalesInvoiceLineAggregate."Line Tax Amount" :=
+        SalesInvoiceLineAggregate."Line Amount Including Tax" - SalesInvoiceLineAggregate."Line Amount Excluding Tax";
+      SalesInvoiceAggregator.UpdateInvoiceDiscountAmount(SalesInvoiceLineAggregate);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

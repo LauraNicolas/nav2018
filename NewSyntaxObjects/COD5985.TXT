@@ -1,0 +1,298 @@
+OBJECT Codeunit 5985 Serv-Item Tracking Rsrv. Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Value Entry Relation"=ri;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ReserveServLine@1000 : Codeunit "Service Line-Reserve";
+      ItemTrackingMgt@1001 : Codeunit "Item Tracking Management";
+      Text001@1002 : TextConst 'ENU=The %1 does not match the quantity defined in item tracking.';
+
+    [External]
+    PROCEDURE CheckTrackingSpecification@46(ServHeader@1002 : Record "Service Header";VAR ServLine@1019 : Record "Service Line");
+    VAR
+      ServLineToCheck@1000 : Record "Service Line";
+      ReservationEntry@1001 : Record "Reservation Entry";
+      ItemTrackingCode@1009 : Record "Item Tracking Code";
+      Item@1006 : Record Item;
+      ItemJnlLine@1007 : Record "Item Journal Line";
+      CreateReservEntry@1004 : Codeunit "Create Reserv. Entry";
+      ErrorFieldCaption@1018 : Text[250];
+      SignFactor@1005 : Integer;
+      ServLineQtyHandled@1022 : Decimal;
+      ServLineQtyToHandle@1023 : Decimal;
+      TrackingQtyHandled@1021 : Decimal;
+      TrackingQtyToHandle@1003 : Decimal;
+      Inbound@1010 : Boolean;
+      SNRequired@1011 : Boolean;
+      LotRequired@1012 : Boolean;
+      SNInfoRequired@1013 : Boolean;
+      LotInfoRequired@1014 : Boolean;
+      CheckServLine@1008 : Boolean;
+    BEGIN
+      // if a SalesLine is posted with ItemTracking then the whole quantity of
+      // the regarding SalesLine has to be post with Item-Tracking
+
+      if ServHeader."Document Type" <> ServHeader."Document Type"::Order then
+        exit;
+
+      TrackingQtyToHandle := 0;
+      TrackingQtyHandled := 0;
+
+      ServLineToCheck.COPY(ServLine);
+      ServLineToCheck.SETRANGE("Document Type",ServLine."Document Type");
+      ServLineToCheck.SETRANGE("Document No.",ServLine."Document No.");
+      ServLineToCheck.SETRANGE(Type,ServLineToCheck.Type::Item);
+      ServLineToCheck.SETFILTER("Quantity Shipped",'<>%1',0);
+      ErrorFieldCaption := ServLineToCheck.FIELDCAPTION("Qty. to Ship");
+
+      if ServLineToCheck.FINDSET then begin
+        ReservationEntry."Source Type" := DATABASE::"Service Line";
+        ReservationEntry."Source Subtype" := ServHeader."Document Type";
+        SignFactor := CreateReservEntry.SignFactor(ReservationEntry);
+        repeat
+          // Only Item where no SerialNo or LotNo is required
+          ServLineToCheck.TESTFIELD(Type,ServLineToCheck.Type::Item);
+          ServLineToCheck.TESTFIELD("No.");
+          Item.GET(ServLineToCheck."No.");
+          if Item."Item Tracking Code" <> '' then begin
+            Inbound := (ServLineToCheck.Quantity * SignFactor) > 0;
+            ItemTrackingCode.Code := Item."Item Tracking Code";
+            ItemTrackingMgt.GetItemTrackingSettings(ItemTrackingCode,
+              ItemJnlLine."Entry Type"::Sale,
+              Inbound,
+              SNRequired,
+              LotRequired,
+              SNInfoRequired,
+              LotInfoRequired);
+            CheckServLine := not SNRequired and not LotRequired;
+            if CheckServLine then
+              CheckServLine := CheckTrackingExists(ServLineToCheck);
+          end else
+            CheckServLine := false;
+
+          TrackingQtyToHandle := 0;
+          TrackingQtyHandled := 0;
+
+          if CheckServLine then begin
+            GetTrackingQuantities(ServLineToCheck,TrackingQtyToHandle,TrackingQtyHandled);
+            TrackingQtyToHandle := TrackingQtyToHandle * SignFactor;
+            TrackingQtyHandled := TrackingQtyHandled * SignFactor;
+            ServLineQtyToHandle := ServLineToCheck."Qty. to Ship (Base)";
+            ServLineQtyHandled := ServLineToCheck."Qty. Shipped (Base)";
+            if ((TrackingQtyHandled + TrackingQtyToHandle) <> (ServLineQtyHandled + ServLineQtyToHandle)) or
+               (TrackingQtyToHandle <> ServLineQtyToHandle)
+            then
+              ERROR(STRSUBSTNO(Text001,ErrorFieldCaption));
+          end;
+        until ServLineToCheck.NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE CheckTrackingExists@7(ServLine@1000 : Record "Service Line") : Boolean;
+    VAR
+      TrackingSpecification@1004 : Record "Tracking Specification";
+      ReservEntry@1001 : Record "Reservation Entry";
+    BEGIN
+      TrackingSpecification.SetSourceFilter(
+        DATABASE::"Service Line",ServLine."Document Type",ServLine."Document No.",ServLine."Line No.",true);
+      TrackingSpecification.SetSourceFilter2('',0);
+      ReservEntry.SetSourceFilter(
+        DATABASE::"Service Line",ServLine."Document Type",ServLine."Document No.",ServLine."Line No.",true);
+      ReservEntry.SetSourceFilter2('',0);
+
+      TrackingSpecification.SETRANGE(Correction,false);
+      if not TrackingSpecification.ISEMPTY then
+        exit(true);
+      ReservEntry.SETFILTER("Serial No.",'<>%1','');
+      if not ReservEntry.ISEMPTY then
+        exit(true);
+      ReservEntry.SETRANGE("Serial No.");
+      ReservEntry.SETFILTER("Lot No.",'<>%1','');
+      if not ReservEntry.ISEMPTY then
+        exit(true);
+    END;
+
+    LOCAL PROCEDURE GetTrackingQuantities@47(ServLine@1000 : Record "Service Line";VAR TrackingQtyToHandle@1003 : Decimal;VAR TrackingQtyHandled@1005 : Decimal);
+    VAR
+      TrackingSpecification@1004 : Record "Tracking Specification";
+      ReservEntry@1001 : Record "Reservation Entry";
+    BEGIN
+      TrackingSpecification.SetSourceFilter(
+        DATABASE::"Service Line",ServLine."Document Type",ServLine."Document No.",ServLine."Line No.",true);
+      TrackingSpecification.SetSourceFilter2('',0);
+      TrackingSpecification.CALCSUMS("Quantity Handled (Base)");
+      TrackingQtyHandled := TrackingSpecification."Quantity Handled (Base)";
+
+      ReservEntry.SetSourceFilter(
+        DATABASE::"Service Line",ServLine."Document Type",ServLine."Document No.",ServLine."Line No.",true);
+      ReservEntry.SetSourceFilter2('',0);
+      if ReservEntry.FINDSET then
+        repeat
+          if ReservEntry.TrackingExists then
+            TrackingQtyToHandle := TrackingQtyToHandle + ReservEntry."Qty. to Handle (Base)";
+        until ReservEntry.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE SaveInvoiceSpecification@24(VAR TempInvoicingSpecification@1000 : TEMPORARY Record "Tracking Specification";VAR TempTrackingSpecification@1001 : Record "Tracking Specification");
+    BEGIN
+      TempInvoicingSpecification.RESET;
+      if TempInvoicingSpecification.FIND('-') then begin
+        repeat
+          TempInvoicingSpecification."Quantity Invoiced (Base)" += TempInvoicingSpecification."Qty. to Invoice (Base)";
+          TempTrackingSpecification := TempInvoicingSpecification;
+          TempTrackingSpecification."Buffer Status" := TempTrackingSpecification."Buffer Status"::MODIFY;
+          TempTrackingSpecification.INSERT;
+        until TempInvoicingSpecification.NEXT = 0;
+        TempInvoicingSpecification.DELETEALL;
+      end;
+    END;
+
+    [External]
+    PROCEDURE InsertTrackingSpecification@48(VAR ServHeader@1002 : Record "Service Header";VAR TempTrackingSpecification@1001 : Record "Tracking Specification");
+    VAR
+      TrackingSpecification@1000 : Record "Tracking Specification";
+    BEGIN
+      TempTrackingSpecification.RESET;
+      if TempTrackingSpecification.FIND('-') then begin
+        repeat
+          TrackingSpecification := TempTrackingSpecification;
+          TrackingSpecification."Buffer Status" := 0;
+          TrackingSpecification.Correction := false;
+          TrackingSpecification.InitQtyToShip;
+          TrackingSpecification."Quantity actual Handled (Base)" := 0;
+          if TempTrackingSpecification."Buffer Status" = TempTrackingSpecification."Buffer Status"::MODIFY then
+            TrackingSpecification.MODIFY
+          else
+            TrackingSpecification.INSERT;
+        until TempTrackingSpecification.NEXT = 0;
+        TempTrackingSpecification.DELETEALL;
+      end;
+
+      ReserveServLine.UpdateItemTrackingAfterPosting(ServHeader);
+    END;
+
+    [External]
+    PROCEDURE InsertTempHandlngSpecification@5(SrcType@1005 : Integer;VAR ServLine@1003 : Record "Service Line";VAR TempHandlingSpecification@1000 : Record "Tracking Specification";VAR TempTrackingSpecification@1001 : Record "Tracking Specification";VAR TempTrackingSpecificationInv@1002 : Record "Tracking Specification";QtyToInvoiceNonZero@1004 : Boolean);
+    BEGIN
+      with ServLine do begin
+        if TempHandlingSpecification.FIND('-') then
+          repeat
+            TempTrackingSpecification := TempHandlingSpecification;
+            TempTrackingSpecification."Source Type" := SrcType;
+            TempTrackingSpecification."Source Subtype" := "Document Type";
+            TempTrackingSpecification."Source ID" := "Document No.";
+            TempTrackingSpecification."Source Batch Name" := '';
+            TempTrackingSpecification."Source Prod. Order Line" := 0;
+            TempTrackingSpecification."Source Ref. No." := "Line No.";
+            if TempTrackingSpecification.INSERT then;
+            if QtyToInvoiceNonZero then begin
+              TempTrackingSpecificationInv := TempTrackingSpecification;
+              if TempTrackingSpecificationInv.INSERT then;
+            end;
+          until TempHandlingSpecification.NEXT = 0;
+      end;
+    END;
+
+    [External]
+    PROCEDURE RetrieveInvoiceSpecification@1(VAR ServLine@1000 : Record "Service Line";VAR TempInvoicingSpecification@1001 : Record "Tracking Specification";Consume@1002 : Boolean) Ok : Boolean;
+    BEGIN
+      Ok := ReserveServLine.RetrieveInvoiceSpecification(ServLine,TempInvoicingSpecification,Consume);
+    END;
+
+    [External]
+    PROCEDURE DeleteInvoiceSpecFromHeader@2(VAR ServHeader@1000 : Record "Service Header");
+    BEGIN
+      ReserveServLine.DeleteInvoiceSpecFromHeader(ServHeader);
+    END;
+
+    [External]
+    PROCEDURE InsertShptEntryRelation@38(VAR ServiceShptLine@1002 : Record "Service Shipment Line";VAR TempHandlingSpecification@1003 : Record "Tracking Specification";VAR TempTrackingSpecificationInv@1000 : Record "Tracking Specification";ItemLedgShptEntryNo@1004 : Integer) : Integer;
+    VAR
+      ItemEntryRelation@1001 : Record "Item Entry Relation";
+    BEGIN
+      TempTrackingSpecificationInv.RESET;
+      if TempTrackingSpecificationInv.FIND('-') then begin
+        repeat
+          TempHandlingSpecification := TempTrackingSpecificationInv;
+          if TempHandlingSpecification.INSERT then;
+        until TempTrackingSpecificationInv.NEXT = 0;
+        TempTrackingSpecificationInv.DELETEALL;
+      end;
+
+      TempHandlingSpecification.RESET;
+      if TempHandlingSpecification.FIND('-') then begin
+        repeat
+          ItemEntryRelation.InitFromTrackingSpec(TempHandlingSpecification);
+          ItemEntryRelation.TransferFieldsServShptLine(ServiceShptLine);
+          ItemEntryRelation.INSERT;
+        until TempHandlingSpecification.NEXT = 0;
+        TempHandlingSpecification.DELETEALL;
+        exit(0);
+      end;
+      exit(ItemLedgShptEntryNo);
+    END;
+
+    [External]
+    PROCEDURE InsertValueEntryRelation@40(VAR TempValueEntryRelation@1001 : Record "Value Entry Relation");
+    VAR
+      ValueEntryRelation@1000 : Record "Value Entry Relation";
+    BEGIN
+      TempValueEntryRelation.RESET;
+      if TempValueEntryRelation.FIND('-') then begin
+        repeat
+          ValueEntryRelation := TempValueEntryRelation;
+          ValueEntryRelation.INSERT;
+        until TempValueEntryRelation.NEXT = 0;
+        TempValueEntryRelation.DELETEALL;
+      end;
+    END;
+
+    [External]
+    PROCEDURE TransServLineToItemJnlLine@3(VAR ServiceLine@1000 : Record "Service Line";VAR ItemJnlLine@1001 : Record "Item Journal Line";QtyToBeShippedBase@1002 : Decimal;VAR CheckApplFromItemEntry@1003 : Boolean);
+    BEGIN
+      ReserveServLine.TransServLineToItemJnlLine(ServiceLine,ItemJnlLine,QtyToBeShippedBase,CheckApplFromItemEntry);
+    END;
+
+    [External]
+    PROCEDURE TransferReservToItemJnlLine@32(VAR ServiceLine@1000 : Record "Service Line";VAR ItemJnlLine@1001 : Record "Item Journal Line";QtyToBeShippedBase@1002 : Decimal;VAR CheckApplFromItemEntry@1004 : Boolean);
+    BEGIN
+      if QtyToBeShippedBase = 0 then
+        exit;
+      CLEAR(ReserveServLine);
+      ReserveServLine.TransServLineToItemJnlLine(
+        ServiceLine,ItemJnlLine,QtyToBeShippedBase,CheckApplFromItemEntry)
+    END;
+
+    [External]
+    PROCEDURE SplitWhseJnlLine@4(VAR TempWhseJnlLine@1000 : Record "Warehouse Journal Line";VAR TempWhseJnlLine2@1001 : Record "Warehouse Journal Line";VAR TempTrackingSpecification@1002 : Record "Tracking Specification";ToTransfer@1003 : Boolean);
+    BEGIN
+      ItemTrackingMgt.SplitWhseJnlLine(TempWhseJnlLine,TempWhseJnlLine2,TempTrackingSpecification,ToTransfer);
+    END;
+
+    [External]
+    PROCEDURE AdjustQuantityRounding@6(RemQtyToBeInvoiced@1000 : Decimal;QtyToBeInvoiced@1001 : Decimal;RemQtyToBeInvoicedBase@1002 : Decimal;QtyToBeInvoicedBase@1003 : Decimal);
+    BEGIN
+      ItemTrackingMgt.AdjustQuantityRounding(
+        RemQtyToBeInvoiced,QtyToBeInvoiced,
+        RemQtyToBeInvoicedBase,QtyToBeInvoicedBase);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

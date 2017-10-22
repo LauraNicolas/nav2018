@@ -1,0 +1,1079 @@
+OBJECT Codeunit 5530 Calc. Item Availability
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempInvtEventBuf@1005 : TEMPORARY Record "Inventory Event Buffer";
+      EntryNo@1000 : Integer;
+      Text0000@1001 : TextConst 'ENU=Table %1 is not supported by the ShowDocument function.';
+
+    [External]
+    PROCEDURE CalcNewInvtEventBuf@5(VAR Item@1008 : Record Item;ForecastName@1001 : Code[10];IncludeBlanketOrders@1006 : Boolean;ExcludeForecastBefore@1005 : Date;IncludePlan@1002 : Boolean);
+    BEGIN
+      if Item.Type <> Item.Type::Inventory then
+        exit;
+      TempInvtEventBuf.RESET;
+      TempInvtEventBuf.DELETEALL;
+
+      GetDocumentEntries(TempInvtEventBuf,Item);
+      if (ForecastName <> '') or IncludeBlanketOrders or IncludePlan then
+        GetAnticipatedDemand(TempInvtEventBuf,Item,ForecastName,ExcludeForecastBefore,IncludeBlanketOrders);
+      if IncludePlan then
+        GetPlanningEntries(TempInvtEventBuf,Item);
+    END;
+
+    [External]
+    PROCEDURE GetInvEventBuffer@10(VAR RequestInvtEventBuf@1000 : Record "Inventory Event Buffer");
+    BEGIN
+      TempInvtEventBuf.RESET;
+      TempInvtEventBuf.SETCURRENTKEY("Availability Date",Type);
+      if TempInvtEventBuf.FIND('-') then
+        repeat
+          RequestInvtEventBuf := TempInvtEventBuf;
+          RequestInvtEventBuf.INSERT;
+        until TempInvtEventBuf.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetDocumentEntries@1(VAR InvtEventBuf@1000 : Record "Inventory Event Buffer";VAR Item@1001 : Record Item);
+    BEGIN
+      TryGetSalesOrdersDemandEntries(InvtEventBuf,Item);
+      TryGetServOrdersDemandEntries(InvtEventBuf,Item);
+      TryGetJobOrdersDemandEntries(InvtEventBuf,Item);
+      TryGetPurchRetOrderDemandEntries(InvtEventBuf,Item);
+      TryGetProdOrderCompDemandEntries(InvtEventBuf,Item);
+      TryGetTransOrderDemandEntries(InvtEventBuf,Item);
+      TryGetQtyOnInventory(InvtEventBuf,Item);
+      TryGetPurchOrderSupplyEntries(InvtEventBuf,Item);
+      TryGetSalesRetOrderSupplyEntries(InvtEventBuf,Item);
+      TryGetProdOrderSupplyEntries(InvtEventBuf,Item);
+      TryGetTransferOrderSupplyEntries(InvtEventBuf,Item);
+      TryGetAsmOrderDemandEntries(InvtEventBuf,Item);
+      TryGetAsmOrderSupllyEntries(InvtEventBuf,Item);
+    END;
+
+    LOCAL PROCEDURE GetAnticipatedDemand@8(VAR InvtEventBuf@1003 : Record "Inventory Event Buffer";VAR Item@1002 : Record Item;ForecastName@1001 : Code[10];ExcludeForecastBefore@1000 : Date;IncludeBlanketOrders@1004 : Boolean);
+    BEGIN
+      if ForecastName <> '' then
+        GetRemainingForecast(InvtEventBuf,Item,ForecastName,ExcludeForecastBefore);
+      if IncludeBlanketOrders then
+        GetBlanketSalesOrders(InvtEventBuf,Item);
+    END;
+
+    LOCAL PROCEDURE GetPlanningEntries@15(VAR InvtEventBuf@1001 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item);
+    BEGIN
+      GetPlanningLines(InvtEventBuf,Item);
+      GetPlanningComponents(InvtEventBuf,Item);
+      GetPlanningTransDemand(InvtEventBuf,Item);
+    END;
+
+    LOCAL PROCEDURE TryGetQtyOnInventory@14(VAR InvtEventBuf@1001 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      ItemLedgEntry@1002 : Record "Item Ledger Entry";
+      FilterItemLedgEntry@1004 : Record "Item Ledger Entry";
+      IncludeLocation@1003 : Boolean;
+    BEGIN
+      if not ItemLedgEntry.READPERMISSION then
+        exit(false);
+
+      if ItemLedgEntry.FindLinesWithItemToPlan(Item,false) then begin
+        FilterItemLedgEntry.COPY(ItemLedgEntry);
+        repeat
+          if ItemLedgEntry."Location Code" = '' then
+            IncludeLocation := true
+          else
+            IncludeLocation := not IsInTransitLocation(ItemLedgEntry."Location Code");
+
+          ItemLedgEntry.SETRANGE("Variant Code",ItemLedgEntry."Variant Code");
+          ItemLedgEntry.SETRANGE("Location Code",ItemLedgEntry."Location Code");
+
+          if IncludeLocation then begin
+            ItemLedgEntry.CALCSUMS("Remaining Quantity");
+            if ItemLedgEntry."Remaining Quantity" <> 0 then begin
+              InvtEventBuf.TransferInventoryQty(ItemLedgEntry);
+              InsertEntry(InvtEventBuf);
+            end;
+          end;
+
+          ItemLedgEntry.FIND('+');
+          ItemLedgEntry.COPYFILTERS(FilterItemLedgEntry);
+        until ItemLedgEntry.NEXT = 0;
+      end;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetPurchOrderSupplyEntries@1018(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      PurchLine@1001 : Record "Purchase Line";
+    BEGIN
+      if not PurchLine.READPERMISSION then
+        exit(false);
+
+      if PurchLine.FindLinesWithItemToPlan(Item,PurchLine."Document Type"::Order) then
+        repeat
+          InvtEventBuf.TransferFromPurchase(PurchLine);
+          InsertEntry(InvtEventBuf);
+        until PurchLine.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetSalesRetOrderSupplyEntries@1015(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1001 : Record Item) : Boolean;
+    VAR
+      SalesLine@1000 : Record "Sales Line";
+    BEGIN
+      if not SalesLine.READPERMISSION then
+        exit(false);
+
+      if SalesLine.FindLinesWithItemToPlan(Item,SalesLine."Document Type"::"Return Order") then
+        repeat
+          InvtEventBuf.TransferFromSalesReturn(SalesLine);
+          InsertEntry(InvtEventBuf);
+        until SalesLine.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetProdOrderSupplyEntries@1014(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1001 : Record Item) : Boolean;
+    VAR
+      ProdOrderLine@1000 : Record "Prod. Order Line";
+    BEGIN
+      if not ProdOrderLine.READPERMISSION then
+        exit(false);
+
+      if ProdOrderLine.FindLinesWithItemToPlan(Item,true) then
+        repeat
+          InvtEventBuf.TransferFromProdOrder(ProdOrderLine);
+          InsertEntry(InvtEventBuf);
+        until ProdOrderLine.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetTransferOrderSupplyEntries@1012(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      TransLine@1001 : Record "Transfer Line";
+    BEGIN
+      if not TransLine.READPERMISSION then
+        exit(false);
+
+      if TransLine.FindLinesWithItemToPlan(Item,true,false) then
+        repeat
+          InvtEventBuf.TransferFromInboundTransOrder(TransLine);
+          InsertEntry(InvtEventBuf);
+        until TransLine.NEXT = 0;
+
+      exit(true)
+    END;
+
+    LOCAL PROCEDURE TryGetSalesOrdersDemandEntries@1017(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      SalesLine@1001 : Record "Sales Line";
+    BEGIN
+      if not SalesLine.READPERMISSION then
+        exit(false);
+
+      if SalesLine.FindLinesWithItemToPlan(Item,SalesLine."Document Type"::Order) then
+        repeat
+          InvtEventBuf.TransferFromSales(SalesLine);
+          InsertEntry(InvtEventBuf);
+        until SalesLine.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetServOrdersDemandEntries@3(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      ServLine@1001 : Record "Service Line";
+    BEGIN
+      if not ServLine.READPERMISSION then
+        exit(false);
+
+      if ServLine.FindLinesWithItemToPlan(Item) then
+        repeat
+          InvtEventBuf.TransferFromServiceNeed(ServLine);
+          InsertEntry(InvtEventBuf);
+        until ServLine.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetJobOrdersDemandEntries@4(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      JobPlanningLine@1001 : Record "Job Planning Line";
+    BEGIN
+      if not JobPlanningLine.READPERMISSION then
+        exit(false);
+
+      if JobPlanningLine.FindLinesWithItemToPlan(Item) then
+        repeat
+          InvtEventBuf.TransferFromJobNeed(JobPlanningLine);
+          InsertEntry(InvtEventBuf);
+        until JobPlanningLine.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetPurchRetOrderDemandEntries@1016(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      PurchLine@1001 : Record "Purchase Line";
+    BEGIN
+      if not PurchLine.READPERMISSION then
+        exit(false);
+
+      if PurchLine.FindLinesWithItemToPlan(Item,PurchLine."Document Type"::"Return Order") then
+        repeat
+          InvtEventBuf.TransferFromPurchReturn(PurchLine);
+          InsertEntry(InvtEventBuf);
+        until PurchLine.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetProdOrderCompDemandEntries@1013(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      ProdOrderComp@1001 : Record "Prod. Order Component";
+    BEGIN
+      if not ProdOrderComp.READPERMISSION then
+        exit(false);
+
+      if ProdOrderComp.FindLinesWithItemToPlan(Item,true) then
+        repeat
+          InvtEventBuf.TransferFromProdComp(ProdOrderComp);
+          InsertEntry(InvtEventBuf);
+        until ProdOrderComp.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetTransOrderDemandEntries@1011(VAR InvtEventBuf@1002 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      TransLine@1001 : Record "Transfer Line";
+    BEGIN
+      if not TransLine.READPERMISSION then
+        exit(false);
+
+      if TransLine.FindLinesWithItemToPlan(Item,false,false) then
+        repeat
+          InvtEventBuf.TransferFromOutboundTransOrder(TransLine);
+          InsertEntry(InvtEventBuf);
+        until TransLine.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetAsmOrderDemandEntries@20(VAR InvtEventBuf@1001 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      AsmLine@1002 : Record "Assembly Line";
+    BEGIN
+      if not AsmLine.READPERMISSION then
+        exit(false);
+
+      if AsmLine.FindLinesWithItemToPlan(Item,AsmLine."Document Type"::Order) then
+        repeat
+          InvtEventBuf.TransferFromAsmOrderLine(AsmLine);
+          InsertEntry(InvtEventBuf);
+        until AsmLine.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE TryGetAsmOrderSupllyEntries@21(VAR InvtEventBuf@1001 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item) : Boolean;
+    VAR
+      AsmHeader@1002 : Record "Assembly Header";
+    BEGIN
+      if not AsmHeader.READPERMISSION then
+        exit(false);
+
+      if AsmHeader.FindLinesWithItemToPlan(Item,AsmHeader."Document Type"::Order) then
+        repeat
+          InvtEventBuf.TransferFromAsmOrder(AsmHeader);
+          InsertEntry(InvtEventBuf);
+        until AsmHeader.NEXT = 0;
+
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE GetRemainingForecast@7(VAR InvtEventBuf@1001 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item;ForecastName@1002 : Code[10];ExcludeForecastBefore@1010 : Date);
+    VAR
+      ItemLedgEntry@1014 : Record "Item Ledger Entry";
+      MfgSetup@1004 : Record "Manufacturing Setup";
+      ProdForecastEntry@1003 : Record "Production Forecast Entry";
+      ProdForecastEntry2@1012 : Record "Production Forecast Entry";
+      CopyOfInvtEventBuf@1018 : Record "Inventory Event Buffer";
+      FromDate@1017 : Date;
+      ToDate@1015 : Date;
+      ForecastPeriodEndDate@1019 : Date;
+      RemainingForecastQty@1016 : Decimal;
+      ModuleLoop@1009 : Integer;
+      ReplenishmentLocation@1008 : Code[10];
+      LocationMandatory@1013 : Boolean;
+      Module@1006 : Boolean;
+    BEGIN
+      // Include Forecast consumption
+      CopyOfInvtEventBuf.COPY(InvtEventBuf);
+      if FORMAT(Item."Date Filter") <> '' then begin
+        FromDate := Item.GETRANGEMIN("Date Filter");
+        ToDate := Item.GETRANGEMAX("Date Filter");
+      end;
+      if FromDate = 0D then
+        FromDate := WORKDATE;
+      if ToDate = 0D then
+        ToDate := DMY2DATE(30,12,9999);
+
+      MfgSetup.GET;
+      if not MfgSetup."Use Forecast on Locations" then begin
+        if not FindReplishmentLocation(ReplenishmentLocation,Item,LocationMandatory) then
+          ReplenishmentLocation := MfgSetup."Components at Location";
+        if LocationMandatory and
+           (ReplenishmentLocation = '')
+        then
+          exit;
+
+        ProdForecastEntry.SETCURRENTKEY(
+          "Production Forecast Name","Item No.","Component Forecast","Forecast Date","Location Code");
+      end else
+        ProdForecastEntry.SETCURRENTKEY(
+          "Production Forecast Name","Item No.","Location Code","Forecast Date","Component Forecast");
+
+      ItemLedgEntry.RESET;
+      ItemLedgEntry.SETCURRENTKEY("Item No.",Open,"Variant Code",Positive,"Location Code");
+
+      ProdForecastEntry.SETRANGE("Production Forecast Name",ForecastName);
+      ProdForecastEntry.SETRANGE("Forecast Date",ExcludeForecastBefore,ToDate);
+      ProdForecastEntry.SETRANGE("Item No.",Item."No.");
+
+      ProdForecastEntry2.COPY(ProdForecastEntry);
+      Item.COPYFILTER("Location Filter",ProdForecastEntry2."Location Code");
+
+      for ModuleLoop := 1 to 2 do begin
+        Module := ModuleLoop = 2;
+        ProdForecastEntry.SETRANGE("Component Forecast",Module);
+        ProdForecastEntry2.SETRANGE("Component Forecast",Module);
+        if ProdForecastEntry2.FINDSET then
+          repeat
+            if MfgSetup."Use Forecast on Locations" then begin
+              ProdForecastEntry2.SETRANGE("Location Code",ProdForecastEntry2."Location Code");
+              ItemLedgEntry.SETRANGE("Location Code",ProdForecastEntry2."Location Code");
+              InvtEventBuf.SETRANGE("Location Code",ProdForecastEntry2."Location Code");
+            end else begin
+              Item.COPYFILTER("Location Filter",ProdForecastEntry2."Location Code");
+              Item.COPYFILTER("Location Filter",ItemLedgEntry."Location Code");
+              Item.COPYFILTER("Location Filter",InvtEventBuf."Location Code");
+            end;
+            ProdForecastEntry2.FINDLAST;
+            ProdForecastEntry2.COPYFILTER("Location Code",ProdForecastEntry."Location Code");
+            Item.COPYFILTER("Location Filter",ProdForecastEntry2."Location Code");
+
+            if ForecastExist(ProdForecastEntry,ExcludeForecastBefore,FromDate,ToDate) then
+              repeat
+                ProdForecastEntry.SETRANGE("Forecast Date",ProdForecastEntry."Forecast Date");
+                ProdForecastEntry.FIND('+');
+                ProdForecastEntry.CALCSUMS("Forecast Quantity (Base)");
+                RemainingForecastQty := ProdForecastEntry."Forecast Quantity (Base)";
+                ForecastPeriodEndDate := FindForecastPeriodEndDate(ProdForecastEntry,ToDate);
+
+                ItemLedgEntry.SETRANGE("Item No.",Item."No.");
+                ItemLedgEntry.SETRANGE(Positive,false);
+                ItemLedgEntry.SETRANGE(Open);
+                ItemLedgEntry.SETRANGE(
+                  "Posting Date",ProdForecastEntry."Forecast Date",ForecastPeriodEndDate);
+                Item.COPYFILTER("Variant Filter",ItemLedgEntry."Variant Code");
+                if Module then begin
+                  ItemLedgEntry.SETRANGE("Entry Type",ItemLedgEntry."Entry Type"::Consumption);
+                  if ItemLedgEntry.FINDSET then
+                    repeat
+                      RemainingForecastQty += ItemLedgEntry.Quantity;
+                    until ItemLedgEntry.NEXT = 0;
+                end else begin
+                  ItemLedgEntry.SETRANGE("Entry Type",ItemLedgEntry."Entry Type"::Sale);
+                  if ItemLedgEntry.FINDSET then begin
+                    repeat
+                      if not ItemLedgEntry."Derived from Blanket Order" then
+                        RemainingForecastQty += ItemLedgEntry.Quantity;
+                    until ItemLedgEntry.NEXT = 0;
+                    // Undo shipment shall neutralize consumption from sales
+                    RemainingForecastQty += AjustForUndoneShipments(ItemLedgEntry);
+                  end;
+                end;
+
+                InvtEventBuf.SETRANGE("Item No.",ProdForecastEntry."Item No.");
+                InvtEventBuf.SETRANGE(
+                  "Availability Date",ProdForecastEntry."Forecast Date",ForecastPeriodEndDate);
+                if Module then
+                  InvtEventBuf.SETRANGE(Type,InvtEventBuf.Type::Component)
+                else
+                  InvtEventBuf.SETFILTER(Type,'%1|%2',InvtEventBuf.Type::Sale,InvtEventBuf.Type::Service);
+                if InvtEventBuf.FIND('-') then
+                  repeat
+                    if not (InvtEventBuf.Positive or InvtEventBuf."Derived from Blanket Order")
+                    then
+                      RemainingForecastQty += InvtEventBuf."Remaining Quantity (Base)";
+                  until (InvtEventBuf.NEXT = 0) or (RemainingForecastQty < 0);
+
+                if RemainingForecastQty < 0 then
+                  RemainingForecastQty := 0;
+
+                InvtEventBuf.TransferFromForecast(ProdForecastEntry,RemainingForecastQty,MfgSetup."Use Forecast on Locations");
+                InsertEntry(InvtEventBuf);
+
+                ProdForecastEntry.SETRANGE("Forecast Date",ExcludeForecastBefore,ToDate);
+              until ProdForecastEntry.NEXT = 0;
+          until ProdForecastEntry2.NEXT = 0;
+      end;
+      InvtEventBuf.COPY(CopyOfInvtEventBuf);
+    END;
+
+    LOCAL PROCEDURE GetBlanketSalesOrders@38(VAR InvtEventBuf@1006 : Record "Inventory Event Buffer";VAR Item@1004 : Record Item);
+    VAR
+      BlanketSalesLine@1003 : Record "Sales Line";
+      CopyOfInvtEventBuf@1000 : Record "Inventory Event Buffer";
+      QtyReleased@1005 : Decimal;
+    BEGIN
+      CopyOfInvtEventBuf.COPY(InvtEventBuf);
+
+      with BlanketSalesLine do begin
+        if FindLinesWithItemToPlan(Item,"Document Type"::"Blanket Order") then
+          repeat
+            InvtEventBuf.SETRANGE(Type,InvtEventBuf.Type::Sale);
+            InvtEventBuf.SETRANGE("Derived from Blanket Order",true);
+            InvtEventBuf.SETRANGE("Ref. Order No.","Document No.");
+            InvtEventBuf.SETRANGE("Ref. Order Line No.","Line No.");
+            if InvtEventBuf.FIND('-') then
+              repeat
+                QtyReleased -= InvtEventBuf."Remaining Quantity (Base)";
+              until InvtEventBuf.NEXT = 0;
+            SETRANGE("Document No.","Document No.");
+            SETRANGE("Line No.","Line No.");
+            repeat
+              if "Outstanding Qty. (Base)" > QtyReleased then begin
+                InvtEventBuf.TransferFromSalesBlanketOrder(
+                  BlanketSalesLine,"Outstanding Qty. (Base)" - QtyReleased);
+                InsertEntry(InvtEventBuf);
+                QtyReleased := 0;
+              end else
+                QtyReleased -= "Outstanding Qty. (Base)";
+            until NEXT = 0;
+            SETRANGE("Document No.");
+            SETRANGE("Line No.");
+          until NEXT = 0;
+      end;
+
+      InvtEventBuf.COPY(CopyOfInvtEventBuf);
+    END;
+
+    LOCAL PROCEDURE GetPlanningLines@11(VAR InvtEventBuf@1000 : Record "Inventory Event Buffer";VAR Item@1001 : Record Item);
+    VAR
+      ReqLine@1002 : Record "Requisition Line";
+      RecRef@1003 : RecordRef;
+    BEGIN
+      // Planning suggestions
+      with ReqLine do begin
+        SETRANGE(Type,Type::Item);
+        SETRANGE("No.",Item."No.");
+        SETFILTER("Location Code",Item.GETFILTER("Location Filter"));
+        SETFILTER("Variant Code",Item.GETFILTER("Variant Filter"));
+        if FINDSET then
+          repeat
+            RecRef.GETTABLE(ReqLine);
+            case "Action Message" of
+              "Action Message"::New:
+                begin
+                  InvtEventBuf.TransferFromReqLine(ReqLine,"Location Code","Due Date","Quantity (Base)",RecRef.RECORDID);
+                  InsertEntry(InvtEventBuf);
+                end;
+              "Action Message"::"Change Qty.":
+                begin
+                  InvtEventBuf.TransferFromReqLine(ReqLine,"Location Code","Due Date",-GetOriginalQtyBase,RecRef.RECORDID);
+                  InsertEntry(InvtEventBuf);
+
+                  InvtEventBuf.TransferFromReqLine(ReqLine,"Location Code","Due Date","Quantity (Base)",RecRef.RECORDID);
+                  InsertEntry(InvtEventBuf);
+                end;
+              "Action Message"::Reschedule:
+                begin
+                  InvtEventBuf.TransferFromReqLine(ReqLine,"Location Code","Original Due Date",-"Quantity (Base)",RecRef.RECORDID);
+                  InsertEntry(InvtEventBuf);
+
+                  InvtEventBuf.TransferFromReqLine(ReqLine,"Location Code","Due Date","Quantity (Base)",RecRef.RECORDID);
+                  InsertEntry(InvtEventBuf);
+                end;
+              "Action Message"::"Resched. & Chg. Qty.":
+                begin
+                  InvtEventBuf.TransferFromReqLine(ReqLine,"Location Code","Original Due Date",-GetOriginalQtyBase,RecRef.RECORDID);
+                  InsertEntry(InvtEventBuf);
+
+                  InvtEventBuf.TransferFromReqLine(ReqLine,"Location Code","Due Date","Quantity (Base)",RecRef.RECORDID);
+                  InsertEntry(InvtEventBuf);
+                end;
+              "Action Message"::Cancel:
+                begin
+                  InvtEventBuf.TransferFromReqLine(ReqLine,"Location Code","Due Date",-GetOriginalQtyBase,RecRef.RECORDID);
+                  InsertEntry(InvtEventBuf);
+                end;
+            end;
+          until NEXT = 0;
+      end;
+    END;
+
+    LOCAL PROCEDURE GetPlanningComponents@13(VAR InvtEventBuf@1001 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item);
+    VAR
+      PlanningComp@1002 : Record "Planning Component";
+      CopyOfInvtEventBuf@1003 : Record "Inventory Event Buffer";
+      CameFromInvtEventBuf@1004 : Record "Inventory Event Buffer";
+      ParentActionMessage@1005 : Option;
+    BEGIN
+      // Neutralize Prod. Orders Components as they might be replaced by planning components
+      CopyOfInvtEventBuf.COPY(InvtEventBuf);
+      InvtEventBuf.SETRANGE(Type,InvtEventBuf.Type::Component);
+      InvtEventBuf.SETRANGE("Action Message",InvtEventBuf."Action Message"::" ");
+      if InvtEventBuf.FIND('-') then
+        repeat
+          CameFromInvtEventBuf.COPY(InvtEventBuf);
+          if ParentIsInPlanning(InvtEventBuf,ParentActionMessage) then begin
+            InvtEventBuf.PlanRevertEntry(InvtEventBuf,ParentActionMessage);
+            InsertEntry(InvtEventBuf);
+          end;
+          InvtEventBuf.COPY(CameFromInvtEventBuf);
+        until InvtEventBuf.NEXT = 0;
+      InvtEventBuf.COPY(CopyOfInvtEventBuf);
+
+      // Insert possible replacements
+      if PlanningComp.FindLinesWithItemToPlan(Item) then
+        repeat
+          InvtEventBuf.TransferFromPlanProdComp(PlanningComp);
+          InsertEntry(InvtEventBuf);
+        until PlanningComp.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetPlanningTransDemand@16(VAR InvtEventBuf@1001 : Record "Inventory Event Buffer";VAR Item@1000 : Record Item);
+    VAR
+      TransferReqLine@1002 : Record "Requisition Line";
+      TransLine@1003 : Record "Transfer Line";
+    BEGIN
+      TransferReqLine.SETCURRENTKEY("Replenishment System",Type,"No.","Variant Code","Transfer-from Code","Transfer Shipment Date");
+      TransferReqLine.SETRANGE("Replenishment System",TransferReqLine."Replenishment System"::Transfer);
+      TransferReqLine.SETRANGE(Type,TransferReqLine.Type::Item);
+      TransferReqLine.SETRANGE("No.",Item."No.");
+      Item.COPYFILTER("Location Filter",TransferReqLine."Transfer-from Code");
+      Item.COPYFILTER("Variant Filter",TransferReqLine."Variant Code");
+      Item.COPYFILTER("Date Filter",TransferReqLine."Transfer Shipment Date");
+      if TransferReqLine.FINDSET then
+        repeat
+          if TransferReqLine."Action Message" <> TransferReqLine."Action Message"::New then begin
+            // Neutralize demand from the related document
+            FindTransDemandToReplace(TransferReqLine,TransLine);
+            InvtEventBuf.TransferFromOutboundTransOrder(TransLine);
+            InvtEventBuf.PlanRevertEntry(InvtEventBuf,TransferReqLine."Action Message");
+            InsertEntry(InvtEventBuf);
+          end;
+          InvtEventBuf.TransferFromReqLineTransDemand(TransferReqLine);
+          InsertEntry(InvtEventBuf);
+        until TransferReqLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertEntry@1034(VAR NewInvtEventBuffer@1000 : Record "Inventory Event Buffer");
+    BEGIN
+      NewInvtEventBuffer."Entry No." := NextEntryNo;
+      NewInvtEventBuffer.INSERT;
+    END;
+
+    LOCAL PROCEDURE NextEntryNo@64() : Integer;
+    BEGIN
+      EntryNo += 1;
+      exit(EntryNo);
+    END;
+
+    LOCAL PROCEDURE FindForecastPeriodEndDate@2(VAR ProdForecastEntry@1000 : Record "Production Forecast Entry";ToDate@1002 : Date) : Date;
+    VAR
+      NextProdForecastEntry@1001 : Record "Production Forecast Entry";
+      NextForecastExist@1003 : Boolean;
+    BEGIN
+      NextProdForecastEntry.COPY(ProdForecastEntry);
+      NextProdForecastEntry.SETRANGE("Forecast Date",ProdForecastEntry."Forecast Date" + 1,ToDate);
+      if NextProdForecastEntry.FINDFIRST then
+        repeat
+          NextProdForecastEntry.SETRANGE("Forecast Date",NextProdForecastEntry."Forecast Date");
+          NextProdForecastEntry.CALCSUMS("Forecast Quantity (Base)");
+          if NextProdForecastEntry."Forecast Quantity (Base)" = 0 then begin
+            NextProdForecastEntry.SETRANGE("Forecast Date",NextProdForecastEntry."Forecast Date" + 1,ToDate);
+            if not NextProdForecastEntry.FINDLAST then
+              NextProdForecastEntry."Forecast Date" := ToDate + 1;
+          end else
+            NextForecastExist := true;
+        until (NextProdForecastEntry."Forecast Date" = ToDate + 1) or NextForecastExist
+      else
+        NextProdForecastEntry."Forecast Date" := ToDate + 1;
+      exit(NextProdForecastEntry."Forecast Date" - 1);
+    END;
+
+    LOCAL PROCEDURE AjustForUndoneShipments@6(VAR ItemLedgEntry@1000 : Record "Item Ledger Entry") AdjustQty : Decimal;
+    VAR
+      CorItemLedgEntry@1001 : Record "Item Ledger Entry";
+    BEGIN
+      CorItemLedgEntry.COPY(ItemLedgEntry);
+      CorItemLedgEntry.SETRANGE(Positive,true);
+      CorItemLedgEntry.SETRANGE(Correction,true);
+      if CorItemLedgEntry.FINDSET then
+        repeat
+          if not CorItemLedgEntry."Derived from Blanket Order" then
+            AdjustQty += CorItemLedgEntry.Quantity;
+        until CorItemLedgEntry.NEXT = 0;
+      ItemLedgEntry.SETRANGE(Correction);
+    END;
+
+    LOCAL PROCEDURE ParentIsInPlanning@12(InvtEventBuf@1000 : Record "Inventory Event Buffer";VAR ParentActionMessage@1004 : Option) : Boolean;
+    VAR
+      ReqLine@1001 : Record "Requisition Line";
+      ProdOrderComp@1003 : Record "Prod. Order Component";
+      RecRef@1005 : RecordRef;
+      RecordID@1002 : RecordID;
+    BEGIN
+      // Check if the parent of a component line is represented with a planning suggestion
+      RecordID := InvtEventBuf."Source Line ID";
+      RecRef := RecordID.GETRECORD;
+      RecRef.SETTABLE(ProdOrderComp);
+      ReqLine.SETCURRENTKEY("Ref. Order Type","Ref. Order Status","Ref. Order No.","Ref. Line No.");
+      ReqLine.SETRANGE("Ref. Order Type",ReqLine."Ref. Order Type"::"Prod. Order");
+      ReqLine.SETRANGE("Ref. Order Status",ProdOrderComp.Status);
+      ReqLine.SETRANGE("Ref. Order No.",ProdOrderComp."Prod. Order No.");
+      ReqLine.SETRANGE("Ref. Line No.",ProdOrderComp."Prod. Order Line No.");
+      ReqLine.SETRANGE("Operation No.",'');
+      if ReqLine.FINDFIRST then begin
+        ParentActionMessage := ReqLine."Action Message";
+        exit(true);
+      end;
+    END;
+
+    LOCAL PROCEDURE FindTransDemandToReplace@19(ReqLine@1001 : Record "Requisition Line";VAR TransLine@1000 : Record "Transfer Line");
+    BEGIN
+      TransLine.GET(ReqLine."Ref. Order No.",ReqLine."Ref. Line No.");
+    END;
+
+    LOCAL PROCEDURE FindReplishmentLocation@42(VAR ReplenishmentLocation@1000 : Code[10];VAR Item@1003 : Record Item;VAR LocationMandatory@1004 : Boolean) : Boolean;
+    VAR
+      SKU@1001 : Record "Stockkeeping Unit";
+      InvtSetup@1002 : Record "Inventory Setup";
+    BEGIN
+      InvtSetup.GET;
+      LocationMandatory := InvtSetup."Location Mandatory";
+
+      ReplenishmentLocation := '';
+      SKU.SETCURRENTKEY("Item No.","Location Code","Variant Code");
+      SKU.SETRANGE("Item No.",Item."No.");
+      Item.COPYFILTER("Location Filter",SKU."Location Code");
+      Item.COPYFILTER("Variant Filter",SKU."Variant Code");
+      SKU.SETRANGE("Replenishment System",Item."Replenishment System"::Purchase,Item."Replenishment System"::"Prod. Order");
+      SKU.SETFILTER("Reordering Policy",'<>%1',SKU."Reordering Policy"::" ");
+      if SKU.FIND('-') then
+        if SKU.NEXT = 0 then
+          ReplenishmentLocation := SKU."Location Code";
+      exit(ReplenishmentLocation <> '');
+    END;
+
+    LOCAL PROCEDURE IsInTransitLocation@17(LocationCode@1000 : Code[10]) : Boolean;
+    VAR
+      Location@1001 : Record Location;
+    BEGIN
+      if Location.GET(LocationCode) then
+        exit(Location."Use As In-Transit");
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE ForecastExist@36(VAR ProdForecastEntry@1000 : Record "Production Forecast Entry";ExcludeForecastBefore@1004 : Date;FromDate@1001 : Date;ToDate@1002 : Date) : Boolean;
+    VAR
+      ForecastExist@1003 : Boolean;
+    BEGIN
+      with ProdForecastEntry do begin
+        SETRANGE("Forecast Date",ExcludeForecastBefore,FromDate);
+        if FIND('+') then
+          repeat
+            SETRANGE("Forecast Date","Forecast Date");
+            CALCSUMS("Forecast Quantity (Base)");
+            if "Forecast Quantity (Base)" <> 0 then
+              ForecastExist := true
+            else
+              SETRANGE("Forecast Date",ExcludeForecastBefore,"Forecast Date" - 1);
+          until (not FIND('+')) or ForecastExist;
+
+        if not ForecastExist then begin
+          if ExcludeForecastBefore > FromDate then
+            SETRANGE("Forecast Date",ExcludeForecastBefore,ToDate)
+          else
+            SETRANGE("Forecast Date",FromDate + 1,ToDate);
+          if FIND('-') then
+            repeat
+              SETRANGE("Forecast Date","Forecast Date");
+              CALCSUMS("Forecast Quantity (Base)");
+              if "Forecast Quantity (Base)" <> 0 then
+                ForecastExist := true
+              else
+                SETRANGE("Forecast Date","Forecast Date" + 1,ToDate);
+            until (not FIND('-')) or ForecastExist
+        end;
+      end;
+      exit(ForecastExist);
+    END;
+
+    [External]
+    PROCEDURE GetSourceReferences@18(FromRecordID@1000 : RecordID;TransferDirection@1002 : 'Outbound,Inbound';VAR SourceType@1010 : Integer;VAR SourceSubtype@1011 : Integer;VAR SourceID@1012 : Code[20];VAR SourceBatchName@1013 : Code[10];VAR SourceProdOrderLine@1015 : Integer;VAR SourceRefNo@1016 : Integer) : Boolean;
+    VAR
+      ItemLedgEntry@1022 : Record "Item Ledger Entry";
+      SalesLine@1021 : Record "Sales Line";
+      PurchLine@1014 : Record "Purchase Line";
+      TransLine@1008 : Record "Transfer Line";
+      ProdOrderLine@1005 : Record "Prod. Order Line";
+      ProdOrderComp@1006 : Record "Prod. Order Component";
+      PlngComp@1007 : Record "Planning Component";
+      ProdForecastEntry@1004 : Record "Production Forecast Entry";
+      ReqLine@1003 : Record "Requisition Line";
+      ServiceLine@1009 : Record "Service Line";
+      JobPlngLine@1017 : Record "Job Planning Line";
+      AssemblyHeader@1018 : Record "Assembly Header";
+      AssemblyLine@1019 : Record "Assembly Line";
+      RecRef@1001 : RecordRef;
+    BEGIN
+      SourceType := 0;
+      SourceSubtype := 0;
+      SourceID := '';
+      SourceBatchName := '';
+      SourceProdOrderLine := 0;
+      SourceRefNo := 0;
+
+      RecRef := FromRecordID.GETRECORD;
+
+      case FromRecordID.TABLENO of
+        DATABASE::"Item Ledger Entry":
+          begin
+            RecRef.SETTABLE(ItemLedgEntry);
+            SourceType := DATABASE::"Item Ledger Entry";
+            SourceRefNo := ItemLedgEntry."Entry No.";
+          end;
+        DATABASE::"Sales Line":
+          begin
+            RecRef.SETTABLE(SalesLine);
+            SourceType := DATABASE::"Sales Line";
+            SourceSubtype := SalesLine."Document Type";
+            SourceID := SalesLine."Document No.";
+            SourceRefNo := SalesLine."Line No.";
+          end;
+        DATABASE::"Purchase Line":
+          begin
+            RecRef.SETTABLE(PurchLine);
+            SourceType := DATABASE::"Purchase Line";
+            SourceSubtype := PurchLine."Document Type";
+            SourceID := PurchLine."Document No.";
+            SourceRefNo := PurchLine."Line No.";
+          end;
+        DATABASE::"Transfer Line":
+          begin
+            RecRef.SETTABLE(TransLine);
+            SourceType := DATABASE::"Transfer Line";
+            SourceSubtype := TransferDirection;
+            TransLine.GET(TransLine."Document No.",TransLine."Line No.");
+            SourceID := TransLine."Document No.";
+            SourceProdOrderLine := TransLine."Derived From Line No.";
+            SourceRefNo := TransLine."Line No.";
+          end;
+        DATABASE::"Prod. Order Line":
+          begin
+            RecRef.SETTABLE(ProdOrderLine);
+            SourceType := DATABASE::"Prod. Order Line";
+            SourceSubtype := ProdOrderLine.Status;
+            SourceID := ProdOrderLine."Prod. Order No.";
+            SourceProdOrderLine := ProdOrderLine."Line No.";
+          end;
+        DATABASE::"Prod. Order Component":
+          begin
+            RecRef.SETTABLE(ProdOrderComp);
+            SourceType := DATABASE::"Prod. Order Component";
+            SourceSubtype := ProdOrderComp.Status;
+            SourceID := ProdOrderComp."Prod. Order No.";
+            SourceProdOrderLine := ProdOrderComp."Prod. Order Line No.";
+            SourceRefNo := ProdOrderComp."Line No.";
+          end;
+        DATABASE::"Planning Component":
+          begin
+            RecRef.SETTABLE(PlngComp);
+            SourceType := DATABASE::"Planning Component";
+            SourceID := PlngComp."Worksheet Template Name";
+            SourceBatchName := PlngComp."Worksheet Batch Name";
+            SourceProdOrderLine := PlngComp."Worksheet Line No.";
+            SourceRefNo := PlngComp."Line No.";
+          end;
+        DATABASE::"Requisition Line":
+          begin
+            RecRef.SETTABLE(ReqLine);
+            SourceType := DATABASE::"Requisition Line";
+            SourceSubtype := TransferDirection;
+            SourceID := ReqLine."Worksheet Template Name";
+            SourceBatchName := ReqLine."Journal Batch Name";
+            SourceRefNo := ReqLine."Line No.";
+          end;
+        DATABASE::"Service Line":
+          begin
+            RecRef.SETTABLE(ServiceLine);
+            SourceType := DATABASE::"Service Line";
+            SourceSubtype := ServiceLine."Document Type";
+            SourceID := ServiceLine."Document No.";
+            SourceRefNo := ServiceLine."Line No.";
+          end;
+        DATABASE::"Job Planning Line":
+          begin
+            RecRef.SETTABLE(JobPlngLine);
+            SourceType := DATABASE::"Job Planning Line";
+            JobPlngLine.GET(JobPlngLine."Job No.",JobPlngLine."Job Task No.",JobPlngLine."Line No.");
+            SourceSubtype := JobPlngLine.Status;
+            SourceID := JobPlngLine."Job No.";
+            SourceRefNo := JobPlngLine."Job Contract Entry No.";
+          end;
+        DATABASE::"Production Forecast Entry":
+          begin
+            RecRef.SETTABLE(ProdForecastEntry);
+            SourceType := DATABASE::"Production Forecast Entry";
+            SourceRefNo := ProdForecastEntry."Entry No.";
+          end;
+        DATABASE::"Assembly Header":
+          begin
+            RecRef.SETTABLE(AssemblyHeader);
+            SourceType := DATABASE::"Assembly Header";
+            SourceSubtype := AssemblyHeader."Document Type";
+            SourceID := AssemblyHeader."No.";
+          end;
+        DATABASE::"Assembly Line":
+          begin
+            RecRef.SETTABLE(AssemblyLine);
+            SourceType := DATABASE::"Assembly Line";
+            SourceSubtype := AssemblyLine."Document Type";
+            SourceID := AssemblyLine."Document No.";
+            SourceRefNo := AssemblyLine."Line No.";
+          end
+        else
+          exit(false);
+      end;
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE ShowDocument@9(RecordID@1006 : RecordID);
+    VAR
+      ItemLedgEntry@1035 : Record "Item Ledger Entry";
+      SalesHeader@1034 : Record "Sales Header";
+      SalesShptHeader@1033 : Record "Sales Shipment Header";
+      SalesInvHeader@1032 : Record "Sales Invoice Header";
+      SalesCrMemoHeader@1031 : Record "Sales Cr.Memo Header";
+      ServShptHeader@1030 : Record "Service Shipment Header";
+      ServInvHeader@1029 : Record "Service Invoice Header";
+      ServCrMemoHeader@1028 : Record "Service Cr.Memo Header";
+      PurchHeader@1027 : Record "Purchase Header";
+      PurchRcptHeader@1026 : Record "Purch. Rcpt. Header";
+      PurchInvHeader@1025 : Record "Purch. Inv. Header";
+      PurchCrMemoHdr@1024 : Record "Purch. Cr. Memo Hdr.";
+      ReturnShptHeader@1023 : Record "Return Shipment Header";
+      ReturnRcptHeader@1022 : Record "Return Receipt Header";
+      TransferHeader@1021 : Record "Transfer Header";
+      TransShptHeader@1020 : Record "Transfer Shipment Header";
+      TransRcptHeader@1019 : Record "Transfer Receipt Header";
+      ProductionOrder@1018 : Record "Production Order";
+      ProdForecastName@1017 : Record "Production Forecast Name";
+      RequisitionLine@1016 : Record "Requisition Line";
+      PlanningComponent@1002 : Record "Planning Component";
+      AssemblyHeader@1000 : Record "Assembly Header";
+      AssemblyLine@1001 : Record "Assembly Line";
+      ReqWkshTemplate@1004 : Record "Req. Wksh. Template";
+      ProdForecastPage@1015 : Page "Production Forecast";
+      PlanningWorksheet@1003 : Page "Planning Worksheet";
+      RecRef@1014 : RecordRef;
+    BEGIN
+      if FORMAT(RecordID) = '' then
+        exit;
+
+      RecRef := RecordID.GETRECORD;
+
+      case RecordID.TABLENO of
+        DATABASE::"Item Ledger Entry":
+          begin
+            RecRef.SETTABLE(ItemLedgEntry);
+            ItemLedgEntry.GET(ItemLedgEntry."Entry No.");
+            ItemLedgEntry.SETRANGE("Item No.",ItemLedgEntry."Item No.");
+            if ItemLedgEntry."Location Code" <> '' then
+              ItemLedgEntry.SETRANGE("Location Code",ItemLedgEntry."Location Code");
+            if ItemLedgEntry."Variant Code" <> '' then
+              ItemLedgEntry.SETRANGE("Variant Code",ItemLedgEntry."Variant Code");
+            PAGE.RUNMODAL(PAGE::"Item Ledger Entries",ItemLedgEntry);
+          end;
+        DATABASE::"Sales Header":
+          begin
+            RecRef.SETTABLE(SalesHeader);
+            case SalesHeader."Document Type" of
+              SalesHeader."Document Type"::Order:
+                PAGE.RUNMODAL(PAGE::"Sales Order",SalesHeader);
+              SalesHeader."Document Type"::Invoice:
+                PAGE.RUNMODAL(PAGE::"Sales Invoice",SalesHeader);
+              SalesHeader."Document Type"::"Credit Memo":
+                PAGE.RUNMODAL(PAGE::"Sales Credit Memo",SalesHeader);
+              SalesHeader."Document Type"::"Blanket Order":
+                PAGE.RUNMODAL(PAGE::"Blanket Sales Orders",SalesHeader);
+              SalesHeader."Document Type"::"Return Order":
+                PAGE.RUNMODAL(PAGE::"Sales Return Order",SalesHeader);
+            end;
+          end;
+        DATABASE::"Sales Shipment Header":
+          begin
+            RecRef.SETTABLE(SalesShptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Sales Shipment",SalesShptHeader);
+          end;
+        DATABASE::"Sales Invoice Header":
+          begin
+            RecRef.SETTABLE(SalesInvHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Sales Invoice",SalesInvHeader);
+          end;
+        DATABASE::"Sales Cr.Memo Header":
+          begin
+            RecRef.SETTABLE(SalesCrMemoHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Sales Credit Memo",SalesCrMemoHeader);
+          end;
+        DATABASE::"Service Shipment Header":
+          begin
+            RecRef.SETTABLE(ServShptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Service Shipment",ServShptHeader);
+          end;
+        DATABASE::"Service Invoice Header":
+          begin
+            RecRef.SETTABLE(ServInvHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Service Invoice",ServInvHeader);
+          end;
+        DATABASE::"Service Cr.Memo Header":
+          begin
+            RecRef.SETTABLE(ServCrMemoHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Service Credit Memo",ServCrMemoHeader);
+          end;
+        DATABASE::"Purchase Header":
+          begin
+            RecRef.SETTABLE(PurchHeader);
+            case PurchHeader."Document Type" of
+              PurchHeader."Document Type"::Order:
+                PAGE.RUNMODAL(PAGE::"Purchase Order",PurchHeader);
+              PurchHeader."Document Type"::Invoice:
+                PAGE.RUNMODAL(PAGE::"Purchase Invoice",PurchHeader);
+              PurchHeader."Document Type"::"Credit Memo":
+                PAGE.RUNMODAL(PAGE::"Purchase Credit Memo",PurchHeader);
+              PurchHeader."Document Type"::"Blanket Order":
+                PAGE.RUNMODAL(PAGE::"Blanket Purchase Order",PurchHeader);
+              PurchHeader."Document Type"::"Return Order":
+                PAGE.RUNMODAL(PAGE::"Purchase Return Order",PurchHeader);
+            end;
+          end;
+        DATABASE::"Purch. Rcpt. Header":
+          begin
+            RecRef.SETTABLE(PurchRcptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Purchase Receipt",PurchRcptHeader);
+          end;
+        DATABASE::"Purch. Inv. Header":
+          begin
+            RecRef.SETTABLE(PurchInvHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Purchase Invoice",PurchInvHeader);
+          end;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          begin
+            RecRef.SETTABLE(PurchCrMemoHdr);
+            PAGE.RUNMODAL(PAGE::"Posted Purchase Credit Memo",PurchCrMemoHdr);
+          end;
+        DATABASE::"Return Shipment Header":
+          begin
+            RecRef.SETTABLE(ReturnShptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Return Shipment",ReturnShptHeader);
+          end;
+        DATABASE::"Return Receipt Header":
+          begin
+            RecRef.SETTABLE(ReturnRcptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Return Receipt",ReturnRcptHeader);
+          end;
+        DATABASE::"Transfer Header":
+          begin
+            RecRef.SETTABLE(TransferHeader);
+            PAGE.RUNMODAL(PAGE::"Transfer Order",TransferHeader);
+          end;
+        DATABASE::"Transfer Shipment Header":
+          begin
+            RecRef.SETTABLE(TransShptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Transfer Shipment",TransShptHeader);
+          end;
+        DATABASE::"Transfer Receipt Header":
+          begin
+            RecRef.SETTABLE(TransRcptHeader);
+            PAGE.RUNMODAL(PAGE::"Posted Transfer Receipt",TransRcptHeader);
+          end;
+        DATABASE::"Production Order":
+          begin
+            RecRef.SETTABLE(ProductionOrder);
+            case ProductionOrder.Status of
+              ProductionOrder.Status::Planned:
+                PAGE.RUNMODAL(PAGE::"Planned Production Order",ProductionOrder);
+              ProductionOrder.Status::"Firm Planned":
+                PAGE.RUNMODAL(PAGE::"Firm Planned Prod. Order",ProductionOrder);
+              ProductionOrder.Status::Released:
+                PAGE.RUNMODAL(PAGE::"Released Production Order",ProductionOrder);
+              ProductionOrder.Status::Finished:
+                PAGE.RUNMODAL(PAGE::"Finished Production Order",ProductionOrder);
+            end;
+          end;
+        DATABASE::"Production Forecast Name":
+          begin
+            RecRef.SETTABLE(ProdForecastName);
+            ProdForecastPage.SetProductionForecastName(ProdForecastName.Name);
+            ProdForecastPage.RUNMODAL;
+          end;
+        DATABASE::"Requisition Line":
+          begin
+            RecRef.SETTABLE(RequisitionLine);
+            ReqWkshTemplate.GET(RequisitionLine."Worksheet Template Name");
+            ReqWkshTemplate.TESTFIELD("Page ID");
+            PAGE.RUNMODAL(ReqWkshTemplate."Page ID",RequisitionLine);
+          end;
+        DATABASE::"Planning Component":
+          begin
+            RecRef.SETTABLE(PlanningComponent);
+
+            RequisitionLine.GET(
+              PlanningComponent."Worksheet Template Name",PlanningComponent."Worksheet Batch Name",
+              PlanningComponent."Worksheet Line No.");
+            PlanningWorksheet.SETTABLEVIEW(RequisitionLine);
+            PlanningWorksheet.SETRECORD(RequisitionLine);
+            PlanningWorksheet.RUN;
+
+            PlanningWorksheet.OpenPlanningComponent(PlanningComponent);
+          end;
+        DATABASE::"Assembly Header":
+          begin
+            RecRef.SETTABLE(AssemblyHeader);
+            PAGE.RUNMODAL(PAGE::"Assembly Order",AssemblyHeader);
+          end;
+        DATABASE::"Assembly Line":
+          begin
+            RecRef.SETTABLE(AssemblyLine);
+            AssemblyHeader.GET(AssemblyLine."Document Type",AssemblyLine."Document No.");
+            PAGE.RUNMODAL(PAGE::"Assembly Order",AssemblyHeader);
+          end
+        else
+          ERROR(Text0000,RecordID.TABLENO);
+      end;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

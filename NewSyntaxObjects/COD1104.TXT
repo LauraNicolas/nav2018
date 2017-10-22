@@ -1,0 +1,415 @@
+OBJECT Codeunit 1104 Cost Account Allocation
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            ConfirmCalcAllocationKeys;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AccPeriod@1000 : Record "Accounting Period";
+      DimensionManagement@1001 : Codeunit DimensionManagement;
+      Window@1002 : Dialog;
+      StartDate@1003 : Date;
+      EndDate@1004 : Date;
+      TotalShare@1005 : Decimal;
+      Text000@1006 : TextConst 'ENU=The dynamic shares of all allocation keys will be newly calculated. \The date filter is the current work date %1.\\Do you want to start the job?';
+      Text001@1007 : TextConst 'ENU=Update allocation keys\Allocation Targets #1########\Actual ID          #2########\Actual Line No.      #3########';
+      Text002@1008 : TextConst 'ENU=%1 allocation keys updated.';
+      Text003@1009 : TextConst 'ENU=The next accounting period for workdate %1 is not defined.\Verify the accounting period setup.';
+      Text004@1010 : TextConst 'ENU=Previous year is not defined in accounting period.\ID %1, line no. %2.';
+
+    LOCAL PROCEDURE ConfirmCalcAllocationKeys@1();
+    VAR
+      NoCalculated@1000 : Integer;
+    BEGIN
+      if not CONFIRM(Text000,true,WORKDATE) then
+        ERROR('');
+
+      NoCalculated := CalcAllocationKeys;
+
+      MESSAGE(Text002,NoCalculated);
+    END;
+
+    [External]
+    PROCEDURE CalcAllocationKeys@2() NoCalculated : Integer;
+    VAR
+      CostAllocationSource@1000 : Record "Cost Allocation Source";
+      CostAllocationTarget@1001 : Record "Cost Allocation Target";
+    BEGIN
+      Window.OPEN(Text001);
+
+      CostAllocationTarget.SETFILTER(Base,'<>%1',CostAllocationTarget.Base::Static);
+      Window.UPDATE(1,FORMAT(CostAllocationTarget.COUNT));
+      if CostAllocationSource.FINDSET then
+        repeat
+          Window.UPDATE(2,CostAllocationSource.ID);
+
+          CostAllocationTarget.RESET;
+          CostAllocationTarget.SETRANGE(ID,CostAllocationSource.ID);
+          CostAllocationTarget.SETFILTER(Base,'<>%1',CostAllocationTarget.Base::Static);
+          if CostAllocationTarget.FINDSET then
+            repeat
+              Window.UPDATE(3,FORMAT(CostAllocationTarget."Line No."));
+              CalcLineShare(CostAllocationTarget);
+              NoCalculated := NoCalculated + 1;
+            until CostAllocationTarget.NEXT = 0;
+          CostAllocationTarget.VALIDATE(Share);
+        until CostAllocationSource.NEXT = 0;
+      Window.CLOSE;
+
+      exit(NoCalculated);
+    END;
+
+    [External]
+    PROCEDURE CalcAllocationKey@3(VAR CostAllocationSource@1000 : Record "Cost Allocation Source");
+    VAR
+      CostAllocationTarget@1001 : Record "Cost Allocation Target";
+    BEGIN
+      CostAllocationTarget.RESET;
+      CostAllocationTarget.SETRANGE(ID,CostAllocationSource.ID);
+      CostAllocationTarget.SETFILTER(Base,'<>%1',CostAllocationTarget.Base::Static);
+      if CostAllocationTarget.FINDSET then
+        repeat
+          CalcLineShare(CostAllocationTarget);
+        until CostAllocationTarget.NEXT = 0;
+
+      CostAllocationTarget.VALIDATE(Share);
+    END;
+
+    [External]
+    PROCEDURE CalcLineShare@4(VAR CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    BEGIN
+      with CostAllocationTarget do begin
+        TotalShare := 0;
+        CalcDateFilter(CostAllocationTarget);
+
+        case Base of
+          Base::"G/L Entries":
+            CalcGLEntryShare(CostAllocationTarget);
+          Base::"G/L Budget Entries":
+            CalcGLBudgetEntryShare(CostAllocationTarget);
+          Base::"Cost Type Entries":
+            CalcCostEntryShare(CostAllocationTarget);
+          Base::"Cost Budget Entries":
+            CalcCostBudgetEntryShare(CostAllocationTarget);
+          Base::"No of Employees":
+            CalcEmployeeCountShare(CostAllocationTarget);
+          Base::"Items Sold (Qty.)":
+            CalcItemSoldQtyShare(CostAllocationTarget);
+          Base::"Items Purchased (Qty.)":
+            CalcItemPurchasedQtyShare(CostAllocationTarget);
+          Base::"Items Sold (Amount)":
+            CalcItemSoldAmtShare(CostAllocationTarget);
+          Base::"Items Purchased (Amount)":
+            CalcItemPurchasedAmtShare(CostAllocationTarget);
+        end;
+
+        if TotalShare <> Share then begin
+          Share := ABS(ROUND(TotalShare,0.00001));
+          MODIFY;
+        end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcGLEntryShare@5(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      GLEntry@1001 : Record "G/L Entry";
+      DimFilter@1002 : Text;
+    BEGIN
+      GLEntry.SETCURRENTKEY("Posting Date","G/L Account No.","Dimension Set ID");
+      GLEntry.SETRANGE("Posting Date",StartDate,EndDate);
+      GLEntry.SETFILTER("G/L Account No.",CostAllocationTarget."No. Filter");
+      if SetCostAccDimFilters(CostAllocationTarget) then begin
+        DimFilter := DimensionManagement.GetDimSetFilter;
+        GLEntry.SETFILTER("Dimension Set ID",DimFilter);
+      end;
+      GLEntry.CALCSUMS(Amount);
+      TotalShare := GLEntry.Amount;
+    END;
+
+    LOCAL PROCEDURE CalcGLBudgetEntryShare@6(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      GLBudgetEntry@1001 : Record "G/L Budget Entry";
+      DimFilter@1002 : Text;
+    BEGIN
+      GLBudgetEntry.SETCURRENTKEY("G/L Account No.",Date,"Budget Name","Dimension Set ID");
+      GLBudgetEntry.SETFILTER("G/L Account No.",CostAllocationTarget."No. Filter");
+      GLBudgetEntry.SETFILTER("Budget Name",CostAllocationTarget."Group Filter");
+      GLBudgetEntry.SETRANGE(Date,StartDate,EndDate);
+      if SetCostAccDimFilters(CostAllocationTarget) then begin
+        DimFilter := DimensionManagement.GetDimSetFilter;
+        GLBudgetEntry.SETFILTER("Dimension Set ID",DimFilter);
+      end;
+      GLBudgetEntry.CALCSUMS(Amount);
+      TotalShare := GLBudgetEntry.Amount;
+    END;
+
+    LOCAL PROCEDURE CalcCostEntryShare@7(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      CostEntry@1001 : Record "Cost Entry";
+    BEGIN
+      CostEntry.SETCURRENTKEY("Cost Type No.","Posting Date","Cost Center Code","Cost Object Code");
+      CostEntry.SETFILTER("Cost Type No.",CostAllocationTarget."No. Filter");
+      CostEntry.SETFILTER("Cost Center Code",CostAllocationTarget."Cost Center Filter");
+      CostEntry.SETFILTER("Cost Object Code",CostAllocationTarget."Cost Object Filter");
+      CostEntry.SETRANGE("Posting Date",StartDate,EndDate);
+      CostEntry.CALCSUMS(Amount);
+      TotalShare := CostEntry.Amount;
+    END;
+
+    LOCAL PROCEDURE CalcCostBudgetEntryShare@8(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      CostBudgetEntry@1001 : Record "Cost Budget Entry";
+    BEGIN
+      CostBudgetEntry.SETCURRENTKEY("Budget Name","Cost Type No.","Cost Center Code","Cost Object Code",Date);
+      CostBudgetEntry.SETFILTER("Cost Type No.",CostAllocationTarget."No. Filter");
+      CostBudgetEntry.SETFILTER("Cost Center Code",CostAllocationTarget."Cost Center Filter");
+      CostBudgetEntry.SETFILTER("Cost Object Code",CostAllocationTarget."Cost Object Filter");
+      CostBudgetEntry.SETRANGE(Date,StartDate,EndDate);
+      CostBudgetEntry.SETFILTER("Budget Name",CostAllocationTarget."Group Filter");
+      CostBudgetEntry.CALCSUMS(Amount);
+      TotalShare := CostBudgetEntry.Amount;
+    END;
+
+    LOCAL PROCEDURE CalcEmployeeCountShare@9(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      Employee@1001 : Record Employee;
+    BEGIN
+      Employee.SETCURRENTKEY(Status);
+      Employee.SETRANGE(Status,Employee.Status::Active);
+      Employee.SETFILTER("Cost Center Code",CostAllocationTarget."Cost Center Filter");
+      Employee.SETFILTER("Cost Object Code",CostAllocationTarget."Cost Object Filter");
+      TotalShare := Employee.COUNT;
+    END;
+
+    LOCAL PROCEDURE CalcItemSoldQtyShare@10(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      CalcItemShare(CostAllocationTarget,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry.FIELDNO("Invoiced Quantity"));
+    END;
+
+    LOCAL PROCEDURE CalcItemSoldAmtShare@11(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      CalcItemShare(CostAllocationTarget,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry.FIELDNO("Sales Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE CalcItemPurchasedQtyShare@12(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      CalcItemShare(CostAllocationTarget,ValueEntry."Item Ledger Entry Type"::Purchase,ValueEntry.FIELDNO("Invoiced Quantity"));
+    END;
+
+    LOCAL PROCEDURE CalcItemPurchasedAmtShare@13(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      ValueEntry@1001 : Record "Value Entry";
+    BEGIN
+      CalcItemShare(CostAllocationTarget,ValueEntry."Item Ledger Entry Type"::Purchase,ValueEntry.FIELDNO("Purchase Amount (Actual)"));
+    END;
+
+    LOCAL PROCEDURE CalcItemShare@20(CostAllocationTarget@1000 : Record "Cost Allocation Target";EntryType@1001 : Option;SumFieldNo@1002 : Integer);
+    VAR
+      ValueEntry@1003 : Record "Value Entry";
+      DimFilter@1004 : Text;
+    BEGIN
+      ValueEntry.SETCURRENTKEY("Item Ledger Entry Type","Posting Date","Item No.","Inventory Posting Group","Dimension Set ID");
+      ValueEntry.SETRANGE("Item Ledger Entry Type",EntryType);
+      ValueEntry.SETRANGE("Posting Date",StartDate,EndDate);
+      ValueEntry.SETFILTER("Item No.",CostAllocationTarget."No. Filter");
+      ValueEntry.SETFILTER("Inventory Posting Group",CostAllocationTarget."Group Filter");
+      if SetCostAccDimFilters(CostAllocationTarget) then begin
+        DimFilter := DimensionManagement.GetDimSetFilter;
+        ValueEntry.SETFILTER("Dimension Set ID",DimFilter);
+      end;
+      TotalShare := SumValueEntryField(ValueEntry,SumFieldNo);
+    END;
+
+    LOCAL PROCEDURE SumValueEntryField@21(VAR ValueEntry@1000 : Record "Value Entry";SumFieldNo@1001 : Integer) : Decimal;
+    BEGIN
+      case SumFieldNo of
+        ValueEntry.FIELDNO("Invoiced Quantity"):
+          begin
+            ValueEntry.CALCSUMS("Invoiced Quantity");
+            exit(ValueEntry."Invoiced Quantity");
+          end;
+        ValueEntry.FIELDNO("Sales Amount (Actual)"):
+          begin
+            ValueEntry.CALCSUMS("Sales Amount (Actual)");
+            exit(ValueEntry."Sales Amount (Actual)");
+          end;
+        ValueEntry.FIELDNO("Purchase Amount (Actual)"):
+          begin
+            ValueEntry.CALCSUMS("Purchase Amount (Actual)");
+            exit(ValueEntry."Purchase Amount (Actual)");
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE CalcDateFilter@14(CostAllocationTarget@1000 : Record "Cost Allocation Target");
+    VAR
+      PeriodStart@1001 : Date;
+      NextPeriodStart@1002 : Date;
+      LastPeriodStart@1003 : Date;
+      LastYearPeriodStart@1004 : Date;
+      LastYearNextPeriodStart@1005 : Date;
+      YearStart@1006 : Date;
+      NextYearStart@1007 : Date;
+      LastYearStart@1008 : Date;
+    BEGIN
+      AccPeriod.RESET;
+      StartDate := 0D;
+      EndDate := DMY2DATE(31,12,9999);
+
+      if CostAllocationTarget."Date Filter Code" = 0 then
+        exit;
+
+      AccPeriod.SETFILTER("Starting Date",'>%1',WORKDATE);
+      if not AccPeriod.FIND('-') then
+        ERROR(Text003,WORKDATE);
+
+      AccPeriod.SETFILTER("Starting Date",'>%1',WORKDATE);
+      AccPeriod.FIND('-');
+      NextPeriodStart := AccPeriod."Starting Date";
+      AccPeriod.SETRANGE("Starting Date");
+
+      AccPeriod.NEXT(-1);
+      PeriodStart := AccPeriod."Starting Date";
+
+      AccPeriod.NEXT(-1);
+      LastPeriodStart := AccPeriod."Starting Date";
+
+      AccPeriod.SETFILTER("Starting Date",'>%1',CALCDATE('<-1Y>',WORKDATE));
+      AccPeriod.FIND('-');
+      LastYearNextPeriodStart := AccPeriod."Starting Date";
+      AccPeriod.SETRANGE("Starting Date");
+
+      if AccPeriod.NEXT(-1) = 0 then
+        if CostAllocationTarget."Date Filter Code" in
+           [CostAllocationTarget."Date Filter Code"::"Period of Last Year",CostAllocationTarget."Date Filter Code"::"Last Fiscal Year"]
+        then
+          ERROR(Text004,CostAllocationTarget.ID,CostAllocationTarget."Line No.");
+      LastYearPeriodStart := AccPeriod."Starting Date";
+
+      AccPeriod.SETRANGE("New Fiscal Year",true);
+      AccPeriod.SETFILTER("Starting Date",'>%1',WORKDATE);
+      AccPeriod.FIND('-');
+      NextYearStart := AccPeriod."Starting Date";
+      AccPeriod.SETRANGE("Starting Date");
+
+      AccPeriod.NEXT(-1);
+      YearStart := AccPeriod."Starting Date";
+
+      if AccPeriod.NEXT(-1) = 0 then
+        if CostAllocationTarget."Date Filter Code" in
+           [CostAllocationTarget."Date Filter Code"::"Period of Last Year",CostAllocationTarget."Date Filter Code"::"Last Fiscal Year"]
+        then
+          ERROR(Text004,CostAllocationTarget.ID,CostAllocationTarget."Line No.");
+      LastYearStart := AccPeriod."Starting Date";
+
+      case CostAllocationTarget."Date Filter Code" of
+        CostAllocationTarget."Date Filter Code"::Week:
+          begin
+            StartDate := CALCDATE('<-CW>',WORKDATE);
+            EndDate := CALCDATE('<CW>',WORKDATE);
+          end;
+        CostAllocationTarget."Date Filter Code"::"Last Week":
+          begin
+            StartDate := CALCDATE('<-CW-1W>',WORKDATE);
+            EndDate := CALCDATE('<CW-1W>',WORKDATE);
+          end;
+        CostAllocationTarget."Date Filter Code"::Month:
+          begin
+            StartDate := CALCDATE('<-CM>',WORKDATE);
+            EndDate := CALCDATE('<CM>',WORKDATE);
+          end;
+        CostAllocationTarget."Date Filter Code"::"Last Month":
+          begin
+            StartDate := CALCDATE('<-CM-1M>',WORKDATE);
+            EndDate := CALCDATE('<CM>',StartDate);
+          end;
+        CostAllocationTarget."Date Filter Code"::"Month of Last Year":
+          begin
+            StartDate := CALCDATE('<-CM-1Y>',WORKDATE);
+            EndDate := CALCDATE('<CM-1Y>',WORKDATE);
+          end;
+        CostAllocationTarget."Date Filter Code"::Year:
+          begin
+            StartDate := CALCDATE('<-CY>',WORKDATE);
+            EndDate := CALCDATE('<CY>',WORKDATE);
+          end;
+        CostAllocationTarget."Date Filter Code"::"Last Year":
+          begin
+            StartDate := CALCDATE('<-CY-1Y>',WORKDATE);
+            EndDate := CALCDATE('<CY-1Y>',WORKDATE);
+          end;
+        CostAllocationTarget."Date Filter Code"::Period:
+          begin
+            StartDate := PeriodStart;
+            EndDate := NextPeriodStart - 1;
+          end;
+        CostAllocationTarget."Date Filter Code"::"Last Period":
+          begin
+            StartDate := LastPeriodStart;
+            EndDate := PeriodStart - 1;
+          end;
+        CostAllocationTarget."Date Filter Code"::"Period of Last Year":
+          begin
+            StartDate := LastYearPeriodStart;
+            EndDate := LastYearNextPeriodStart - 1;
+          end;
+        CostAllocationTarget."Date Filter Code"::"Fiscal Year":
+          begin
+            StartDate := YearStart;
+            EndDate := NextYearStart - 1;
+          end;
+        CostAllocationTarget."Date Filter Code"::"Last Fiscal Year":
+          begin
+            StartDate := LastYearStart;
+            EndDate := YearStart - 1;
+          end;
+      end;
+    END;
+
+    LOCAL PROCEDURE SetCostAccDimFilters@16(CostAllocationTarget@1000 : Record "Cost Allocation Target") FilterSet : Boolean;
+    VAR
+      CostAccSetup@1001 : Record "Cost Accounting Setup";
+    BEGIN
+      CostAccSetup.GET;
+      DimensionManagement.ClearDimSetFilter;
+      FilterSet :=
+        SetDimFilter(CostAccSetup."Cost Center Dimension",CostAllocationTarget."Cost Center Filter") or
+        SetDimFilter(CostAccSetup."Cost Object Dimension",CostAllocationTarget."Cost Object Filter");
+    END;
+
+    LOCAL PROCEDURE SetDimFilter@22(DimCode@1000 : Code[20];DimFilter@1001 : Text[250]) : Boolean;
+    BEGIN
+      if DimFilter <> '' then begin
+        DimensionManagement.GetDimSetIDsForFilter(DimCode,DimFilter);
+        exit(true);
+      end;
+    END;
+
+    [External]
+    PROCEDURE GetTotalShare@15(VAR ControlTotalShare@1000 : Decimal);
+    BEGIN
+      ControlTotalShare := TotalShare;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,421 @@
+OBJECT Codeunit 5335 Integration Table Synch.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      IntegrationTableMappingHasNoMappedFieldsErr@1001 : TextConst '@@@="%1=""Integration Field Mapping"" table caption, %2=""Integration Field Mapping.Integration Table Mapping Name"" field caption, %3 Integration Table Mapping value";ENU=There are no field mapping rows for the %2 %3 in the %1 table.';
+      IntegrationNotActivatedErr@1010 : TextConst 'ENU=Integration Management must be activated before you can start the synchronization processes.';
+      RecordMustBeIntegrationRecordErr@1011 : TextConst '@@@="%1 = Table caption";ENU=Table %1 must be registered for integration.';
+      IntegrationRecordNotFoundErr@1002 : TextConst '@@@="%1 = Internationalized RecordID, such as ''Customer 1234''";ENU=The integration record for %1 was not found.';
+      CurrentIntegrationSynchJob@1005 : Record "Integration Synch. Job";
+      CurrentIntegrationTableMapping@1020 : Record "Integration Table Mapping";
+      TempIntegrationFieldMapping@1022 : TEMPORARY Record "Temp Integration Field Mapping";
+      IntegrationTableConnectionType@1008 : TableConnectionType;
+      SynchActionType@1003 : 'None,Insert,Modify,ForceModify,IgnoreUnchanged,Fail,Skip,Delete';
+      JobState@1012 : 'Ready,Created,"In Progress"';
+      UnableToDetectSynchDirectionErr@1017 : TextConst 'ENU=The synchronization direction cannot be determined.';
+      MappingDoesNotAllowDirectionErr@1018 : TextConst '@@@="%1 = Integration Table Mapping caption, %2 Integration Table Mapping Name, %3 = the calculated synch. direction (FromIntegrationTable|ToIntegrationTable)";ENU=The %1 %2 is not configured for %3 synchronization.';
+      InvalidStateErr@1013 : TextConst 'ENU=The synchronization process is in a state that is not valid.';
+      DirectionChangeIsNotSupportedErr@1019 : TextConst 'ENU=You cannot change the synchronization direction after a job has started.';
+      TablesDoNotMatchMappingErr@1000 : TextConst '@@@="%1,%2 - tables Ids; %2 - name of the mapping.";ENU=Source table %1 and destination table %2 do not match integration table mapping %3.';
+      JobQueueLogEntryNo@1004 : Integer;
+
+    [External]
+    PROCEDURE BeginIntegrationSynchJob@38(ConnectionType@1005 : TableConnectionType;VAR IntegrationTableMapping@1001 : Record "Integration Table Mapping";SourceTableID@1000 : Integer) JobID : GUID;
+    VAR
+      DirectionIsDefined@1004 : Boolean;
+      ErrorMessage@1002 : Text;
+    BEGIN
+      EnsureState(JobState::Ready);
+
+      CLEAR(CurrentIntegrationSynchJob);
+      CLEAR(CurrentIntegrationTableMapping);
+
+      IntegrationTableConnectionType := ConnectionType;
+      CurrentIntegrationTableMapping := IntegrationTableMapping;
+      JobQueueLogEntryNo := IntegrationTableMapping.GetJobLogEntryNo;
+      DirectionIsDefined := DetermineSynchDirection(SourceTableID,ErrorMessage);
+
+      JobID := InitIntegrationSynchJob;
+      if not ISNULLGUID(JobID) then begin
+        JobState := JobState::Created;
+        if not DirectionIsDefined then
+          FinishIntegrationSynchJob(ErrorMessage);
+      end;
+    END;
+
+    [External]
+    PROCEDURE BeginIntegrationSynchJobLoging@5(ConnectionType@1000 : TableConnectionType;CodeunitID@1001 : Integer;JobLogEntryNo@1002 : Integer) JobID : GUID;
+    BEGIN
+      EnsureState(JobState::Ready);
+
+      CLEAR(CurrentIntegrationSynchJob);
+      CLEAR(CurrentIntegrationTableMapping);
+
+      IntegrationTableConnectionType := ConnectionType;
+      JobQueueLogEntryNo := JobLogEntryNo;
+      CurrentIntegrationTableMapping."Table ID" := DATABASE::Customer;
+      CurrentIntegrationTableMapping.Name := FORMAT(CodeunitID);
+      CurrentIntegrationTableMapping.Direction := CurrentIntegrationTableMapping.Direction::ToIntegrationTable;
+
+      JobID := InitIntegrationSynchJob;
+      if not ISNULLGUID(JobID) then
+        JobState := JobState::Created;
+    END;
+
+    [Internal]
+    PROCEDURE Synchronize@41(VAR SourceRecordRef@1000 : RecordRef;VAR DestinationRecordRef@1005 : RecordRef;ForceModify@1004 : Boolean;IgnoreSynchOnlyCoupledRecords@1001 : Boolean) : Boolean;
+    VAR
+      IntegrationRecordSynch@1006 : Codeunit "Integration Record Synch.";
+      IntegrationRecSynchInvoke@1008 : Codeunit "Integration Rec. Synch. Invoke";
+      SynchAction@1003 : Option;
+    BEGIN
+      if not DoesSourceMatchMapping(SourceRecordRef.NUMBER) then begin
+        FinishIntegrationSynchJob(
+          STRSUBSTNO(
+            TablesDoNotMatchMappingErr,SourceRecordRef.NUMBER,DestinationRecordRef.NUMBER,CurrentIntegrationTableMapping.GetName));
+        exit(false);
+      end;
+
+      EnsureState(JobState::Created);
+      // Ready to synch.
+      COMMIT;
+
+      // First synch. fixes direction
+      if JobState = JobState::Created then begin
+        JobState := JobState::"In Progress";
+        CurrentIntegrationSynchJob."Synch. Direction" := CurrentIntegrationTableMapping.Direction;
+        CurrentIntegrationSynchJob.MODIFY(true);
+
+        BuildTempIntegrationFieldMapping(
+          CurrentIntegrationTableMapping,CurrentIntegrationTableMapping.Direction,TempIntegrationFieldMapping);
+        COMMIT;
+      end else
+        if CurrentIntegrationTableMapping.Direction <> CurrentIntegrationSynchJob."Synch. Direction" then
+          ERROR(DirectionChangeIsNotSupportedErr);
+
+      if ForceModify then
+        SynchAction := SynchActionType::ForceModify
+      else
+        SynchAction := SynchActionType::Skip;
+
+      if SourceRecordRef.COUNT <> 0 then begin
+        if IsRecordSkipped(SourceRecordRef) then
+          SynchAction := SynchActionType::Skip
+        else begin
+          IntegrationRecordSynch.SetFieldMapping(TempIntegrationFieldMapping);
+          IntegrationRecSynchInvoke.SetContext(
+            CurrentIntegrationTableMapping,SourceRecordRef,DestinationRecordRef,
+            IntegrationRecordSynch,SynchAction,IgnoreSynchOnlyCoupledRecords,CurrentIntegrationSynchJob.ID,
+            IntegrationTableConnectionType);
+          if not IntegrationRecSynchInvoke.RUN then begin
+            LogSynchError(SourceRecordRef,DestinationRecordRef,GETLASTERRORTEXT);
+            IntegrationRecSynchInvoke.MarkIntegrationRecordAsFailed(
+              CurrentIntegrationTableMapping,SourceRecordRef,CurrentIntegrationSynchJob.ID,IntegrationTableConnectionType);
+            exit(false);
+          end;
+          IntegrationRecSynchInvoke.GetContext(
+            CurrentIntegrationTableMapping,SourceRecordRef,DestinationRecordRef,IntegrationRecordSynch,SynchAction);
+        end;
+        IncrementSynchJobCounters(SynchAction);
+      end;
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE Delete@1(RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      IntegrationRecDeleteInvoke@1003 : Codeunit "Integration Rec. Delete Invoke";
+      SynchDirection@1001 : Option;
+      SynchAction@1002 : Option;
+    BEGIN
+      EnsureState(JobState::Created);
+
+      JobState := JobState::"In Progress";
+      case RecRef.NUMBER of
+        CurrentIntegrationTableMapping."Table ID":
+          SynchDirection := CurrentIntegrationTableMapping.Direction::FromIntegrationTable;
+        CurrentIntegrationTableMapping."Integration Table ID":
+          SynchDirection := CurrentIntegrationTableMapping.Direction::ToIntegrationTable;
+      end;
+      CurrentIntegrationSynchJob.MODIFY(true);
+      COMMIT;
+      SynchAction := SynchActionType::Delete;
+
+      IntegrationRecDeleteInvoke.SetContext(
+        CurrentIntegrationTableMapping,RecRef,
+        SynchAction,CurrentIntegrationSynchJob.ID);
+      if not IntegrationRecDeleteInvoke.RUN then begin
+        LogSynchError(RecRef,RecRef,GETLASTERRORTEXT);
+        exit(false);
+      end;
+      IntegrationRecDeleteInvoke.GetContext(
+        CurrentIntegrationTableMapping,RecRef,SynchAction);
+
+      IncrementSynchJobCounters(SynchAction);
+
+      exit(true);
+    END;
+
+    [External]
+    PROCEDURE EndIntegrationSynchJob@50() : GUID;
+    BEGIN
+      exit(EndIntegrationSynchJobWithMsg(''));
+    END;
+
+    [External]
+    PROCEDURE EndIntegrationSynchJobWithMsg@7(FinalMessage@1000 : Text) : GUID;
+    BEGIN
+      if CurrentIntegrationSynchJob."Finish Date/Time" = 0DT then
+        FinishIntegrationSynchJob(FinalMessage);
+
+      JobState := JobState::Ready;
+      exit(CurrentIntegrationSynchJob.ID);
+    END;
+
+    [External]
+    PROCEDURE GetRowLastModifiedOn@2(IntegrationTableMapping@1000 : Record "Integration Table Mapping";FromRecordRef@1001 : RecordRef) : DateTime;
+    VAR
+      IntegrationRecord@1002 : Record "Integration Record";
+      ModifiedFieldRef@1004 : FieldRef;
+    BEGIN
+      if FromRecordRef.NUMBER = IntegrationTableMapping."Integration Table ID" then begin
+        ModifiedFieldRef := FromRecordRef.FIELD(IntegrationTableMapping."Int. Tbl. Modified On Fld. No.");
+        exit(ModifiedFieldRef.VALUE);
+      end;
+
+      if IntegrationRecord.FindByRecordId(FromRecordRef.RECORDID) then
+        exit(IntegrationRecord."Modified On");
+      ERROR(IntegrationRecordNotFoundErr,FORMAT(FromRecordRef.RECORDID,0,1));
+    END;
+
+    [External]
+    PROCEDURE GetStartDateTime@6() : DateTime;
+    BEGIN
+      exit(CurrentIntegrationSynchJob."Start Date/Time");
+    END;
+
+    LOCAL PROCEDURE EnsureState@51(RequiredState@1000 : Option);
+    BEGIN
+      if (JobState = JobState::"In Progress") and (RequiredState = JobState::Created) then
+        exit;
+
+      if RequiredState <> JobState then
+        ERROR(InvalidStateErr);
+    END;
+
+    LOCAL PROCEDURE DetermineSynchDirection@49(TableID@1000 : Integer;VAR ErrorMessage@1005 : Text) : Boolean;
+    VAR
+      DummyIntegrationTableMapping@1004 : Record "Integration Table Mapping";
+      SynchDirection@1002 : Option;
+    BEGIN
+      with CurrentIntegrationTableMapping do begin
+        ErrorMessage := '';
+        case TableID of
+          "Table ID":
+            SynchDirection := Direction::ToIntegrationTable;
+          "Integration Table ID":
+            SynchDirection := Direction::FromIntegrationTable;
+          else begin
+            ErrorMessage := UnableToDetectSynchDirectionErr;
+            exit(false);
+          end;
+        end;
+
+        if not (Direction in [SynchDirection,Direction::Bidirectional]) then begin
+          DummyIntegrationTableMapping.Direction := SynchDirection;
+          ErrorMessage :=
+            STRSUBSTNO(
+              MappingDoesNotAllowDirectionErr,TABLECAPTION,Name,
+              DummyIntegrationTableMapping.Direction);
+          exit(false);
+        end;
+
+        Direction := SynchDirection;
+      end;
+      exit(true);
+    END;
+
+    LOCAL PROCEDURE InitIntegrationSynchJob@22() : GUID;
+    VAR
+      JobID@1000 : GUID;
+    BEGIN
+      JobID := CreateIntegrationSynchJobEntry;
+
+      if EnsureIntegrationServicesState then begin // Prepare for processing
+        COMMIT;
+        exit(JobID);
+      end;
+    END;
+
+    LOCAL PROCEDURE FinishIntegrationSynchJob@14(FinalMessage@1000 : Text);
+    BEGIN
+      with CurrentIntegrationSynchJob do begin
+        if FinalMessage <> '' then
+          Message := COPYSTR(FinalMessage,1,MAXSTRLEN(Message));
+        "Finish Date/Time" := CURRENTDATETIME;
+        MODIFY(true);
+      end;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateIntegrationSynchJobEntry@8() JobID : GUID;
+    BEGIN
+      with CurrentIntegrationSynchJob do
+        if ISEMPTY or ISNULLGUID(ID) then begin
+          RESET;
+          INIT;
+          ID := CREATEGUID;
+          "Start Date/Time" := CURRENTDATETIME;
+          "Integration Table Mapping Name" := CurrentIntegrationTableMapping.GetName;
+          "Synch. Direction" := CurrentIntegrationTableMapping.Direction;
+          "Job Queue Log Entry No." := JobQueueLogEntryNo;
+          INSERT(true);
+          COMMIT;
+          JobID := ID;
+        end;
+    END;
+
+    LOCAL PROCEDURE EnsureIntegrationServicesState@12() : Boolean;
+    VAR
+      IntegrationManagement@1001 : Codeunit "Integration Management";
+    BEGIN
+      if not IntegrationManagement.IsIntegrationActivated then begin
+        FinishIntegrationSynchJob(IntegrationNotActivatedErr);
+        exit(false);
+      end;
+
+      with CurrentIntegrationTableMapping do begin
+        if IntegrationManagement.IsIntegrationRecord("Table ID") then
+          exit(true);
+
+        if IntegrationManagement.IsIntegrationRecordChild("Table ID") then
+          exit(true);
+
+        if "Integration Table ID" = DATABASE::"Graph Contact" then
+          exit(true);
+
+        FinishIntegrationSynchJob(STRSUBSTNO(RecordMustBeIntegrationRecordErr,"Table ID"));
+      end;
+      exit(false);
+    END;
+
+    LOCAL PROCEDURE BuildTempIntegrationFieldMapping@18(VAR IntegrationTableMapping@1000 : Record "Integration Table Mapping";SynchDirection@1003 : Option;VAR TempIntegrationFieldMapping@1001 : Record "Temp Integration Field Mapping");
+    VAR
+      IntegrationFieldMapping@1002 : Record "Integration Field Mapping";
+    BEGIN
+      with IntegrationFieldMapping do begin
+        SETRANGE("Integration Table Mapping Name",IntegrationTableMapping.Name);
+        SETFILTER(Direction,'%1|%2',SynchDirection,Direction::Bidirectional);
+        if ISEMPTY then
+          ERROR(
+            IntegrationTableMappingHasNoMappedFieldsErr,TABLECAPTION,
+            FIELDCAPTION("Integration Table Mapping Name"),IntegrationTableMapping.Name);
+
+        TempIntegrationFieldMapping.DELETEALL;
+        FINDSET;
+        repeat
+          TempIntegrationFieldMapping.INIT;
+          TempIntegrationFieldMapping."No." := "No.";
+          TempIntegrationFieldMapping."Integration Table Mapping Name" := "Integration Table Mapping Name";
+          TempIntegrationFieldMapping."Constant Value" := "Constant Value";
+          if SynchDirection = IntegrationTableMapping.Direction::ToIntegrationTable then begin
+            TempIntegrationFieldMapping."Source Field No." := "Field No.";
+            TempIntegrationFieldMapping."Destination Field No." := "Integration Table Field No.";
+            TempIntegrationFieldMapping."Validate Destination Field" := "Validate Integration Table Fld";
+          end else begin
+            TempIntegrationFieldMapping."Source Field No." := "Integration Table Field No.";
+            TempIntegrationFieldMapping."Destination Field No." := "Field No.";
+            TempIntegrationFieldMapping."Validate Destination Field" := "Validate Field";
+          end;
+          TempIntegrationFieldMapping.INSERT;
+        until NEXT = 0;
+      end;
+    END;
+
+    PROCEDURE LogSynchError@30(VAR SourceRecordRef@1000 : RecordRef;VAR DestinationRecordRef@1001 : RecordRef;ErrorMessage@1002 : Text);
+    VAR
+      IntegrationSynchJobErrors@1003 : Record "Integration Synch. Job Errors";
+      DummyEmptyRecordID@1004 : RecordID;
+    BEGIN
+      IncrementSynchJobCounters(SynchActionType::Fail);
+      if DestinationRecordRef.NUMBER = 0 then
+        IntegrationSynchJobErrors.LogSynchError(
+          CurrentIntegrationSynchJob.ID,SourceRecordRef.RECORDID,DummyEmptyRecordID,ErrorMessage)
+      else begin
+        IntegrationSynchJobErrors.LogSynchError(
+          CurrentIntegrationSynchJob.ID,SourceRecordRef.RECORDID,DestinationRecordRef.RECORDID,ErrorMessage);
+
+        // Close destination - it is in error state and can no longer be used.
+        DestinationRecordRef.CLOSE;
+      end;
+    END;
+
+    PROCEDURE IncrementSynchJobCounters@23(SynchAction@1000 : Option);
+    BEGIN
+      UpdateSynchJobCounters(SynchAction,1)
+    END;
+
+    PROCEDURE UpdateSynchJobCounters@9(SynchAction@1000 : Option;Counter@1001 : Integer);
+    BEGIN
+      if Counter = 0 then
+        exit;
+      with CurrentIntegrationSynchJob do begin
+        case SynchAction of
+          SynchActionType::Insert:
+            Inserted += Counter;
+          SynchActionType::Modify,SynchActionType::ForceModify:
+            Modified += Counter;
+          SynchActionType::IgnoreUnchanged:
+            Unchanged += Counter;
+          SynchActionType::Skip:
+            Skipped += Counter;
+          SynchActionType::Fail:
+            Failed += Counter;
+          SynchActionType::Delete:
+            Deleted += Counter;
+          else
+            exit
+        end;
+        MODIFY;
+        COMMIT;
+      end;
+    END;
+
+    LOCAL PROCEDURE DoesSourceMatchMapping@3(SourceTableID@1000 : Integer) : Boolean;
+    BEGIN
+      with CurrentIntegrationTableMapping do
+        case Direction of
+          Direction::ToIntegrationTable:
+            exit(SourceTableID = "Table ID");
+          Direction::FromIntegrationTable:
+            exit(SourceTableID = "Integration Table ID");
+        end;
+    END;
+
+    LOCAL PROCEDURE IsRecordSkipped@4(RecRef@1000 : RecordRef) : Boolean;
+    VAR
+      CRMIntegrationRecord@1001 : Record "CRM Integration Record";
+    BEGIN
+      CRMIntegrationRecord.FindByRecordID(RecRef.RECORDID);
+      exit(CRMIntegrationRecord.Skipped);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

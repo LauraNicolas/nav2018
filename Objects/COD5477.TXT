@@ -2,9 +2,9 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
 {
   OBJECT-PROPERTIES
   {
-    Date=28.05.17;
+    Date=06.10.17;
     Time=12:00:00;
-    Version List=NAVW110.0;
+    Version List=NAVW111.0;
   }
   PROPERTIES
   {
@@ -16,15 +16,17 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
   CODE
   {
     VAR
-      DocumentIDNotSpecifiedErr@1000 : TextConst 'ENU=You must specify a document id to get the lines.';
-      DocumentDoesNotExistErr@1001 : TextConst 'ENU=No document with the specified ID exists.';
-      MultipleDocumentsFoundForIdErr@1006 : TextConst 'ENU=Multiple documents have been found for the specified criteria.';
-      CannotModifyPostedInvioceErr@1002 : TextConst 'ENU=The invoice has been posted and can no longer be modified.';
-      CannotInsertALineThatAlreadyExistsErr@1003 : TextConst 'ENU=You cannot insert a line because a line already exists.';
-      CannotModifyALineThatDoesntExistErr@1004 : TextConst 'ENU=You cannot modify a line that does not exist.';
-      CannotInsertPostedInvoiceErr@1005 : TextConst 'ENU=Invoices created through the API must be in Draft state.';
+      DocumentIDNotSpecifiedForLinesErr@1000 : TextConst '@@@={Locked};ENU=You must specify a document id to get the lines.';
+      DocumentDoesNotExistErr@1001 : TextConst '@@@={Locked};ENU=No document with the specified ID exists.';
+      MultipleDocumentsFoundForIdErr@1006 : TextConst '@@@={Locked};ENU=Multiple documents have been found for the specified criteria.';
+      CannotModifyPostedInvioceErr@1002 : TextConst '@@@={Locked};ENU=The invoice has been posted and can no longer be modified.';
+      CannotInsertALineThatAlreadyExistsErr@1003 : TextConst '@@@={Locked};ENU=You cannot insert a line because a line already exists.';
+      CannotModifyALineThatDoesntExistErr@1004 : TextConst '@@@={Locked};ENU=You cannot modify a line that does not exist.';
+      CannotInsertPostedInvoiceErr@1005 : TextConst '@@@={Locked};ENU=Invoices created through the API must be in Draft state.';
       GraphMgtGeneralTools@1007 : Codeunit 5465;
-      CanOnlySetUOMForTypeItemErr@1008 : TextConst 'ENU=Unit of Measure can be set only for lines with type Item.';
+      CanOnlySetUOMForTypeItemErr@1008 : TextConst '@@@={Locked};ENU=Unit of Measure can be set only for lines with type Item.';
+      SkipUpdateDiscounts@1014 : Boolean;
+      VATPostingSetupForCombinationDoesNotExistErr@1009 : TextConst '@@@={Locked};ENU=The provided combination (%1,%2) of VAT Business Posting Group and VAT Product Posting Group does not exist in the VAT Posting Setup table.';
 
     [EventSubscriber(Table,36,OnAfterInsertEvent)]
     LOCAL PROCEDURE OnAfterInsertSalesHeader@2(VAR Rec@1000 : Record 36;RunTrigger@1001 : Boolean);
@@ -71,13 +73,19 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
     [EventSubscriber(Table,37,OnAfterInsertEvent)]
     LOCAL PROCEDURE OnAfterInsertSalesLine@71(VAR Rec@1000 : Record 37;RunTrigger@1001 : Boolean);
     BEGIN
-      ModifyTotalsSalesLine(Rec);
+      IF NOT CheckValidLineRecord(Rec) THEN
+        EXIT;
+
+      ModifyTotalsSalesLine(Rec,TRUE);
     END;
 
     [EventSubscriber(Table,37,OnAfterModifyEvent)]
     LOCAL PROCEDURE OnAfterModifySalesLine@72(VAR Rec@1000 : Record 37;VAR xRec@1001 : Record 37;RunTrigger@1002 : Boolean);
     BEGIN
-      ModifyTotalsSalesLine(Rec);
+      IF NOT CheckValidLineRecord(Rec) THEN
+        EXIT;
+
+      ModifyTotalsSalesLine(Rec,Rec."Recalculate Invoice Disc.");
     END;
 
     [EventSubscriber(Table,37,OnAfterDeleteEvent)]
@@ -85,12 +93,15 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
     VAR
       SalesLine@1003 : Record 37;
     BEGIN
+      IF NOT CheckValidLineRecord(Rec) THEN
+        EXIT;
+
       SalesLine.SETRANGE("Document No.",Rec."Document No.");
       SalesLine.SETRANGE("Document Type",Rec."Document Type");
       SalesLine.SETRANGE("Recalculate Invoice Disc.",TRUE);
 
       IF SalesLine.FINDFIRST THEN BEGIN
-        ModifyTotalsSalesLine(SalesLine);
+        ModifyTotalsSalesLine(SalesLine,TRUE);
         EXIT;
       END;
 
@@ -129,6 +140,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       IF NOT SalesInvoiceEntityAggregate.GET(xRec."No.",TRUE) THEN
         EXIT;
 
+      SalesInvoiceEntityAggregate.SetIsRenameAllowed(TRUE);
       SalesInvoiceEntityAggregate.RENAME(Rec."No.",TRUE);
     END;
 
@@ -231,6 +243,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
     PROCEDURE PropagateOnInsert@15(VAR SalesInvoiceEntityAggregate@1000 : Record 5475;VAR TempFieldBuffer@1003 : TEMPORARY Record 8450);
     VAR
       SalesHeader@1001 : Record 36;
+      TypeHelper@1002 : Codeunit 10;
       TargetRecordRef@1004 : RecordRef;
       DocTypeFieldRef@1006 : FieldRef;
       NoFieldRef@1007 : FieldRef;
@@ -248,7 +261,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
 
       NoFieldRef := TargetRecordRef.FIELD(SalesHeader.FIELDNO("No."));
 
-      TransferFieldsWithValidate(TempFieldBuffer,SalesInvoiceEntityAggregate,TargetRecordRef);
+      TypeHelper.TransferFieldsWithValidate(TempFieldBuffer,SalesInvoiceEntityAggregate,TargetRecordRef);
 
       TargetRecordRef.INSERT(TRUE);
 
@@ -259,6 +272,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
     PROCEDURE PropagateOnModify@16(VAR SalesInvoiceEntityAggregate@1000 : Record 5475;VAR TempFieldBuffer@1004 : TEMPORARY Record 8450);
     VAR
       SalesHeader@1001 : Record 36;
+      TypeHelper@1002 : Codeunit 10;
       TargetRecordRef@1005 : RecordRef;
       Exists@1003 : Boolean;
     BEGIN
@@ -274,7 +288,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       ELSE
         TargetRecordRef.OPEN(DATABASE::"Sales Header");
 
-      TransferFieldsWithValidate(TempFieldBuffer,SalesInvoiceEntityAggregate,TargetRecordRef);
+      TypeHelper.TransferFieldsWithValidate(TempFieldBuffer,SalesInvoiceEntityAggregate,TargetRecordRef);
 
       IF Exists THEN
         TargetRecordRef.MODIFY(TRUE)
@@ -428,6 +442,23 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       UpdateStatusIfChanged(SalesInvoiceEntityAggregate);
     END;
 
+    PROCEDURE SetTaxGroupIdAndCode@32(VAR SalesInvoiceLineAggregate@1000 : Record 5476;TaxGroupCode@1001 : Code[20];VATProductPostingGroupCode@1005 : Code[20];VATIdentifier@1006 : Code[20]);
+    VAR
+      TaxGroup@1004 : Record 321;
+      VATProductPostingGroup@1003 : Record 324;
+      GeneralLedgerSetup@1002 : Record 98;
+    BEGIN
+      IF GeneralLedgerSetup.UseVat THEN BEGIN
+        SalesInvoiceLineAggregate."Tax Code" := VATIdentifier;
+        IF VATProductPostingGroup.GET(VATProductPostingGroupCode) THEN
+          SalesInvoiceLineAggregate."Tax Id" := VATProductPostingGroup.Id;
+      END ELSE BEGIN
+        SalesInvoiceLineAggregate."Tax Code" := TaxGroupCode;
+        IF TaxGroup.GET(TaxGroupCode) THEN
+          SalesInvoiceLineAggregate."Tax Id" := TaxGroup.Id;
+      END;
+    END;
+
     PROCEDURE UpdateUnitOfMeasure@43(VAR Item@1004 : Record 27;JSONUnitOfMeasureTxt@1001 : Text);
     VAR
       TempFieldSet@1000 : TEMPORARY Record 2000000041;
@@ -499,6 +530,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       SalesInvoiceEntityAggregate."Invoice Discount Amount" := TotalSalesLine."Inv. Discount Amount";
       SalesInvoiceEntityAggregate.Amount := TotalSalesLine.Amount;
       SalesInvoiceEntityAggregate."Total Tax Amount" := VATAmount;
+      SalesInvoiceEntityAggregate."Subtotal Amount" := TotalSalesLine."Line Amount";
       SalesInvoiceEntityAggregate."Amount Including VAT" := TotalSalesLine."Amount Including VAT";
     END;
 
@@ -506,6 +538,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
     VAR
       SalesInvoiceHeader@1003 : Record 112;
       TotalSalesInvoiceHeader@1006 : Record 112;
+      TotalSalesInvoiceLine@1005 : Record 113;
       DocumentTotals@1004 : Codeunit 57;
       VATAmount@1002 : Decimal;
     BEGIN
@@ -521,6 +554,10 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       SalesInvoiceEntityAggregate."Invoice Discount Amount" := TotalSalesInvoiceHeader."Invoice Discount Amount";
       SalesInvoiceEntityAggregate.Amount := TotalSalesInvoiceHeader.Amount;
       SalesInvoiceEntityAggregate."Total Tax Amount" := VATAmount;
+
+      TotalSalesInvoiceLine.SETRANGE("Document No.",SalesInvoiceLine."Document No.");
+      TotalSalesInvoiceLine.CALCSUMS("Line Amount");
+      SalesInvoiceEntityAggregate."Subtotal Amount" := TotalSalesInvoiceLine."Line Amount";
       SalesInvoiceEntityAggregate."Amount Including VAT" := TotalSalesInvoiceHeader."Amount Including VAT";
     END;
 
@@ -533,7 +570,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
 
       SalesInvoiceEntityAggregate."Invoice Discount Amount" := 0;
       SalesInvoiceEntityAggregate."Total Tax Amount" := 0;
-
+      SalesInvoiceEntityAggregate."Subtotal Amount" := 0;
       SalesInvoiceEntityAggregate.Amount := 0;
       SalesInvoiceEntityAggregate."Amount Including VAT" := 0;
       SalesInvoiceEntityAggregate.MODIFY;
@@ -550,21 +587,15 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       EXIT(TRUE);
     END;
 
-    LOCAL PROCEDURE ModifyTotalsSalesLine@12(VAR SalesLine@1000 : Record 37);
+    LOCAL PROCEDURE ModifyTotalsSalesLine@12(VAR SalesLine@1000 : Record 37;RecalculateInvoiceDisc@1002 : Boolean);
     VAR
       SalesInvoiceEntityAggregate@1001 : Record 5475;
       SalesHeader@1003 : Record 36;
     BEGIN
-      IF SalesLine.ISTEMPORARY OR (NOT GraphMgtGeneralTools.IsApiEnabled) THEN
-        EXIT;
-
-      IF SalesLine."Document Type" <> SalesLine."Document Type"::Invoice THEN
+      IF NOT RecalculateInvoiceDisc THEN
         EXIT;
 
       IF NOT SalesInvoiceEntityAggregate.GET(SalesLine."Document No.",FALSE) THEN
-        EXIT;
-
-      IF NOT SalesLine."Recalculate Invoice Disc." THEN
         EXIT;
 
       SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
@@ -574,14 +605,43 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
 
     LOCAL PROCEDURE TransferSalesInvoiceLineAggregateToSalesLine@37(VAR SalesInvoiceLineAggregate@1000 : Record 5476;VAR SalesLine@1001 : Record 37;VAR TempFieldBuffer@1002 : TEMPORARY Record 8450);
     VAR
+      VATProductPostingGroup@1006 : Record 324;
+      SalesHeader@1010 : Record 36;
+      TaxGroup@1007 : Record 321;
+      GeneralLedgerSetup@1005 : Record 98;
+      VATPostingSetup@1009 : Record 325;
+      TypeHelper@1004 : Codeunit 10;
       SalesLineRecordRef@1003 : RecordRef;
+      BlankGUID@1008 : GUID;
     BEGIN
       SalesLine."Document Type" := SalesLine."Document Type"::Invoice;
+
       SalesLineRecordRef.GETTABLE(SalesLine);
 
-      TransferFieldsWithValidate(TempFieldBuffer,SalesInvoiceLineAggregate,SalesLineRecordRef);
-
+      TypeHelper.TransferFieldsWithValidate(TempFieldBuffer,SalesInvoiceLineAggregate,SalesLineRecordRef);
       SalesLineRecordRef.SETTABLE(SalesLine);
+
+      IF SalesInvoiceLineAggregate."Tax Id" <> BlankGUID THEN
+        IF GeneralLedgerSetup.UseVat THEN BEGIN
+          VATProductPostingGroup.SETRANGE(Id,SalesInvoiceLineAggregate."Tax Id");
+          VATProductPostingGroup.FINDFIRST;
+
+          SalesHeader.SETRANGE(Id,SalesInvoiceLineAggregate."Document Id");
+          IF NOT SalesHeader.FINDFIRST THEN
+            ERROR(DocumentDoesNotExistErr);
+
+          IF NOT VATPostingSetup.GET(SalesHeader."VAT Bus. Posting Group",VATProductPostingGroup.Code) THEN
+            ERROR(STRSUBSTNO(
+                VATPostingSetupForCombinationDoesNotExistErr,
+                SalesHeader."VAT Bus. Posting Group",
+                VATProductPostingGroup.Id));
+
+          SalesLine.VALIDATE("VAT Prod. Posting Group",VATProductPostingGroup.Code);
+        END ELSE BEGIN
+          TaxGroup.SETRANGE(Id,SalesInvoiceLineAggregate."Tax Id");
+          TaxGroup.FINDFIRST;
+          SalesLine.VALIDATE("Tax Group Code",TaxGroup.Code);
+        END;
     END;
 
     LOCAL PROCEDURE TransferIntegrationRecordID@10(VAR SalesHeader@1000 : Record 36);
@@ -615,28 +675,6 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       IntegrationManagement.InsertUpdateIntegrationRecord(SalesInvoiceHeaderRecordRef,CURRENTDATETIME);
     END;
 
-    LOCAL PROCEDURE TransferFieldsWithValidate@32(VAR TempFieldBuffer@1000 : TEMPORARY Record 8450;RecordVariant@1001 : Variant;VAR TargetTableRecRef@1002 : RecordRef);
-    VAR
-      DataTypeManagement@1006 : Codeunit 701;
-      SourceRecRef@1004 : RecordRef;
-      TargetFieldRef@1005 : FieldRef;
-      SourceFieldRef@1003 : FieldRef;
-    BEGIN
-      DataTypeManagement.GetRecordRef(RecordVariant,SourceRecRef);
-
-      TempFieldBuffer.RESET;
-      IF NOT TempFieldBuffer.FINDFIRST THEN
-        EXIT;
-
-      REPEAT
-        IF TargetTableRecRef.FIELDEXIST(TempFieldBuffer."Field ID") THEN BEGIN
-          SourceFieldRef := SourceRecRef.FIELD(TempFieldBuffer."Field ID");
-          TargetFieldRef := TargetTableRecRef.FIELD(TempFieldBuffer."Field ID");
-          TargetFieldRef.VALIDATE(SourceFieldRef.VALUE);
-        END;
-      UNTIL TempFieldBuffer.NEXT = 0;
-    END;
-
     PROCEDURE RedistributeInvoiceDiscounts@31(VAR SalesInvoiceEntityAggregate@1002 : Record 5475);
     VAR
       SalesLine@1001 : Record 37;
@@ -658,7 +696,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       SalesInvoiceEntityAggregate@1004 : Record 5475;
     BEGIN
       IF DocumentIdFilter = '' THEN
-        ERROR(DocumentIDNotSpecifiedErr);
+        ERROR(DocumentIDNotSpecifiedForLinesErr);
 
       SalesInvoiceEntityAggregate.SETFILTER(Id,DocumentIdFilter);
       IF NOT SalesInvoiceEntityAggregate.FINDFIRST THEN
@@ -681,11 +719,11 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
           CLEAR(SalesInvoiceLineAggregate);
           SalesInvoiceLineAggregate.TRANSFERFIELDS(SalesInvoiceLine,TRUE);
           SalesInvoiceLineAggregate."Document Id" := SalesInvoiceEntityAggregate.Id;
-          IF SalesInvoiceLine."VAT Calculation Type" = SalesInvoiceLine."VAT Calculation Type"::"Sales Tax" THEN
-            SalesInvoiceLineAggregate."Tax Code" := SalesInvoiceLine."Tax Group Code"
-          ELSE
-            SalesInvoiceLineAggregate."Tax Code" := SalesInvoiceLine."VAT Identifier";
-
+          SetTaxGroupIdAndCode(
+            SalesInvoiceLineAggregate,
+            SalesInvoiceLine."Tax Group Code",
+            SalesInvoiceLine."VAT Prod. Posting Group",
+            SalesInvoiceLine."VAT Identifier");
           SalesInvoiceLineAggregate."VAT %" := SalesInvoiceLine."VAT %";
           SalesInvoiceLineAggregate."Tax Amount" := SalesInvoiceLine."Amount Including VAT" - SalesInvoiceLine."VAT Base Amount";
           SalesInvoiceLineAggregate."Currency Code" := SalesInvoiceLine.GetCurrencyCode;
@@ -712,17 +750,23 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
 
     LOCAL PROCEDURE TransferFromSalesLine@40(VAR SalesInvoiceLineAggregate@1002 : Record 5476;VAR SalesInvoiceEntityAggregate@1000 : Record 5475;VAR SalesLine@1001 : Record 37);
     BEGIN
+      TransferFromSalesLineToAggregateLine(
+        SalesInvoiceLineAggregate,SalesLine,SalesInvoiceEntityAggregate.Id,SalesInvoiceEntityAggregate."Prices Including VAT");
+    END;
+
+    PROCEDURE TransferFromSalesLineToAggregateLine@101(VAR SalesInvoiceLineAggregate@1002 : Record 5476;VAR SalesLine@1001 : Record 37;DocumentId@1000 : GUID;PricesIncludingVAT@1003 : Boolean);
+    BEGIN
       CLEAR(SalesInvoiceLineAggregate);
       SalesInvoiceLineAggregate.TRANSFERFIELDS(SalesLine,TRUE);
-      SalesInvoiceLineAggregate."Document Id" := SalesInvoiceEntityAggregate.Id;
-      IF SalesLine."VAT Calculation Type" = SalesLine."VAT Calculation Type"::"Sales Tax" THEN
-        SalesInvoiceLineAggregate."Tax Code" := SalesLine."Tax Group Code"
-      ELSE
-        SalesInvoiceLineAggregate."Tax Code" := SalesLine."VAT Identifier";
-
+      SalesInvoiceLineAggregate."Document Id" := DocumentId;
+      SetTaxGroupIdAndCode(
+        SalesInvoiceLineAggregate,
+        SalesLine."Tax Group Code",
+        SalesLine."VAT Prod. Posting Group",
+        SalesLine."VAT Identifier");
       SalesInvoiceLineAggregate."VAT %" := SalesLine."VAT %";
       SalesInvoiceLineAggregate."Tax Amount" := SalesLine."Amount Including VAT" - SalesLine."VAT Base Amount";
-      SalesInvoiceLineAggregate."Prices Including Tax" := SalesInvoiceEntityAggregate."Prices Including VAT";
+      SalesInvoiceLineAggregate."Prices Including Tax" := PricesIncludingVAT;
       SalesInvoiceLineAggregate.UpdateReferencedRecordIds;
       UpdateLineAmountsFromSalesLine(SalesInvoiceLineAggregate,SalesLine);
     END;
@@ -754,7 +798,8 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       TransferSalesInvoiceLineAggregateToSalesLine(SalesInvoiceLineAggregate,SalesLine,TempFieldBuffer);
       SalesLine.INSERT(TRUE);
 
-      RedistributeInvoiceDiscounts(SalesInvoiceEntityAggregate);
+      IF NOT SkipUpdateDiscounts THEN
+        RedistributeInvoiceDiscounts(SalesInvoiceEntityAggregate);
 
       SalesLine.FIND;
       TransferFromSalesLine(SalesInvoiceLineAggregate,SalesInvoiceEntityAggregate,SalesLine);
@@ -774,7 +819,8 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
 
       SalesLine.MODIFY(TRUE);
 
-      RedistributeInvoiceDiscounts(SalesInvoiceEntityAggregate);
+      IF NOT SkipUpdateDiscounts THEN
+        RedistributeInvoiceDiscounts(SalesInvoiceEntityAggregate);
 
       SalesLine.FIND;
       TransferFromSalesLine(SalesInvoiceLineAggregate,SalesInvoiceEntityAggregate,SalesLine);
@@ -789,8 +835,53 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
 
       IF SalesLine.GET(SalesLine."Document Type"::Invoice,SalesInvoiceEntityAggregate."No.",SalesInvoiceLineAggregate."Line No.") THEN BEGIN
         SalesLine.DELETE(TRUE);
-        RedistributeInvoiceDiscounts(SalesInvoiceEntityAggregate);
+        IF NOT SkipUpdateDiscounts THEN
+          RedistributeInvoiceDiscounts(SalesInvoiceEntityAggregate);
       END;
+    END;
+
+    PROCEDURE PropagateMultipleLinesUpdate@65(VAR TempNewSalesInvoiceLineAggregate@1000 : TEMPORARY Record 5476);
+    VAR
+      TempCurrentSalesInvoiceLineAggregate@1005 : TEMPORARY Record 5476;
+      SalesInvoiceEntityAggregate@1001 : Record 5475;
+      SalesLine@1002 : Record 37;
+      TempAllFieldBuffer@1003 : TEMPORARY Record 8450;
+      NativeEDMTypes@1004 : Codeunit 2801;
+    BEGIN
+      VerifyCRUDIsPossibleForLine(TempNewSalesInvoiceLineAggregate,SalesInvoiceEntityAggregate);
+      NativeEDMTypes.GetFieldSetBufferWithAllFieldsSet(TempAllFieldBuffer);
+
+      IF NOT TempNewSalesInvoiceLineAggregate.FINDFIRST THEN BEGIN
+        SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Invoice);
+        SalesLine.SETRANGE("Document No.",SalesInvoiceEntityAggregate."No.");
+        SalesLine.DELETEALL(TRUE);
+        EXIT;
+      END;
+
+      LoadLines(TempCurrentSalesInvoiceLineAggregate,SalesInvoiceEntityAggregate.Id);
+
+      SkipUpdateDiscounts := TRUE;
+
+      // Remove deleted lines
+      IF TempCurrentSalesInvoiceLineAggregate.FINDSET(TRUE,FALSE) THEN
+        REPEAT
+          IF NOT TempNewSalesInvoiceLineAggregate.GET(SalesInvoiceEntityAggregate.Id,TempCurrentSalesInvoiceLineAggregate."Line No.") THEN
+            PropagateDeleteLine(TempCurrentSalesInvoiceLineAggregate);
+        UNTIL TempCurrentSalesInvoiceLineAggregate.NEXT = 0;
+
+      // Update Lines
+      TempNewSalesInvoiceLineAggregate.FINDFIRST;
+
+      REPEAT
+        IF NOT TempCurrentSalesInvoiceLineAggregate.GET(
+             TempNewSalesInvoiceLineAggregate."Document Id",TempNewSalesInvoiceLineAggregate."Line No.")
+        THEN
+          PropagateInsertLine(TempNewSalesInvoiceLineAggregate,TempAllFieldBuffer)
+        ELSE
+          PropagateModifyLine(TempNewSalesInvoiceLineAggregate,TempAllFieldBuffer);
+      UNTIL TempNewSalesInvoiceLineAggregate.NEXT = 0;
+
+      SalesInvoiceEntityAggregate.FIND;
     END;
 
     LOCAL PROCEDURE VerifyCRUDIsPossibleForLine@60(VAR SalesInvoiceLineAggregate@1001 : Record 5476;VAR SalesInvoiceEntityAggregate@1000 : Record 5475);
@@ -801,7 +892,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       IF ISNULLGUID(SalesInvoiceLineAggregate."Document Id") THEN BEGIN
         DocumentIDFilter := SalesInvoiceLineAggregate.GETFILTER("Document Id");
         IF DocumentIDFilter = '' THEN
-          ERROR(DocumentIDNotSpecifiedErr);
+          ERROR(DocumentIDNotSpecifiedForLinesErr);
         SalesInvoiceEntityAggregate.SETFILTER(Id,DocumentIDFilter);
       END ELSE
         SalesInvoiceEntityAggregate.SETRANGE(Id,SalesInvoiceLineAggregate."Document Id");
@@ -835,7 +926,7 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
       UpdateInvoiceDiscountAmount(SalesInvoiceLineAggregate);
     END;
 
-    LOCAL PROCEDURE UpdateInvoiceDiscountAmount@48(VAR SalesInvoiceLineAggregate@1000 : Record 5476);
+    PROCEDURE UpdateInvoiceDiscountAmount@48(VAR SalesInvoiceLineAggregate@1000 : Record 5476);
     BEGIN
       IF SalesInvoiceLineAggregate."Prices Including Tax" THEN
         SalesInvoiceLineAggregate."Inv. Discount Amount Excl. VAT" :=
@@ -848,6 +939,20 @@ OBJECT Codeunit 5477 Sales Invoice Aggregator
     BEGIN
       IF SalesInvoiceLineAggregate."API Type" <> SalesInvoiceLineAggregate."API Type"::Item THEN
         ERROR(CanOnlySetUOMForTypeItemErr);
+    END;
+
+    LOCAL PROCEDURE CheckValidLineRecord@41(VAR SalesLine@1000 : Record 37) : Boolean;
+    BEGIN
+      IF SalesLine.ISTEMPORARY THEN
+        EXIT(FALSE);
+
+      IF NOT GraphMgtGeneralTools.IsApiEnabled THEN
+        EXIT(FALSE);
+
+      IF SalesLine."Document Type" <> SalesLine."Document Type"::Invoice THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
     END;
 
     BEGIN

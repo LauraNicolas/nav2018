@@ -1,0 +1,481 @@
+OBJECT Codeunit 393 Reminder-Issue
+{
+  OBJECT-PROPERTIES
+  {
+    Date=20171006D;
+    Time=120000T;
+    Version List=NAVW111.0;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData "Cust. Ledger Entry"=rm,
+                TableData "Issued Reminder Header"=rimd,
+                TableData "Issued Reminder Line"=rimd,
+                TableData "Reminder/Fin. Charge Entry"=rimd;
+    OnRun=VAR
+            Cust@1000 : Record Customer;
+            CustLedgEntry@1001 : Record "Cust. Ledger Entry";
+            CustLedgEntry2@1004 : Record "Cust. Ledger Entry";
+            CustPostingGr@1003 : Record "Customer Posting Group";
+            ReminderLine@1002 : Record "Reminder Line";
+            ReminderFinChargeEntry@1007 : Record "Reminder/Fin. Charge Entry";
+            ReminderCommentLine@1006 : Record "Reminder Comment Line";
+          BEGIN
+            OnBeforeIssueReminder(ReminderHeader);
+
+            with ReminderHeader do begin
+              UpdateReminderRounding(ReminderHeader);
+              if (PostingDate <> 0D) and (ReplacePostingDate or ("Posting Date" = 0D)) then
+                VALIDATE("Posting Date",PostingDate);
+              TESTFIELD("Customer No.");
+              Cust.GET("Customer No.");
+              if Cust.Blocked = Cust.Blocked::All then
+                ERROR(Text004,Cust.FIELDCAPTION(Blocked),Cust.Blocked,Cust.TABLECAPTION,"Customer No.");
+
+              TESTFIELD("Posting Date");
+              TESTFIELD("Document Date");
+              TESTFIELD("Due Date");
+              TESTFIELD("Customer Posting Group");
+              if not DimMgt.CheckDimIDComb("Dimension Set ID") then
+                ERROR(
+                  DimensionCombinationIsBlockedErr,
+                  TABLECAPTION,"No.",DimMgt.GetDimCombErr);
+
+              TableID[1] := DATABASE::Customer;
+              No[1] := "Customer No.";
+              if not DimMgt.CheckDimValuePosting(TableID,No,"Dimension Set ID") then
+                ERROR(
+                  Text003,
+                  TABLECAPTION,"No.",DimMgt.GetDimValuePostingErr);
+
+              CustPostingGr.GET("Customer Posting Group");
+              CALCFIELDS("Interest Amount","Additional Fee","Remaining Amount","Add. Fee per Line");
+              if ("Interest Amount" = 0) and ("Additional Fee" = 0) and ("Add. Fee per Line" = 0) and ("Remaining Amount" = 0) then
+                ERROR(Text000);
+              SourceCodeSetup.GET;
+              SourceCodeSetup.TESTFIELD(Reminder);
+              SrcCode := SourceCodeSetup.Reminder;
+
+              if ("Issuing No." = '') and ("No. Series" <> "Issuing No. Series") then begin
+                TESTFIELD("Issuing No. Series");
+                "Issuing No." := NoSeriesMgt.GetNextNo("Issuing No. Series","Posting Date",true);
+                MODIFY;
+                COMMIT;
+              end;
+              if "Issuing No." <> '' then
+                DocNo := "Issuing No."
+              else
+                DocNo := "No.";
+
+              ReminderLine.SETRANGE("Reminder No.","No.");
+              if ReminderLine.FIND('-') then
+                repeat
+                  case ReminderLine.Type of
+                    ReminderLine.Type::" ":
+                      ReminderLine.TESTFIELD(Amount,0);
+                    ReminderLine.Type::"G/L Account":
+                      if "Post Additional Fee" then
+                        InsertGenJnlLineForFee(ReminderLine);
+                    ReminderLine.Type::"Customer Ledger Entry":
+                      begin
+                        ReminderLine.TESTFIELD("Entry No.");
+                        ReminderInterestAmount := ReminderInterestAmount + ReminderLine.Amount;
+                        ReminderInterestVATAmount := ReminderInterestVATAmount + ReminderLine."VAT Amount";
+                      end;
+                    ReminderLine.Type::"Line Fee":
+                      if "Post Add. Fee per Line" then begin
+                        CheckLineFee(ReminderLine,ReminderHeader);
+                        InsertGenJnlLineForFee(ReminderLine);
+                      end;
+                  end;
+                until ReminderLine.NEXT = 0;
+
+              if (ReminderInterestAmount <> 0) and "Post Interest" then begin
+                if ReminderInterestAmount < 0 then
+                  ERROR(Text001);
+                InitGenJnlLine(GenJnlLine."Account Type"::"G/L Account",CustPostingGr.GetInterestAccount,true);
+                GenJnlLine.VALIDATE("VAT Bus. Posting Group","VAT Bus. Posting Group");
+                GenJnlLine.VALIDATE(Amount,-ReminderInterestAmount - ReminderInterestVATAmount);
+                GenJnlLine.UpdateLineBalance;
+                TotalAmount := TotalAmount - GenJnlLine.Amount;
+                TotalAmountLCY := TotalAmountLCY - GenJnlLine."Balance (LCY)";
+                GenJnlLine."Bill-to/Pay-to No." := "Customer No.";
+                GenJnlLine.INSERT;
+              end;
+
+              if (TotalAmount <> 0) or (TotalAmountLCY <> 0) then begin
+                InitGenJnlLine(GenJnlLine."Account Type"::Customer,"Customer No.",true);
+                GenJnlLine.VALIDATE(Amount,TotalAmount);
+                GenJnlLine.VALIDATE("Amount (LCY)",TotalAmountLCY);
+                GenJnlLine.INSERT;
+              end;
+
+              CLEAR(GenJnlPostLine);
+              if GenJnlLine.FIND('-') then
+                repeat
+                  GenJnlLine2 := GenJnlLine;
+                  GenJnlLine2."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+                  GenJnlLine2."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+                  GenJnlLine2."Dimension Set ID" := "Dimension Set ID";
+                  GenJnlPostLine.RUN(GenJnlLine2);
+                until GenJnlLine.NEXT = 0;
+
+              GenJnlLine.DELETEALL;
+
+              if (ReminderInterestAmount <> 0) and "Post Interest" then begin
+                TESTFIELD("Fin. Charge Terms Code");
+                FinChrgTerms.GET("Fin. Charge Terms Code");
+                if FinChrgTerms."Interest Calculation" in
+                   [FinChrgTerms."Interest Calculation"::"Closed Entries",
+                    FinChrgTerms."Interest Calculation"::"All Entries"]
+                then begin
+                  ReminderLine.SETRANGE(Type,ReminderLine.Type::"Customer Ledger Entry");
+                  if ReminderLine.FIND('-') then
+                    repeat
+                      CustLedgEntry.GET(ReminderLine."Entry No.");
+                      CustLedgEntry.TESTFIELD("Currency Code","Currency Code");
+                      CustLedgEntry.CALCFIELDS("Remaining Amount");
+                      if CustLedgEntry."Remaining Amount" = 0 then begin
+                        CustLedgEntry."Calculate Interest" := false;
+                        CustLedgEntry.MODIFY;
+                      end;
+                      CustLedgEntry2.SETCURRENTKEY("Closed by Entry No.");
+                      CustLedgEntry2.SETRANGE("Closed by Entry No.",CustLedgEntry."Entry No.");
+                      CustLedgEntry2.SETRANGE("Closing Interest Calculated",false);
+                      CustLedgEntry2.MODIFYALL("Closing Interest Calculated",true);
+                    until ReminderLine.NEXT = 0;
+                  ReminderLine.SETRANGE(Type);
+                end;
+              end;
+
+              InsertIssuedReminderHeader(ReminderHeader,IssuedReminderHeader);
+
+              if NextEntryNo = 0 then begin
+                ReminderFinChargeEntry.LOCKTABLE;
+                if ReminderFinChargeEntry.FINDLAST then
+                  NextEntryNo := ReminderFinChargeEntry."Entry No." + 1
+                else
+                  NextEntryNo := 1;
+              end;
+
+              ReminderCommentLine.CopyComments(
+                ReminderCommentLine.Type::Reminder,ReminderCommentLine.Type::"Issued Reminder","No.",IssuedReminderHeader."No.");
+
+              if ReminderLine.FINDSET then
+                repeat
+                  if (ReminderLine.Type = ReminderLine.Type::"Customer Ledger Entry") and
+                     (ReminderLine."Entry No." <> 0)
+                  then begin
+                    InsertReminderEntry(ReminderHeader,ReminderLine);
+                    NextEntryNo := NextEntryNo + 1;
+                  end;
+                  InsertIssuedReminderLine(ReminderLine,IssuedReminderHeader."No.");
+                until ReminderLine.NEXT = 0;
+              ReminderLine.DELETEALL;
+              DELETE;
+            end;
+
+            OnAfterIssueReminder(ReminderHeader,IssuedReminderHeader."No.");
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=There is nothing to issue.';
+      Text001@1001 : TextConst 'ENU=Interests must be positive or 0';
+      DimensionCombinationIsBlockedErr@1002 : TextConst '@@@="%1: TABLECAPTION(Reminder Header); %2: Field(No.); %3: Text GetDimCombErr";ENU=The combination of dimensions used in %1 %2 is blocked. %3.';
+      Text003@1003 : TextConst 'ENU=A dimension used in %1 %2 has caused an error. %3';
+      SourceCodeSetup@1004 : Record "Source Code Setup";
+      FinChrgTerms@1006 : Record "Finance Charge Terms";
+      ReminderHeader@1007 : Record "Reminder Header";
+      IssuedReminderHeader@1009 : Record "Issued Reminder Header";
+      IssuedReminderLine@1010 : Record "Issued Reminder Line";
+      GenJnlLine@1016 : TEMPORARY Record "Gen. Journal Line";
+      GenJnlLine2@1017 : Record "Gen. Journal Line";
+      SourceCode@1018 : Record "Source Code";
+      DimMgt@1022 : Codeunit DimensionManagement;
+      NoSeriesMgt@1023 : Codeunit NoSeriesManagement;
+      GenJnlPostLine@1024 : Codeunit "Gen. Jnl.-Post Line";
+      DocNo@1025 : Code[20];
+      NextEntryNo@1026 : Integer;
+      ReplacePostingDate@1027 : Boolean;
+      PostingDate@1028 : Date;
+      SrcCode@1029 : Code[10];
+      ReminderInterestAmount@1030 : Decimal;
+      ReminderInterestVATAmount@1031 : Decimal;
+      TotalAmount@1032 : Decimal;
+      TotalAmountLCY@1033 : Decimal;
+      TableID@1034 : ARRAY [10] OF Integer;
+      No@1035 : ARRAY [10] OF Code[20];
+      Text004@1036 : TextConst 'ENU=%1 must not be %2 in %3 %4';
+      LineFeeAmountErr@1019 : TextConst '@@@="%1 = Document Type, %2 = Document No.. E.g. Line Fee amount must be positive and non-zero for Line Fee applied to Invoice 102421";ENU=Line Fee amount must be positive and non-zero for Line Fee applied to %1 %2.';
+      AppliesToDocErr@1020 : TextConst 'ENU=Line Fee has to be applied to an open overdue document.';
+      EntryNotOverdueErr@1037 : TextConst '@@@="%1 = Document Type, %2 = Document No., %3 = Table name. E.g. Invoice 12313 in Cust. Ledger Entry is not overdue.";ENU=%1 %2 in %3 is not overdue.';
+      LineFeeAlreadyIssuedErr@1038 : TextConst '@@@="%1 = Document Type, %2 = Document No. %3 = Reminder Level. E.g. The Line Fee for Invoice 141232 on reminder level 2 has already been issued.";ENU=The Line Fee for %1 %2 on reminder level %3 has already been issued.';
+      MultipleLineFeesSameDocErr@1040 : TextConst '@@@="%1 = Document Type, %2 = Document No. E.g. You cannot issue multiple line fees for the same level for the same document. Error with line fees for Invoice 1312312.";ENU=You cannot issue multiple line fees for the same level for the same document. Error with line fees for %1 %2.';
+
+    [External]
+    PROCEDURE Set@2(VAR NewReminderHeader@1000 : Record "Reminder Header";NewReplacePostingDate@1001 : Boolean;NewPostingDate@1002 : Date);
+    BEGIN
+      ReminderHeader := NewReminderHeader;
+      ReplacePostingDate := NewReplacePostingDate;
+      PostingDate := NewPostingDate;
+    END;
+
+    [External]
+    PROCEDURE GetIssuedReminder@3(VAR NewIssuedReminderHeader@1000 : Record "Issued Reminder Header");
+    BEGIN
+      NewIssuedReminderHeader := IssuedReminderHeader;
+    END;
+
+    LOCAL PROCEDURE InitGenJnlLine@4(AccType@1000 : Integer;AccNo@1001 : Code[20];SystemCreatedEntry@1002 : Boolean);
+    BEGIN
+      with ReminderHeader do begin
+        GenJnlLine.INIT;
+        GenJnlLine."Line No." := GenJnlLine."Line No." + 1;
+        GenJnlLine."Document Type" := GenJnlLine."Document Type"::Reminder;
+        GenJnlLine."Document No." := DocNo;
+        GenJnlLine."Posting Date" := "Posting Date";
+        GenJnlLine."Document Date" := "Document Date";
+        GenJnlLine."Account Type" := AccType;
+        GenJnlLine."Account No." := AccNo;
+        GenJnlLine.VALIDATE("Account No.");
+        if GenJnlLine."Account Type" = GenJnlLine."Account Type"::"G/L Account" then begin
+          GenJnlLine."Gen. Posting Type" := GenJnlLine."Gen. Posting Type"::Sale;
+          GenJnlLine."Gen. Bus. Posting Group" := "Gen. Bus. Posting Group";
+          GenJnlLine."VAT Bus. Posting Group" := "VAT Bus. Posting Group";
+        end;
+        GenJnlLine.VALIDATE("Currency Code","Currency Code");
+        if GenJnlLine."Account Type" = GenJnlLine."Account Type"::Customer then begin
+          GenJnlLine.VALIDATE(Amount,TotalAmount);
+          GenJnlLine.VALIDATE("Amount (LCY)",TotalAmountLCY);
+          GenJnlLine."Due Date" := "Due Date";
+        end;
+        GenJnlLine.Description := "Posting Description";
+        GenJnlLine."Source Type" := GenJnlLine."Source Type"::Customer;
+        GenJnlLine."Source No." := "Customer No.";
+        GenJnlLine."Source Code" := SrcCode;
+        GenJnlLine."Reason Code" := "Reason Code";
+        GenJnlLine."System-Created Entry" := SystemCreatedEntry;
+        GenJnlLine."Posting No. Series" := "Issuing No. Series";
+        GenJnlLine."Salespers./Purch. Code" := '';
+      end;
+    END;
+
+    [External]
+    PROCEDURE DeleteIssuedReminderLines@1(IssuedReminderHeader@1000 : Record "Issued Reminder Header");
+    VAR
+      IssuedReminderLine@1001 : Record "Issued Reminder Line";
+    BEGIN
+      IssuedReminderLine.SETRANGE("Reminder No.",IssuedReminderHeader."No.");
+      IssuedReminderLine.DELETEALL;
+    END;
+
+    [External]
+    PROCEDURE IncrNoPrinted@5(VAR IssuedReminderHeader@1000 : Record "Issued Reminder Header");
+    BEGIN
+      with IssuedReminderHeader do begin
+        FIND;
+        "No. Printed" := "No. Printed" + 1;
+        MODIFY;
+        COMMIT;
+      end;
+    END;
+
+    [External]
+    PROCEDURE TestDeleteHeader@19(ReminderHeader@1000 : Record "Reminder Header";VAR IssuedReminderHeader@1001 : Record "Issued Reminder Header");
+    BEGIN
+      with ReminderHeader do begin
+        CLEAR(IssuedReminderHeader);
+        SourceCodeSetup.GET;
+        SourceCodeSetup.TESTFIELD("Deleted Document");
+        SourceCode.GET(SourceCodeSetup."Deleted Document");
+
+        if ("Issuing No. Series" <> '') and
+           (("Issuing No." <> '') or ("No. Series" = "Issuing No. Series"))
+        then begin
+          IssuedReminderHeader.TRANSFERFIELDS(ReminderHeader);
+          if "Issuing No." <> '' then
+            IssuedReminderHeader."No." := "Issuing No.";
+          IssuedReminderHeader."Pre-Assigned No. Series" := "No. Series";
+          IssuedReminderHeader."Pre-Assigned No." := "No.";
+          IssuedReminderHeader."Posting Date" := TODAY;
+          IssuedReminderHeader."User ID" := USERID;
+          IssuedReminderHeader."Source Code" := SourceCode.Code;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE DeleteHeader@18(ReminderHeader@1000 : Record "Reminder Header";VAR IssuedReminderHeader@1001 : Record "Issued Reminder Header");
+    BEGIN
+      with ReminderHeader do begin
+        TestDeleteHeader(ReminderHeader,IssuedReminderHeader);
+        if IssuedReminderHeader."No." <> '' then begin
+          IssuedReminderHeader."Shortcut Dimension 1 Code" := '';
+          IssuedReminderHeader."Shortcut Dimension 2 Code" := '';
+          IssuedReminderHeader.INSERT;
+          IssuedReminderLine.INIT;
+          IssuedReminderLine."Reminder No." := "No.";
+          IssuedReminderLine."Line No." := 10000;
+          IssuedReminderLine.Description := SourceCode.Description;
+          IssuedReminderLine.INSERT;
+        end;
+      end;
+    END;
+
+    [External]
+    PROCEDURE ChangeDueDate@20(VAR ReminderEntry2@1102601000 : Record "Reminder/Fin. Charge Entry";NewDueDate@1102601001 : Date;OldDueDate@1102601002 : Date);
+    BEGIN
+      ReminderEntry2."Due Date" := ReminderEntry2."Due Date" + (NewDueDate - OldDueDate);
+      ReminderEntry2.MODIFY;
+    END;
+
+    LOCAL PROCEDURE InsertIssuedReminderHeader@10(ReminderHeader@1001 : Record "Reminder Header";VAR IssuedReminderHeader@1000 : Record "Issued Reminder Header");
+    BEGIN
+      IssuedReminderHeader.INIT;
+      IssuedReminderHeader.TRANSFERFIELDS(ReminderHeader);
+      IssuedReminderHeader."No." := DocNo;
+      IssuedReminderHeader."Pre-Assigned No." := ReminderHeader."No.";
+      IssuedReminderHeader."Source Code" := SrcCode;
+      IssuedReminderHeader."User ID" := USERID;
+      IssuedReminderHeader.INSERT;
+    END;
+
+    LOCAL PROCEDURE InsertIssuedReminderLine@15(ReminderLine@1000 : Record "Reminder Line";IssuedReminderNo@1001 : Code[20]);
+    VAR
+      IssuedReminderLine@1002 : Record "Issued Reminder Line";
+    BEGIN
+      IssuedReminderLine.INIT;
+      IssuedReminderLine.TRANSFERFIELDS(ReminderLine);
+      IssuedReminderLine."Reminder No." := IssuedReminderNo;
+      IssuedReminderLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE InsertGenJnlLineForFee@1000(VAR ReminderLine@1000 : Record "Reminder Line");
+    BEGIN
+      with ReminderHeader do
+        if ReminderLine.Amount <> 0 then begin
+          ReminderLine.TESTFIELD("No.");
+          InitGenJnlLine(GenJnlLine."Account Type"::"G/L Account",
+            ReminderLine."No.",
+            ReminderLine."Line Type" = ReminderLine."Line Type"::Rounding);
+          GenJnlLine."Gen. Prod. Posting Group" := ReminderLine."Gen. Prod. Posting Group";
+          GenJnlLine."VAT Prod. Posting Group" := ReminderLine."VAT Prod. Posting Group";
+          GenJnlLine."VAT Calculation Type" := ReminderLine."VAT Calculation Type";
+          if ReminderLine."VAT Calculation Type" =
+             ReminderLine."VAT Calculation Type"::"Sales Tax"
+          then begin
+            GenJnlLine."Tax Area Code" := "Tax Area Code";
+            GenJnlLine."Tax Liable" := "Tax Liable";
+            GenJnlLine."Tax Group Code" := ReminderLine."Tax Group Code";
+          end;
+          GenJnlLine."VAT %" := ReminderLine."VAT %";
+          GenJnlLine.VALIDATE(Amount,-ReminderLine.Amount - ReminderLine."VAT Amount");
+          GenJnlLine."VAT Amount" := -ReminderLine."VAT Amount";
+          GenJnlLine.UpdateLineBalance;
+          TotalAmount := TotalAmount - GenJnlLine.Amount;
+          TotalAmountLCY := TotalAmountLCY - GenJnlLine."Balance (LCY)";
+          GenJnlLine."Bill-to/Pay-to No." := "Customer No.";
+          GenJnlLine.INSERT;
+        end;
+    END;
+
+    LOCAL PROCEDURE InsertReminderEntry@13(ReminderHeader@1000 : Record "Reminder Header";ReminderLine@1002 : Record "Reminder Line");
+    VAR
+      ReminderFinChargeEntry@1001 : Record "Reminder/Fin. Charge Entry";
+    BEGIN
+      with ReminderFinChargeEntry do begin
+        INIT;
+        "Entry No." := NextEntryNo;
+        Type := Type::Reminder;
+        "No." := IssuedReminderHeader."No.";
+        "Posting Date" := ReminderHeader."Posting Date";
+        "Document Date" := ReminderHeader."Document Date";
+        "Due Date" := IssuedReminderHeader."Due Date";
+        "Customer No." := ReminderHeader."Customer No.";
+        "Customer Entry No." := ReminderLine."Entry No.";
+        "Document Type" := ReminderLine."Document Type";
+        "Document No." := ReminderLine."Document No.";
+        "Reminder Level" := ReminderLine."No. of Reminders";
+        "Remaining Amount" := ReminderLine."Remaining Amount";
+        "Interest Amount" := ReminderLine.Amount;
+        "Interest Posted" :=
+          (ReminderInterestAmount <> 0) and ReminderHeader."Post Interest";
+        "User ID" := USERID;
+        INSERT;
+      end;
+      if ReminderLine."Line Type" <> ReminderLine."Line Type"::"Not Due" then
+        UpdateCustLedgEntryLastIssuedReminderLevel(ReminderFinChargeEntry);
+    END;
+
+    LOCAL PROCEDURE CheckLineFee@6(VAR ReminderLine@1000 : Record "Reminder Line";VAR ReminderHeader@1001 : Record "Reminder Header");
+    VAR
+      CustLedgEntry3@1003 : Record "Cust. Ledger Entry";
+      ReminderLine2@1002 : Record "Reminder Line";
+    BEGIN
+      if ReminderLine.Amount <= 0 then
+        ERROR(LineFeeAmountErr,ReminderLine."Applies-to Document Type",ReminderLine."Applies-to Document No.");
+      if ReminderLine."Applies-to Document No." = '' then
+        ERROR(AppliesToDocErr);
+
+      with CustLedgEntry3 do begin
+        SETRANGE("Document Type",ReminderLine."Applies-to Document Type");
+        SETRANGE("Document No.",ReminderLine."Applies-to Document No.");
+        SETRANGE("Customer No.",ReminderHeader."Customer No.");
+        FINDFIRST;
+        if "Due Date" >= ReminderHeader."Document Date" then
+          ERROR(
+            EntryNotOverdueErr,FIELDCAPTION("Document No."),ReminderLine."Applies-to Document No.",TABLENAME);
+      end;
+
+      with IssuedReminderLine do begin
+        RESET;
+        SETRANGE("Applies-To Document Type",ReminderLine."Applies-to Document Type");
+        SETRANGE("Applies-To Document No.",ReminderLine."Applies-to Document No.");
+        SETRANGE(Type,Type::"Line Fee");
+        SETRANGE("No. of Reminders",ReminderLine."No. of Reminders");
+        if FINDFIRST then
+          ERROR(
+            LineFeeAlreadyIssuedErr,ReminderLine."Applies-to Document Type",ReminderLine."Applies-to Document No.",
+            ReminderLine."No. of Reminders");
+      end;
+
+      with ReminderLine2 do begin
+        RESET;
+        SETRANGE("Applies-to Document Type",ReminderLine."Applies-to Document Type");
+        SETRANGE("Applies-to Document No.",ReminderLine."Applies-to Document No.");
+        SETRANGE(Type,IssuedReminderLine.Type::"Line Fee");
+        SETRANGE("No. of Reminders",ReminderLine."No. of Reminders");
+        if COUNT > 1 then
+          ERROR(MultipleLineFeesSameDocErr,ReminderLine."Applies-to Document Type",ReminderLine."Applies-to Document No.");
+      end;
+    END;
+
+    [External]
+    PROCEDURE UpdateCustLedgEntryLastIssuedReminderLevel@7(ReminderFinChargeEntry@1000 : Record "Reminder/Fin. Charge Entry");
+    VAR
+      CustLedgEntry@1001 : Record "Cust. Ledger Entry";
+    BEGIN
+      CustLedgEntry.LOCKTABLE;
+      CustLedgEntry.GET(ReminderFinChargeEntry."Customer Entry No.");
+      CustLedgEntry."Last Issued Reminder Level" := ReminderFinChargeEntry."Reminder Level";
+      CustLedgEntry.MODIFY;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterIssueReminder@9(VAR ReminderHeader@1000 : Record "Reminder Header";IssuedReminderNo@1001 : Code[20]);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeIssueReminder@8(VAR ReminderHeader@1000 : Record "Reminder Header");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+
