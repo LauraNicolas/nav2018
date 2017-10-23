@@ -1,0 +1,94 @@
+codeunit 70009206 "G/L Show Source Card"
+{
+  // version GLSN10.0
+
+  TableNo="G/L Entry";
+
+  trigger OnRun();
+  begin
+    ShowGLEntrySourceCard(Rec);
+  end;
+
+  var
+    NoSourceDefined : TextConst ENU='Source is not defined';
+    SourceNotFound : TextConst ENU='%1 %2 %3 not found';
+
+  procedure ShowSourceNameCard(GLSourceName : Record "G/L Source Name");
+  begin
+    with GLSourceName do
+      case "Source Type" of
+      "Source Type"::Customer:
+        ShowCustCard("Source No.");
+      "Source Type"::Vendor:
+        ShowVendCard("Source No.");
+      "Source Type"::"Bank Account":
+        ShowBankAccCard("Source No.");
+      "Source Type"::"Fixed Asset":
+        ShowFixedAssetCard("Source No.");
+      else
+        ERROR(NoSourceDefined);
+    end;
+  end;
+
+  local procedure ShowGLEntrySourceCard(GLEntry : Record "G/L Entry");
+  begin
+    with GLEntry do
+      case "Source Type" of
+        "Source Type"::Customer:
+          ShowCustCard("Source No.");
+        "Source Type"::Vendor:
+          ShowVendCard("Source No.");
+        "Source Type"::"Bank Account":
+          ShowBankAccCard("Source No.");
+        "Source Type"::"Fixed Asset":
+          ShowFixedAssetCard("Source No.");
+        else
+          ERROR(NoSourceDefined);
+      end;
+  end;
+
+  local procedure ShowCustCard(No : Code[20]);
+  var
+    Cust : Record Customer;
+  begin
+    with Cust do
+      if GET(No) then
+        PAGE.RUN(PAGE::"Customer Card",Cust)
+      else
+        ERROR(SourceNotFound,TABLECAPTION,FIELDCAPTION("No."),No);
+  end;
+
+  local procedure ShowVendCard(No : Code[20]);
+  var
+    Vend : Record Vendor;
+  begin
+    with Vend do
+      if GET(No) then
+        PAGE.RUN(PAGE::"Vendor Card",Vend)
+      else
+        ERROR(SourceNotFound,TABLECAPTION,FIELDCAPTION("No."),No);
+  end;
+
+  local procedure ShowBankAccCard(No : Code[20]);
+  var
+    BankAcc : Record "Bank Account";
+  begin
+    with BankAcc do
+      if GET(No) then
+        PAGE.RUN(PAGE::"Bank Account Card",BankAcc)
+      else
+        ERROR(SourceNotFound,TABLECAPTION,FIELDCAPTION("No."),No);
+  end;
+
+  local procedure ShowFixedAssetCard(No : Code[20]);
+  var
+    FixedAsset : Record "Fixed Asset";
+  begin
+    with FixedAsset do
+      if GET(No) then
+        PAGE.RUN(PAGE::"Fixed Asset Card",FixedAsset)
+      else
+        ERROR(SourceNotFound,TABLECAPTION,FIELDCAPTION("No."),No);
+  end;
+}
+
