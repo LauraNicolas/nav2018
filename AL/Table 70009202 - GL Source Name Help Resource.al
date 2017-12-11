@@ -52,21 +52,6 @@ table 70009202 "G/L Source Name Help Resource"
       exit(Url);
   end;
 
-  procedure GetMediaFile(SetupCode : Code[50];var TempFileName : Text) : Boolean;
-  var
-    FileMgt : Codeunit "File Management";
-  begin
-    if GET(SetupCode) then
-      if Icon.HASVALUE then begin
-        TempFileName := FileMgt.CombinePath(TEMPORARYPATH,Code + '.png');
-        if EXISTS(TempFileName) then
-          ERASE(TempFileName);
-        Icon.EXPORTFILE(TempFileName);
-        if FileMgt.ServerFileExists(TempFileName) then
-          exit(true);
-      end;
-  end;
-
   procedure StartVideo(SetupCode : Code[50]);
   var
     VideoLink : Page "Video link";
