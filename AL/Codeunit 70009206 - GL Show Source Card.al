@@ -13,7 +13,7 @@ codeunit 70009206 "G/L Show Source Card"
     NoSourceDefined : TextConst ENU='Source is not defined';
     SourceNotFound : TextConst ENU='%1 %2 %3 not found';
 
-  procedure ShowSourceNameCard(GLSourceName : Record "G/L Source Name");
+  procedure ShowSourceNameCard(GLSourceName : Record "O4N GL SN");
   begin
     with GLSourceName do
       case "Source Type" of

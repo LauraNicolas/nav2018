@@ -1,10 +1,10 @@
-page 70009202 "G/L Source Name Help Resources"
+page 70009202 "O4N GL SN Help Resources"
 {
   // version GLSN10.0
 
   Editable=false;
   PageType=List;
-  SourceTable="G/L Source Name Help Resource";
+  SourceTable="O4N GL SN Help Resource";
 
   layout
   {

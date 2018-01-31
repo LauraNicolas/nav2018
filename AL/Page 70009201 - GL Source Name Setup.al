@@ -1,4 +1,4 @@
-page 70009201 "G/L Source Name Setup"
+page 70009201 "O4N GL SN Setup"
 {
   // version GLSN10.0
 
@@ -6,7 +6,7 @@ page 70009201 "G/L Source Name Setup"
   DeleteAllowed=false;
   InsertAllowed=false;
   PageType=Card;
-  SourceTable="G/L Source Name Setup";
+  SourceTable="O4N GL SN Setup";
 
   layout
   {

@@ -1,4 +1,4 @@
-codeunit 70009232 "G/L Source Name Icon 240x240"
+codeunit 70009232 "O4N GL SN Icon 240x240"
 {
   // version GLSN10.0.0.2
 

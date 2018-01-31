@@ -8,20 +8,20 @@ pageextension 70009201 pageextension70009201 extends "General Ledger Entries"
     {
       field("Source Type";"Source Type")
       {
-        AccessByPermission=TableData "G/L Source Name"=R;
+        AccessByPermission=TableData "O4N GL SN"=R;
         ApplicationArea=Basic,Suite;
         ToolTipML=ENU='Specifies the type of the master record associated with this entry';
       }
       field("Source No.";"Source No.")
       {
-        AccessByPermission=TableData "G/L Source Name"=R;
+        AccessByPermission=TableData "O4N GL SN"=R;
         ApplicationArea=Basic,Suite;
         ToolTipML=ENU='Specifies the number of the master record associated with this entry';
         Visible=false;
       }
       field("Source Name";"Source Name")
       {
-        AccessByPermission=TableData "G/L Source Name"=R;
+        AccessByPermission=TableData "O4N GL SN"=R;
         ApplicationArea=Basic,Suite;
         ToolTipML=ENU='Specifies the name of the master record associated with this entry';
       }
@@ -33,7 +33,7 @@ pageextension 70009201 pageextension70009201 extends "General Ledger Entries"
     {
       action(SourceCard)
       {
-        AccessByPermission=TableData "G/L Source Name"=R;
+        AccessByPermission=TableData "O4N GL SN"=R;
         ApplicationArea=Basic,Suite;
         CaptionML=ENU='Source Card';
         Image=Card;

@@ -1,4 +1,4 @@
-page 70009204 "G/L Source Name Group ListPart"
+page 70009204 "O4N GL SN Group ListPart"
 {
   // version GLSN10.0
 
@@ -6,7 +6,7 @@ page 70009204 "G/L Source Name Group ListPart"
   InsertAllowed=false;
   LinksAllowed=false;
   PageType=ListPart;
-  SourceTable="G/L Source Name Group Access";
+  SourceTable="O4N GL SN Group Access";
   SourceTableTemporary=true;
 
   layout
@@ -81,10 +81,10 @@ page 70009204 "G/L Source Name Group ListPart"
   end;
 
   var
-    GlobalTempUserAccess : Record "G/L Source Name User Access" temporary;
+    GlobalTempUserAccess : Record "O4N GL SN User Access" temporary;
     HasPermission : Boolean;
 
-  procedure Set(var TempGroupAccess : Record "G/L Source Name Group Access" temporary;var TempUserAccess : Record "G/L Source Name User Access" temporary);
+  procedure Set(var TempGroupAccess : Record "O4N GL SN Group Access" temporary;var TempUserAccess : Record "O4N GL SN User Access" temporary);
   begin
     COPY(TempGroupAccess,true);
     GlobalTempUserAccess.COPY(TempUserAccess,true);

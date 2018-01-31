@@ -1,11 +1,11 @@
-page 70009200 "G/L Source Name List"
+page 70009200 "O4N GL SN List"
 {
   // version GLSN10.0
 
   CaptionML=ENU='G/L Source Name List';
   Editable=false;
   PageType=List;
-  SourceTable="G/L Source Name";
+  SourceTable="O4N GL SN";
 
   layout
   {

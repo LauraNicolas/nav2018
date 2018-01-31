@@ -1,8 +1,8 @@
-table 70009202 "G/L Source Name Help Resource"
+table 70009202 "O4N GL SN Help Resource"
 {
   // version GLSN10.0
 
-  Permissions=TableData "G/L Source Name Help Resource"=im;
+  Permissions=TableData "O4N GL SN Help Resource"=im;
 
   fields
   {
@@ -159,7 +159,7 @@ table 70009202 "G/L Source Name Help Resource"
   var
     TempBlob : Record TempBlob;
     IconDescription : TextConst ENU='G/L Source Name Icon 70x70';
-    GLSourceNameIcon : Codeunit "G/L Source Name Icon 70x70";
+    GLSourceNameIcon : Codeunit "O4N GL SN Icon 70x70";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
     InitIcon(Get70PXIconCode,IconDescription,TempBlob);
@@ -169,7 +169,7 @@ table 70009202 "G/L Source Name Help Resource"
   var
     TempBlob : Record TempBlob;
     IconDescription : TextConst ENU='G/L Source Name Icon 150x150';
-    GLSourceNameIcon : Codeunit "G/L Source Name Icon 150x150";
+    GLSourceNameIcon : Codeunit "O4N GL SN Icon 150x150";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
     InitIcon(Get150PXIconCode,IconDescription,TempBlob);
@@ -179,7 +179,7 @@ table 70009202 "G/L Source Name Help Resource"
   var
     TempBlob : Record TempBlob;
     IconDescription : TextConst ENU='G/L Source Name Icon 240x240';
-    GLSourceNameIcon : Codeunit "G/L Source Name Icon 240x240";
+    GLSourceNameIcon : Codeunit "O4N GL SN Icon 240x240";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
     InitIcon(Get70PXIconCode,IconDescription,TempBlob);
@@ -189,7 +189,7 @@ table 70009202 "G/L Source Name Help Resource"
   var
     TempBlob : Record TempBlob;
     IconDescription : TextConst ENU='G/L Source Name Icon 250x250';
-    GLSourceNameIcon : Codeunit "G/L Source Name Icon 250x250";
+    GLSourceNameIcon : Codeunit "O4N GL SN Icon 250x250";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
     InitIcon(Get250PXIconCode,IconDescription,TempBlob);
@@ -199,7 +199,7 @@ table 70009202 "G/L Source Name Help Resource"
   var
     TempBlob : Record TempBlob;
     IconDescription : TextConst ENU='G/L Source Name Icon 417x417';
-    GLSourceNameIcon : Codeunit "G/L Source Name Icon 417x417";
+    GLSourceNameIcon : Codeunit "O4N GL SN Icon 417x417";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
     InitIcon(Get417PXIconCode,IconDescription,TempBlob);
@@ -207,7 +207,7 @@ table 70009202 "G/L Source Name Help Resource"
 
   local procedure InitUrl(UrlCode : Code[50];UrlLink : Text);
   var
-    GLSourceNameHelpResource : Record "G/L Source Name Help Resource";
+    GLSourceNameHelpResource : Record "O4N GL SN Help Resource";
   begin
     with GLSourceNameHelpResource do
       if not GET(UrlCode) then begin
@@ -219,7 +219,7 @@ table 70009202 "G/L Source Name Help Resource"
 
   local procedure InitIcon(IconCode : Code[50];IconDescription : Text;TempBlob : Record TempBlob);
   var
-    GLSourceNameHelpResource : Record "G/L Source Name Help Resource";
+    GLSourceNameHelpResource : Record "O4N GL SN Help Resource";
     InStr : InStream;
   begin
     with GLSourceNameHelpResource do

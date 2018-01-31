@@ -1,4 +1,4 @@
-codeunit 70009215 "G/L Source Name Assisted Setup"
+codeunit 70009215 "O4N GL SN Assisted Setup"
 {
   // version GLSN10.0
 
@@ -8,9 +8,9 @@ codeunit 70009215 "G/L Source Name Assisted Setup"
   end;
 
   var
-    Setup : Record "G/L Source Name Setup";
+    Setup : Record "O4N GL SN Setup";
     GLSourceNamesTxt : TextConst ENU='Set up G/L Source Names';
-    HelpResource : Record "G/L Source Name Help Resource";
+    HelpResource : Record "O4N GL SN Help Resource";
     RequiredPermissionMissingErr : TextConst ENU='You have not been granted required access rights to start the Assisted Setup.\\The Assisted Setup for G/L Source Names is about assigning the required permissions to users.  To be able to assign permissions you need to be granted either the SUPER og SECURITY permission set.';
 
   procedure VerifyUserAccess();
@@ -39,7 +39,7 @@ codeunit 70009215 "G/L Source Name Assisted Setup"
   begin
     Setup.GET;
     with TempAggregatedAssistedSetup do
-      SetStatus(TempAggregatedAssistedSetup,PAGE::"G/L Source Name Setup Wizard",Setup.Status);
+      SetStatus(TempAggregatedAssistedSetup,PAGE::"O4N GL SN Setup Wizard",Setup.Status);
   end;
 
   local procedure InitializeSetup();
@@ -58,7 +58,7 @@ codeunit 70009215 "G/L Source Name Assisted Setup"
   local procedure AddToAssistedSetup(var TempAggregatedAssistedSetup : Record "Aggregated Assisted Setup" temporary);
   var
     TempBlob : Record TempBlob;
-    GLSourceNameIcon : Codeunit "G/L Source Name Icon 240x240";
+    GLSourceNameIcon : Codeunit "O4N GL SN Icon 240x240";
     InStr : InStream;
   begin
     with TempAggregatedAssistedSetup do begin
@@ -67,7 +67,7 @@ codeunit 70009215 "G/L Source Name Assisted Setup"
       InsertAssistedSetupIcon(HelpResource.Get240PXIconCode,InStr);
 
       AddExtensionAssistedSetup(
-        PAGE::"G/L Source Name Setup Wizard",
+        PAGE::"O4N GL SN Setup Wizard",
         GLSourceNamesTxt,
         true,
         Setup.RECORDID,

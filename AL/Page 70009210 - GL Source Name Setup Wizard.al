@@ -1,4 +1,4 @@
-page 70009210 "G/L Source Name Setup Wizard"
+page 70009210 "O4N GL SN Setup Wizard"
 {
   // version GLSN10.0
 
@@ -7,7 +7,7 @@ page 70009210 "G/L Source Name Setup Wizard"
   InsertAllowed=false;
   LinksAllowed=false;
   PageType=NavigatePage;
-  SourceTable="G/L Source Name Setup";
+  SourceTable="O4N GL SN Setup";
   SourceTableTemporary=true;
 
   layout
@@ -69,7 +69,7 @@ page 70009210 "G/L Source Name Setup Wizard"
       {
         InstructionalTextML=ENU='Check the Assign or Remove Permisson Box to change read permission for the user group members';
         Visible=UserGroupReadVisible;
-        part(GroupsWithReadAccess;"G/L Source Name Group ListPart")
+        part(GroupsWithReadAccess;"O4N GL SN Group ListPart")
         {
           ApplicationArea=Basic,Suite;
           CaptionML=ENU='User Groups requiring read access';
@@ -80,7 +80,7 @@ page 70009210 "G/L Source Name Setup Wizard"
       {
         InstructionalTextML=ENU='Check the Assign or Remove Permisson Box to change both read and update permission for the user group members';
         Visible=UserGroupUpdateVisible;
-        part(GroupsWithUpdateAccess;"G/L Source Name Group ListPart")
+        part(GroupsWithUpdateAccess;"O4N GL SN Group ListPart")
         {
           ApplicationArea=Basic,Suite;
           CaptionML=ENU='User Groups requiring update access';
@@ -91,7 +91,7 @@ page 70009210 "G/L Source Name Setup Wizard"
       {
         InstructionalTextML=ENU='Check the Assign or Remove Permisson Box to change read permission for the user.  User Group members should be managed through the user group only.';
         Visible=UserReadVisible;
-        part(UsersWithReadAccess;"G/L Source Name Users ListPart")
+        part(UsersWithReadAccess;"O4N GL SN Users ListPart")
         {
           ApplicationArea=Basic,Suite;
           CaptionML=ENU='Users requiring read access';
@@ -102,7 +102,7 @@ page 70009210 "G/L Source Name Setup Wizard"
       {
         InstructionalTextML=ENU='Check the Assign or Remove Permisson Box to change both read and update permission for the user.  User Group members should be managed through the user group only';
         Visible=UserUpdateVisible;
-        part(UsersWithUpdateAccess;"G/L Source Name Users ListPart")
+        part(UsersWithUpdateAccess;"O4N GL SN Users ListPart")
         {
           ApplicationArea=Basic,Suite;
           CaptionML=ENU='Users requiring update access';
@@ -193,7 +193,7 @@ page 70009210 "G/L Source Name Setup Wizard"
         trigger OnAction();
         var
           CompanyInformation : Record "Company Information";
-          PermissionMgt : Codeunit "G/L Source Name Permission Mgt";
+          PermissionMgt : Codeunit "O4N GL SN Permission Mgt";
         begin
           PermissionMgt.SuggestAccessControl(TempUserAccess,TempGroupAccess);
           if "Registration E-Mail Address" = '' then
@@ -218,7 +218,7 @@ page 70009210 "G/L Source Name Setup Wizard"
 
         trigger OnAction();
         var
-          GLSourceNameMgt : Codeunit "G/L Source Name Mgt";
+          GLSourceNameMgt : Codeunit "O4N GL SN Mgt";
         begin
           GLSourceNameMgt.Refresh(false);
         end;
@@ -246,9 +246,9 @@ page 70009210 "G/L Source Name Setup Wizard"
 
   trigger OnOpenPage();
   var
-    Setup : Record "G/L Source Name Setup";
-    PermissionMgt : Codeunit "G/L Source Name Permission Mgt";
-    AssistedSetupMgt : Codeunit "G/L Source Name Assisted Setup";
+    Setup : Record "O4N GL SN Setup";
+    PermissionMgt : Codeunit "O4N GL SN Permission Mgt";
+    AssistedSetupMgt : Codeunit "O4N GL SN Assisted Setup";
   begin
     AssistedSetupMgt.VerifyUserAccess;
     INIT;
@@ -280,8 +280,8 @@ page 70009210 "G/L Source Name Setup Wizard"
   var
     MediaRepositoryStandard : Record "Media Repository";
     MediaRepositoryDone : Record "Media Repository";
-    TempUserAccess : Record "G/L Source Name User Access" temporary;
-    TempGroupAccess : Record "G/L Source Name Group Access" temporary;
+    TempUserAccess : Record "O4N GL SN User Access" temporary;
+    TempGroupAccess : Record "O4N GL SN Group Access" temporary;
     Step : Option Start,UserGroupRead,UserGroupUpdate,UserRead,UserUpdate,Registration,Finish;
     TopBannerVisible : Boolean;
     FirstStepVisible : Boolean;
@@ -441,7 +441,7 @@ page 70009210 "G/L Source Name Setup Wizard"
 
   local procedure StoreSetup();
   var
-    Setup : Record "G/L Source Name Setup";
+    Setup : Record "O4N GL SN Setup";
   begin
     Status := Status::Completed;
     Setup.GET;
@@ -451,7 +451,7 @@ page 70009210 "G/L Source Name Setup Wizard"
 
   local procedure StoreAccessControl();
   var
-    PermissionMgt : Codeunit "G/L Source Name Permission Mgt";
+    PermissionMgt : Codeunit "O4N GL SN Permission Mgt";
   begin
     PermissionMgt.SetAccessControl(TempUserAccess,TempGroupAccess);
   end;

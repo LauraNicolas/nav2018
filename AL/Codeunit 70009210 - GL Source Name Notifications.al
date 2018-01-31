@@ -1,4 +1,4 @@
-codeunit 70009210 "G/L Source Name Notifications"
+codeunit 70009210 "O4N GL SN Notifications"
 {
   // version GLSN10.0.0.1
 
@@ -8,14 +8,14 @@ codeunit 70009210 "G/L Source Name Notifications"
   end;
 
   var
-    GLSourceName : Record "G/L Source Name";
+    GLSourceName : Record "O4N GL SN";
     NewFeatuerNotificationIdTxt : TextConst Comment='{Locked}',ENU='1dd20373-27f8-4c68-a7b4-aab7ca199b98';
     NewFeatureMessageTxt : TextConst ENU='We have added a new feature to the General Ledger Entries.  Now you can see the Source Name column!';
     NewFeatureLinkTxt : TextConst ENU='Show me the details';
     MissingPermissionNotificationIdTxt : TextConst Comment='{Locked}',ENU='4fa8230a-53e5-4182-8423-373dc6f23f9d';
     MissingPermissionMessageText : TextConst ENU='You don''t have permissions to use our new feature that will show Source Names.  Please contact your administrator.';
     MissingPermissionLinkTxt : TextConst ENU='What should I show?';
-    GLSourceNameUserSetup : Record "G/L Source Name User Setup";
+    GLSourceNameUserSetup : Record "O4N GL SN User Setup";
 
   [EventSubscriber(ObjectType::Page, 20, 'OnOpenPageEvent', '', true, true)]
   local procedure CatchGLEntriesOpenPage(var Rec : Record "G/L Entry");
@@ -36,7 +36,7 @@ codeunit 70009210 "G/L Source Name Notifications"
       ID := GetMissingPermissionNotificationId;
       MESSAGE := MissingPermissionMessageText;
       SCOPE := NOTIFICATIONSCOPE::LocalScope;
-      ADDACTION(MissingPermissionLinkTxt,CODEUNIT::"G/L Source Name Perm. Notif.",'ShowAssistedSetupToUser');
+      ADDACTION(MissingPermissionLinkTxt,CODEUNIT::"O4N GL SN Perm. Notif.",'ShowAssistedSetupToUser');
       SEND;
     end;
     SetNotificationHasBeenShown(GetMissingPermissionNotificationId);
@@ -51,7 +51,7 @@ codeunit 70009210 "G/L Source Name Notifications"
       ID := GetNewFeatuerNotificationId;
       MESSAGE := NewFeatureMessageTxt;
       SCOPE := NOTIFICATIONSCOPE::LocalScope;
-      ADDACTION(NewFeatureLinkTxt,CODEUNIT::"G/L Source Name Feature Notif.",'ShowDetailsToUser');
+      ADDACTION(NewFeatureLinkTxt,CODEUNIT::"O4N GL SN Feature Notif.",'ShowDetailsToUser');
       SEND;
     end;
     SetNotificationHasBeenShown(GetNewFeatuerNotificationId);

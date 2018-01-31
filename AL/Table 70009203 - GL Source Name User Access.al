@@ -1,4 +1,4 @@
-table 70009203 "G/L Source Name User Access"
+table 70009203 "O4N GL SN User Access"
 {
   // version GLSN10.0
 

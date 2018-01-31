@@ -1,4 +1,4 @@
-codeunit 70009211 "G/L Source Name Feature Notif."
+codeunit 70009211 "O4N GL SN Feature Notif."
 {
   // version GLSN10.0
 

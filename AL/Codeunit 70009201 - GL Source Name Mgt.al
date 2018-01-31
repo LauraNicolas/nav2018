@@ -1,8 +1,8 @@
-codeunit 70009201 "G/L Source Name Mgt"
+codeunit 70009201 "O4N GL SN Mgt"
 {
   // version GLSN10.0
 
-  Permissions=TableData "G/L Source Name"=rimd;
+  Permissions=TableData "O4N GL SN"=rimd;
 
   trigger OnRun();
   begin
@@ -17,7 +17,7 @@ codeunit 70009201 "G/L Source Name Mgt"
 
   procedure AddSource(SourceType : Option;SourceNo : Code[20];SourceName : Text[50]);
   var
-    GLSourceName : Record "G/L Source Name";
+    GLSourceName : Record "O4N GL SN";
   begin
     with GLSourceName do begin
       if not WRITEPERMISSION then exit;
@@ -35,7 +35,7 @@ codeunit 70009201 "G/L Source Name Mgt"
 
   procedure RemoveSource(SourceType : Option;SourceNo : Code[20]);
   var
-    GLSourceName : Record "G/L Source Name";
+    GLSourceName : Record "O4N GL SN";
   begin
     with GLSourceName do begin
       if not WRITEPERMISSION then exit;
@@ -46,7 +46,7 @@ codeunit 70009201 "G/L Source Name Mgt"
 
   procedure UpdateSource(SourceType : Option;SourceNo : Code[20];SourceName : Text[50]);
   var
-    GLSourceName : Record "G/L Source Name";
+    GLSourceName : Record "O4N GL SN";
   begin
     with GLSourceName do begin
       if not WRITEPERMISSION then exit;
@@ -62,7 +62,7 @@ codeunit 70009201 "G/L Source Name Mgt"
 
   procedure Refresh(HideMessage : Boolean);
   var
-    GLSourceName : Record "G/L Source Name";
+    GLSourceName : Record "O4N GL SN";
     Customer : Record Customer;
     Vendor : Record Vendor;
     BankAccount : Record "Bank Account";
@@ -91,7 +91,7 @@ codeunit 70009201 "G/L Source Name Mgt"
 
   procedure PopulateSourceTable();
   var
-    GLSourceName : Record "G/L Source Name";
+    GLSourceName : Record "O4N GL SN";
     Customer : Record Customer;
     Vendor : Record Vendor;
     BankAccount : Record "Bank Account";

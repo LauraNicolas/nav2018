@@ -1,4 +1,4 @@
-codeunit 70009216 "G/L Source Name Permission Mgt"
+codeunit 70009216 "O4N GL SN Permission Mgt"
 {
   // version GLSN10.0
 
@@ -11,22 +11,22 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
     ReadRoleId : TextConst ENU='G/L-SOURCE NAMES';
     UpdateRoleId : TextConst ENU='G/L-SOURCE NAMES, E';
 
-  procedure GetAccessControl(var TempUserAccess : Record "G/L Source Name User Access" temporary;var TempGroupAccess : Record "G/L Source Name Group Access" temporary);
+  procedure GetAccessControl(var TempUserAccess : Record "O4N GL SN User Access" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary);
   begin
     GetReadOnlyMembers(TempUserAccess,TempGroupAccess);
     GetUpdateMembers(TempUserAccess,TempGroupAccess);
   end;
 
-  procedure SetAccessControl(var TempUserAccess : Record "G/L Source Name User Access" temporary;var TempGroupAccess : Record "G/L Source Name Group Access" temporary);
+  procedure SetAccessControl(var TempUserAccess : Record "O4N GL SN User Access" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary);
   begin
     UpdateUserAccessControl(TempUserAccess);
     UpdateGroupAccessControl(TempGroupAccess);
   end;
 
-  procedure SuggestAccessControl(var TempUserAccess : Record "G/L Source Name User Access" temporary;var TempGroupAccess : Record "G/L Source Name Group Access" temporary);
+  procedure SuggestAccessControl(var TempUserAccess : Record "O4N GL SN User Access" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary);
   var
-    LocalTempUserAccess : Record "G/L Source Name User Access" temporary;
-    LocalTempGroupAccess : Record "G/L Source Name Group Access" temporary;
+    LocalTempUserAccess : Record "O4N GL SN User Access" temporary;
+    LocalTempGroupAccess : Record "O4N GL SN Group Access" temporary;
   begin
     with LocalTempGroupAccess do begin
       COPY(TempGroupAccess,true);
@@ -40,9 +40,9 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
     end;
   end;
 
-  local procedure UpdateUserAccessControl(var TempUserAccess : Record "G/L Source Name User Access" temporary);
+  local procedure UpdateUserAccessControl(var TempUserAccess : Record "O4N GL SN User Access" temporary);
   var
-    LocalTempUserAccess : Record "G/L Source Name User Access" temporary;
+    LocalTempUserAccess : Record "O4N GL SN User Access" temporary;
   begin
     with LocalTempUserAccess do begin
       COPY(TempUserAccess,true);
@@ -60,9 +60,9 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
     end;
   end;
 
-  local procedure UpdateGroupAccessControl(var TempGroupAccess : Record "G/L Source Name Group Access" temporary);
+  local procedure UpdateGroupAccessControl(var TempGroupAccess : Record "O4N GL SN Group Access" temporary);
   var
-    LocalTempGroupAccess : Record "G/L Source Name Group Access" temporary;
+    LocalTempGroupAccess : Record "O4N GL SN Group Access" temporary;
   begin
     with LocalTempGroupAccess do begin
       COPY(TempGroupAccess,true);
@@ -79,7 +79,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
     end;
   end;
 
-  local procedure GetReadOnlyMembers(var TempUserAccess : Record "G/L Source Name User Access" temporary;var TempGroupAccess : Record "G/L Source Name Group Access" temporary);
+  local procedure GetReadOnlyMembers(var TempUserAccess : Record "O4N GL SN User Access" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary);
   var
     TempUser : Record User temporary;
     TempUserGroup : Record "User Group" temporary;
@@ -90,7 +90,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
     CopyUsers(TempUser,TempUserAccess,TempGroupAccess,TempGroupAccess."Permission Level"::Read);
   end;
 
-  local procedure GetUpdateMembers(var TempUserAccess : Record "G/L Source Name User Access" temporary;var TempGroupAccess : Record "G/L Source Name Group Access" temporary);
+  local procedure GetUpdateMembers(var TempUserAccess : Record "O4N GL SN User Access" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary);
   var
     TempUser : Record User temporary;
     TempUserGroup : Record "User Group" temporary;
@@ -104,7 +104,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
     CopyUsers(TempUser,TempUserAccess,TempGroupAccess,TempGroupAccess."Permission Level"::Update);
   end;
 
-  local procedure CopyUserGroups(var TempUserGroup : Record "User Group" temporary;var TempGroupAccess : Record "G/L Source Name Group Access" temporary;PermissionLevel : Option);
+  local procedure CopyUserGroups(var TempUserGroup : Record "User Group" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary;PermissionLevel : Option);
   begin
     with TempUserGroup do
       if FIND('-') then repeat
@@ -116,7 +116,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
       until NEXT = 0;
   end;
 
-  local procedure CopyUsers(var TempUser : Record User temporary;var TempUserAccess : Record "G/L Source Name User Access" temporary;var TempGroupAccess : Record "G/L Source Name Group Access" temporary;PermissionLevel : Option);
+  local procedure CopyUsers(var TempUser : Record User temporary;var TempUserAccess : Record "O4N GL SN User Access" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary;PermissionLevel : Option);
   begin
     with TempUser do
       if FIND('-') then repeat
@@ -196,10 +196,10 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
     end;
   end;
 
-  local procedure HasAccessViaGroup(TempUserAccess : Record "G/L Source Name User Access" temporary;var TempGroupAccess : Record "G/L Source Name Group Access" temporary) : Code[20];
+  local procedure HasAccessViaGroup(TempUserAccess : Record "O4N GL SN User Access" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary) : Code[20];
   var
     UserGroupMember : Record "User Group Member";
-    TempUserGroupAccess : Record "G/L Source Name Group Access" temporary;
+    TempUserGroupAccess : Record "O4N GL SN Group Access" temporary;
   begin
     UserGroupMember.SETRANGE("User Security ID",TempUserAccess."User Security ID");
     with TempUserGroupAccess do begin
@@ -216,7 +216,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
   local procedure UserHasAccess(UserSid : Guid;PermissionLevel : Option Read,Update) : Boolean;
   var
     AccessControl : Record "Access Control";
-    AppMgt : Codeunit "G/L Source Name App Mgt.";
+    AppMgt : Codeunit "O4N GL SN App Mgt.";
     AppGuid : Guid;
   begin
     EVALUATE(AppGuid,AppMgt.GetAppId);
@@ -238,7 +238,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
   local procedure GroupHasAccess(GroupCode : Code[20];PermissionLevel : Option Read,Update) : Boolean;
   var
     UserGroupPermissionSet : Record "User Group Permission Set";
-    AppMgt : Codeunit "G/L Source Name App Mgt.";
+    AppMgt : Codeunit "O4N GL SN App Mgt.";
     AppGuid : Guid;
   begin
     EVALUATE(AppGuid,AppMgt.GetAppId);
@@ -259,7 +259,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
   local procedure AddUserAccess(UserSid : Guid;PermissionLevel : Option Read,Update) : Boolean;
   var
     AccessControl : Record "Access Control";
-    AppMgt : Codeunit "G/L Source Name App Mgt.";
+    AppMgt : Codeunit "O4N GL SN App Mgt.";
     AppGuid : Guid;
   begin
     EVALUATE(AppGuid,AppMgt.GetAppId);
@@ -282,7 +282,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
   local procedure AddGroupAccess(GroupCode : Code[20];PermissionLevel : Option Read,Update) : Boolean;
   var
     UserGroupPermissionSet : Record "User Group Permission Set";
-    AppMgt : Codeunit "G/L Source Name App Mgt.";
+    AppMgt : Codeunit "O4N GL SN App Mgt.";
     AppGuid : Guid;
   begin
     EVALUATE(AppGuid,AppMgt.GetAppId);
@@ -304,7 +304,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
   local procedure RemoveUserAccess(UserSid : Guid;PermissionLevel : Option Read,Update) : Boolean;
   var
     AccessControl : Record "Access Control";
-    AppMgt : Codeunit "G/L Source Name App Mgt.";
+    AppMgt : Codeunit "O4N GL SN App Mgt.";
     AppGuid : Guid;
   begin
     EVALUATE(AppGuid,AppMgt.GetAppId);
@@ -326,7 +326,7 @@ codeunit 70009216 "G/L Source Name Permission Mgt"
   local procedure RemoveGroupAccess(GroupCode : Code[20];PermissionLevel : Option Read,Update) : Boolean;
   var
     UserGroupPermissionSet : Record "User Group Permission Set";
-    AppMgt : Codeunit "G/L Source Name App Mgt.";
+    AppMgt : Codeunit "O4N GL SN App Mgt.";
     AppGuid : Guid;
   begin
     EVALUATE(AppGuid,AppMgt.GetAppId);

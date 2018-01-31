@@ -13,15 +13,15 @@ codeunit 70009207 "O4N GL Source Name Install"
     
     trigger OnInstallAppPerCompany();
     var
-        GLSourceNameMgt : Codeunit "G/L Source Name Mgt";
+        GLSourceNameMgt : Codeunit "O4N GL SN Mgt";
     begin
-        NAVAPP.RESTOREARCHIVEDATA(DATABASE::"G/L Source Name Setup");
-        NAVAPP.RESTOREARCHIVEDATA(DATABASE::"G/L Source Name User Setup");
-        NAVAPP.DELETEARCHIVEDATA(DATABASE::"G/L Source Name");
+        NAVAPP.RESTOREARCHIVEDATA(DATABASE::"O4N GL SN Setup");
+        NAVAPP.RESTOREARCHIVEDATA(DATABASE::"O4N GL SN User Setup");
+        NAVAPP.DELETEARCHIVEDATA(DATABASE::"O4N GL SN");
 
-        NAVAPP.DELETEARCHIVEDATA(DATABASE::"G/L Source Name Help Resource");
-        NAVAPP.DELETEARCHIVEDATA(DATABASE::"G/L Source Name User Access");
-        NAVAPP.DELETEARCHIVEDATA(DATABASE::"G/L Source Name Group Access");
+        NAVAPP.DELETEARCHIVEDATA(DATABASE::"O4N GL SN Help Resource");
+        NAVAPP.DELETEARCHIVEDATA(DATABASE::"O4N GL SN User Access");
+        NAVAPP.DELETEARCHIVEDATA(DATABASE::"O4N GL SN Group Access");
 
         GLSourceNameMgt.PopulateSourceTable;
         RemoveAssistedSetup;
@@ -46,7 +46,7 @@ codeunit 70009207 "O4N GL Source Name Install"
     AssistedSetup : Record "Assisted Setup";
   begin
     with AssistedSetup do begin
-      SETRANGE("Page ID",PAGE::"G/L Source Name Setup Wizard");
+      SETRANGE("Page ID",PAGE::"O4N GL SN Setup Wizard");
       if not ISEMPTY then
         DELETEALL;
     end;
@@ -55,7 +55,7 @@ codeunit 70009207 "O4N GL Source Name Install"
   local procedure AddUserAccess(AssignToUser : Guid;PermissionSet : Code[20]);
   var
     AccessControl : Record "Access Control";
-    AppMgt : Codeunit "G/L Source Name App Mgt.";
+    AppMgt : Codeunit "O4N GL SN App Mgt.";
     AppGuid : Guid;
   begin
     EVALUATE(AppGuid,AppMgt.GetAppId);

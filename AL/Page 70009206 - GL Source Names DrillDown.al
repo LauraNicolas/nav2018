@@ -1,11 +1,11 @@
-page 70009206 "G/L Source Names DrillDown"
+page 70009206 "O4N GL SNs DrillDown"
 {
   // version GLSN10.0
 
   CaptionML=ENU='G/L Source Names DrillDown';
   Editable=false;
   PageType=List;
-  SourceTable="G/L Source Name";
+  SourceTable="O4N GL SN";
 
   layout
   {

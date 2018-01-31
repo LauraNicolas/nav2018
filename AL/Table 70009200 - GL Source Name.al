@@ -1,8 +1,8 @@
-table 70009200 "G/L Source Name"
+table 70009200 "O4N GL SN"
 {
   // version GLSN10.0
 
-  DrillDownPageID="G/L Source Names DrillDown";
+  DrillDownPageID="O4N GL SNs DrillDown";
 
   fields
   {

@@ -1,4 +1,4 @@
-codeunit 70009204 "G/L Source Name Bank Upd."
+codeunit 70009204 "O4N GL SN Bank Upd."
 {
   // version GLSN10.0
 
@@ -8,7 +8,7 @@ codeunit 70009204 "G/L Source Name Bank Upd."
   end;
 
   var
-    GLSourceNamesMgt : Codeunit "G/L Source Name Mgt";
+    GLSourceNamesMgt : Codeunit "O4N GL SN Mgt";
     SourceType : Option " ",Customer,Vendor,"Bank Account","Fixed Asset";
 
   [EventSubscriber(ObjectType::Table, 270, 'OnAfterInsertEvent', '', true, false)]

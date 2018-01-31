@@ -1,4 +1,4 @@
-codeunit 70009212 "G/L Source Name Perm. Notif."
+codeunit 70009212 "O4N GL SN Perm. Notif."
 {
   // version GLSN10.0
 

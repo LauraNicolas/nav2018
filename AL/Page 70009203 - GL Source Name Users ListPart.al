@@ -1,4 +1,4 @@
-page 70009203 "G/L Source Name Users ListPart"
+page 70009203 "O4N GL SN Users ListPart"
 {
   // version GLSN10.0
 
@@ -6,7 +6,7 @@ page 70009203 "G/L Source Name Users ListPart"
   InsertAllowed=false;
   LinksAllowed=false;
   PageType=ListPart;
-  SourceTable="G/L Source Name User Access";
+  SourceTable="O4N GL SN User Access";
   SourceTableTemporary=true;
 
   layout
@@ -74,7 +74,7 @@ page 70009203 "G/L Source Name Users ListPart"
   var
     HasPermission : Boolean;
 
-  procedure Set(var TempUserAccess : Record "G/L Source Name User Access" temporary);
+  procedure Set(var TempUserAccess : Record "O4N GL SN User Access" temporary);
   begin
     COPY(TempUserAccess,true);
   end;
