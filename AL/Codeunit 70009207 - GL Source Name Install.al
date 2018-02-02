@@ -15,14 +15,6 @@ codeunit 70009207 "O4N GL Source Name Install"
     var
         GLSourceNameMgt : Codeunit "O4N GL SN Mgt";
     begin
-        NAVAPP.RESTOREARCHIVEDATA(DATABASE::"O4N GL SN Setup");
-        NAVAPP.RESTOREARCHIVEDATA(DATABASE::"O4N GL SN User Setup");
-        NAVAPP.DELETEARCHIVEDATA(DATABASE::"O4N GL SN");
-
-        NAVAPP.DELETEARCHIVEDATA(DATABASE::"O4N GL SN Help Resource");
-        NAVAPP.DELETEARCHIVEDATA(DATABASE::"O4N GL SN User Access");
-        NAVAPP.DELETEARCHIVEDATA(DATABASE::"O4N GL SN Group Access");
-
         GLSourceNameMgt.PopulateSourceTable;
         RemoveAssistedSetup;
     end;
