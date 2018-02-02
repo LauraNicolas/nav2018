@@ -19,7 +19,7 @@ pageextension 70009201 pageextension70009201 extends "General Ledger Entries"
         ToolTipML=ENU='Specifies the number of the master record associated with this entry';
         Visible=false;
       }
-      field("Source Name";"Source Name")
+      field("Source Name";"O4N Source Name")
       {
         AccessByPermission=TableData "O4N GL SN"=R;
         ApplicationArea=Basic,Suite;
