@@ -66,91 +66,91 @@ table 70009202 "O4N GL SN Help Resource"
 
   procedure GetSetupHelpCode() : Code[50];
   var
-    SetupHelpCode : TextConst ENU='SETUPHELP';
+    SetupHelpCode : TextConst Comment='{Locked}',ENU='SETUPHELP';
   begin
     exit(SetupHelpCode);
   end;
 
   procedure GetSetupVideoCode() : Code[50];
   var
-    SetupVideoCode : TextConst ENU='SETUPVIDEO';
+    SetupVideoCode : TextConst Comment='{Locked}',ENU='SETUPVIDEO';
   begin
     exit(SetupVideoCode);
   end;
 
   procedure GetUsageHelpCode() : Code[50];
   var
-    UsageHelpCode : TextConst ENU='USAGEHELP';
+    UsageHelpCode : TextConst Comment='{Locked}',ENU='USAGEHELP';
   begin
     exit(UsageHelpCode);
   end;
 
   procedure GetUsageVideoCode() : Code[50];
   var
-    UsageVideoCode : TextConst ENU='USAGEVIDEO';
+    UsageVideoCode : TextConst Comment='{Locked}',ENU='USAGEVIDEO';
   begin
     exit(UsageVideoCode);
   end;
 
   procedure Get70PXIconCode() : Code[50];
   var
-    IconCode : TextConst ENU='GLSOURCENAMES_70PXICON';
+    IconCode : TextConst Comment='{Locked}',ENU='GLSOURCENAMES_70PXICON';
   begin
     exit(IconCode)
   end;
 
   procedure Get150PXIconCode() : Code[50];
   var
-    IconCode : TextConst ENU='GLSOURCENAMES_150PXICON';
+    IconCode : TextConst Comment='{Locked}',ENU='GLSOURCENAMES_150PXICON';
   begin
     exit(IconCode)
   end;
 
   procedure Get240PXIconCode() : Code[50];
   var
-    IconCode : TextConst ENU='GLSOURCENAMES_240PXICON';
+    IconCode : TextConst Comment='{Locked}',ENU='GLSOURCENAMES_240PXICON';
   begin
     exit(IconCode)
   end;
 
   procedure Get250PXIconCode() : Code[50];
   var
-    IconCode : TextConst ENU='GLSOURCENAMES_250PXICON';
+    IconCode : TextConst Comment='{Locked}',ENU='GLSOURCENAMES_250PXICON';
   begin
     exit(IconCode)
   end;
 
   procedure Get417PXIconCode() : Code[50];
   var
-    IconCode : TextConst ENU='GLSOURCENAMES_417PXICON';
+    IconCode : TextConst Comment='{Locked}',ENU='GLSOURCENAMES_417PXICON';
   begin
     exit(IconCode)
   end;
 
   local procedure InitAssistedSetupHelpPageUrl();
   var
-    SetupHelpUrl : TextConst ENU='http://Objects4NAV.com/GLSourceNames';
+    SetupHelpUrl : TextConst Comment='{Locked}',ENU='http://Objects4NAV.com/GLSourceNames';
   begin
     InitUrl(GetSetupHelpCode,SetupHelpUrl);
   end;
 
   local procedure InitAssistedSetupEmbedVideoUrl();
   var
-    SetupVideoUrl : TextConst ENU='https://www.youtube.com/embed/TYo1ZJ5jizs';
+    SetupVideoUrl : TextConst Comment='{Locked}',ENU='https://www.youtube.com/embed/TYo1ZJ5jizs';
   begin
     InitUrl(GetSetupVideoCode,SetupVideoUrl);
   end;
 
   local procedure InitUsageHelpPageUrl();
   var
-    UsageHelpUrl : TextConst ENU='http://Objects4NAV.com/GLSourceNames';
+    UsageHelpUrl : TextConst Comment='{Locked}',ENU='http://Objects4NAV.com/GLSourceNames';
   begin
     InitUrl(GetUsageHelpCode,UsageHelpUrl);
   end;
 
   local procedure InitUsageHelpEmbedVideoUrl();
   var
-    UsageVideoUrl : TextConst ENU='https://www.youtube.com/embed/Xj5TATt7Pns';
+    UsageVideoUrl : TextConst Comment='{Locked}',ENU='https://www.youtube.com/embed/Xj5TATt7Pns';
   begin
     InitUrl(GetUsageVideoCode,UsageVideoUrl);
   end;
@@ -158,7 +158,7 @@ table 70009202 "O4N GL SN Help Resource"
   local procedure InitIcon70x70();
   var
     TempBlob : Record TempBlob;
-    IconDescription : TextConst ENU='G/L Source Name Icon 70x70';
+    IconDescription : TextConst Comment='{Locked}',ENU='G/L Source Name Icon 70x70';
     GLSourceNameIcon : Codeunit "O4N GL SN Icon 70x70";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
@@ -168,7 +168,7 @@ table 70009202 "O4N GL SN Help Resource"
   local procedure InitIcon150x150();
   var
     TempBlob : Record TempBlob;
-    IconDescription : TextConst ENU='G/L Source Name Icon 150x150';
+    IconDescription : TextConst Comment='{Locked}',ENU='G/L Source Name Icon 150x150';
     GLSourceNameIcon : Codeunit "O4N GL SN Icon 150x150";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
@@ -178,7 +178,7 @@ table 70009202 "O4N GL SN Help Resource"
   local procedure InitIcon240x240();
   var
     TempBlob : Record TempBlob;
-    IconDescription : TextConst ENU='G/L Source Name Icon 240x240';
+    IconDescription : TextConst Comment='{Locked}',ENU='G/L Source Name Icon 240x240';
     GLSourceNameIcon : Codeunit "O4N GL SN Icon 240x240";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
@@ -188,7 +188,7 @@ table 70009202 "O4N GL SN Help Resource"
   local procedure InitIcon250x250();
   var
     TempBlob : Record TempBlob;
-    IconDescription : TextConst ENU='G/L Source Name Icon 250x250';
+    IconDescription : TextConst Comment='{Locked}',ENU='G/L Source Name Icon 250x250';
     GLSourceNameIcon : Codeunit "O4N GL SN Icon 250x250";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
@@ -198,7 +198,7 @@ table 70009202 "O4N GL SN Help Resource"
   local procedure InitIcon417x417();
   var
     TempBlob : Record TempBlob;
-    IconDescription : TextConst ENU='G/L Source Name Icon 417x417';
+    IconDescription : TextConst Comment='{Locked}',ENU='G/L Source Name Icon 417x417';
     GLSourceNameIcon : Codeunit "O4N GL SN Icon 417x417";
   begin
     GLSourceNameIcon.GetIcon(TempBlob);
