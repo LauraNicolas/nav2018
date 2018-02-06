@@ -8,8 +8,8 @@ codeunit 70009216 "O4N GL SN Permission Mgt"
   end;
 
   var
-    ReadRoleId : TextConst ENU='G/L-SOURCE NAMES';
-    UpdateRoleId : TextConst ENU='G/L-SOURCE NAMES, E';
+    ReadRoleId : TextConst Comment='{Locked}',ENU='G/L-SOURCE NAMES';
+    UpdateRoleId : TextConst Comment='{Locked}',ENU='G/L-SOURCE NAMES, E';
 
   procedure GetAccessControl(var TempUserAccess : Record "O4N GL SN User Access" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary);
   begin

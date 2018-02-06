@@ -6,9 +6,9 @@ codeunit 70009207 "O4N GL Source Name Install"
     end;
 
     var
-    PermissionSetToSetupGLSourceNames : TextConst ENU='G/L-SOURCE NAMES, S';
-    PermissionSetToUpdateGLSourceNames : TextConst ENU='G/L-SOURCE NAMES, E';
-    PermissionSetToUserGLSourceNames : TextConst ENU='G/L-SOURCE NAMES';
+    PermissionSetToSetupGLSourceNames : TextConst Comment='{Locked}',ENU='G/L-SOURCE NAMES, S';
+    PermissionSetToUpdateGLSourceNames : TextConst Comment='{Locked}',ENU='G/L-SOURCE NAMES, E';
+    PermissionSetToUserGLSourceNames : TextConst Comment='{Locked}',ENU='G/L-SOURCE NAMES';
 
     
     trigger OnInstallAppPerCompany();

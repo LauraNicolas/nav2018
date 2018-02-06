@@ -45,10 +45,12 @@ page 70009210 "O4N GL SN Setup Wizard"
           Visible=FirstStepVisible;
           group(Group18)
           {
+            ShowCaption=false;
             InstructionalTextML=ENU='To be able to use Source Names on G/L Entries, users must have required permissions.';
           }
           group(Group19)
           {
+            ShowCaption=false;
             InstructionalTextML=ENU='Users that can update master tables, like; Customer, Vendor, Bank Account and Fixed Asset, must be able to update the G/L Source Name lookup table.';
           }
         }
@@ -57,10 +59,12 @@ page 70009210 "O4N GL SN Setup Wizard"
           CaptionML=ENU='Let''s go!';
           group(Group70009201)
           {
+            ShowCaption=false;
             InstructionalTextML=ENU='Choose Set Defaults and all required permissions will be automatically assigned to user group members and users based on current permissions to the G/L Entries and the above master tables.';
           }
           group(Group22)
           {
+            ShowCaption=false;
             InstructionalTextML=ENU='Choose Next so you can manually set up permissions for users and groups.';
           }
         }
@@ -114,6 +118,7 @@ page 70009210 "O4N GL SN Setup Wizard"
         Visible=RegistrationVisible;
         group(Group27)
         {
+          ShowCaption=false;
           InstructionalTextML=ENU='Enter the Registration details.';
           field("Registration E-Mail Address";"Registration E-Mail Address")
           {
@@ -127,6 +132,7 @@ page 70009210 "O4N GL SN Setup Wizard"
         Visible=FinalStepVisible;
         group(Group70009203)
         {
+          ShowCaption=false;
           InstructionalTextML=ENU='We suggest that you refresh the data in G/L Source Names lookup table before finishing this wizard.  You can come back here any time to refresh the lookup table again';
         }
         group("That's it!")
@@ -134,10 +140,12 @@ page 70009210 "O4N GL SN Setup Wizard"
           CaptionML=ENU='That''s it!';
           group(Group23)
           {
+            ShowCaption=false;
             InstructionalTextML=ENU='To refresh the data in the G/L Source Name lookup table, choose Update G/L Source Names.';
           }
           group(Group25)
           {
+            ShowCaption=false;
             InstructionalTextML=ENU='To enable Source Names in G/L Entries, choose Finish.';
           }
         }
