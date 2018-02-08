@@ -1,4 +1,4 @@
-codeunit 70009215 "O4N GL SN Assisted Setup"
+﻿codeunit 70009215 "O4N GL SN Assisted Setup"
 {
   // version GLSN10.0
 
@@ -9,9 +9,9 @@ codeunit 70009215 "O4N GL SN Assisted Setup"
 
   var
     Setup : Record "O4N GL SN Setup";
-    GLSourceNamesTxt : TextConst ENU='Set up G/L Source Names';
+    GLSourceNamesTxt : Label 'Set up G/L Source Names';
     HelpResource : Record "O4N GL SN Help Resource";
-    RequiredPermissionMissingErr : TextConst ENU='You have not been granted required access rights to start the Assisted Setup.\\The Assisted Setup for G/L Source Names is about assigning the required permissions to users.  To be able to assign permissions you need to be granted either the SUPER og SECURITY permission set.';
+    RequiredPermissionMissingErr : Label 'You have not been granted required access rights to start the Assisted Setup.\\The Assisted Setup for G/L Source Names is about assigning the required permissions to users.  To be able to assign permissions you need to be granted either the SUPER og SECURITY permission set.';
 
   procedure VerifyUserAccess();
   var
@@ -76,4 +76,5 @@ codeunit 70009215 "O4N GL SN Assisted Setup"
     end;
   end;
 }
+
 

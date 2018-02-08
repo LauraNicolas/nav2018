@@ -1,4 +1,4 @@
-codeunit 70009206 "G/L Show Source Card"
+﻿codeunit 70009206 "G/L Show Source Card"
 {
   // version GLSN10.0
 
@@ -10,8 +10,8 @@ codeunit 70009206 "G/L Show Source Card"
   end;
 
   var
-    NoSourceDefined : TextConst ENU='Source is not defined';
-    SourceNotFound : TextConst ENU='%1 %2 %3 not found';
+    NoSourceDefined : Label 'Source is not defined';
+    SourceNotFound : Label '%1 %2 %3 not found';
 
   procedure ShowSourceNameCard(GLSourceName : Record "O4N GL SN");
   begin
@@ -91,4 +91,5 @@ codeunit 70009206 "G/L Show Source Card"
         ERROR(SourceNotFound,TABLECAPTION,FIELDCAPTION("No."),No);
   end;
 }
+
 

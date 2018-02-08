@@ -1,4 +1,4 @@
-codeunit 70009200 "O4N GL SN App Mgt."
+﻿codeunit 70009200 "O4N GL SN App Mgt."
 {
   // version GLSN10.0.0.1
 
@@ -13,4 +13,5 @@ codeunit 70009200 "O4N GL SN App Mgt."
   end;
 
 }
+
 

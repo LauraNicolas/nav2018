@@ -1,4 +1,4 @@
-table 70009201 "O4N GL SN Setup"
+﻿table 70009201 "O4N GL SN Setup"
 {
   // version GLSN10.0
 
@@ -7,45 +7,45 @@ table 70009201 "O4N GL SN Setup"
   {
     field(1;"Primary Key";Code[10])
     {
-      CaptionML=ENU='Primary Key';
+      Caption='Primary Key';
     }
     field(2;"Registration E-Mail Address";Text[50])
     {
-      CaptionML=ENU='Registration E-Mail Address';
+      Caption='Registration E-Mail Address';
     }
     field(3;"Installation Id";Guid)
     {
-      CaptionML=ENU='Installation Id';
+      Caption='Installation Id';
     }
     field(4;"Registration Id";Guid)
     {
-      CaptionML=ENU='Registration Id';
+      Caption='Registration Id';
     }
     field(5;"Next Registration Verification";DateTime)
     {
-      CaptionML=ENU='Next Registration Verification';
+      Caption='Next Registration Verification';
     }
     field(12;Status;Option)
     {
-      CaptionML=ENU='Status';
-      OptionCaptionML=ENU='Not Completed,Completed,Not Started,Seen,Watched,Read, ';
+      Caption='Status';
+      OptionCaption='Not Completed,Completed,Not Started,Seen,Watched,Read, ';
       OptionMembers="Not Completed",Completed,"Not Started",Seen,Watched,Read," ";
     }
     field(13;"Tour Id";Integer)
     {
-      CaptionML=ENU='Tour Id';
+      Caption='Tour Id';
     }
     field(14;"Video Status";Boolean)
     {
-      CaptionML=ENU='Video Status';
+      Caption='Video Status';
     }
     field(15;"Help Status";Boolean)
     {
-      CaptionML=ENU='Help Status';
+      Caption='Help Status';
     }
     field(16;"Tour Status";Boolean)
     {
-      CaptionML=ENU='Tour Status';
+      Caption='Tour Status';
     }
   }
 
@@ -61,4 +61,5 @@ table 70009201 "O4N GL SN Setup"
   {
   }
 }
+
 

@@ -1,8 +1,8 @@
-page 70009210 "O4N GL SN Setup Wizard"
+﻿page 70009210 "O4N GL SN Setup Wizard"
 {
   // version GLSN10.0
 
-  CaptionML=ENU='G/L Source Name Setup';
+  Caption='G/L Source Name Setup';
   DeleteAllowed=false;
   InsertAllowed=false;
   LinksAllowed=false;
@@ -41,75 +41,74 @@ page 70009210 "O4N GL SN Setup Wizard"
         Visible=FirstStepVisible;
         group("Welcome to G/L Source Name Setup")
         {
-          CaptionML=ENU='Welcome to G/L Source Name Setup';
-          Visible=FirstStepVisible;
+          Caption='Welcome to G/L Source Name Setup';
           group(Group18)
           {
             ShowCaption=false;
-            InstructionalTextML=ENU='To be able to use Source Names on G/L Entries, users must have required permissions.';
+            InstructionalText='To be able to use Source Names on G/L Entries, users must have required permissions.';
           }
           group(Group19)
           {
             ShowCaption=false;
-            InstructionalTextML=ENU='Users that can update master tables, like; Customer, Vendor, Bank Account and Fixed Asset, must be able to update the G/L Source Name lookup table.';
+            InstructionalText='Users that can update master tables, like; Customer, Vendor, Bank Account and Fixed Asset, must be able to update the G/L Source Name lookup table.';
           }
         }
         group("Let's go!")
         {
-          CaptionML=ENU='Let''s go!';
+          Caption='Let''s go!';
           group(Group70009201)
           {
             ShowCaption=false;
-            InstructionalTextML=ENU='Choose Set Defaults and all required permissions will be automatically assigned to user group members and users based on current permissions to the G/L Entries and the above master tables.';
+            InstructionalText='Choose Set Defaults and all required permissions will be automatically assigned to user group members and users based on current permissions to the G/L Entries and the above master tables.';
           }
           group(Group22)
           {
             ShowCaption=false;
-            InstructionalTextML=ENU='Choose Next so you can manually set up permissions for users and groups.';
+            InstructionalText='Choose Next so you can manually set up permissions for users and groups.';
           }
         }
       }
       group(Group2)
       {
-        InstructionalTextML=ENU='Check the Assign or Remove Permisson Box to change read permission for the user group members';
+        InstructionalText='Check the Assign or Remove Permisson Box to change read permission for the user group members';
         Visible=UserGroupReadVisible;
         part(GroupsWithReadAccess;"O4N GL SN Group ListPart")
         {
           ApplicationArea=Basic,Suite;
-          CaptionML=ENU='User Groups requiring read access';
+          Caption='User Groups requiring read access';
           SubPageView=WHERE("Permission Level"=CONST(Read));
         }
       }
       group(Group1000000002)
       {
-        InstructionalTextML=ENU='Check the Assign or Remove Permisson Box to change both read and update permission for the user group members';
+        InstructionalText='Check the Assign or Remove Permisson Box to change both read and update permission for the user group members';
         Visible=UserGroupUpdateVisible;
         part(GroupsWithUpdateAccess;"O4N GL SN Group ListPart")
         {
           ApplicationArea=Basic,Suite;
-          CaptionML=ENU='User Groups requiring update access';
+          Caption='User Groups requiring update access';
           SubPageView=WHERE("Permission Level"=CONST(Update));
         }
       }
       group(Group1000000007)
       {
-        InstructionalTextML=ENU='Check the Assign or Remove Permisson Box to change read permission for the user.  User Group members should be managed through the user group only.';
+        InstructionalText='Check the Assign or Remove Permisson Box to change read permission for the user.  User Group members should be managed through the user group only.';
         Visible=UserReadVisible;
         part(UsersWithReadAccess;"O4N GL SN Users ListPart")
         {
           ApplicationArea=Basic,Suite;
-          CaptionML=ENU='Users requiring read access';
+          Caption='Users requiring read access';
           SubPageView=WHERE("Permission Level"=CONST(Read));
         }
       }
       group(Group1000000005)
       {
-        InstructionalTextML=ENU='Check the Assign or Remove Permisson Box to change both read and update permission for the user.  User Group members should be managed through the user group only';
+        InstructionalText='Check the Assign or Remove Permisson Box to change both read and update permission for the user.  User Group members should be managed through the user group only';
         Visible=UserUpdateVisible;
         part(UsersWithUpdateAccess;"O4N GL SN Users ListPart")
         {
           ApplicationArea=Basic,Suite;
-          CaptionML=ENU='Users requiring update access';
+          Caption='Users requiring update access';
           SubPageView=WHERE("Permission Level"=CONST(Update));
         }
       }
@@ -119,11 +118,11 @@ page 70009210 "O4N GL SN Setup Wizard"
         group(Group27)
         {
           ShowCaption=false;
-          InstructionalTextML=ENU='Enter the Registration details.';
+          InstructionalText='Enter the Registration details.';
           field("Registration E-Mail Address";"Registration E-Mail Address")
           {
             ApplicationArea=Basic,Suite;
-            ToolTipML=ENU='Your registration will only be stored in Dynamics365.  Your E-Mail Address is not shared with anyone.';
+            ToolTip='Your registration will only be stored in Dynamics365.  Your E-Mail Address is not shared with anyone.';
           }
         }
       }
@@ -133,20 +132,20 @@ page 70009210 "O4N GL SN Setup Wizard"
         group(Group70009203)
         {
           ShowCaption=false;
-          InstructionalTextML=ENU='We suggest that you refresh the data in G/L Source Names lookup table before finishing this wizard.  You can come back here any time to refresh the lookup table again';
+          InstructionalText='We suggest that you refresh the data in G/L Source Names lookup table before finishing this wizard.  You can come back here any time to refresh the lookup table again';
         }
         group("That's it!")
         {
-          CaptionML=ENU='That''s it!';
+          Caption='That''s it!';
           group(Group23)
           {
             ShowCaption=false;
-            InstructionalTextML=ENU='To refresh the data in the G/L Source Name lookup table, choose Update G/L Source Names.';
+            InstructionalText='To refresh the data in the G/L Source Name lookup table, choose Update G/L Source Names.';
           }
           group(Group25)
           {
             ShowCaption=false;
-            InstructionalTextML=ENU='To enable Source Names in G/L Entries, choose Finish.';
+            InstructionalText='To enable Source Names in G/L Entries, choose Finish.';
           }
         }
       }
@@ -160,7 +159,7 @@ page 70009210 "O4N GL SN Setup Wizard"
       action(ActionBack)
       {
         ApplicationArea=Basic,Suite;
-        CaptionML=ENU='Back';
+        Caption='Back';
         Enabled=BackActionEnabled;
         Image=PreviousRecord;
         InFooterBar=true;
@@ -173,7 +172,7 @@ page 70009210 "O4N GL SN Setup Wizard"
       action(ActionNext)
       {
         ApplicationArea=Basic,Suite;
-        CaptionML=ENU='Next';
+        Caption='Next';
         Enabled=NextActionEnabled;
         Image=NextRecord;
         InFooterBar=true;
@@ -192,11 +191,11 @@ page 70009210 "O4N GL SN Setup Wizard"
       action(ActionDefault)
       {
         ApplicationArea=Basic,Suite;
-        CaptionML=ENU='Set Defaults';
+        Caption='Set Defaults';
         Enabled=FirstStepVisible;
         Image=Default;
         InFooterBar=true;
-        ToolTipML=ENU='Updates Permissions to all users and user groups as suggested';
+        ToolTip='Updates Permissions to all users and user groups as suggested';
 
         trigger OnAction();
         var
@@ -218,11 +217,11 @@ page 70009210 "O4N GL SN Setup Wizard"
       action(ActionUpdateSourceLookup)
       {
         ApplicationArea=Basic,Suite;
-        CaptionML=ENU='Update G/L Source Names';
+        Caption='Update G/L Source Names';
         Enabled=FinishActionEnabled;
         Image=Card;
         InFooterBar=true;
-        ToolTipML=ENU='This action will update the G/L Source Names lookup table';
+        ToolTip='This action will update the G/L Source Names lookup table';
 
         trigger OnAction();
         var
@@ -234,7 +233,7 @@ page 70009210 "O4N GL SN Setup Wizard"
       action(ActionFinish)
       {
         ApplicationArea=Basic,Suite;
-        CaptionML=ENU='Finish';
+        Caption='Finish';
         Enabled=FinishActionEnabled;
         Image=Approve;
         InFooterBar=true;
@@ -306,8 +305,8 @@ page 70009210 "O4N GL SN Setup Wizard"
     FinishActionEnabled : Boolean;
     BackActionEnabled : Boolean;
     NextActionEnabled : Boolean;
-    NAVNotSetUpQst : TextConst ENU='G/L Source Names have not been set up.\\Are you sure you want to exit?';
-    RegistrationEMailAddressMissingErr : TextConst ENU='Registration E-Mail Address is missing';
+    NAVNotSetUpQst : Label 'G/L Source Names have not been set up.\\Are you sure you want to exit?';
+    RegistrationEMailAddressMissingErr : Label 'Registration E-Mail Address is missing';
 
   local procedure EnableControls();
   begin
@@ -472,4 +471,5 @@ page 70009210 "O4N GL SN Setup Wizard"
       TopBannerVisible := MediaRepositoryDone.Image.HASVALUE;
   end;
 }
+
 

@@ -1,8 +1,8 @@
-page 70009201 "O4N GL SN Setup"
+﻿page 70009201 "O4N GL SN Setup"
 {
   // version GLSN10.0
 
-  CaptionML=ENU='G/L Source Name Setup';
+  Caption='G/L Source Name Setup';
   DeleteAllowed=false;
   InsertAllowed=false;
   PageType=Card;
@@ -18,7 +18,7 @@ page 70009201 "O4N GL SN Setup"
         {
           ApplicationArea=Basic,Suite;
           ShowMandatory=true;
-          ToolTipML=ENU='The G/L Source Name Extension will be registered on this E-Mail Address.  When registering the registration key will be sent to this E-Mail Address.';
+          ToolTip='The G/L Source Name Extension will be registered on this E-Mail Address.  When registering the registration key will be sent to this E-Mail Address.';
         }
         field("Next Registration Verification";"Next Registration Verification")
         {
@@ -41,4 +41,5 @@ page 70009201 "O4N GL SN Setup"
     end;
   end;
 }
+
 

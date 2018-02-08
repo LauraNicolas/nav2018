@@ -1,4 +1,4 @@
-page 70009203 "O4N GL SN Users ListPart"
+﻿page 70009203 "O4N GL SN Users ListPart"
 {
   // version GLSN10.0
 
@@ -19,7 +19,7 @@ page 70009203 "O4N GL SN Users ListPart"
         {
           ApplicationArea=Basic,Suite;
           Editable=false;
-          ToolTipML=ENU='Indicates whether the user has full access or just read access to G/L Source Names Lookup table';
+          ToolTip='Indicates whether the user has full access or just read access to G/L Source Names Lookup table';
           Visible=false;
         }
         field("User Name";"User Name")
@@ -36,27 +36,27 @@ page 70009203 "O4N GL SN Users ListPart"
         field("User Group Member";"Access Via User Group Code" <> '')
         {
           ApplicationArea=Basic,Suite;
-          CaptionML=ENU='User Group Member';
+          Caption='User Group Member';
           Editable=false;
-          ToolTipML=ENU='Indicates if this user is a member of a user group in one of the previous steps.';
+          ToolTip='Indicates if this user is a member of a user group in one of the previous steps.';
         }
         field("Has Permission";"Has Permission")
         {
           ApplicationArea=Basic,Suite;
           Editable=false;
-          ToolTipML=ENU='Indicates whether the user already has required permissions';
+          ToolTip='Indicates whether the user already has required permissions';
         }
         field("Assign Permission";"Assign Permission")
         {
           ApplicationArea=Basic,Suite;
           Editable=NOT HasPermission;
-          ToolTipML=ENU='This will assign the required permission to this user when the wizard completes.';
+          ToolTip='This will assign the required permission to this user when the wizard completes.';
         }
         field("Remove Permission";"Remove Permission")
         {
           ApplicationArea=Basic,Suite;
           Editable=HasPermission;
-          ToolTipML=ENU='This will remove current permission from this user when the wizard completes.';
+          ToolTip='This will remove current permission from this user when the wizard completes.';
         }
       }
     }
@@ -79,4 +79,5 @@ page 70009203 "O4N GL SN Users ListPart"
     COPY(TempUserAccess,true);
   end;
 }
+
 

@@ -1,4 +1,4 @@
-codeunit 70009202 "O4N GL SN Cust Upd."
+﻿codeunit 70009202 "O4N GL SN Cust Upd."
 {
   // version GLSN10.0
 
@@ -32,4 +32,5 @@ codeunit 70009202 "O4N GL SN Cust Upd."
     GLSourceNamesMgt.UpdateSource(SourceType::Customer,Rec."No.",Rec.Name);
   end;
 }
+
 

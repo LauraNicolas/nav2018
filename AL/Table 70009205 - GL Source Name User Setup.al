@@ -1,4 +1,4 @@
-table 70009205 "O4N GL SN User Setup"
+﻿table 70009205 "O4N GL SN User Setup"
 {
   // version GLSN10.0.0.1
 
@@ -7,12 +7,12 @@ table 70009205 "O4N GL SN User Setup"
   {
     field(1;"User Security ID";Guid)
     {
-      CaptionML=ENU='User Security ID';
+      Caption='User Security ID';
       TableRelation=User."User Security ID";
     }
     field(2;"Notification Id";Guid)
     {
-      CaptionML=ENU='Notification Id';
+      Caption='Notification Id';
       Editable=false;
       NotBlank=true;
     }
@@ -30,4 +30,5 @@ table 70009205 "O4N GL SN User Setup"
   {
   }
 }
+
 

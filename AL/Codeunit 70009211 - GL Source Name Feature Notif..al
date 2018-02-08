@@ -1,4 +1,4 @@
-codeunit 70009211 "O4N GL SN Feature Notif."
+﻿codeunit 70009211 "O4N GL SN Feature Notif."
 {
   // version GLSN10.0
 
@@ -8,7 +8,7 @@ codeunit 70009211 "O4N GL SN Feature Notif."
   end;
 
   var
-    ShowAgainQst : TextConst ENU='Do you want to hide this notification in the future?';
+    ShowAgainQst : Label 'Do you want to hide this notification in the future?';
 
   procedure ShowDetailsToUser(NewFeatureNotification : Notification);
   begin
@@ -27,4 +27,5 @@ codeunit 70009211 "O4N GL SN Feature Notif."
       HYPERLINK(Url);
   end;
 }
+
 

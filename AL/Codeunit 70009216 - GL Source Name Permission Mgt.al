@@ -1,4 +1,4 @@
-codeunit 70009216 "O4N GL SN Permission Mgt"
+﻿codeunit 70009216 "O4N GL SN Permission Mgt"
 {
   // version GLSN10.0
 
@@ -8,8 +8,8 @@ codeunit 70009216 "O4N GL SN Permission Mgt"
   end;
 
   var
-    ReadRoleId : TextConst Comment='{Locked}',ENU='G/L-SOURCE NAMES';
-    UpdateRoleId : TextConst Comment='{Locked}',ENU='G/L-SOURCE NAMES, E';
+    ReadRoleId : Label 'G/L-SOURCE NAMES',Locked=true;
+    UpdateRoleId : Label 'G/L-SOURCE NAMES, E',Locked=true;
 
   procedure GetAccessControl(var TempUserAccess : Record "O4N GL SN User Access" temporary;var TempGroupAccess : Record "O4N GL SN Group Access" temporary);
   begin
@@ -344,4 +344,5 @@ codeunit 70009216 "O4N GL SN Permission Mgt"
     end;
   end;
 }
+
 

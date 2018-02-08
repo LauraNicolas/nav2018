@@ -1,4 +1,4 @@
-page 70009202 "O4N GL SN Help Resources"
+﻿page 70009202 "O4N GL SN Help Resources"
 {
   // version GLSN10.0
 
@@ -37,4 +37,5 @@ page 70009202 "O4N GL SN Help Resources"
     InitializeResources;
   end;
 }
+
 

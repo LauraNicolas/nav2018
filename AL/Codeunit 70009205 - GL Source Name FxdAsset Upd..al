@@ -1,4 +1,4 @@
-codeunit 70009205 "O4N GL SN FxdAsset Upd."
+﻿codeunit 70009205 "O4N GL SN FxdAsset Upd."
 {
   // version GLSN10.0
 
@@ -32,4 +32,5 @@ codeunit 70009205 "O4N GL SN FxdAsset Upd."
     GLSourceNamesMgt.UpdateSource(SourceType::"Fixed Asset",Rec."No.",Rec.Description);
   end;
 }
+
 

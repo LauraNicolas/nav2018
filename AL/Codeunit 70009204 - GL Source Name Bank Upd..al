@@ -1,4 +1,4 @@
-codeunit 70009204 "O4N GL SN Bank Upd."
+﻿codeunit 70009204 "O4N GL SN Bank Upd."
 {
   // version GLSN10.0
 
@@ -32,4 +32,5 @@ codeunit 70009204 "O4N GL SN Bank Upd."
     GLSourceNamesMgt.UpdateSource(SourceType::"Bank Account",Rec."No.",Rec.Name);
   end;
 }
+
 

@@ -1,4 +1,4 @@
-page 70009204 "O4N GL SN Group ListPart"
+﻿page 70009204 "O4N GL SN Group ListPart"
 {
   // version GLSN10.0
 
@@ -19,7 +19,7 @@ page 70009204 "O4N GL SN Group ListPart"
         {
           ApplicationArea=Basic,Suite;
           Editable=false;
-          ToolTipML=ENU='Indicates whether members of this user group have full access or just read access to G/L Source Names Lookup table';
+          ToolTip='Indicates whether members of this user group have full access or just read access to G/L Source Names Lookup table';
           Visible=false;
         }
         field("User Group Code";"User Group Code")
@@ -37,13 +37,13 @@ page 70009204 "O4N GL SN Group ListPart"
         {
           ApplicationArea=Basic,Suite;
           Editable=false;
-          ToolTipML=ENU='Indicates whether the user that are member of this user group already have required permissions';
+          ToolTip='Indicates whether the user that are member of this user group already have required permissions';
         }
         field("Assign Permission";"Assign Permission")
         {
           ApplicationArea=Basic,Suite;
           Editable=NOT HasPermission;
-          ToolTipML=ENU='This will assign the required permission to the members of this user group when the wizard completes.';
+          ToolTip='This will assign the required permission to the members of this user group when the wizard completes.';
 
           trigger OnValidate();
           begin
@@ -57,7 +57,7 @@ page 70009204 "O4N GL SN Group ListPart"
         {
           ApplicationArea=Basic,Suite;
           Editable=HasPermission;
-          ToolTipML=ENU='This will remove current permission from the members of this user group when the wizard completes.';
+          ToolTip='This will remove current permission from the members of this user group when the wizard completes.';
 
           trigger OnValidate();
           begin
@@ -90,4 +90,5 @@ page 70009204 "O4N GL SN Group ListPart"
     GlobalTempUserAccess.COPY(TempUserAccess,true);
   end;
 }
+
 

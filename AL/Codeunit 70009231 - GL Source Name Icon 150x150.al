@@ -1,4 +1,4 @@
-codeunit 70009231 "O4N GL SN Icon 150x150"
+﻿codeunit 70009231 "O4N GL SN Icon 150x150"
 {
   // version GLSN10.0.0.2
 
@@ -154,4 +154,5 @@ codeunit 70009231 "O4N GL SN Icon 150x150"
     'GUGWsbLICLKMlUVGEGQs/pdFFn6hrCxnf3n5iaX/Bzbi42LJvI+WAAAAAElFTkSuQmCC');
   end;
 }
+
 

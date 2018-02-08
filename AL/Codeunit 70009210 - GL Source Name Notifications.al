@@ -1,4 +1,4 @@
-codeunit 70009210 "O4N GL SN Notifications"
+﻿codeunit 70009210 "O4N GL SN Notifications"
 {
   // version GLSN10.0.0.1
 
@@ -9,12 +9,12 @@ codeunit 70009210 "O4N GL SN Notifications"
 
   var
     GLSourceName : Record "O4N GL SN";
-    NewFeatuerNotificationIdTxt : TextConst Comment='{Locked}',ENU='1dd20373-27f8-4c68-a7b4-aab7ca199b98';
-    NewFeatureMessageTxt : TextConst ENU='We have added a new feature to the General Ledger Entries.  Now you can see the Source Name column!';
-    NewFeatureLinkTxt : TextConst ENU='Show me the details';
-    MissingPermissionNotificationIdTxt : TextConst Comment='{Locked}',ENU='4fa8230a-53e5-4182-8423-373dc6f23f9d';
-    MissingPermissionMessageText : TextConst ENU='You don''t have permissions to use our new feature that will show Source Names.  Please contact your administrator.';
-    MissingPermissionLinkTxt : TextConst ENU='What should I show?';
+    NewFeatuerNotificationIdTxt : Label '1dd20373-27f8-4c68-a7b4-aab7ca199b98',Locked=true;
+    NewFeatureMessageTxt : Label 'We have added a new feature to the General Ledger Entries.  Now you can see the Source Name column!';
+    NewFeatureLinkTxt : Label 'Show me the details';
+    MissingPermissionNotificationIdTxt : Label '4fa8230a-53e5-4182-8423-373dc6f23f9d',Locked=true;
+    MissingPermissionMessageText : Label 'You don''t have permissions to use our new feature that will show Source Names.  Please contact your administrator.';
+    MissingPermissionLinkTxt : Label 'What should I show?';
     GLSourceNameUserSetup : Record "O4N GL SN User Setup";
 
   [EventSubscriber(ObjectType::Page, 20, 'OnOpenPageEvent', '', true, true)]
@@ -88,4 +88,5 @@ codeunit 70009210 "O4N GL SN Notifications"
     end;
   end;
 }
+
 

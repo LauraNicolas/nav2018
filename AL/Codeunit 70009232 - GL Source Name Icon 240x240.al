@@ -1,4 +1,4 @@
-codeunit 70009232 "O4N GL SN Icon 240x240"
+﻿codeunit 70009232 "O4N GL SN Icon 240x240"
 {
   // version GLSN10.0.0.2
 
@@ -287,4 +287,5 @@ codeunit 70009232 "O4N GL SN Icon 240x240"
     'AABJRU5ErkJggg==');
   end;
 }
+
 

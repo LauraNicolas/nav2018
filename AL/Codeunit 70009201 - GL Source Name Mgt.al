@@ -1,4 +1,4 @@
-codeunit 70009201 "O4N GL SN Mgt"
+﻿codeunit 70009201 "O4N GL SN Mgt"
 {
   // version GLSN10.0
 
@@ -11,9 +11,9 @@ codeunit 70009201 "O4N GL SN Mgt"
   var
     Window : Dialog;
     SourceType : Option " ",Customer,Vendor,"Bank Account","Fixed Asset";
-    ProcessInfo : TextConst ENU='Populating G/L Source Names...';
-    RequiredPermissionMissingErr : TextConst ENU='Required permissions for table "%1" is missing.  Can''t refresh lookup data.';
-    ProcessCompleted : TextConst ENU='G/L Source Names lookup table update finished';
+    ProcessInfo : Label 'Populating G/L Source Names...';
+    RequiredPermissionMissingErr : Label 'Required permissions for table "%1" is missing.  Can''t refresh lookup data.';
+    ProcessCompleted : Label 'G/L Source Names lookup table update finished';
 
   procedure AddSource(SourceType : Option;SourceNo : Code[20];SourceName : Text[50]);
   var
@@ -130,4 +130,5 @@ codeunit 70009201 "O4N GL SN Mgt"
     end;
   end;
 }
+
 

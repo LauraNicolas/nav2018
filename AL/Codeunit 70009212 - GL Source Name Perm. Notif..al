@@ -1,4 +1,4 @@
-codeunit 70009212 "O4N GL SN Perm. Notif."
+﻿codeunit 70009212 "O4N GL SN Perm. Notif."
 {
   // version GLSN10.0
 
@@ -8,7 +8,7 @@ codeunit 70009212 "O4N GL SN Perm. Notif."
   end;
 
   var
-    ShowAgainQst : TextConst ENU='Do you want to hide this notification in the future?';
+    ShowAgainQst : Label 'Do you want to hide this notification in the future?';
 
   procedure ShowAssistedSetupToUser(MissingPermissionNotification : Notification);
   begin
@@ -27,4 +27,5 @@ codeunit 70009212 "O4N GL SN Perm. Notif."
       HYPERLINK(Url);
   end;
 }
+
 

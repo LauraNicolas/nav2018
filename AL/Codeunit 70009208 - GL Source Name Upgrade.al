@@ -1,4 +1,4 @@
-codeunit 70009208 "O4N GL SN Upgrade"
+﻿codeunit 70009208 "O4N GL SN Upgrade"
 {
     Subtype=Upgrade;
     trigger OnRun()
@@ -51,3 +51,4 @@ codeunit 70009208 "O4N GL SN Upgrade"
     end;
     
 }
+

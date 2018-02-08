@@ -1,8 +1,8 @@
-page 70009200 "O4N GL SN List"
+﻿page 70009200 "O4N GL SN List"
 {
   // version GLSN10.0
 
-  CaptionML=ENU='G/L Source Name List';
+  Caption='G/L Source Name List';
   Editable=false;
   PageType=List;
   SourceTable="O4N GL SN";
@@ -33,4 +33,5 @@ page 70009200 "O4N GL SN List"
   {
   }
 }
+
 

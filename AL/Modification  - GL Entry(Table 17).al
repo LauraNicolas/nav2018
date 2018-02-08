@@ -1,4 +1,4 @@
-tableextension 70009202 tableextension70009202 extends "G/L Entry" 
+﻿tableextension 70009202 tableextension70009202 extends "G/L Entry" 
 {
   // version NAVW111.0,GLSN10.0
 
@@ -8,7 +8,7 @@ tableextension 70009202 tableextension70009202 extends "G/L Entry"
     {
       CalcFormula=Lookup("O4N GL SN"."Source Name" WHERE ("Source Type"=FIELD("Source Type"),
                                                                 "Source No."=FIELD("Source No.")));
-      CaptionML=ENU='Source Name';
+      Caption='Source Name';
       Editable=false;
       FieldClass=FlowField;
     }
@@ -17,4 +17,5 @@ tableextension 70009202 tableextension70009202 extends "G/L Entry"
   {
   }
 }
+
 

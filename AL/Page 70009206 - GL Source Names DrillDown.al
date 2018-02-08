@@ -1,8 +1,8 @@
-page 70009206 "O4N GL SNs DrillDown"
+﻿page 70009206 "O4N GL SNs DrillDown"
 {
   // version GLSN10.0
 
-  CaptionML=ENU='G/L Source Names DrillDown';
+  Caption='G/L Source Names DrillDown';
   Editable=false;
   PageType=List;
   SourceTable="O4N GL SN";
@@ -25,4 +25,5 @@ page 70009206 "O4N GL SNs DrillDown"
   var
     GLShowSourceCard : Codeunit "G/L Show Source Card";
 }
+
 
