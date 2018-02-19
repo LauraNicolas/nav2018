@@ -6,20 +6,20 @@
   {
     addafter("Bal. Account No.")
     {
-      field("Source Type";"Source Type")
+      field("O4N Source Type";"Source Type")
       {
         AccessByPermission=TableData "O4N GL SN"=R;
         ApplicationArea=Basic,Suite;
         ToolTip='Specifies the type of the master record associated with this entry';
       }
-      field("Source No.";"Source No.")
+      field("O4N Source No.";"Source No.")
       {
         AccessByPermission=TableData "O4N GL SN"=R;
         ApplicationArea=Basic,Suite;
         ToolTip='Specifies the number of the master record associated with this entry';
         Visible=false;
       }
-      field("Source Name";"O4N Source Name")
+      field("O4N Source Name";"O4N Source Name")
       {
         AccessByPermission=TableData "O4N GL SN"=R;
         ApplicationArea=Basic,Suite;
