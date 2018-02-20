@@ -1,4 +1,4 @@
-﻿codeunit 70009206 "G/L Show Source Card"
+﻿codeunit 70009206 "O4N GL Show Source Card"
 {
   // version GLSN10.0
 

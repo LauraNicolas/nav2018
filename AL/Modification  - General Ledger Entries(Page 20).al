@@ -37,7 +37,7 @@
         ApplicationArea=Basic,Suite;
         Caption='Source Card';
         Image=Card;
-        RunObject=Codeunit "G/L Show Source Card";
+        RunObject=Codeunit "O4N GL Show Source Card";
         ToolTip='Show the card for the master record defined as the source for this entry';
       }
     }

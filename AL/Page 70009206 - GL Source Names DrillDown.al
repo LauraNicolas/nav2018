@@ -23,7 +23,7 @@
   end;
 
   var
-    GLShowSourceCard : Codeunit "G/L Show Source Card";
+    GLShowSourceCard : Codeunit "O4N GL Show Source Card";
 }
 
 
