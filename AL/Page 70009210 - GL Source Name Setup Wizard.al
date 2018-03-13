@@ -50,7 +50,7 @@
           group(Group19)
           {
             ShowCaption=false;
-            InstructionalText='"Users that can update master tables, like; Customer, Vendor, Bank Account and Fixed Asset, must be able to update the G/L Source Name lookup table."';
+            InstructionalText='Users that can update master tables, like; Customer, Vendor, Bank Account and Fixed Asset, must be able to update the G/L Source Name lookup table.';
           }
         }
         group("Let's go!")
